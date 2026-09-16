@@ -1,0 +1,11 @@
+.venv/
+chrome-profile/
+logs/*
+screenshots/*
+runs/*
+run.pid
+config/candidate-profile.json
+config/otp-rules.json
+__pycache__/
+.pytest_cache/
+*.pyc

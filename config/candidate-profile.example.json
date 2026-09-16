@@ -1,0 +1,7 @@
+{
+  "identity": {"full_name":"","first_name":"","last_name":"","phone":"","email":"","location":""},
+  "education": {"school":"","degree":"","major":"","graduation_date":"","gpa":""},
+  "links": {"linkedin":"","github":"","website":""},
+  "application_defaults": {"preferred_city":""},
+  "approved_answers": {}
+}
