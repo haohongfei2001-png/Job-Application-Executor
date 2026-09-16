@@ -4,13 +4,15 @@ from pydantic import BaseModel, Field
 from typing import Any
 
 class RunState(StrEnum):
-    IDLE="IDLE"; OPENING="OPENING"; AUTHENTICATING="AUTHENTICATING"; LOCATING_APPLICATION="LOCATING_APPLICATION"
+    IDLE="IDLE"; TARGET_SELECTION="TARGET_SELECTION"; OPENING="OPENING"; AUTHENTICATING="AUTHENTICATING"; LOCATING_APPLICATION="LOCATING_APPLICATION"
     FORM_FILLING="FORM_FILLING"; WAITING_USER_INPUT="WAITING_USER_INPUT"; WAITING_USER_CONFIRMATION="WAITING_USER_CONFIRMATION"
     SUBMITTING="SUBMITTING"; SUBMITTED="SUBMITTED"; ERROR="ERROR"
 
 class RuntimeState(BaseModel):
     state: RunState = RunState.IDLE
     job_url: str | None = None
+    target_query: dict[str,Any] | None = None
+    candidates: list[dict[str,Any]] = Field(default_factory=list)
     active_url: str | None = None
     profile_path: str | None = None
     resume_path: str | None = None
