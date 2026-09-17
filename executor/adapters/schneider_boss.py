@@ -83,8 +83,23 @@ class SchneiderBossAdapter:
         allow={'zp_token','x-requested-with','x-download-domain','content-type','x-anti-request-token','referer','traceid','accept'}
         return {k:v for k,v in self.headers.items() if k.lower() in allow}
 
+    def _serialize_data_for_save(self,data:dict):
+        out=copy.deepcopy(data)
+        for group_id in ('BASE_INFO','ATTACHMENT'):
+            group=self._groups().get(group_id) or {}
+            attachment_ids={f['id'] for f in group.get('fields',[]) if f.get('formType')=='attachment'}
+            for row in out.get(group_id) or []:
+                for field_id in attachment_ids:
+                    vals=row.get(field_id) or []
+                    normalized=[]
+                    for item in vals:
+                        if isinstance(item,str): normalized.append(item)
+                        elif isinstance(item,dict) and item.get('encryptId'): normalized.append(str(item['encryptId']))
+                    row[field_id]=normalized
+        return out
+
     def save_data(self,data:dict):
-        r=self.resume; payload={'encryptJobId':r['encryptJobId'],'encryptProjectId':r['encryptProjectId'],'data':data}
+        r=self.resume; payload={'encryptJobId':r['encryptJobId'],'encryptProjectId':r['encryptProjectId'],'data':self._serialize_data_for_save(data)}
         resp=self.ctx.request.post(BASE+SAVE+f'?_={int(time.time()*1000)}',headers=self._api_headers(),data=payload,timeout=30000)
         out=resp.json()
         if resp.status!=200 or out.get('code')!=0 or out.get('zpData') is not True:
@@ -189,11 +204,17 @@ class SchneiderBossAdapter:
         if max_mb and size_mb>max_mb: raise ValueError(f'{field_id} file is {size_mb:.2f}MB > {max_mb:.2f}MB')
         return {'path':str(path),'name':path.name,'ext':ext,'size_bytes':path.stat().st_size,'max_mb':max_mb}
 
-    def attach_uploaded(self, data:dict, field_id:str, file_obj:dict):
+    @staticmethod
+    def _file_id(file_obj):
+        if isinstance(file_obj,str): return file_obj
+        if isinstance(file_obj,dict) and file_obj.get('encryptId'): return str(file_obj['encryptId'])
+        raise ValueError('uploaded file object is missing encryptId')
+
+    def attach_uploaded(self, data:dict, field_id:str, file_obj:dict|str):
         if field_id=='certificatePhoto':
-            self.ensure_record(data,'BASE_INFO')['certificatePhoto']=[file_obj]
+            self.ensure_record(data,'BASE_INFO')['certificatePhoto']=[self._file_id(file_obj)]
         elif field_id=='bossAttachment':
-            self.ensure_record(data,'ATTACHMENT')['bossAttachment']=[file_obj]
+            self.ensure_record(data,'ATTACHMENT')['bossAttachment']=[self._file_id(file_obj)]
         else:
             raise KeyError(f'unsupported managed attachment field: {field_id}')
         return data
@@ -215,6 +236,7 @@ class SchneiderBossAdapter:
                 if low<=0 or high<=low: raise ValueError('salary range must satisfy 0 < low < high')
                 base['bossSalary']=[low,high]
         for field_id,answer in (decisions.get('compliance') or {}).items():
+            if answer is None: continue
             if not isinstance(answer,bool): raise ValueError(f'compliance answer must be boolean: {field_id}')
             att[field_id]=[self.select_value('ATTACHMENT',field_id,'是' if answer else '否')]
         return data
