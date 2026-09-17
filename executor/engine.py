@@ -12,13 +12,14 @@ VISIBLE_FIELD_SELECTOR='input:not([type="hidden"]), textarea, select'
 BUTTON_SELECTOR='button, input[type="button"], input[type="submit"], [role="button"], a'
 
 class Executor:
-    def __init__(self,job_url,resume_path,profile_path):
+    def __init__(self,job_url,resume_path,profile_path,auth_wait_seconds=900):
         self.job_url=job_url
         self.resume=Path(resume_path).expanduser().resolve()
         self.profile_path=Path(profile_path).expanduser().resolve()
         if not self.resume.is_file(): raise FileNotFoundError(self.resume)
         if not self.profile_path.is_file(): raise FileNotFoundError(self.profile_path)
         self.profile=load_profile(self.profile_path)
+        self.auth_wait_seconds=int(auth_wait_seconds or 900)
         self.state=RuntimeState(state=RunState.OPENING,job_url=job_url,profile_path=str(self.profile_path),resume_path=str(self.resume))
         self.pw=self.browser=self.ctx=self.page=None
 
@@ -129,7 +130,8 @@ class Executor:
                 el.click(); self.page.wait_for_timeout(1500); self.page=latest_page(self.ctx,self.page); return True
         return False
 
-    def wait_for_auth(self,max_seconds=900):
+    def wait_for_auth(self,max_seconds=None):
+        max_seconds=self.auth_wait_seconds if max_seconds is None else max_seconds
         if not self.has_auth_challenge(): return True
         self.checkpoint(RunState.AUTHENTICATING); self.screenshot('authentication-needed')
         deadline=time.time()+max_seconds

@@ -1,0 +1,12 @@
+{
+  "full_name": "",
+  "gender": "男",
+  "birthday_month": "YYYY-MM",
+  "id_card": "",
+  "phone": "",
+  "email": "",
+  "resident_city_path": ["中国", "省", "市", "区县"],
+  "living_city_path": ["中国", "直辖市或省", "区或市"],
+  "graduation_month": "YYYY-MM",
+  "education": []
+}

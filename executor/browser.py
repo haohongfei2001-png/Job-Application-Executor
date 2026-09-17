@@ -22,10 +22,19 @@ def ensure_chrome(start_url="about:blank"):
     raise RuntimeError("application Chrome did not expose CDP on 9333")
 
 def connect(target_url=None):
-    ensure_chrome(target_url or "about:blank")
+    ensure_chrome("about:blank")
     pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(CDP); ctx=browser.contexts[0]
-    pages=[p for p in ctx.pages if not p.is_closed()]; page=pages[-1] if pages else ctx.new_page()
-    if target_url and (page.url in ("about:blank","chrome://newtab/") or page.url!=target_url): page.goto(target_url,wait_until="domcontentloaded",timeout=60000)
+    pages=[p for p in ctx.pages if not p.is_closed()]
+    if target_url:
+        exact=[p for p in pages if p.url==target_url]
+        if exact:
+            page=exact[-1]
+        else:
+            blanks=[p for p in pages if p.url in ("about:blank","chrome://newtab/","chrome://new-tab-page/")]
+            page=blanks[-1] if blanks else ctx.new_page()
+            page.goto(target_url,wait_until="domcontentloaded",timeout=60000)
+    else:
+        page=pages[-1] if pages else ctx.new_page()
     return pw,browser,ctx,page
 
 def latest_page(ctx,fallback):

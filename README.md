@@ -12,3 +12,16 @@ Local-first application form executor. It opens a dedicated Chrome profile, fill
 `./scripts/run.sh '<job-url>' '/absolute/resume.pdf' '/absolute/candidate-profile.json'`
 
 Dedicated Chrome profile: `~/Job-Application-Executor/chrome-profile`, CDP port `9333`.
+
+## Schneider Electric / BOSS Campus adapter
+
+Schneider 2027 campus applications on BOSS use a dedicated API adapter instead of generic DOM filling. The browser is used only to establish the authenticated BOSS session and anti-request token; job/schema/dictionaries/resume data are then read through the site's own APIs and draft changes use `saveResumeData` only.
+
+Commands:
+- `python -m executor.cli schneider-probe` — read-only login/job/draft check.
+- `python -m executor.cli schneider-plan` — read-only deterministic fill plan, unresolved decisions, and local asset validation.
+- `python -m executor.cli schneider-save-safe` — save deterministic profile fields to the draft; never submit.
+- `python -m executor.cli schneider-upload-assets --confirm UPLOAD_ASSETS` — upload the configured photo/PDF to the draft; never submit.
+- `python -m executor.cli schneider-complete --decisions <local-json>` — apply explicitly reviewed city/salary/compliance answers; never submit.
+
+The final application submission remains outside the adapter and still requires the executor's explicit final-submit confirmation barrier. Local Schneider profile/decision files are gitignored.

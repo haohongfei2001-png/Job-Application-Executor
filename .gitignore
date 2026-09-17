@@ -9,3 +9,5 @@ config/otp-rules.json
 __pycache__/
 .pytest_cache/
 *.pyc
+config/schneider-profile.json
+config/schneider-decisions.json
