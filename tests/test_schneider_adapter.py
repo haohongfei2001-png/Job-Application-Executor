@@ -10,7 +10,7 @@ def _adapter():
                                                {'id':'conflict','formType':'select','options':[{'label':'是','value':'Y'},{'label':'否','value':'N'}]}]},
         ]
     }
-    a.capture_data['cities']=[{'name':'中国','code':'001','subLevelModelList':[{'name':'上海市','code':'310000','subLevelModelList':[{'name':'普陀区','code':'310107','subLevelModelList':None}]}]}]
+    a.capture_data['cities']=[{'name':'中国','code':'001','subLevelModelList':[{'name':'上海市','code':'310000','subLevelModelList':[{'name':'普陀区','code':'310107','subLevelModelList':None}]},{'name':'北京市','code':'110000','subLevelModelList':[]}]}]
     return a
 
 
@@ -28,9 +28,11 @@ def test_apply_decisions_ignores_unanswered_compliance():
     a=_adapter()
     data={'BASE_INFO':[{}],'ATTACHMENT':[{}]}
     a.apply_decisions(data,{'work_city_path':['中国','上海市','普陀区'],
+                            'work_city_path_2':['中国','北京市'],
                             'interview_city_path':['中国','上海市','普陀区'],
                             'salary':None,
                             'compliance':{'conflict':None}})
     assert data['BASE_INFO'][0]['field-1721014054734']==['001','310000','310107']
+    assert data['BASE_INFO'][0]['field-1721014048344']==['001','110000']
     assert data['BASE_INFO'][0]['field-1721014095457']==['001','310000','310107']
     assert 'conflict' not in data['ATTACHMENT'][0]

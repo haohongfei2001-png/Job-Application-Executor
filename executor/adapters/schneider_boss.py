@@ -149,14 +149,21 @@ class SchneiderBossAdapter:
     def build_safe_data(self,app:dict):
         data=copy.deepcopy(self.resume['data'])
         base=self.ensure_record(data,'BASE_INFO'); contact=self.ensure_record(data,'CONTACT')
+        resident_path=app.get('resident_city_path') or []
+        living_path=app.get('living_city_path') or []
         base.update({
             'name':app['full_name'],'gender':['1' if app['gender']=='男' else '0'],
             'birthday':app['birthday_month'].replace('-','/'),'credentialsType':['0'],'atsIdCardNo':app['id_card'],
-            'residentCity':self.city_path(*app['resident_city_path']),
-            'livingCity':self.city_path(*app['living_city_path']),
+            'residentCity':self.city_path(*resident_path) if resident_path else [],
+            'livingCity':self.city_path(*living_path) if living_path else [],
             'highestDegree':['204'],'highestDegreeGraduationDate':app['graduation_month'].replace('-','/'),
             'hasRecommendCode':['0'],'recommendCode':''})
+        if app.get('english_name'):
+            base['field-1720686655808']=app['english_name']
         contact['atsPhone']=app['phone']; contact['email']=app['email']
+        if app.get('mailing_address') is not None: contact['mailingAddress']=app.get('mailing_address') or ''
+        if app.get('emergency_contact_name') is not None: contact['emergencyContactName']=app.get('emergency_contact_name') or ''
+        if app.get('emergency_contact_phone') is not None: contact['emergencyContactMode']=app.get('emergency_contact_phone') or ''
         contact.setdefault('extra',{'atsPhone':{'regionCode':'+86','regionName':'中国大陆'}})
         edu=[]
         for x in app.get('education',[]):
@@ -223,6 +230,8 @@ class SchneiderBossAdapter:
         base=self.ensure_record(data,'BASE_INFO'); att=self.ensure_record(data,'ATTACHMENT')
         if decisions.get('work_city_path'):
             base['field-1721014054734']=self.city_path(*decisions['work_city_path'])
+        if decisions.get('work_city_path_2'):
+            base['field-1721014048344']=self.city_path(*decisions['work_city_path_2'])
         if decisions.get('interview_city_path'):
             base['field-1721014095457']=self.city_path(*decisions['interview_city_path'])
         salary=decisions.get('salary')
