@@ -20,7 +20,7 @@ CONFIRMATION_PATTERNS = (
     r"criminal|background.?check|犯罪|背景调查",
     r"signature|electronic.?sign|电子签名|签名",
     r"truth|accurate|certif|声明|承诺|真实有效",
-    r"privacy consent|隐私同意|授权声明",
+    r"privacy consent|privacy policy|隐私同意|隐私政策|同意.*隐私|授权声明",
     r"是否为政治公众人物|politically exposed",
 )
 
@@ -43,6 +43,25 @@ RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("identity.mailing_address", (r"通信地址", r"mailing.?address")),
     ("identity.marital_status", (r"婚姻状况", r"marital.?status")),
     ("identity.driver_license", (r"驾驶证", r"driver.?licen")),
+    ("identity.household_type", (r"户口类别", r"户籍类别", r"household.?type", r"hukou.?type")),
+    ("identity.health_status", (r"^健康状况$", r"^身体状况$", r"health.?status")),
+    ("identity.personnel_file_place", (r"人事档案所在单位", r"档案所在单位", r"personnel.?file")),
+    ("identity.foreign_residency_status", (
+        r"是否具有外国国籍.*(?:永久居留|长期居留)",
+        r"外国国籍.*(?:永久居留|长期居留)",
+        r"foreign.?nationality",
+        r"permanent.?residen",
+        r"long.?term.?residence",
+    )),
+    ("compliance.coamc_employee_recusal_requirements_met", (
+        r"是否符合中国东方员工工作回避有关要求",
+        r"中国东方.*工作回避",
+    )),
+    ("family.primary.name", (r"家庭成员.*姓名", r"家属.*姓名")),
+    ("family.primary.relationship", (r"家庭成员.*关系", r"家属.*关系")),
+    ("family.primary.work_unit", (r"家庭成员.*工作单位", r"家属.*工作单位")),
+    ("family.primary.department_title", (r"家庭成员.*(?:部门.*职务|职务)", r"家属.*(?:部门.*职务|职务)")),
+    ("family.primary.work_location", (r"家庭成员.*工作所在地", r"家属.*工作所在地")),
     ("education.bachelor.school", (r"本科.*(?:院校|学校)", r"(?:bachelor|undergraduate).*(?:school|university)")),
     ("education.bachelor.college", (r"本科.*院系", r"(?:bachelor|undergraduate).*(?:department|faculty)")),
     ("education.bachelor.major", (r"本科.*专业", r"(?:bachelor|undergraduate).*major")),
@@ -90,6 +109,24 @@ def _rule_key(label: str) -> tuple[str | None, float, str]:
     for key, patterns in RULES:
         if any(re.search(pattern, text, re.I) for pattern in patterns):
             return key, 0.99, "deterministic rule"
+    return None, 0.0, ""
+
+
+def _contextual_rule_key(field: WebField) -> tuple[str | None, float, str]:
+    label = _norm(field.label)
+    context = _norm(" ".join(str(field.metadata.get(k) or "") for k in ("section", "context")))
+    if not re.search(r"家庭情况|家庭成员|家属|family", context, re.I):
+        return None, 0.0, ""
+    mappings = (
+        ("family.primary.relationship", (r"与本人关系", r"关系", r"relationship")),
+        ("family.primary.work_unit", (r"工作单位", r"单位", r"company", r"employer")),
+        ("family.primary.department_title", (r"所属部门及职务", r"部门.*职务", r"职务", r"title", r"position")),
+        ("family.primary.work_location", (r"工作所在地", r"工作地点", r"location")),
+        ("family.primary.name", (r"^姓名(?:\s|\||$)", r"^name(?:\s|\||$)")),
+    )
+    for key, patterns in mappings:
+        if any(re.search(pattern, label, re.I) for pattern in patterns):
+            return key, 1.0, "family section context"
     return None, 0.0, ""
 
 
@@ -257,7 +294,9 @@ class FieldResolver:
                 reason=f"requires user confirmation: {confirmation}",
             )
 
-        key, confidence, reason = _rule_key(field.label)
+        key, confidence, reason = _contextual_rule_key(field)
+        if not key:
+            key, confidence, reason = _rule_key(field.label)
         if not key:
             key, confidence = _alias_key(self.profile, field.label)
             reason = "profile alias match" if key else ""

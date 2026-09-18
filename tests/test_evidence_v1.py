@@ -85,3 +85,61 @@ def test_user_explicit_override_survives_profile_rebuild_and_outranks_confirmed_
     assert field.value == "Explicit City"
     assert field.user_confirmed is True
     assert any(x.kind == "user_explicit" for x in field.sources)
+
+def test_new_confirmed_personal_facts_are_parsed_from_max(tmp_path):
+    path = tmp_path / "max-new-facts.docx"
+    doc = Document()
+    doc.add_paragraph("户口类别：农业户口（2026-09-18确认）")
+    doc.add_paragraph("生源地：示例省示例市示例县（2026-09-18确认）")
+    doc.add_paragraph("健康状况：健康（2026-09-18确认）")
+    doc.add_paragraph("人事档案所在单位：示例大学（2026-09-18确认）")
+    doc.add_paragraph("是否具有外国国籍或境外长期居留身份：否（2026-09-18确认）")
+    doc.add_paragraph("中国东方员工工作回避要求：是（2026-09-18确认）")
+    doc.add_paragraph("家庭成员1姓名：示例家属（2026-09-18确认）")
+    doc.add_paragraph("家庭成员1关系：母亲（2026-09-18确认）")
+    doc.add_paragraph("家庭成员1工作单位：示例村（2026-09-18确认）")
+    doc.add_paragraph("家庭成员1部门及职务：务农（2026-09-18确认）")
+    doc.add_paragraph("家庭成员1工作所在地：示例省示例市示例县（2026-09-18确认）")
+    doc.save(path)
+
+    profile = ProfileBuilder().import_max_docx(path).build()
+    assert profile.fields["identity.household_type"].value == "农业户口"
+    assert profile.fields["identity.student_origin"].value == "示例省示例市示例县"
+    assert profile.fields["identity.health_status"].value == "健康"
+    assert profile.fields["identity.personnel_file_place"].value == "示例大学"
+
+    assert profile.fields["identity.foreign_residency_status"].value is False
+    assert profile.fields["compliance.coamc_employee_recusal_requirements_met"].value is True
+    assert profile.fields["family.primary.name"].value == "示例家属"
+    assert profile.fields["family.primary.relationship"].value == "母亲"
+    assert profile.fields["family.primary.work_unit"].value == "示例村"
+    assert profile.fields["family.primary.department_title"].value == "务农"
+    assert profile.fields["family.primary.work_location"].value == "示例省示例市示例县"
+    assert all(
+        profile.fields[key].user_confirmed
+        for key in [
+            "identity.household_type",
+            "identity.student_origin",
+            "identity.health_status",
+            "identity.personnel_file_place",
+            "identity.foreign_residency_status",
+            "compliance.coamc_employee_recusal_requirements_met",
+            "family.primary.name",
+        ]
+    )
+
+
+def test_docx_resume_is_supported_as_current_asset(tmp_path):
+    resume = tmp_path / "resume.docx"
+    doc = Document()
+    doc.add_paragraph("产品项目")
+    doc.add_paragraph("Example Product｜独立项目")
+    doc.add_paragraph("• Example bullet")
+
+    doc.add_paragraph("技能与语言")
+    doc.save(resume)
+
+    profile = ProfileBuilder().import_resume(resume).build()
+    assert profile.assets["resume"].path == str(resume.resolve())
+    assert profile.assets["resume"].kind == "resume_docx"
+    assert any(x.kind == "resume_docx" for x in profile.source_documents)

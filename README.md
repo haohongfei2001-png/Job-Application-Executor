@@ -71,7 +71,7 @@ Build/rebuild from evidence:
 ./scripts/application.sh profile-build \
   --max-docx /path/to/MAX.docx \
   --legacy-profile /path/to/legacy-profile.json \
-  --resume /path/to/resume.pdf \
+  --resume /path/to/resume.docx \
   --photo /path/to/photo.png \
   --history-json /path/to/site-history.json \
   --history-scope site-campaign \
@@ -105,7 +105,7 @@ When an execution stops with `unresolved_fields`, answer the field once and reco
 ./scripts/application.sh recover --execution-id '<execution-id>'
 ```
 
-Execution answers are scoped to that application by default. For a durable personal fact that should become canonical across future applications, add `--promote-profile`; legal/compliance answers, salary choices and other application-specific decisions should normally remain execution-scoped.
+Execution answers are scoped to that application by default. For a durable personal fact that should become canonical across future applications, add `--promote-profile`. Stable factual answers (for example household type, student origin, health-status label, personnel-file location or foreign-residency status) may be promoted when the user explicitly asks for future reuse. One-time privacy consents, truth declarations, signatures, salary choices and other application-specific decisions remain execution-scoped. Company-specific compliance facts must use company-scoped canonical keys rather than being generalized to other employers.
 
 Recovery deliberately does not inherit submission authorization.
 

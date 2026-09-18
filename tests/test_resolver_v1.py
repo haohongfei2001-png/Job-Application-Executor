@@ -13,6 +13,16 @@ def _profile():
             "education.highest.school": {"value": "Graduate University", "confidence": 1.0},
             "education.bachelor.school": {"value": "Undergraduate University", "confidence": 1.0},
             "preferences.accept_location_adjustment": {"value": True, "confidence": 1.0},
+            "identity.household_type": {"value": "农业户口", "confidence": 1.0, "user_confirmed": True},
+            "identity.health_status": {"value": "健康", "confidence": 1.0, "user_confirmed": True},
+            "identity.personnel_file_place": {"value": "Example University", "confidence": 1.0, "user_confirmed": True},
+            "identity.foreign_residency_status": {"value": False, "confidence": 1.0, "user_confirmed": True},
+            "compliance.coamc_employee_recusal_requirements_met": {"value": True, "confidence": 1.0, "user_confirmed": True},
+            "family.primary.name": {"value": "Example Mother", "confidence": 1.0, "user_confirmed": True},
+            "family.primary.relationship": {"value": "母亲", "confidence": 1.0, "user_confirmed": True},
+            "family.primary.work_unit": {"value": "Example Village", "confidence": 1.0, "user_confirmed": True},
+            "family.primary.department_title": {"value": "务农", "confidence": 1.0, "user_confirmed": True},
+            "family.primary.work_location": {"value": "Example County", "confidence": 1.0, "user_confirmed": True},
         }
     }
 
@@ -90,3 +100,55 @@ def test_ai_semantic_mapping_precedes_stale_site_value(monkeypatch):
     assert item.status == ResolutionStatus.RESOLVED
     assert item.value == "Example User"
     assert item.source == "ai_mapping_only"
+
+def test_stable_confirmed_facts_do_not_require_reconfirmation():
+    resolver = _resolver()
+    cases = [
+        ("户口类别", "identity.household_type", "农业户口"),
+        ("健康状况", "identity.health_status", "健康"),
+        ("人事档案所在单位", "identity.personnel_file_place", "Example University"),
+        (
+            "是否具有外国国籍，或者国（境）外永久居留权、长期居留许可等境外身份",
+            "identity.foreign_residency_status",
+            False,
+        ),
+        (
+            "是否符合中国东方员工工作回避有关要求",
+            "compliance.coamc_employee_recusal_requirements_met",
+            True,
+        ),
+    ]
+    for label, key, value in cases:
+        item = resolver.resolve(WebField(field_id=key, selector="#" + key, label=label, required=True))
+        assert item.status == ResolutionStatus.RESOLVED
+        assert item.canonical_key == key
+        assert item.value == value
+
+def test_family_section_context_disambiguates_name_and_related_fields():
+    resolver = _resolver()
+    cases = [
+        ("姓名", "family.primary.name", "Example Mother"),
+        ("与本人关系", "family.primary.relationship", "母亲"),
+        ("工作单位", "family.primary.work_unit", "Example Village"),
+        ("所属部门及职务", "family.primary.department_title", "务农"),
+        ("工作所在地", "family.primary.work_location", "Example County"),
+    ]
+    for label, key, value in cases:
+        item = resolver.resolve(WebField(
+            field_id=key,
+            selector="#" + key,
+            label=label,
+            required=True,
+            metadata={"section": "家庭情况"},
+        ))
+        assert item.status == ResolutionStatus.RESOLVED
+        assert item.canonical_key == key
+        assert item.value == value
+
+def test_privacy_and_truth_declarations_still_require_confirmation():
+    resolver = _resolver()
+    for label in ["我已阅读并同意隐私政策", "本人承诺以上信息真实有效"]:
+        item = resolver.resolve(WebField(
+            field_id="decl", selector="#decl", label=label, required=True
+        ))
+        assert item.status == ResolutionStatus.USER_CONFIRMATION

@@ -46,7 +46,7 @@ def _build_profile(args) -> int:
     if args.legacy_profile:
         builder.import_legacy_profile(args.legacy_profile)
     if args.resume:
-        builder.import_resume_pdf(args.resume)
+        builder.import_resume(args.resume)
     if args.photo:
         builder.add_asset("photo", args.photo, "photo")
     if args.history_json:

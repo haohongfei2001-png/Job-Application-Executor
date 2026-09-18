@@ -12,6 +12,8 @@ __pycache__/
 config/schneider-profile.json
 config/schneider-decisions.json
 config/applicant-profile.json
+config/applicant-profile.backup-*.json
+config/candidate-profile.backup-*.json
 config/settings.json
 config/runtime.json
 applications/*

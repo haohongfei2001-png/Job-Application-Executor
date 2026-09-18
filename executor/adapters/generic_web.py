@@ -65,6 +65,32 @@ class GenericWebAdapter(SiteAdapter):
             return ""
 
     @staticmethod
+    def _section_hint(locator) -> str:
+        script = r"""e=>{
+          const clean=s=>(s||'').replace(/\s+/g,' ').trim();
+          const known=/^(个人信息|教育经历|实习经历|工作经历|语言能力|证书|家庭情况|家庭成员|获奖情况|在校实践|论文\/?专著|附加信息|简历附件|personal information|education|internship|work experience|family|awards?)$/i;
+          let node=e;
+          for(let depth=0; node && depth<10; depth++,node=node.parentElement){
+            let sib=node.previousElementSibling, hops=0;
+            while(sib && hops<8){
+              const own=clean(sib.innerText);
+              if(own && own.length<=80 && known.test(own)) return own;
+              const candidates=sib.querySelectorAll?.('h1,h2,h3,h4,h5,h6,[class*=title],[class*=header]')||[];
+              for(let i=candidates.length-1;i>=0;i--){
+                const t=clean(candidates[i].innerText);
+                if(t && t.length<=80 && known.test(t)) return t;
+              }
+              sib=sib.previousElementSibling; hops++;
+            }
+          }
+          return '';
+        }"""
+        try:
+            return " ".join((locator.evaluate(script) or "").split())
+        except Exception:
+            return ""
+
+    @staticmethod
     def _selector(locator, index: int) -> str:
         try:
             element_id = locator.get_attribute("id")
@@ -130,7 +156,11 @@ class GenericWebAdapter(SiteAdapter):
                     options=options,
                     current_value=current,
                     page_url=self.page.url,
-                    metadata={"index": index, "tag": tag},
+                    metadata={
+                        "index": index,
+                        "tag": tag,
+                        "section": self._section_hint(element),
+                    },
                 ))
             except Exception:
                 continue

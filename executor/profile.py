@@ -15,6 +15,7 @@ SENSITIVE_PATH_FRAGMENTS = (
     "id_number", "id_card", "credentials_no",
     "emergency_contact_name", "emergency_contact_phone",
     "domicile", "family_address", "mailing_address", "native_place",
+    "health_status", "foreign_residency_status", "family.primary",
 )
 
 DEFAULT_ALIASES: dict[str, tuple[str, ...]] = {
@@ -38,6 +39,27 @@ DEFAULT_ALIASES: dict[str, tuple[str, ...]] = {
     "identity.mailing_address": ("通信地址", "mailing address"),
     "identity.marital_status": ("婚姻状况", "marital status"),
     "identity.driver_license": ("驾驶证", "driver license", "driving licence"),
+    "identity.household_type": ("户口类别", "户籍类别", "household type", "hukou type"),
+    "identity.health_status": ("健康状况", "身体状况", "health status"),
+    "identity.personnel_file_place": ("人事档案所在单位", "档案所在单位", "personnel file location"),
+    "identity.foreign_residency_status": (
+        "是否具有外国国籍或境外长期居留身份",
+        "外国国籍",
+        "境外永久居留权",
+        "长期居留许可",
+        "foreign nationality",
+        "permanent residency",
+        "long-term residence permit",
+    ),
+    "compliance.coamc_employee_recusal_requirements_met": (
+        "中国东方员工工作回避要求",
+        "是否符合中国东方员工工作回避有关要求",
+    ),
+    "family.primary.name": ("家庭成员1姓名", "家庭成员姓名", "家属姓名"),
+    "family.primary.relationship": ("家庭成员1关系", "与本人关系", "家属关系"),
+    "family.primary.work_unit": ("家庭成员1工作单位", "家属工作单位"),
+    "family.primary.department_title": ("家庭成员1部门及职务", "家属部门及职务", "家属职务"),
+    "family.primary.work_location": ("家庭成员1工作所在地", "家属工作所在地"),
     "education.highest.school": ("最高学历学校", "院校", "学校", "university", "school"),
     "education.highest.college": ("最高学历院系", "院系", "department", "faculty"),
     "education.highest.major": ("最高学历专业", "专业", "major"),

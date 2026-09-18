@@ -40,6 +40,18 @@ LABEL_MAP = {
     "婚姻状况": "identity.marital_status",
     "驾驶证": "identity.driver_license",
     "生源地": "identity.student_origin",
+    "户口类别": "identity.household_type",
+    "健康状况": "identity.health_status",
+    "人事档案所在单位": "identity.personnel_file_place",
+    "是否具有外国国籍或境外长期居留身份": "identity.foreign_residency_status",
+    "是否具有外国国籍，或者国（境）外永久居留权、长期居留许可等境外身份": "identity.foreign_residency_status",
+    "中国东方员工工作回避要求": "compliance.coamc_employee_recusal_requirements_met",
+    "是否符合中国东方员工工作回避有关要求": "compliance.coamc_employee_recusal_requirements_met",
+    "家庭成员1姓名": "family.primary.name",
+    "家庭成员1关系": "family.primary.relationship",
+    "家庭成员1工作单位": "family.primary.work_unit",
+    "家庭成员1部门及职务": "family.primary.department_title",
+    "家庭成员1工作所在地": "family.primary.work_location",
     "求职身份": "preferences.candidate_status",
     "预计毕业日期": "education.highest.graduation_date",
     "培养/学历取得方式": "education.highest.study_type",
@@ -83,6 +95,8 @@ LABEL_MAP = {
 BOOL_KEYS = {
     "preferences.accept_location_adjustment",
     "preferences.accept_role_adjustment",
+    "identity.foreign_residency_status",
+    "compliance.coamc_employee_recusal_requirements_met",
 }
 
 PENDING_MARKERS = ("待补充", "待查", "未固定", "根据毕业", "建议按")
@@ -339,6 +353,17 @@ class ProfileBuilder:
             "identity.pre_gaokao_domicile": ("identity", "household_before_gaokao"),
             "identity.domicile": ("identity", "household_address"),
             "identity.family_address": ("identity", "family_address"),
+            "identity.student_origin": ("identity", "student_origin"),
+            "identity.household_type": ("identity", "household_type"),
+            "identity.health_status": ("identity", "health_status"),
+            "identity.personnel_file_place": ("identity", "personnel_file_place"),
+            "identity.foreign_residency_status": ("identity", "foreign_residency_status"),
+            "compliance.coamc_employee_recusal_requirements_met": ("compliance", "coamc_employee_recusal_requirements_met"),
+            "family.primary.name": ("family", "primary", "name"),
+            "family.primary.relationship": ("family", "primary", "relationship"),
+            "family.primary.work_unit": ("family", "primary", "work_unit"),
+            "family.primary.department_title": ("family", "primary", "department_title"),
+            "family.primary.work_location": ("family", "primary", "work_location"),
             "education.highest.school": ("education", "school"),
             "education.highest.degree": ("education", "degree"),
             "education.highest.major": ("education", "major"),
@@ -356,6 +381,44 @@ class ProfileBuilder:
                     normalization={"strategy": "legacy_mapping", "source_key": ".".join(route)},
                 )
         return self
+
+    def import_resume(self, path: str | Path):
+        path = Path(path).expanduser().resolve()
+        if not path.is_file():
+            return self
+        if path.suffix.lower() == ".pdf":
+            return self.import_resume_pdf(path)
+        if path.suffix.lower() == ".docx":
+            doc = Document(path)
+            text = "\n".join((paragraph.text or "") for paragraph in doc.paragraphs)
+            kind = "resume_docx"
+            self.profile.source_documents.append(
+                EvidenceRef(kind=kind, path=str(path), note=f"sha256:{file_sha256(path)}")
+            )
+            if text.strip():
+                self.profile.collections["resume_text_snapshot"] = text.strip()
+                lines = [x.strip() for x in text.splitlines() if x.strip()]
+                relevant: list[str] = []
+                section = None
+                for line in lines:
+                    if line in {"产品项目", "科研经历"}:
+                        section = line
+                        continue
+                    if line == "技能与语言":
+                        section = None
+                    if section:
+                        relevant.append(line)
+                parsed_resume = _parse_project_lines(relevant, kind)
+                self.profile.collections["projects"] = _merge_projects(
+                    self.profile.collections.get("projects") or [],
+                    parsed_resume,
+                )
+            self.profile.assets["resume"] = AssetRef(
+                path=str(path), kind=kind, sha256=file_sha256(path),
+                source=EvidenceRef(kind=kind, path=str(path)),
+            )
+            return self
+        return self.add_asset("resume", path, f"resume_{path.suffix.lower().lstrip('.') or 'file'}")
 
     def import_resume_pdf(self, path: str | Path):
         path = Path(path).expanduser().resolve()
