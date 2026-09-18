@@ -25,3 +25,10 @@ def test_browser_fill_and_stop_before_submit(tmp_path, monkeypatch):
     keys={x.get('key') for x in state.filled_fields}
     assert 'identity.full_name' in keys and 'identity.email' in keys
     assert state.page_index==1
+
+def test_legacy_submit_helper_cannot_click_final_submit():
+    import pytest
+    from executor.submit import submit_current
+
+    with pytest.raises(RuntimeError, match="must be clicked by the user"):
+        submit_current("FINAL_SUBMIT")

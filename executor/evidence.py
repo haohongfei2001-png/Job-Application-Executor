@@ -55,6 +55,7 @@ LABEL_MAP = {
     "网申隐私政策自动决策": "policy.auto_accept_privacy_terms",
     "网申真实性/投递声明自动决策": "policy.auto_accept_truth_submission_declarations",
     "新公司法律/合规声明自动决策": "policy.auto_decide_company_legal_compliance",
+    "最终投递必须本人点击": "policy.final_submission_requires_user_click",
     "求职身份": "preferences.candidate_status",
     "预计毕业日期": "education.highest.graduation_date",
     "培养/学历取得方式": "education.highest.study_type",
@@ -103,6 +104,7 @@ BOOL_KEYS = {
     "policy.auto_accept_privacy_terms",
     "policy.auto_accept_truth_submission_declarations",
     "policy.auto_decide_company_legal_compliance",
+    "policy.final_submission_requires_user_click",
 }
 
 PENDING_MARKERS = ("待补充", "待查", "未固定", "根据毕业", "建议按")
@@ -373,6 +375,7 @@ class ProfileBuilder:
             "policy.auto_accept_privacy_terms": ("application_policy", "auto_accept_privacy_terms"),
             "policy.auto_accept_truth_submission_declarations": ("application_policy", "auto_accept_truth_submission_declarations"),
             "policy.auto_decide_company_legal_compliance": ("application_policy", "auto_decide_company_legal_compliance"),
+            "policy.final_submission_requires_user_click": ("application_policy", "final_submission_requires_user_click"),
             "education.highest.school": ("education", "school"),
             "education.highest.degree": ("education", "degree"),
             "education.highest.major": ("education", "major"),

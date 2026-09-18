@@ -86,6 +86,7 @@ def _execute(args) -> int:
         "audit_dir": str(executor.audit.root),
         "unresolved_fields": unresolved,
         "verification": plan.metadata.get("verification"),
+        "final_review": plan.metadata.get("final_review"),
     }, ensure_ascii=False, indent=2, default=str))
     return 0
 
@@ -101,6 +102,7 @@ def _recover(args) -> int:
         "stage": plan.stage,
         "recovered_from_stage": plan.metadata.get("recovered_from_stage"),
         "unresolved_fields": [_unresolved_view(item) for item in plan.unresolved_fields],
+        "final_review": plan.metadata.get("final_review"),
     }, ensure_ascii=False, indent=2, default=str))
     return 0
 
@@ -183,7 +185,11 @@ def main() -> int:
     execute.add_argument("--url", required=True)
     execute.add_argument("--profile")
     execute.add_argument("--max-pages", type=int, default=15)
-    execute.add_argument("--submit-authorized", action="store_true")
+    execute.add_argument(
+        "--submit-authorized",
+        action="store_true",
+        help="legacy target-authorization flag; never authorizes an automated final submit click",
+    )
 
     recover = sub.add_parser("recover")
     recover.add_argument("--execution-id", required=True)

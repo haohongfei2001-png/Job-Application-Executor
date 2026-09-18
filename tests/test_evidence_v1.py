@@ -103,6 +103,7 @@ def test_new_confirmed_personal_facts_are_parsed_from_max(tmp_path):
     doc.add_paragraph("网申隐私政策自动决策：是（2026-09-18确认）")
     doc.add_paragraph("网申真实性/投递声明自动决策：是（2026-09-18确认）")
     doc.add_paragraph("新公司法律/合规声明自动决策：是（2026-09-18确认）")
+    doc.add_paragraph("最终投递必须本人点击：是（2026-09-18确认）")
     doc.save(path)
 
     profile = ProfileBuilder().import_max_docx(path).build()
@@ -121,6 +122,7 @@ def test_new_confirmed_personal_facts_are_parsed_from_max(tmp_path):
     assert profile.fields["policy.auto_accept_privacy_terms"].value is True
     assert profile.fields["policy.auto_accept_truth_submission_declarations"].value is True
     assert profile.fields["policy.auto_decide_company_legal_compliance"].value is True
+    assert profile.fields["policy.final_submission_requires_user_click"].value is True
     assert all(
         profile.fields[key].user_confirmed
         for key in [
@@ -131,6 +133,7 @@ def test_new_confirmed_personal_facts_are_parsed_from_max(tmp_path):
             "identity.foreign_residency_status",
             "compliance.coamc_employee_recusal_requirements_met",
             "family.primary.name",
+            "policy.final_submission_requires_user_click",
         ]
     )
 

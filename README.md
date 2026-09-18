@@ -24,6 +24,7 @@ Core modules:
 - `executor/application.py` — generic state machine and submit boundary.
 - `executor/audit.py` — per-execution plans/actions/evidence/receipt with persisted values masked.
 - `executor/recovery.py` — re-runs a non-terminal execution from current page/profile; terminal submissions are read-only.
+- `executor/review.py` — builds the mandatory pre-submit review, including structured-project coverage against the canonical project inventory.
 - `executor/adapters/generic_web.py` — DOM/accessibility-first generic web adapter.
 - `executor/adapters/schneider_boss.py` — preserved BOSS/Schneider-specific reference implementation.
 
@@ -39,7 +40,7 @@ DISCOVERED
 → VERIFIED
 ```
 
-`BLOCKED` and `ERROR` are explicit non-terminal states. `READY_TO_SUBMIT` never implies authorization to submit.
+`BLOCKED` and `ERROR` are explicit non-terminal states. `READY_TO_SUBMIT` is a hard manual boundary: the executor must stop there and the user must personally click the final submit control.
 
 ## Local environment
 
@@ -88,11 +89,7 @@ Fill everything deterministically known and stop on unresolved required fields o
 ./scripts/application.sh execute --url 'https://example.com/application'
 ```
 
-Only when the exact target has explicit submission authorization:
-
-```bash
-./scripts/application.sh execute --url 'https://example.com/application' --submit-authorized
-```
+The legacy `--submit-authorized` flag may still be used to record exact-target authorization, but it never authorizes an automated final click. Even with that flag, execution stops at `READY_TO_SUBMIT` so the user can review and personally click the final submit control.
 
 When an execution stops with `unresolved_fields`, answer the field once and recover the same execution:
 
@@ -107,7 +104,17 @@ When an execution stops with `unresolved_fields`, answer the field once and reco
 
 Execution answers are scoped to that application by default. For a durable personal fact that should become canonical across future applications, add `--promote-profile`. Stable factual answers (for example household type, student origin, health-status label, personnel-file location or foreign-residency status) may be promoted when the user explicitly asks for future reuse.
 
-A user may also set standing decision policies in the canonical profile. When `policy.auto_accept_privacy_terms` is user-confirmed, standard recruitment privacy/data-processing consents are accepted automatically for an already-authorized exact target. When `policy.auto_accept_truth_submission_declarations` is user-confirmed, standard truthfulness/submission declarations are accepted automatically after the form values have been resolved. When `policy.auto_decide_company_legal_compliance` is user-confirmed, company-specific legal/compliance questions are handled without re-asking merely because the field is a compliance field. Pure assent/commitment statements (for example agreeing to a company compliance policy or promising to follow a code of conduct) are accepted automatically. Factual compliance questions are resolved from confirmed canonical facts or evidence-backed semantic mappings. Unknown objective facts are not invented: they remain unresolved for lack of factual basis. Electronic signatures and subjective salary choices still require separate handling.
+A user may also set standing decision policies in the canonical profile. When `policy.auto_accept_privacy_terms` is user-confirmed, standard recruitment privacy/data-processing consents are accepted automatically for an already-authorized exact target. When `policy.auto_accept_truth_submission_declarations` is user-confirmed, standard truthfulness/submission declarations are accepted automatically after the form values have been resolved. When `policy.auto_decide_company_legal_compliance` is user-confirmed, company-specific legal/compliance questions are handled without re-asking merely because the field is a compliance field. Pure assent/commitment statements (for example agreeing to a company compliance policy or promising to follow a code of conduct) are accepted automatically. Factual compliance questions are resolved from confirmed canonical facts or evidence-backed semantic mappings. Unknown objective facts are not invented: they remain unresolved for lack of factual basis.
+
+When `policy.final_submission_requires_user_click` is user-confirmed, the executor must complete every preparatory step it can, validate the application, and stop at the final submit control. Privacy/accuracy declarations may still be handled by the standing policies above, but the actual final application action is never clicked by automation. The user performs that final click personally after review.
+
+### Mandatory pre-submit review
+
+Reaching `READY_TO_SUBMIT` must create `metadata.final_review`. The review is not optional. It includes the exact final control, attachment basenames, unresolved-field count, and a structured-project coverage audit.
+
+Resume parsing is treated as an untrusted draft. Before the user is asked to click the final button, the executor/operator must audit every parsed section and remove misclassified rows. A resume attachment is **not** a substitute for structured project fields when the portal exposes a project/activity section.
+
+The project audit compares the canonical project inventory with project-name fields actually present in the structured form. Every canonical project must end in one of three states: included, explicitly excluded with a reason/user instruction, or surfaced as `uncovered_projects` in the final review. Silent omission is forbidden. Research projects are not dropped merely because the target role is product-oriented; relevance decisions must be explicit. Unknown dates or facts are never invented to satisfy a required field.
 
 Recovery deliberately does not inherit submission authorization.
 
@@ -121,7 +128,7 @@ Resolution is conservative:
 4. a non-empty value already present on the current site when no stronger canonical fact exists;
 5. otherwise the field becomes `unresolved_fields`.
 
-DeepSeek may be called while interpreting an unfamiliar field label, before source precedence is applied, but it can only return one of the existing canonical keys. It never supplies the applicant value. Generic education labels such as `School`/`Major` are treated as ambiguous when the degree level is not explicit. Salary, legal/compliance declarations, signatures, work authorization and similar decisions require user confirmation even when the site marks them optional.
+DeepSeek may be called while interpreting an unfamiliar field label, before source precedence is applied, but it can only return one of the existing canonical keys. It never supplies the applicant value. Generic education labels such as `School`/`Major` are treated as ambiguous when the degree level is not explicit. Standing user policies may automate privacy, truthfulness and evidence-backed compliance decisions, but objective facts must never be invented. Electronic signatures and subjective choices without a standing policy remain explicit decision points.
 
 The resolver can reuse the existing macOS Keychain service `AI-Supervisor-DeepSeek`; the key itself is not written to this repository.
 

@@ -108,7 +108,7 @@ def test_ready_to_submit_does_not_submit_without_authorization(tmp_path, monkeyp
     assert fake.submit_calls == 0
 
 
-def test_page_success_signal_is_not_server_verification(tmp_path, monkeypatch):
+def test_submit_authorized_still_requires_manual_final_click(tmp_path, monkeypatch):
     fake = FakeAdapter([
         WebField(field_id="name", selector="#name", label="姓名", required=True),
     ], final="Submit application", verification_level="page_signal")
@@ -119,9 +119,12 @@ def test_page_success_signal_is_not_server_verification(tmp_path, monkeypatch):
         {"deepseek": {"enabled": False}}, submit_authorized=True,
     )
     plan = runner.run(max_pages=1)
-    assert plan.stage == ApplicationStage.SUBMITTED
-    assert fake.submit_calls == 1
-    assert plan.metadata["verification"]["level"] == "page_signal"
+    assert plan.stage == ApplicationStage.READY_TO_SUBMIT
+    assert fake.submit_calls == 0
+    assert plan.metadata["manual_final_click_required"] is True
+    assert plan.metadata["submit_authorized_does_not_allow_final_click"] is True
+    assert plan.metadata["final_review"]["human_review_required"] is True
+    assert plan.metadata["final_review"]["final_click_actor"] == "user"
 
 
 def test_recovery_of_terminal_execution_is_read_only(tmp_path, monkeypatch):

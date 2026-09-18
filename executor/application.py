@@ -11,6 +11,7 @@ from .audit import AuditStore
 from .models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus, WebField
 from .profile import get_field, is_sensitive_key, load_profile
 from .resolver import FieldResolver
+from .review import build_final_review
 
 
 def execution_id_for(target_url: str) -> str:
@@ -249,26 +250,20 @@ class ApplicationExecutor:
                 if final_control:
                     self.plan.stage = ApplicationStage.READY_TO_SUBMIT
                     self.plan.metadata["final_submit_control"] = final_control
+                    self.plan.metadata["manual_final_click_required"] = True
+                    self.plan.metadata["submit_authorized_does_not_allow_final_click"] = bool(
+                        self.plan.submit_authorized
+                    )
+                    self.plan.metadata["final_review"] = build_final_review(
+                        self.profile,
+                        self.plan,
+                        final_control,
+                    )
                     self.audit.save_plan(self.plan)
                     try:
                         adapter.screenshot(self.audit.screenshot_path("ready-to-submit"))
                     except Exception:
                         pass
-                    if not self.plan.submit_authorized:
-                        return self.plan
-
-                    receipt = adapter.submit()
-                    self.plan.stage = ApplicationStage.SUBMITTED
-                    self.audit.record_action({"type": "submit", "control": final_control})
-                    verification = adapter.verify_submission()
-                    receipt["verification"] = verification.model_dump(mode="json")
-                    self.audit.save_receipt(receipt)
-                    self.plan.metadata["verification"] = verification.model_dump(mode="json")
-                    if verification.verified and verification.level in {
-                        "server_record", "application_history", "api",
-                    }:
-                        self.plan.stage = ApplicationStage.VERIFIED
-                    self.audit.save_plan(self.plan)
                     return self.plan
 
                 if adapter.advance():

@@ -63,6 +63,7 @@ DEFAULT_ALIASES: dict[str, tuple[str, ...]] = {
     "policy.auto_accept_privacy_terms": ("网申隐私政策自动决策",),
     "policy.auto_accept_truth_submission_declarations": ("网申真实性/投递声明自动决策",),
     "policy.auto_decide_company_legal_compliance": ("新公司法律/合规声明自动决策",),
+    "policy.final_submission_requires_user_click": ("最终投递必须本人点击", "最终提交本人点击", "manual final submit"),
     "education.highest.school": ("最高学历学校", "院校", "学校", "university", "school"),
     "education.highest.college": ("最高学历院系", "院系", "department", "faculty"),
     "education.highest.major": ("最高学历专业", "专业", "major"),

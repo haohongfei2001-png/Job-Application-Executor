@@ -3,5 +3,11 @@
   "education": {"school":"","degree":"","major":"","graduation_date":"","gpa":""},
   "links": {"linkedin":"","github":"","website":""},
   "application_defaults": {"preferred_city":""},
+  "application_policy": {
+    "auto_accept_privacy_terms": false,
+    "auto_accept_truth_submission_declarations": false,
+    "auto_decide_company_legal_compliance": false,
+    "final_submission_requires_user_click": true
+  },
   "approved_answers": {}
 }
