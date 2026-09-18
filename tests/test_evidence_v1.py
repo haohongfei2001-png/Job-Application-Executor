@@ -100,6 +100,9 @@ def test_new_confirmed_personal_facts_are_parsed_from_max(tmp_path):
     doc.add_paragraph("家庭成员1工作单位：示例村（2026-09-18确认）")
     doc.add_paragraph("家庭成员1部门及职务：务农（2026-09-18确认）")
     doc.add_paragraph("家庭成员1工作所在地：示例省示例市示例县（2026-09-18确认）")
+    doc.add_paragraph("网申隐私政策自动决策：是（2026-09-18确认）")
+    doc.add_paragraph("网申真实性/投递声明自动决策：是（2026-09-18确认）")
+    doc.add_paragraph("新公司法律/合规声明自动决策：是（2026-09-18确认）")
     doc.save(path)
 
     profile = ProfileBuilder().import_max_docx(path).build()
@@ -115,6 +118,9 @@ def test_new_confirmed_personal_facts_are_parsed_from_max(tmp_path):
     assert profile.fields["family.primary.work_unit"].value == "示例村"
     assert profile.fields["family.primary.department_title"].value == "务农"
     assert profile.fields["family.primary.work_location"].value == "示例省示例市示例县"
+    assert profile.fields["policy.auto_accept_privacy_terms"].value is True
+    assert profile.fields["policy.auto_accept_truth_submission_declarations"].value is True
+    assert profile.fields["policy.auto_decide_company_legal_compliance"].value is True
     assert all(
         profile.fields[key].user_confirmed
         for key in [

@@ -13,15 +13,32 @@ from .models import FieldResolution, ResolutionStatus, WebField
 from .profile import aliases_for, get_field, is_sensitive_key, profile_keys
 
 
+PRIVACY_PATTERNS = (
+    r"privacy consent|privacy policy|隐私同意|隐私政策|同意.*隐私|个人信息保护|数据处理",
+)
+TRUTH_DECLARATION_PATTERNS = (
+    r"\b(?:i\s+)?(?:certify|declare|attest)\b.*(?:true|accurate|complete)",
+    r"(?:truth|accurate).*?(?:statement|declaration|information)",
+    r"真实有效|真实性|信息.*真实|本人承诺|本人确认|本人声明|投递声明|简历一经投递|不可修改",
+)
+LEGAL_COMPLIANCE_PATTERNS = (
+    r"visa|work.?authori|sponsor|签证|工作许可",
+    r"conflict|利益冲突|竞业|non.?compete|回避",
+    r"criminal|background.?check|犯罪|背景调查|处分",
+    r"是否为政治公众人物|politically exposed",
+    r"合规|compliance|法律声明|legal declaration",
+)
+LEGAL_ASSENT_PATTERNS = (
+    r"同意.*(?:合规|法律|政策|准则|守则|条款)",
+    r"承诺.*(?:遵守|合规|守则|准则|政策)",
+    r"(?:agree|acknowledge|commit|undertake).*?(?:compliance|code of conduct|policy|legal|terms)",
+)
 CONFIRMATION_PATTERNS = (
     r"salary|薪资|薪酬|期望年薪|期望月薪",
-    r"visa|work.?authori|sponsor|签证|工作许可",
-    r"conflict|利益冲突|竞业|non.?compete",
-    r"criminal|background.?check|犯罪|背景调查",
     r"signature|electronic.?sign|电子签名|签名",
-    r"truth|accurate|certif|声明|承诺|真实有效",
-    r"privacy consent|privacy policy|隐私同意|隐私政策|同意.*隐私|授权声明",
-    r"是否为政治公众人物|politically exposed",
+    *PRIVACY_PATTERNS,
+    *TRUTH_DECLARATION_PATTERNS,
+    *LEGAL_COMPLIANCE_PATTERNS,
 )
 
 RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -101,6 +118,21 @@ def _needs_user_confirmation(label: str) -> str | None:
     for pattern in CONFIRMATION_PATTERNS:
         if re.search(pattern, text, re.I):
             return pattern
+    return None
+
+
+def _matches_any(label: str, patterns: tuple[str, ...]) -> bool:
+    text = _norm(label)
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
+def _standing_policy_key(label: str) -> str | None:
+    if _matches_any(label, PRIVACY_PATTERNS):
+        return "policy.auto_accept_privacy_terms"
+    if _matches_any(label, TRUTH_DECLARATION_PATTERNS):
+        return "policy.auto_accept_truth_submission_declarations"
+    if _matches_any(label, LEGAL_COMPLIANCE_PATTERNS):
+        return "policy.auto_decide_company_legal_compliance"
     return None
 
 
@@ -286,14 +318,6 @@ class FieldResolver:
         self.ai = DeepSeekMapper(settings)
 
     def resolve(self, field: WebField) -> FieldResolution:
-        confirmation = _needs_user_confirmation(field.label)
-        if confirmation:
-            return FieldResolution(
-                field_id=field.field_id, selector=field.selector, label=field.label,
-                status=ResolutionStatus.USER_CONFIRMATION, required=field.required,
-                reason=f"requires user confirmation: {confirmation}",
-            )
-
         key, confidence, reason = _contextual_rule_key(field)
         if not key:
             key, confidence, reason = _rule_key(field.label)
@@ -313,6 +337,67 @@ class FieldResolver:
                     reason=reason, required=field.required,
                     sensitive=profile_field.sensitive or is_sensitive_key(key),
                 )
+
+        confirmation = _needs_user_confirmation(field.label)
+        if confirmation:
+            policy_key = _standing_policy_key(field.label)
+            policy_field = get_field(self.profile, policy_key) if policy_key else None
+            policy_enabled = bool(policy_field and policy_field.user_confirmed and policy_field.value is True)
+
+            if policy_enabled and policy_key in {
+                "policy.auto_accept_privacy_terms",
+                "policy.auto_accept_truth_submission_declarations",
+            }:
+                return FieldResolution(
+                    field_id=field.field_id, selector=field.selector, label=field.label,
+                    canonical_key=policy_key, status=ResolutionStatus.RESOLVED,
+                    value=True, source="standing_user_policy", confidence=1.0,
+                    reason=f"standing user policy: {policy_key}", required=field.required,
+                )
+
+            if policy_enabled and policy_key == "policy.auto_decide_company_legal_compliance":
+                if _matches_any(field.label, LEGAL_ASSENT_PATTERNS):
+                    return FieldResolution(
+                        field_id=field.field_id, selector=field.selector, label=field.label,
+                        canonical_key=policy_key, status=ResolutionStatus.RESOLVED,
+                        value=True, source="standing_user_policy", confidence=1.0,
+                        reason="standing user policy: company legal/compliance assent",
+                        required=field.required,
+                    )
+                if _nonempty(field.current_value):
+                    return FieldResolution(
+                        field_id=field.field_id, selector=field.selector, label=field.label,
+                        status=ResolutionStatus.KEEP_EXISTING,
+                        value=field.current_value, source="site_existing", confidence=0.80,
+                        reason="standing autonomous compliance policy preserved existing site value",
+                        required=field.required,
+                    )
+                ai_key, ai_conf, ai_reason = self.ai.map_field(field, profile_keys(self.profile))
+                if ai_key and ai_conf >= 0.80:
+                    mapped = get_field(self.profile, ai_key)
+                    if mapped and _nonempty(mapped.value):
+                        return FieldResolution(
+                            field_id=field.field_id, selector=field.selector, label=field.label,
+                            canonical_key=ai_key, status=ResolutionStatus.RESOLVED,
+                            value=mapped.value, source="standing_policy_ai_mapping",
+                            confidence=min(ai_conf, mapped.confidence),
+                            reason=ai_reason, required=field.required,
+                            sensitive=mapped.sensitive or is_sensitive_key(ai_key),
+                        )
+                return FieldResolution(
+                    field_id=field.field_id, selector=field.selector, label=field.label,
+                    status=ResolutionStatus.UNRESOLVED, required=field.required,
+                    confidence=0.0,
+                    reason="standing autonomous compliance policy active, but no factual basis was found",
+                )
+
+            return FieldResolution(
+                field_id=field.field_id, selector=field.selector, label=field.label,
+                status=ResolutionStatus.USER_CONFIRMATION, required=field.required,
+                reason=f"requires user confirmation: {confirmation}",
+            )
+
+        if key:
             if _nonempty(field.current_value):
                 return FieldResolution(
                     field_id=field.field_id, selector=field.selector, label=field.label,

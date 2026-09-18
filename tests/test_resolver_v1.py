@@ -23,6 +23,9 @@ def _profile():
             "family.primary.work_unit": {"value": "Example Village", "confidence": 1.0, "user_confirmed": True},
             "family.primary.department_title": {"value": "务农", "confidence": 1.0, "user_confirmed": True},
             "family.primary.work_location": {"value": "Example County", "confidence": 1.0, "user_confirmed": True},
+            "policy.auto_accept_privacy_terms": {"value": True, "confidence": 1.0, "user_confirmed": True},
+            "policy.auto_accept_truth_submission_declarations": {"value": True, "confidence": 1.0, "user_confirmed": True},
+            "policy.auto_decide_company_legal_compliance": {"value": True, "confidence": 1.0, "user_confirmed": True},
         }
     }
 
@@ -145,10 +148,65 @@ def test_family_section_context_disambiguates_name_and_related_fields():
         assert item.canonical_key == key
         assert item.value == value
 
-def test_privacy_and_truth_declarations_still_require_confirmation():
+def test_privacy_and_truth_declarations_follow_standing_user_policy():
     resolver = _resolver()
-    for label in ["我已阅读并同意隐私政策", "本人承诺以上信息真实有效"]:
+    for label, key in [
+        ("我已阅读并同意隐私政策", "policy.auto_accept_privacy_terms"),
+        ("本人承诺以上信息真实有效", "policy.auto_accept_truth_submission_declarations"),
+        ("简历一经投递不可修改", "policy.auto_accept_truth_submission_declarations"),
+    ]:
         item = resolver.resolve(WebField(
             field_id="decl", selector="#decl", label=label, required=True
         ))
-        assert item.status == ResolutionStatus.USER_CONFIRMATION
+        assert item.status == ResolutionStatus.RESOLVED
+        assert item.canonical_key == key
+        assert item.value is True
+        assert item.source == "standing_user_policy"
+
+
+def test_unknown_company_compliance_is_not_reconfirmed_but_needs_fact_basis():
+    resolver = _resolver()
+    item = resolver.resolve(WebField(
+        field_id="new-compliance",
+        selector="#new-compliance",
+        label="是否存在与本公司业务相关的其他利益冲突",
+        required=True,
+    ))
+    assert item.status == ResolutionStatus.UNRESOLVED
+    assert "standing autonomous compliance policy" in item.reason
+    assert "factual basis" in item.reason
+
+
+def test_signature_still_requires_confirmation():
+    resolver = _resolver()
+    item = resolver.resolve(WebField(
+        field_id="signature",
+        selector="#signature",
+        label="电子签名",
+        required=True,
+    ))
+    assert item.status == ResolutionStatus.USER_CONFIRMATION
+
+def test_certificate_field_is_not_treated_as_truth_declaration():
+    resolver = _resolver()
+    item = resolver.resolve(WebField(
+        field_id="certificate",
+        selector="#certificate",
+        label="Certificate name",
+        required=True,
+    ))
+    assert item.status == ResolutionStatus.UNRESOLVED
+    assert item.source != "standing_user_policy"
+
+def test_company_legal_assent_is_auto_accepted_by_standing_policy():
+    resolver = _resolver()
+    item = resolver.resolve(WebField(
+        field_id="compliance-assent",
+        selector="#compliance-assent",
+        label="本人同意遵守本公司合规政策与行为准则",
+        required=True,
+    ))
+    assert item.status == ResolutionStatus.RESOLVED
+    assert item.canonical_key == "policy.auto_decide_company_legal_compliance"
+    assert item.value is True
+    assert item.source == "standing_user_policy"
