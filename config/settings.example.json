@@ -1,0 +1,18 @@
+{
+  "resume_path": null,
+  "profile_path": null,
+  "photo_path": null,
+  "auth_wait_seconds": 900,
+  "deepseek": {
+    "enabled": true,
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-v4-pro",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "keychain_service": "AI-Supervisor-DeepSeek",
+    "keychain_account": null,
+    "proxy": null,
+    "timeout_seconds": 120,
+    "reasoning_effort": "low",
+    "max_tokens": 500
+  }
+}

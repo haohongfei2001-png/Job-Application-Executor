@@ -1,0 +1,12 @@
+{
+  "targets": [
+    {
+      "label": "already submitted application",
+      "status": "VERIFIED",
+      "hosts": ["example.com"],
+      "query_any": {
+        "applicationId": ["replace-with-local-id"]
+      }
+    }
+  ]
+}

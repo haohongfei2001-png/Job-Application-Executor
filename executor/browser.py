@@ -1,5 +1,5 @@
 from __future__ import annotations
-import subprocess,time,urllib.request
+import os,subprocess,time,urllib.request
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -23,7 +23,7 @@ def ensure_chrome(start_url="about:blank"):
 
 def connect(target_url=None):
     ensure_chrome("about:blank")
-    pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(CDP); ctx=browser.contexts[0]
+    pw=sync_playwright().start(); browser=pw.chromium.connect_over_cdp(CDP,no_defaults=True); ctx=browser.contexts[0]
     pages=[p for p in ctx.pages if not p.is_closed()]
     if target_url:
         exact=[p for p in pages if p.url==target_url]

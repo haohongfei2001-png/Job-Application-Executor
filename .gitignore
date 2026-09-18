@@ -11,3 +11,9 @@ __pycache__/
 *.pyc
 config/schneider-profile.json
 config/schneider-decisions.json
+config/applicant-profile.json
+config/settings.json
+config/runtime.json
+applications/*
+!applications/.gitkeep
+config/protected-targets.json

@@ -1,0 +1,15 @@
+{
+  "state": "IDLE",
+  "job_url": null,
+  "target_query": null,
+  "candidates": [],
+  "active_url": null,
+  "profile_path": null,
+  "resume_path": null,
+  "last_checkpoint_at": null,
+  "page_index": 0,
+  "filled_fields": [],
+  "unresolved_fields": [],
+  "final_submit_detected": false,
+  "last_error": null
+}
