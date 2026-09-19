@@ -53,7 +53,13 @@ def resolve_schneider(title:str,location:str='China',max_pages:int=8):
         out.sort(key=lambda c:(not c.exact_title,c.title.casefold(),c.location.casefold()))
         return out
     finally:
-        page.close(); browser.close(); pw.stop()
+        try:
+            page.close()
+        except Exception:
+            pass
+        # In live mode this browser is a CDP attachment to the shared dedicated
+        # application Chrome. Closing it would terminate the whole profile.
+        pw.stop()
 
 def resolve(company:str,title:str,location:str='China'):
     if company.strip().casefold() in SCHNEIDER_ALIASES:

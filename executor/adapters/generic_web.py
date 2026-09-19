@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Iterable
@@ -50,60 +49,6 @@ class GenericWebAdapter(SiteAdapter):
         except Exception:
             return False
 
-    @staticmethod
-    def _hint(locator) -> str:
-        script = """e=>{
-          const labels=[...(e.labels||[])].map(x=>x.innerText);
-          const near=e.closest('label,fieldset,[class*=field],[class*=form]');
-          return [labels.join(' '),e.getAttribute('aria-label'),e.getAttribute('placeholder'),
-            e.getAttribute('name'),e.id,near?.innerText?.slice(0,280)]
-            .filter(Boolean).join(' | ')
-        }"""
-        try:
-            return " ".join((locator.evaluate(script) or "").split())
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _section_hint(locator) -> str:
-        script = r"""e=>{
-          const clean=s=>(s||'').replace(/\s+/g,' ').trim();
-          const known=/^(个人信息|教育经历|实习经历|工作经历|语言能力|证书|家庭情况|家庭成员|获奖情况|在校实践|论文\/?专著|附加信息|简历附件|personal information|education|internship|work experience|family|awards?)$/i;
-          let node=e;
-          for(let depth=0; node && depth<10; depth++,node=node.parentElement){
-            let sib=node.previousElementSibling, hops=0;
-            while(sib && hops<8){
-              const own=clean(sib.innerText);
-              if(own && own.length<=80 && known.test(own)) return own;
-              const candidates=sib.querySelectorAll?.('h1,h2,h3,h4,h5,h6,[class*=title],[class*=header]')||[];
-              for(let i=candidates.length-1;i>=0;i--){
-                const t=clean(candidates[i].innerText);
-                if(t && t.length<=80 && known.test(t)) return t;
-              }
-              sib=sib.previousElementSibling; hops++;
-            }
-          }
-          return '';
-        }"""
-        try:
-            return " ".join((locator.evaluate(script) or "").split())
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _selector(locator, index: int) -> str:
-        try:
-            element_id = locator.get_attribute("id")
-            if element_id:
-                return "#" + locator.evaluate("e=>CSS.escape(e.id)")
-            name = locator.get_attribute("name")
-            tag = locator.evaluate("e=>e.tagName.toLowerCase()")
-            if name:
-                return f"{tag}[name={json.dumps(name)}]"
-        except Exception:
-            pass
-        return f"__field_index__:{index}"
-
     def _locate(self, selector: str, label: str = ""):
         if selector.startswith("__field_index__:"):
             index = int(selector.rsplit(":", 1)[1])
@@ -118,53 +63,117 @@ class GenericWebAdapter(SiteAdapter):
         return loc.first
 
     def discover_fields(self) -> list[WebField]:
-        fields: list[WebField] = []
-        loc = self.page.locator(VISIBLE_FIELD_SELECTOR)
-        for index in range(min(loc.count(), 350)):
-            element = loc.nth(index)
-            if not self._visible(element):
-                continue
-            try:
-                tag = element.evaluate("e=>e.tagName.toLowerCase()")
-                input_type = (element.get_attribute("type") or tag).lower()
-                label = self._hint(element)
-                required = (
-                    element.get_attribute("required") is not None
-                    or element.get_attribute("aria-required") == "true"
-                )
-                current = None
-                if input_type not in {"file", "submit", "button"}:
-                    if input_type in {"checkbox", "radio"}:
-                        current = element.is_checked()
-                    else:
-                        current = element.input_value()
-                options: list[str] = []
-                if tag == "select":
-                    opts = element.locator("option")
-                    for n in range(min(opts.count(), 200)):
-                        text = (opts.nth(n).inner_text() or "").strip()
-                        if text:
-                            options.append(text)
-                selector = self._selector(element, index)
-                field_id = element.get_attribute("name") or element.get_attribute("id") or f"field-{index}"
-                fields.append(WebField(
-                    field_id=field_id,
-                    selector=selector,
-                    label=label,
-                    input_type=input_type,
-                    required=required,
-                    options=options,
-                    current_value=current,
-                    page_url=self.page.url,
-                    metadata={
-                        "index": index,
-                        "tag": tag,
-                        "section": self._section_hint(element),
-                    },
-                ))
-            except Exception:
-                continue
-        return fields
+        """Snapshot the whole form in one browser round-trip.
+
+        The previous implementation crossed the Playwright boundary repeatedly for
+        every field (visibility, label, type, section, value and options). Heavy
+        React recruitment forms could therefore require hundreds of CDP calls per
+        pass. Keep the same fallback selector semantics while collecting metadata
+        in-page once.
+        """
+        script = r"""() => {
+          const selector = 'input:not([type="hidden"]), textarea, select';
+          const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+          const known = /^(个人信息|教育经历|实习经历|工作经历|项目经历|项目\/活动经历|科研经历|语言能力|证书|家庭情况|家庭成员|获奖情况|在校实践|论文\/?专著|附加信息|简历附件|personal information|education|internship|work experience|projects?|research|family|awards?)$/i;
+          const visible = e => {
+            const style = getComputedStyle(e);
+            const rect = e.getBoundingClientRect();
+            return style.display !== 'none'
+              && style.visibility !== 'hidden'
+              && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+              && !e.disabled
+              && e.getAttribute('aria-disabled') !== 'true';
+          };
+          const hint = e => {
+            const labels = [...(e.labels || [])].map(x => x.innerText);
+            const near = e.closest('label,fieldset,[class*=field],[class*=form]');
+            return clean([
+              labels.join(' '),
+              e.getAttribute('aria-label'),
+              e.getAttribute('placeholder'),
+              e.getAttribute('name'),
+              e.id,
+              near?.innerText?.slice(0, 280),
+            ].filter(Boolean).join(' | '));
+          };
+          const section = e => {
+            let node = e;
+            for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+              let sib = node.previousElementSibling, hops = 0;
+              while (sib && hops < 8) {
+                const own = clean(sib.innerText);
+                if (own && own.length <= 80 && known.test(own)) return own;
+                const candidates = sib.querySelectorAll?.('h1,h2,h3,h4,h5,h6,[class*=title],[class*=header]') || [];
+                for (let i = candidates.length - 1; i >= 0; i--) {
+                  const text = clean(candidates[i].innerText);
+                  if (text && text.length <= 80 && known.test(text)) return text;
+                }
+                sib = sib.previousElementSibling;
+                hops++;
+              }
+            }
+            return '';
+          };
+
+          return [...document.querySelectorAll(selector)].slice(0, 350).map((e, index) => {
+            const tag = e.tagName.toLowerCase();
+            const inputType = (e.getAttribute('type') || tag).toLowerCase();
+            const name = e.getAttribute('name') || '';
+            const id = e.id || '';
+            let cssSelector = '__field_index__:' + index;
+            if (id) cssSelector = '#' + CSS.escape(id);
+            else if (name) cssSelector = tag + '[name=' + JSON.stringify(name) + ']';
+
+            const options = tag === 'select'
+              ? [...e.options].slice(0, 200).map(x => clean(x.innerText)).filter(Boolean)
+              : [];
+            const selectedText = tag === 'select' && e.selectedIndex >= 0
+              ? clean(e.options[e.selectedIndex]?.innerText)
+              : '';
+            let current = null;
+            if (inputType === 'checkbox' || inputType === 'radio') current = !!e.checked;
+            else if (!['submit', 'button'].includes(inputType)) current = e.value ?? '';
+
+            return {
+              visible: visible(e),
+              index,
+              tag,
+              inputType,
+              label: hint(e),
+              required: !!e.required || e.getAttribute('aria-required') === 'true',
+              current,
+              options,
+              selectedText,
+              selector: cssSelector,
+              fieldId: name || id || ('field-' + index),
+              section: section(e),
+            };
+          }).filter(x => x.visible);
+        }"""
+        try:
+            snapshot = self.page.evaluate(script) or []
+        except Exception:
+            snapshot = []
+
+        return [
+            WebField(
+                field_id=item["fieldId"],
+                selector=item["selector"],
+                label=item.get("label") or "",
+                input_type=item.get("inputType") or item.get("tag") or "text",
+                required=bool(item.get("required")),
+                options=list(item.get("options") or []),
+                current_value=item.get("current"),
+                page_url=self.page.url,
+                metadata={
+                    "index": item.get("index"),
+                    "tag": item.get("tag"),
+                    "section": item.get("section") or "",
+                    "selected_text": item.get("selectedText") or "",
+                },
+            )
+            for item in snapshot
+        ]
 
     @staticmethod
     def _control_text(value, input_type: str = "text", label: str = "") -> str:
@@ -247,47 +256,37 @@ class GenericWebAdapter(SiteAdapter):
         warnings: list[str] = []
         current_fields = self.discover_fields()
         by_selector = {item.selector: item for item in plan.fields}
-        for field in current_fields:
-            element = self._locate(field.selector, field.label)
-            label = field.label or field.field_id
-            try:
-                if field.input_type in {"checkbox", "radio"}:
-                    actual = element.is_checked()
-                    empty = not actual
-                else:
-                    actual = element.input_value()
-                    empty = not str(actual or "").strip()
-                if field.required and empty:
-                    missing.append(label)
-                    continue
 
-                expected = by_selector.get(field.selector)
-                if not expected or expected.status != ResolutionStatus.RESOLVED:
-                    continue
-                if field.input_type == "file":
-                    expected_name = Path(str(expected.value)).name
-                    if expected_name and expected_name not in str(actual or ""):
-                        errors.append(f"{label}: attachment mismatch")
-                elif field.input_type in {"checkbox", "radio"}:
-                    if bool(actual) != bool(expected.value):
-                        errors.append(f"{label}: boolean value mismatch")
-                elif field.metadata.get("tag") == "select":
-                    selected = element.locator("option:checked")
-                    selected_text = (selected.inner_text() or "").strip() if selected.count() else ""
-                    candidates = expected.value if isinstance(expected.value, list) else [expected.value]
-                    normalized = {str(x).strip().casefold().removesuffix("市") for x in candidates}
-                    actual_norm = selected_text.casefold().removesuffix("市")
-                    if normalized and actual_norm not in normalized:
-                        warnings.append(f"{label}: selected option uses site-specific normalization")
-                else:
-                    desired = self._control_text(expected.value, field.input_type, field.label)
-                    if str(actual or "") != desired:
-                        errors.append(f"{label}: value does not match canonical profile")
-            except Exception as exc:
-                if field.required:
-                    missing.append(label)
-                else:
-                    warnings.append(f"{label}: validation {type(exc).__name__}")
+        for field in current_fields:
+            label = field.label or field.field_id
+            actual = field.current_value
+            empty = not bool(actual) if field.input_type in {"checkbox", "radio"} else not str(actual or "").strip()
+            if field.required and empty:
+                missing.append(label)
+                continue
+
+            expected = by_selector.get(field.selector)
+            if not expected or expected.status != ResolutionStatus.RESOLVED:
+                continue
+            if field.input_type == "file":
+                expected_name = Path(str(expected.value)).name
+                if expected_name and expected_name not in str(actual or ""):
+                    errors.append(f"{label}: attachment mismatch")
+            elif field.input_type in {"checkbox", "radio"}:
+                if bool(actual) != bool(expected.value):
+                    errors.append(f"{label}: boolean value mismatch")
+            elif field.metadata.get("tag") == "select":
+                selected_text = str(field.metadata.get("selected_text") or "")
+                candidates = expected.value if isinstance(expected.value, list) else [expected.value]
+                normalized = {str(x).strip().casefold().removesuffix("市") for x in candidates}
+                actual_norm = selected_text.casefold().removesuffix("市")
+                if normalized and actual_norm not in normalized:
+                    warnings.append(f"{label}: selected option uses site-specific normalization")
+            else:
+                desired = self._control_text(expected.value, field.input_type, field.label)
+                if str(actual or "") != desired:
+                    errors.append(f"{label}: value does not match canonical profile")
+
         return ValidationResult(
             ok=not missing and not errors,
             missing_required=missing,
@@ -296,24 +295,26 @@ class GenericWebAdapter(SiteAdapter):
         )
 
     def _buttons(self):
-        out = []
+        script = r"""() => {
+          const selector = 'button, input[type="button"], input[type="submit"], [role="button"], a';
+          return [...document.querySelectorAll(selector)].slice(0, 220).map((e, index) => {
+            const style = getComputedStyle(e);
+            const rect = e.getBoundingClientRect();
+            const visible = style.display !== 'none'
+              && style.visibility !== 'hidden'
+              && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+              && !e.disabled
+              && e.getAttribute('aria-disabled') !== 'true';
+            const text = ((e.innerText || e.value || e.getAttribute('aria-label') || '') + '').trim();
+            return {index, visible, text};
+          }).filter(x => x.visible && x.text);
+        }"""
+        try:
+            snapshot = self.page.evaluate(script) or []
+        except Exception:
+            snapshot = []
         loc = self.page.locator(BUTTON_SELECTOR)
-        for i in range(min(loc.count(), 220)):
-            element = loc.nth(i)
-            if not self._visible(element):
-                continue
-            try:
-                text = (
-                    element.inner_text()
-                    or element.get_attribute("value")
-                    or element.get_attribute("aria-label")
-                    or ""
-                ).strip()
-                if text:
-                    out.append((element, text))
-            except Exception:
-                continue
-        return out
+        return [(loc.nth(item["index"]), item["text"]) for item in snapshot]
 
     def auth_challenge(self) -> bool:
         try:

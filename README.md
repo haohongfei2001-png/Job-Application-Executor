@@ -44,12 +44,20 @@ DISCOVERED
 
 ## Local environment
 
-The committed Python dependency manifest is `requirements.txt`. The executor uses the installed Google Chrome through the dedicated CDP profile rather than a disposable Playwright browser profile.
+The committed Python dependency manifest is `requirements.txt`. Real applications use the installed Google Chrome through the dedicated CDP profile `~/Job-Application-Executor/chrome-profile`.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
+
+### Browser runtime
+
+A real application execution keeps one Playwright/CDP attachment for the whole run instead of reconnecting for every page. Live connections only auto-clean automation-owned junk: stale pytest `file://` pages, redundant blank tabs, and duplicate copies of the exact same target URL. Unrelated real job/application tabs are never closed by that cleanup.
+
+Tests are hard-isolated from the live profile. Pytest sets `APPLICATION_EXECUTOR_BROWSER_MODE=isolated`, which launches a temporary headless Chrome with extensions disabled; it must never attach to port 9333 or mutate the persistent application profile.
+
+Generic form discovery and validation use one in-page DOM snapshot per pass rather than hundreds of per-field CDP calls. This materially reduces UI contention on large React/Beisen-style forms.
 
 ## Canonical applicant profile
 
