@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "endpoint": "https://PROJECT.supabase.co/functions/v1/job-otp-bridge",
+  "token": "LOCAL_SECRET_ONLY",
+  "timeout_seconds": 180,
+  "poll_interval_seconds": 1.0,
+  "mac_messages_fallback": true
+}
