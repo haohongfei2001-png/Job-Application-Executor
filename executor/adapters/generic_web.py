@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 from .base import SiteAdapter
 from ..browser import connect, latest_page
@@ -19,6 +20,11 @@ from ..models import (
 
 VISIBLE_FIELD_SELECTOR = 'input:not([type="hidden"]), textarea, select'
 BUTTON_SELECTOR = 'button, input[type="button"], input[type="submit"], [role="button"], a'
+OTP_HINT_RE = re.compile(
+    r"(?:验证码|校验码|动态码|短信码|verification[\s_-]*code|"
+    r"one[\s_-]*time[\s_-]*code|otp)",
+    re.I,
+)
 
 
 class GenericWebAdapter(SiteAdapter):
@@ -316,24 +322,119 @@ class GenericWebAdapter(SiteAdapter):
         loc = self.page.locator(BUTTON_SELECTOR)
         return [(loc.nth(item["index"]), item["text"]) for item in snapshot]
 
-    def auth_challenge(self) -> bool:
+    def _otp_candidates(self):
+        script = r"""() => {
+          const visible = e => {
+            const style = getComputedStyle(e);
+            const rect = e.getBoundingClientRect();
+            return style.display !== 'none'
+              && style.visibility !== 'hidden'
+              && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+              && !e.disabled
+              && e.getAttribute('aria-disabled') !== 'true';
+          };
+          return [...document.querySelectorAll('input:not([type="hidden"])')]
+            .map((e, index) => ({
+              index,
+              autocomplete: (e.getAttribute('autocomplete') || '').toLowerCase(),
+              hint: [
+                ...(e.labels ? [...e.labels].map(label => label.innerText || '') : []),
+                e.getAttribute('name') || '',
+                e.id || '',
+                e.getAttribute('placeholder') || '',
+                e.getAttribute('aria-label') || '',
+              ].join(' '),
+              visible: visible(e),
+            }))
+            .filter(item => item.visible);
+        }"""
         try:
-            if self.page.locator('input[type="password"]:visible').count() > 0:
-                return True
-            if self.page.locator('input[autocomplete="one-time-code"]:visible').count() > 0:
-                return True
-            if self.page.locator('iframe[src*="captcha" i], iframe[title*="captcha" i], [class*="captcha" i]:visible').count() > 0:
-                return True
+            snapshot = self.page.evaluate(script) or []
+        except Exception:
+            return []
+        visible_inputs = self.page.locator('input:not([type="hidden"])')
+        matches = []
+        for item in snapshot:
+            if (
+                item.get("autocomplete") == "one-time-code"
+                or OTP_HINT_RE.search(item.get("hint") or "")
+            ):
+                matches.append(visible_inputs.nth(int(item["index"])))
+        return matches
+
+    def auth_challenge_kind(self) -> str | None:
+        try:
+            kinds: set[str] = set()
+            otp_candidates = self._otp_candidates()
+            if otp_candidates:
+                kinds.add("one_time_code")
+            password_count = self.page.evaluate(r"""() => {
+              const otpHint = /验证码|校验码|动态码|短信码|verification[\s_-]*code|one[\s_-]*time[\s_-]*code|otp/i;
+              return [...document.querySelectorAll('input[type="password"]')].filter(e => {
+                const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                const visible = style.display !== 'none' && style.visibility !== 'hidden'
+                  && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+                  && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+                const hint = [
+                  ...(e.labels ? [...e.labels].map(label => label.innerText || '') : []),
+                  e.getAttribute('name') || '', e.id || '',
+                  e.getAttribute('placeholder') || '', e.getAttribute('aria-label') || '',
+                ].join(' ');
+                return visible
+                  && e.getAttribute('autocomplete') !== 'one-time-code'
+                  && !otpHint.test(hint);
+              }).length;
+            }""")
+            if password_count > 0:
+                kinds.add("password")
+            if self.page.locator(
+                'iframe[src*="captcha" i], iframe[title*="captcha" i], [class*="captcha" i]:visible'
+            ).count() > 0:
+                kinds.add("captcha")
             body = (self.page.locator("body").inner_text(timeout=2500) or "")[-7000:]
-            challenge = re.search(
-                r"captcha|verify you are human|verification code|two.?factor|multi.?factor|"
-                r"验证码|人机验证|安全验证|扫码登录|二次验证",
+            if re.search(r"captcha|verify you are human|人机验证", body, re.I):
+                kinds.add("captcha")
+            if re.search(r"扫码登录|二维码|qr[ -]?code|face (?:id|verification)|人脸|安全密钥", body, re.I):
+                kinds.add("other")
+            if not kinds and re.search(
+                r"verification code|one.?time code|\botp\b|two.?factor|multi.?factor|"
+                r"验证码|校验码|动态码|短信码|安全验证|二次验证",
                 body,
                 re.I,
-            )
-            return bool(challenge) and self.page.locator(VISIBLE_FIELD_SELECTOR).count() < 12
+            ) and self.page.locator(VISIBLE_FIELD_SELECTOR).count() < 12:
+                kinds.add("other")
+            return next(iter(kinds)) if len(kinds) == 1 else "other" if kinds else None
+        except Exception:
+            return "other"
+
+    def auth_challenge(self) -> bool:
+        return self.auth_challenge_kind() is not None
+
+    def current_page_hostname(self) -> str:
+        try:
+            return urlparse(self.page.url).hostname or ""
+        except Exception:
+            return super().current_page_hostname()
+
+    def enter_one_time_code(self, code: str) -> bool:
+        if not re.fullmatch(r"\d{4,8}", code or ""):
+            return False
+        candidates = self._otp_candidates()
+        if len(candidates) != 1:
+            return False
+        try:
+            candidates[0].fill(code)
+            self.page.wait_for_timeout(1500)
+            self.page = latest_page(self.ctx, self.page)
+            return True
         except Exception:
             return False
+
+    def otp_field_status(self) -> str:
+        count = len(self._otp_candidates())
+        if count == 1:
+            return "unique"
+        return "ambiguous" if count > 1 else "unavailable"
 
     def start_application(self) -> bool:
         matches = [(el, text) for el, text in self._buttons() if is_initial_apply(text) and not is_final_submit(text)]

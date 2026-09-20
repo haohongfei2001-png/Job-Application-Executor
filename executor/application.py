@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from .adapters.registry import adapter_for_url, site_id_for_url
 from .audit import AuditStore
 from .models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus, WebField
+from .otp.bridge import OtpBridge, OtpBridgeError
 from .profile import get_field, is_sensitive_key, load_profile
 from .resolver import FieldResolver
 from .review import build_final_review
@@ -29,6 +30,7 @@ class ApplicationExecutor:
         *,
         submit_authorized: bool = False,
         execution_id: str | None = None,
+        otp_bridge: OtpBridge | None = None,
     ):
         self.target_url = target_url
         self.profile_path = Path(profile_path).expanduser().resolve()
@@ -49,6 +51,116 @@ class ApplicationExecutor:
         )
         self.audit = AuditStore(self.plan.execution_id)
         self.user_answers = self.audit.load_user_answers()
+        self.otp_bridge = otp_bridge or OtpBridge()
+
+    @staticmethod
+    def _auth_kind(adapter) -> str | None:
+        try:
+            method = getattr(adapter, "auth_challenge_kind", None)
+            if callable(method):
+                return method()
+            return "other" if adapter.auth_challenge() else None
+        except Exception:
+            return "other"
+
+    def _block_auth(self, page_index: int, kind: str, reason: str) -> ApplicationPlan:
+        self.plan.stage = ApplicationStage.BLOCKED
+        self.plan.metadata["block_reason"] = reason
+        self.plan.metadata["auth_kind"] = kind
+        self.plan.metadata["page_index"] = page_index
+        self.audit.save_plan(self.plan)
+        return self.plan
+
+    def _resolve_otp_challenge(self, adapter, page_index: int) -> bool:
+        if not self.otp_bridge.enabled:
+            self._block_auth(page_index, "one_time_code", "one-time-code authentication requires human handling")
+            return False
+
+        try:
+            field_status = getattr(adapter, "otp_field_status", lambda: "unique")()
+        except Exception:
+            field_status = "unavailable"
+        if field_status != "unique":
+            self.audit.record_action({
+                "type": "otp_authentication", "source": "iphone_relay", "ok": False,
+                "reason": "OTP field unavailable or ambiguous",
+            })
+            self._block_auth(page_index, "one_time_code", "OTP field unavailable or ambiguous")
+            return False
+
+        try:
+            hostname = adapter.current_page_hostname()
+        except Exception:
+            hostname = ""
+        if not hostname:
+            self._block_auth(page_index, "one_time_code", "OTP page hostname unavailable")
+            return False
+
+        try:
+            result = self.otp_bridge.wait_for_code(hostname)
+        except OtpBridgeError:
+            self.audit.record_action({
+                "type": "otp_authentication", "source": "iphone_relay", "ok": False,
+                "reason": "relay_error",
+            })
+            self._block_auth(page_index, "one_time_code", "OTP relay error")
+            return False
+        except Exception:
+            self.audit.record_action({
+                "type": "otp_authentication", "source": "iphone_relay", "ok": False,
+                "reason": "relay_error",
+            })
+            self._block_auth(page_index, "one_time_code", "OTP relay error")
+            return False
+
+        if not result:
+            self.audit.record_action({
+                "type": "otp_authentication", "source": "iphone_relay", "ok": False,
+                "reason": "timeout",
+            })
+            self._block_auth(page_index, "one_time_code", "OTP relay timed out")
+            return False
+
+        if not isinstance(result, dict):
+            self.audit.record_action({
+                "type": "otp_authentication", "source": "iphone_relay", "ok": False,
+                "reason": "relay_error",
+            })
+            self._block_auth(page_index, "one_time_code", "OTP relay error")
+            return False
+
+        reported_source = result.get("source")
+        source = reported_source if reported_source in {"iphone_relay", "mac_messages"} else "unknown"
+        code = str(result.get("code") or "")
+        entered = False
+        try:
+            if re.fullmatch(r"\d{4,8}", code):
+                entered = bool(adapter.enter_one_time_code(code))
+        except Exception:
+            entered = False
+        finally:
+            code = ""
+        if not entered:
+            self.audit.record_action({
+                "type": "otp_authentication", "source": source, "ok": False,
+                "reason": "OTP field unavailable or ambiguous",
+            })
+            self._block_auth(page_index, "one_time_code", "OTP field unavailable or ambiguous")
+            return False
+
+        remaining_kind = self._auth_kind(adapter)
+        if remaining_kind is not None:
+            self.audit.record_action({
+                "type": "otp_authentication", "source": source, "ok": False,
+                "reason": "challenge_remains",
+            })
+            self._block_auth(page_index, remaining_kind, "authentication challenge remains after OTP entry")
+            return False
+
+        self.audit.record_action({
+            "type": "otp_authentication", "source": source, "ok": True,
+        })
+        return True
 
     def _attachment_resolution(self, field: WebField) -> FieldResolution | None:
         if field.input_type != "file":
@@ -164,16 +276,16 @@ class ApplicationExecutor:
         adapter = adapter_for_url(self.target_url)
         with adapter:
             for page_index in range(max_pages):
-                if adapter.auth_challenge():
-                    self.plan.stage = ApplicationStage.BLOCKED
-                    self.plan.metadata["block_reason"] = "authentication required"
-                    self.plan.metadata["page_index"] = page_index
-                    self.audit.save_plan(self.plan)
-                    try:
-                        adapter.screenshot(self.audit.screenshot_path(f"page-{page_index}-authentication"))
-                    except Exception:
-                        pass
-                    return self.plan
+                auth_kind = self._auth_kind(adapter)
+                if auth_kind == "one_time_code":
+                    if not self._resolve_otp_challenge(adapter, page_index):
+                        return self.plan
+                elif auth_kind is not None:
+                    return self._block_auth(
+                        page_index,
+                        auth_kind,
+                        f"{auth_kind} authentication requires human handling",
+                    )
 
                 fields = adapter.discover_fields()
                 if not fields and adapter.start_application():

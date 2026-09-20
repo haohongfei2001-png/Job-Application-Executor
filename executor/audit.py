@@ -17,7 +17,7 @@ SECRET_KEY_FRAGMENTS = (
 
 def redact_secrets(value: Any, key: str = "") -> Any:
     low = key.casefold()
-    if any(fragment in low for fragment in SECRET_KEY_FRAGMENTS):
+    if low == "code" or any(fragment in low for fragment in SECRET_KEY_FRAGMENTS):
         return "[REDACTED]"
     if isinstance(value, dict):
         return {str(k): redact_secrets(v, str(k)) for k, v in value.items()}

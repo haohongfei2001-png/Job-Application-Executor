@@ -126,6 +126,22 @@ The project audit compares the canonical project inventory with project-name fie
 
 Recovery deliberately does not inherit submission authorization.
 
+### SMS one-time-code authentication
+
+When the local, gitignored `config/otp-bridge.json` enables the iPhone relay, the
+formal executor can resolve an SMS one-time-code challenge only when exactly one
+visible OTP input is identifiable. It sends the current page hostname to the
+relay, consumes one 4–8 digit code, fills that input, and continues only after
+the challenge disappears or the page advances automatically. It never clicks an
+authentication button on the user's behalf. Ambiguous fields, relay failures,
+timeouts, or a challenge that remains after entry stop in `BLOCKED`; password,
+CAPTCHA, QR, face, and other authentication always remain human-handled.
+
+OTP values are transient and are never written to plans, action logs, screenshot
+metadata, exception messages, or other execution artifacts. Audit records contain
+only non-secret outcome and source information. This authentication convenience
+does not alter the mandatory manual final application click.
+
 ## Resolution and safety rules
 
 Resolution is conservative:

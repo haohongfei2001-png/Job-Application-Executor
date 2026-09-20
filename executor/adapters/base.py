@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from urllib.parse import urlparse
 
 
 class SiteAdapter(ABC):
@@ -43,6 +44,18 @@ class SiteAdapter(ABC):
 
     def auth_challenge(self) -> bool:
         return False
+
+    def auth_challenge_kind(self) -> str | None:
+        return "other" if self.auth_challenge() else None
+
+    def current_page_hostname(self) -> str:
+        return urlparse(self.target_url).hostname or ""
+
+    def enter_one_time_code(self, code: str) -> bool:
+        return False
+
+    def otp_field_status(self) -> str:
+        return "unavailable"
 
     def start_application(self) -> bool:
         return False
