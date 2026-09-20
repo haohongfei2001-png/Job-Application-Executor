@@ -132,10 +132,14 @@ When the local, gitignored `config/otp-bridge.json` enables the iPhone relay, th
 formal executor can resolve an SMS one-time-code challenge only when exactly one
 visible OTP input is identifiable. It sends the current page hostname to the
 relay, consumes one 4–8 digit code, fills that input, and continues only after
-the challenge disappears or the page advances automatically. It never clicks an
-authentication button on the user's behalf. Ambiguous fields, relay failures,
-timeouts, or a challenge that remains after entry stop in `BLOCKED`; password,
-CAPTCHA, QR, face, and other authentication always remain human-handled.
+the challenge disappears or the page advances. If entry alone does not advance,
+it may click exactly one visible, enabled authentication confirmation control in
+the OTP field's own form (or an unambiguous explicit auth/dialog container).
+Controls outside that context, ambiguous matches, send/resend controls, initial
+apply controls, account/destructive actions, and final-application controls are
+never clicked. A challenge that remains or changes after that single click stops
+in `BLOCKED`; password, CAPTCHA, QR, face, and other authentication always remain
+human-handled.
 
 OTP values are transient and are never written to plans, action logs, screenshot
 metadata, exception messages, or other execution artifacts. Audit records contain

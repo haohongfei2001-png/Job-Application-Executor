@@ -25,6 +25,24 @@ OTP_HINT_RE = re.compile(
     r"one[\s_-]*time[\s_-]*code|otp)",
     re.I,
 )
+OTP_STRONG_AUTH_CONFIRM_TEXTS = {
+    "登录", "登陆", "sign in", "log in",
+}
+OTP_CONTEXTUAL_AUTH_CONFIRM_TEXTS = {
+    "验证", "确认", "继续", "下一步",
+    "verify", "confirm", "continue", "next",
+}
+OTP_CONFIRM_TEXTS = OTP_STRONG_AUTH_CONFIRM_TEXTS | OTP_CONTEXTUAL_AUTH_CONFIRM_TEXTS
+OTP_SEND_CONTROL_RE = re.compile(
+    r"发送验证码|获取验证码|重新发送|重发|send\s+(?:the\s+)?code|"
+    r"get\s+(?:the\s+)?code|resend",
+    re.I,
+)
+ACCOUNT_OR_DESTRUCTIVE_RE = re.compile(
+    r"注册|创建账号|创建账户|注销|删除|取消账号|sign\s*up|register|"
+    r"create\s+(?:an?\s+)?account|delete|remove|destroy|deactivate",
+    re.I,
+)
 
 
 class GenericWebAdapter(SiteAdapter):
@@ -425,6 +443,118 @@ class GenericWebAdapter(SiteAdapter):
         try:
             candidates[0].fill(code)
             self.page.wait_for_timeout(1500)
+            self.page = latest_page(self.ctx, self.page)
+            return True
+        except Exception:
+            return False
+
+    def confirm_one_time_code_auth(self) -> bool:
+        """Confirm OTP auth only inside the unique, conservative OTP context.
+
+        The in-page pass proves that a unique visible OTP field already contains a
+        valid code, chooses its closest form (or a nearest explicit auth/dialog
+        container), and rejects application-like contexts. Python then applies the
+        shared final-submit/apply detectors before allowing one exact whitelist
+        match to be clicked.
+        """
+        script = r"""() => {
+          const visible = e => {
+            const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+            return style.display !== 'none'
+              && style.visibility !== 'hidden'
+              && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+              && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+          };
+          const hint = e => [
+            ...(e.labels ? [...e.labels].map(x => x.innerText || '') : []),
+            e.getAttribute('name') || '', e.id || '',
+            e.getAttribute('placeholder') || '', e.getAttribute('aria-label') || '',
+          ].join(' ');
+          const otpHint = /验证码|校验码|动态码|短信码|verification[\s_-]*code|one[\s_-]*time[\s_-]*code|otp/i;
+          const inputs = [...document.querySelectorAll('input:not([type="hidden"])')];
+          const otps = inputs.filter(e => visible(e) && (
+            (e.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code'
+            || otpHint.test(hint(e))
+          ));
+          if (otps.length !== 1 || !/^\d{4,8}$/.test(otps[0].value || '')) {
+            return {safe: false, controls: []};
+          }
+
+          const otp = otps[0];
+          let context = otp.closest('form');
+          if (!context) {
+            context = otp.closest(
+              '[role="dialog"], [aria-modal="true"], [class*="auth" i], '
+              + '[class*="login" i], [class*="verify" i], [class*="verification" i], '
+              + '[class*="otp" i], [class*="modal" i], [class*="dialog" i]'
+            );
+          }
+          if (!context) return {safe: false, controls: []};
+
+          const contextText = (context.innerText || '').replace(/\s+/g, ' ').trim();
+          const contextAttrs = [
+            context.id || '',
+            context.getAttribute('class') || '',
+            context.getAttribute('name') || '',
+            context.getAttribute('action') || '',
+            context.getAttribute('aria-label') || '',
+          ].join(' ');
+          const otherInputs = [...context.querySelectorAll('input:not([type="hidden"])')]
+            .filter(e => visible(e) && e !== otp && !['button', 'submit', 'reset'].includes((e.type || '').toLowerCase()));
+          const identifier = /phone|mobile|tel|e-?mail|account|username|手机|电话|邮箱|账号|用户名/i;
+          if (otherInputs.length > 1 || otherInputs.some(e => !identifier.test(hint(e)))) {
+            return {safe: false, controls: []};
+          }
+          const authAttrs = /login|log[-_ ]?in|sign[-_ ]?in|signin|auth|session|account|登录|登陆/i;
+          const authText = /登录|登陆|sign\s*in|log\s*in|账号|账户|account|authentication|身份验证|安全登录/i;
+          const explicitAuthContext = (
+            authAttrs.test(contextAttrs)
+            || authText.test(contextText)
+            || otherInputs.some(e => identifier.test(hint(e)))
+          );
+          const applicationContext = /submit application|apply now|application|job[-_ ]?apply|提交申请|确认投递|立即投递|正式投递|申请职位|投递|报名|应聘|简历|教育经历|工作经历|项目经历/i;
+          if (applicationContext.test(contextText + ' ' + contextAttrs) && !explicitAuthContext) {
+            return {safe: false, controls: []};
+          }
+
+          const selector = 'button, input[type="button"], input[type="submit"], [role="button"], a';
+          const all = [...document.querySelectorAll(selector)];
+          const controls = [...context.querySelectorAll(selector)]
+            .filter(visible)
+            .map(e => ({
+              index: all.indexOf(e),
+              text: ((e.innerText || e.value || e.getAttribute('aria-label') || '') + '')
+                .replace(/\s+/g, ' ').trim(),
+            }))
+            .filter(x => x.index >= 0 && x.text);
+          return {safe: true, authContext: explicitAuthContext, controls};
+        }"""
+        try:
+            result = self.page.evaluate(script) or {}
+            if not result.get("safe"):
+                return False
+            eligible = []
+            auth_context = bool(result.get("authContext"))
+            for item in result.get("controls") or []:
+                text = str(item.get("text") or "")
+                normalized = " ".join(text.split()).casefold()
+                if normalized not in OTP_CONFIRM_TEXTS:
+                    continue
+                if normalized in OTP_CONTEXTUAL_AUTH_CONFIRM_TEXTS and not auth_context:
+                    continue
+                if (
+                    is_final_submit(text)
+                    or is_initial_apply(text)
+                    or OTP_SEND_CONTROL_RE.search(text)
+                    or ACCOUNT_OR_DESTRUCTIVE_RE.search(text)
+                ):
+                    continue
+                eligible.append(item)
+            if len(eligible) != 1:
+                return False
+            index = int(eligible[0]["index"])
+            self.page.locator(BUTTON_SELECTOR).nth(index).click()
+            self.page.wait_for_timeout(1800)
             self.page = latest_page(self.ctx, self.page)
             return True
         except Exception:

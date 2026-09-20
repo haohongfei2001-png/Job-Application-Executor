@@ -149,12 +149,42 @@ class ApplicationExecutor:
             return False
 
         remaining_kind = self._auth_kind(adapter)
+        confirmation_clicked = False
+        if remaining_kind == "one_time_code":
+            try:
+                confirmed = bool(adapter.confirm_one_time_code_auth())
+            except Exception:
+                confirmed = False
+            self.audit.record_action({
+                "type": "otp_authentication_confirmation",
+                "source": source,
+                "ok": confirmed,
+                "reason": None if confirmed else "confirmation_control_unavailable_or_ambiguous",
+            })
+            if not confirmed:
+                self._block_auth(
+                    page_index,
+                    "one_time_code",
+                    "OTP authentication confirmation control unavailable or ambiguous",
+                )
+                return False
+            confirmation_clicked = True
+            remaining_kind = self._auth_kind(adapter)
+
         if remaining_kind is not None:
             self.audit.record_action({
                 "type": "otp_authentication", "source": source, "ok": False,
                 "reason": "challenge_remains",
             })
-            self._block_auth(page_index, remaining_kind, "authentication challenge remains after OTP entry")
+            self._block_auth(
+                page_index,
+                remaining_kind,
+                (
+                    "authentication challenge remains after OTP confirmation"
+                    if confirmation_clicked
+                    else "authentication challenge remains after OTP entry"
+                ),
+            )
             return False
 
         self.audit.record_action({

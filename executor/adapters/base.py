@@ -54,6 +54,10 @@ class SiteAdapter(ABC):
     def enter_one_time_code(self, code: str) -> bool:
         return False
 
+    def confirm_one_time_code_auth(self) -> bool:
+        """Click one provably scoped OTP-auth confirmation control, if present."""
+        return False
+
     def otp_field_status(self) -> str:
         return "unavailable"
 

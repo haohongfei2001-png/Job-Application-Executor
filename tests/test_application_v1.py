@@ -233,7 +233,16 @@ class FakeOtpBridge:
 
 
 class AuthAdapter(FakeAdapter):
-    def __init__(self, kind, *, field_status="unique", clears=True, final=None):
+    def __init__(
+        self,
+        kind,
+        *,
+        field_status="unique",
+        clears=True,
+        final=None,
+        confirms=False,
+        kind_after_confirm=None,
+    ):
         super().__init__(
             [WebField(field_id="name", selector="#name", label="姓名", required=True)],
             final=final,
@@ -242,6 +251,9 @@ class AuthAdapter(FakeAdapter):
         self.field_status = field_status
         self.clears = clears
         self.entered = False
+        self.confirms = confirms
+        self.kind_after_confirm = kind_after_confirm
+        self.confirm_calls = 0
 
     def auth_challenge_kind(self):
         return self.kind
@@ -257,6 +269,13 @@ class AuthAdapter(FakeAdapter):
         if self.clears:
             self.kind = None
         return self.field_status == "unique"
+
+    def confirm_one_time_code_auth(self):
+        self.confirm_calls += 1
+        if not self.confirms:
+            return False
+        self.kind = self.kind_after_confirm
+        return True
 
 
 def test_relay_success_continues_to_manual_submit_boundary(tmp_path, monkeypatch):
@@ -361,5 +380,61 @@ def test_otp_challenge_remaining_after_entry_blocks_without_click(tmp_path, monk
     ).run(max_pages=1)
 
     assert plan.stage == ApplicationStage.BLOCKED
-    assert plan.metadata["block_reason"] == "authentication challenge remains after OTP entry"
+    assert plan.metadata["block_reason"] == "OTP authentication confirmation control unavailable or ambiguous"
+    assert adapter.confirm_calls == 1
+    assert adapter.submit_calls == 0
+
+
+def test_unique_otp_auth_confirmation_continues_to_manual_submit_boundary(tmp_path, monkeypatch):
+    adapter = AuthAdapter(
+        "one_time_code",
+        clears=False,
+        confirms=True,
+        kind_after_confirm=None,
+        final="Submit application",
+    )
+    bridge = FakeOtpBridge({"code": "462810", "source": "iphone_relay"})
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: adapter)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+
+    runner = ApplicationExecutor(
+        "https://example.test/apply",
+        _profile_file(tmp_path),
+        {"deepseek": {"enabled": False}},
+        otp_bridge=bridge,
+    )
+    plan = runner.run(max_pages=1)
+
+    assert adapter.confirm_calls == 1
+    assert plan.stage == ApplicationStage.READY_TO_SUBMIT
+    assert adapter.submit_calls == 0
+    audit_text = (runner.audit.root / "plan.json").read_text(encoding="utf-8")
+    audit_text += runner.audit.actions_path.read_text(encoding="utf-8")
+    assert "462810" not in audit_text
+    assert "otp_authentication_confirmation" in audit_text
+
+
+@pytest.mark.parametrize("kind", ["password", "captcha", "other"])
+def test_challenge_after_otp_confirmation_blocks(tmp_path, monkeypatch, kind):
+    adapter = AuthAdapter(
+        "one_time_code",
+        clears=False,
+        confirms=True,
+        kind_after_confirm=kind,
+    )
+    bridge = FakeOtpBridge({"code": "462810", "source": "iphone_relay"})
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: adapter)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+
+    plan = ApplicationExecutor(
+        "https://example.test/apply",
+        _profile_file(tmp_path),
+        {"deepseek": {"enabled": False}},
+        otp_bridge=bridge,
+    ).run(max_pages=1)
+
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["auth_kind"] == kind
+    assert plan.metadata["block_reason"] == "authentication challenge remains after OTP confirmation"
+    assert adapter.confirm_calls == 1
     assert adapter.submit_calls == 0

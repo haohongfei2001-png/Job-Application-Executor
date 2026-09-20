@@ -97,3 +97,145 @@ def test_generic_adapter_distinguishes_non_otp_auth_challenges(tmp_path, body, e
 
     with GenericWebAdapter(html.as_uri()) as adapter:
         assert adapter.auth_challenge_kind() == expected
+
+
+def _otp_confirmation_page(tmp_path, body, name="otp-confirm.html"):
+    html = tmp_path / name
+    html.write_text(f"<!doctype html><body>{body}</body>", encoding="utf-8")
+    return html
+
+
+def test_generic_adapter_clicks_unique_verify_in_same_otp_form(tmp_path):
+    html = _otp_confirmation_page(tmp_path, '''
+      <form id="auth">
+        <label>验证码 <input id="otp" value="462810"></label>
+        <button id="verify" type="button"
+          onclick="document.querySelector('#auth').remove()">Verify</button>
+      </form>
+    ''')
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is True
+        assert adapter.page.locator("#auth").count() == 0
+        assert adapter.auth_challenge_kind() is None
+
+
+def test_generic_adapter_ignores_candidate_outside_otp_form(tmp_path):
+    html = _otp_confirmation_page(tmp_path, '''
+      <form id="auth"><label>验证码 <input id="otp" value="462810"></label></form>
+      <button id="outside" type="button" onclick="this.dataset.clicked='yes'">Verify</button>
+    ''')
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is False
+        assert adapter.page.locator("#outside").get_attribute("data-clicked") is None
+
+
+def test_generic_adapter_rejects_two_otp_auth_confirmation_candidates(tmp_path):
+    html = _otp_confirmation_page(tmp_path, '''
+      <form id="auth">
+        <label>验证码 <input id="otp" value="462810"></label>
+        <button id="verify" type="button" onclick="this.dataset.clicked='yes'">Verify</button>
+        <button id="login" type="button" onclick="this.dataset.clicked='yes'">Log in</button>
+      </form>
+    ''')
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is False
+        assert adapter.page.locator("[data-clicked]").count() == 0
+
+
+@pytest.mark.parametrize("text", ["发送验证码", "获取验证码", "重新发送", "重发", "Send code", "Get code", "Resend"])
+def test_generic_adapter_ignores_send_or_resend_code_control(tmp_path, text):
+    html = _otp_confirmation_page(tmp_path, f'''
+      <form id="auth">
+        <label>验证码 <input id="otp" value="462810"></label>
+        <button id="resend" type="button" onclick="this.dataset.clicked='yes'">{text}</button>
+      </form>
+    ''')
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is False
+        assert adapter.page.locator("#resend").get_attribute("data-clicked") is None
+
+
+@pytest.mark.parametrize("text", ["Submit application", "提交申请", "确认投递", "立即投递", "正式投递"])
+def test_generic_adapter_never_clicks_final_submit_like_control_in_otp_form(tmp_path, text):
+    html = _otp_confirmation_page(tmp_path, f'''
+      <form id="auth">
+        <label>验证码 <input id="otp" value="462810"></label>
+        <button id="final" type="button" onclick="this.dataset.clicked='yes'">{text}</button>
+      </form>
+    ''', name="otp-final.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is False
+        assert adapter.page.locator("#final").get_attribute("data-clicked") is None
+
+
+def test_generic_adapter_rejects_bare_confirm_in_application_context(tmp_path):
+    html = _otp_confirmation_page(tmp_path, '''
+      <form id="application">
+        <label>姓名 <input id="name" value="Example User"></label>
+        <label>验证码 <input id="otp" value="462810"></label>
+        <button id="final" type="button" onclick="this.dataset.clicked='yes'">确认</button>
+      </form>
+    ''', name="otp-bare-confirm.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is False
+        assert adapter.page.locator("#final").get_attribute("data-clicked") is None
+
+
+def test_generic_adapter_rejects_bare_confirm_without_explicit_auth_context(tmp_path):
+    html = _otp_confirmation_page(tmp_path, '''
+      <form id="plain">
+        <label>验证码 <input id="otp" value="462810"></label>
+        <button id="confirm" type="button" onclick="this.dataset.clicked='yes'">确认</button>
+      </form>
+    ''', name="otp-plain-confirm.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is False
+        assert adapter.page.locator("#confirm").get_attribute("data-clicked") is None
+
+
+def test_generic_adapter_clicks_strong_login_without_extra_auth_context(tmp_path):
+    html = _otp_confirmation_page(tmp_path, '''
+      <form id="plain">
+        <label>验证码 <input id="otp" value="462810"></label>
+        <button id="login" type="button"
+          onclick="document.querySelector('#plain').remove()">Log in</button>
+      </form>
+    ''', name="otp-strong-login.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is True
+        assert adapter.page.locator("#plain").count() == 0
+
+
+def test_generic_adapter_allows_contextual_confirm_in_explicit_login_form(tmp_path):
+    html = _otp_confirmation_page(tmp_path, '''
+      <form id="login">
+        <label>验证码 <input id="otp" value="462810"></label>
+        <button id="confirm" type="button"
+          onclick="document.querySelector('#login').remove()">Confirm</button>
+      </form>
+    ''', name="otp-login-confirm.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is True
+        assert adapter.page.locator("#login").count() == 0
+
+
+def test_generic_adapter_rejects_otp_only_confirm_in_application_form(tmp_path):
+    html = _otp_confirmation_page(tmp_path, '''
+      <form id="application">
+        <label>验证码 <input id="otp" value="462810"></label>
+        <button id="confirm" type="button" onclick="this.dataset.clicked='yes'">确认</button>
+      </form>
+    ''', name="otp-application-confirm.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.confirm_one_time_code_auth() is False
+        assert adapter.page.locator("#confirm").get_attribute("data-clicked") is None
