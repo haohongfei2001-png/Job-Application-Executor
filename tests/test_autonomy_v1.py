@@ -152,6 +152,23 @@ def test_resume_migrates_legacy_generic_paused_human_wait(tmp_path, stage, block
     assert q.claim('w')['attempts'] == 1
 
 
+@pytest.mark.parametrize("blocker", ["session_unavailable", "validation"])
+def test_resume_resets_retry_budget_for_recoverable_block(tmp_path, blocker):
+    now = [1.]
+    q = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=1))["task_id"]
+    claimed = q.claim("w")
+    assert claimed["attempts"] == 1
+    q.checkpoint(tid, claimed["owner"], "BLOCKED", blocker=blocker, release=True)
+    blocked = q.get(tid)
+    assert blocked["attempts"] == 1
+    resumed = q.resume(tid)
+    assert resumed["attempts"] == 0
+    retried = q.claim("w")
+    assert retried is not None
+    assert retried["attempts"] == 1
+
+
 @pytest.mark.parametrize('message,expected', [('您的验证码是 482913，五分钟有效','482913'), ('Your verification code is 7294.', '7294'), ('OTP 12345678', '12345678'), ('482913 and 7294', None), ('123456789', None)])
 def test_chinese_english_extraction(message, expected):
     assert extract_code(message) == expected
