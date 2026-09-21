@@ -243,10 +243,16 @@ class TaskQueue:
                 raise ValueError("task is already at an immutable boundary")
             if row["stage"] == "ERROR" and row["blocker"] == "retry_exhausted":
                 raise ValueError("retry budget exhausted")
-            pause_blocker = {
-                "NEEDS_USER_INPUT": "user_paused_from_input",
-                "NEEDS_USER_ACTION": "user_paused_from_action",
-            }.get(row["stage"], "user_paused")
+            if row["stage"] == "BLOCKED" and row["blocker"] in {
+                "user_paused_from_input",
+                "user_paused_from_action",
+            }:
+                pause_blocker = row["blocker"]
+            else:
+                pause_blocker = {
+                    "NEEDS_USER_INPUT": "user_paused_from_input",
+                    "NEEDS_USER_ACTION": "user_paused_from_action",
+                }.get(row["stage"], "user_paused")
             db.execute(
                 "UPDATE tasks SET stage='BLOCKED',blocker=?,"
                 "owner=NULL,lease_until=NULL,next_run=0,updated=? WHERE task_id=?",
