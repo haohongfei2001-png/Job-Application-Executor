@@ -182,6 +182,61 @@ def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_pat
     assert task["spec"]["live_authorized"] is True
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://jobs.example.test/apply?position=AI,ML",
+        "https://jobs.example.test/apply?position=AI;ML",
+        "https://jobs.example.test/roles/engineer_(ml)",
+    ],
+)
+def test_create_task_preserves_legal_url_punctuation(tmp_path, url):
+    profile = tmp_path / "canonical.json"
+    profile.write_text("{}")
+    turn = ManagerTurn(reply="开始处理。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.CREATE_TASK,
+            company="Example",
+            role="Engineer",
+            target_url=url,
+        )
+    ])
+    q, _, provider, manager = controller(
+        tmp_path,
+        turn,
+        settings={"profile_path": str(profile)},
+    )
+
+    accepted = manager.handle("请申请这个岗位 " + url)
+    assert accepted["actions"][0]["status"] == "accepted"
+
+    # A model-proposed prefix of a longer URL is never accepted as exact.
+    if url.endswith(")"):
+        q2, worker2, _, _ = controller(
+            tmp_path / "truncated",
+            ManagerTurn(reply="开始处理。", decisions=[]),
+            settings={"profile_path": str(profile)},
+        )
+        truncated = url[:-1]
+        provider2 = FakeProvider(ManagerTurn(reply="开始处理。", decisions=[
+            ManagerDecision(
+                action=ManagerAction.CREATE_TASK,
+                company="Example",
+                role="Engineer",
+                target_url=truncated,
+            )
+        ]))
+        manager2 = ManagerController(
+            q2,
+            worker2,
+            provider=provider2,
+            settings={"profile_path": str(profile)},
+        )
+        denied = manager2.handle("请申请这个岗位 " + url)
+        assert denied["actions"][0]["status"] == "denied"
+        assert denied["actions"][0]["reason"] == "exact_url_required"
+
+
 def test_resume_ready_to_submit_is_never_allowed(tmp_path):
     q = TaskQueue(tmp_path / "runtime")
     worker = Worker(q, settings={"deepseek": {"enabled": False}})
@@ -230,6 +285,8 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     '{"密码":"hunter2"}',
     '{"验证码":"7294"}',
     '{"令牌":"abcdefghijklmnop"}',
+    '{"password":"my very secret passphrase"}',
+    '{"密码":"我的 私密 口令"}',
     "Bearer abcdefghijklmnop",
 ])
 def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
