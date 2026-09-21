@@ -115,6 +115,9 @@ def test_pause_resume_preserves_human_wait_retry_reset(tmp_path, stage, blocker)
     paused = q.pause(tid)
     assert paused['stage'] == 'BLOCKED'
     assert paused['blocker'] in {'user_paused_from_input', 'user_paused_from_action'}
+    original_pause_blocker = paused['blocker']
+    paused_again = q.pause(tid)
+    assert paused_again['blocker'] == original_pause_blocker
     resumed = q.resume(tid)
     assert resumed['attempts'] == 0
     assert q.claim('w')['attempts'] == 1
