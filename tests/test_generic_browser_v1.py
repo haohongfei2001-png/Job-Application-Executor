@@ -253,7 +253,8 @@ def test_sms_login_is_preferred_over_qr_alternative_and_requests_code_once(tmp_p
         <h2>注册登录</h2>
         <label>手机号 <input id="phone" type="tel" placeholder="请输入手机号"></label>
         <label>验证码 <input id="otp" autocomplete="one-time-code"></label>
-        <button id="send" type="button" onclick="this.dataset.clicked='yes'">发送验证码</button>
+        <button id="send" type="button"
+          onclick="this.dataset.clicked='yes'; this.textContent='重新发送'">发送验证码</button>
         <div>扫码登录</div>
       </div>
     ''')
@@ -263,6 +264,8 @@ def test_sms_login_is_preferred_over_qr_alternative_and_requests_code_once(tmp_p
         assert adapter.prepare_one_time_code_auth("13800138000") == "requested"
         assert adapter.page.locator("#phone").input_value() == "13800138000"
         assert adapter.page.locator("#send").get_attribute("data-clicked") == "yes"
+        assert adapter.page.locator("#send").inner_text() == "重新发送"
+        assert adapter.auth_challenge_kind() == "one_time_code"
 
 
 def test_sms_login_requires_policy_before_checking_auth_terms(tmp_path):
@@ -360,3 +363,26 @@ def test_sms_login_can_confirm_register_login_only_after_authorized_terms(tmp_pa
         assert adapter.enter_one_time_code("462810") is True
         assert adapter.confirm_one_time_code_auth() is True
         assert adapter.page.locator("#login-dialog").count() == 0
+
+
+def test_sms_login_reproves_send_control_after_consent_rerender(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>注册登录</h2>
+        <label>手机号 <input id="phone" type="tel"></label>
+        <label>验证码 <input id="otp"></label>
+        <label><input id="terms" type="checkbox"
+          onchange="document.querySelector('#send').outerHTML='<button id=&quot;send2&quot; type=&quot;button&quot; onclick=&quot;this.dataset.clicked=&#39;yes&#39;&quot;>发送验证码</button>'">
+          同意《注册协议》和《隐私政策》
+        </label>
+        <button id="send" type="button">发送验证码</button>
+      </div>
+    ''', name="sms-rerender.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.prepare_one_time_code_auth(
+            "13800138000",
+            allow_standard_auth_terms=True,
+        ) == "requested"
+        assert adapter.page.locator("#send").count() == 0
+        assert adapter.page.locator("#send2").get_attribute("data-clicked") == "yes"
