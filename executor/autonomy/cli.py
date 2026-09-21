@@ -107,7 +107,7 @@ def main(argv=None):
     commands.add_parser("chat")
     enqueue = commands.add_parser("enqueue")
     enqueue.add_argument("--file", type=Path, required=True)
-    for name in ("get", "resume", "cancel"):
+    for name in ("get", "resume", "pause", "cancel"):
         commands.add_parser(name).add_argument("task_id")
     answers = commands.add_parser("user-input")
     answers.add_argument("task_id")
