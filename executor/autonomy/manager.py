@@ -185,7 +185,7 @@ _RESUME_RE = re.compile(r"(?:继续|恢复|接着|resume|continue|retry)", re.I)
 _PAUSE_RE = re.compile(r"(?:暂停|先别|等一下|pause|hold)", re.I)
 _CANCEL_RE = re.compile(r"(?:取消|停止|不投|放弃|cancel|stop|drop)", re.I)
 _APPLY_RE = re.compile(r"(?:投递|申请|开始投|apply|application)", re.I)
-_URL_RE = re.compile(r"https?://[^\s<>'\"，。；：！？、,;]+", re.I)
+_URL_RE = re.compile(r"https?://[^\s<>'\"，。；：！？、]+", re.I)
 _URL_TRAILING = ".,;:!?，。；：！？)]}】》」』"
 _SECRET_RE = re.compile(
     r"""(?ix)
@@ -211,7 +211,7 @@ def _message_urls(message: str) -> set[str]:
 _JSON_SECRET_RE = re.compile(
     r"""(?ix)
     ["']?
-    (?:otp|verification[_ -]?code|password|passwd|pwd|cookie|token|api[_ -]?key|secret)
+    (?:otp|verification[_ -]?code|password|passwd|pwd|cookie|token|api[_ -]?key|secret|验证码|动态码|短信码|密码|口令|令牌|密钥)
     ["']?
     \s*:\s*
     ["']?
