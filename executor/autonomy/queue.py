@@ -240,7 +240,12 @@ class TaskQueue:
             ) or legacy_human_wait
             recoverable_block = (
                 row["stage"] == "BLOCKED"
-                and row["blocker"] in {"session_unavailable", "validation"}
+                and row["blocker"] in {
+                    "session_unavailable",
+                    "validation",
+                    "user_paused_from_session_unavailable",
+                    "user_paused_from_validation",
+                }
             )
             attempts = 0 if (human_wait or recoverable_block) else row["attempts"]
             db.execute("UPDATE tasks SET stage=checkpoint,blocker=NULL,next_run=0,attempts=?,owner=NULL,lease_until=NULL,updated=? WHERE task_id=?", (attempts, self.clock(), tid))
@@ -261,11 +266,19 @@ class TaskQueue:
                 raise ValueError("task is already at an immutable boundary")
             if row["stage"] == "ERROR" and row["blocker"] == "retry_exhausted":
                 raise ValueError("retry budget exhausted")
-            if row["stage"] == "BLOCKED" and row["blocker"] in {
+            preserved_pause_markers = {
                 "user_paused_from_input",
                 "user_paused_from_action",
-            }:
+                "user_paused_from_session_unavailable",
+                "user_paused_from_validation",
+            }
+            if row["stage"] == "BLOCKED" and row["blocker"] in preserved_pause_markers:
                 pause_blocker = row["blocker"]
+            elif row["stage"] == "BLOCKED" and row["blocker"] in {
+                "session_unavailable",
+                "validation",
+            }:
+                pause_blocker = "user_paused_from_" + row["blocker"]
             else:
                 pause_blocker = {
                     "NEEDS_USER_INPUT": "user_paused_from_input",
