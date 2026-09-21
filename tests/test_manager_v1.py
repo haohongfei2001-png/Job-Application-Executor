@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import http.cookiejar
+import json
+import threading
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -12,7 +17,7 @@ from executor.autonomy.manager import (
     safe_task_view,
 )
 from executor.autonomy.queue import TaskQueue, TaskSpec
-from executor.autonomy.supervisor import Supervisor
+from executor.autonomy.supervisor import Supervisor, create_server
 from executor.autonomy.worker import Worker
 
 
@@ -284,3 +289,71 @@ def test_boolean_answer_does_not_flip_negated_chinese_text(tmp_path):
     result = manager.handle("不接受岗位调剂")
     assert result["actions"][0]["status"] == "denied"
     assert q.get(tid)["stage"] == "NEEDS_USER_INPUT"
+
+
+def test_dashboard_http_ticket_cookie_and_same_origin_chat(tmp_path):
+    q = TaskQueue(tmp_path / "runtime")
+    worker = Worker(q, settings={"deepseek": {"enabled": False}})
+    manager = ManagerController(
+        q,
+        worker,
+        provider=FakeProvider(ManagerTurn(reply="状态正常。", decisions=[])),
+        settings={"profile_path": "unused"},
+    )
+    supervisor = Supervisor(q, worker=worker, token="x" * 40, manager=manager)
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    try:
+        ticket_request = urllib.request.Request(
+            base + "/v1/ui-ticket",
+            data=b"{}",
+            headers={
+                "Authorization": "Bearer " + "x" * 40,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(ticket_request) as response:
+            ticket = json.load(response)["ticket"]
+
+        jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        with opener.open(base + "/ui-login?ticket=" + ticket) as response:
+            assert response.geturl().endswith("/ui")
+            assert "AI 投递经理" in response.read().decode("utf-8")
+
+        with opener.open(base + "/ui/api/state") as response:
+            state = json.load(response)
+        assert state["final_click_actor"] == "user"
+
+        chat_request = urllib.request.Request(
+            base + "/ui/api/chat",
+            data=json.dumps({"message": "查看状态"}).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": base,
+            },
+            method="POST",
+        )
+        with opener.open(chat_request) as response:
+            assert json.load(response)["reply"] == "状态正常。"
+
+        evil = urllib.request.Request(
+            base + "/ui/api/chat",
+            data=json.dumps({"message": "查看状态"}).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "https://evil.test",
+            },
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            opener.open(evil)
+        assert exc.value.code == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
