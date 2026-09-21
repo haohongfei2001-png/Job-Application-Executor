@@ -372,10 +372,10 @@ def test_sms_login_reproves_send_control_after_consent_rerender(tmp_path):
         <label>手机号 <input id="phone" type="tel"></label>
         <label>验证码 <input id="otp"></label>
         <label><input id="terms" type="checkbox"
-          onchange="document.querySelector('#send').outerHTML='<button id=&quot;send2&quot; type=&quot;button&quot; onclick=&quot;this.dataset.clicked=&#39;yes&#39;&quot;>发送验证码</button>'">
+          onchange="document.querySelector('#send').id='send2'">
           同意《注册协议》和《隐私政策》
         </label>
-        <button id="send" type="button">发送验证码</button>
+        <button id="send" type="button" onclick="this.dataset.clicked='yes'">发送验证码</button>
       </div>
     ''', name="sms-rerender.html")
 
