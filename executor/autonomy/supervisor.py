@@ -127,6 +127,8 @@ class Supervisor:
             if method == "POST" and len(parts) == 4:
                 if parts[3] == "resume" and not data:
                     return self.queue.resume(tid)
+                if parts[3] == "pause" and not data:
+                    return self.queue.pause(tid)
                 if parts[3] == "cancel" and not data:
                     self.worker.broker.discard(tid)
                     with self.worker.answers_lock:
