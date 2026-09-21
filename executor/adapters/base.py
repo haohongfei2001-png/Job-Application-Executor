@@ -51,6 +51,19 @@ class SiteAdapter(ABC):
     def current_page_hostname(self) -> str:
         return urlparse(self.target_url).hostname or ""
 
+    def prepare_one_time_code_auth(
+        self,
+        phone: str | None,
+        *,
+        allow_standard_auth_terms: bool = False,
+    ) -> str:
+        """Prepare an already-visible SMS OTP login flow without exposing secrets.
+
+        Return one of: not_needed, requested, already_requested, phone_required,
+        consent_required, or ambiguous.
+        """
+        return "not_needed"
+
     def enter_one_time_code(self, code: str) -> bool:
         return False
 
