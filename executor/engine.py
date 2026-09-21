@@ -31,6 +31,7 @@ class Executor:
 
     def screenshot(self,name):
         p=ROOT/"screenshots"/f"{int(time.time())}-{name}.png"
+        p.parent.mkdir(parents=True, exist_ok=True)
         self.page.screenshot(path=str(p),full_page=True); return str(p)
 
     @staticmethod
@@ -155,7 +156,10 @@ class Executor:
     def write_review(self):
         shot=self.screenshot('review')
         data={'state':self.state.state,'job_url':self.job_url,'active_url':self.page.url,'resume':self.resume.name,'filled_fields':self.state.filled_fields,'unresolved_fields':self.state.unresolved_fields,'final_submit_detected':self.state.final_submit_detected,'screenshot':shot}
-        p=ROOT/'runs'/f'review-{int(time.time())}.json'; p.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8'); return p
+        p=ROOT/'runs'/f'review-{int(time.time())}.json'
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
+        return p
 
     def run(self,max_pages=12):
         self.pw,self.browser,self.ctx,self.page=connect(self.job_url)
