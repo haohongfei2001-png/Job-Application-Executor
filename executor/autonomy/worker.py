@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import fcntl
 import json
 import os
@@ -10,6 +11,7 @@ from .. import browser
 from ..application import ApplicationExecutor
 from ..models import ApplicationStage
 from ..protected_targets import assert_target_not_protected
+from ..settings import load_settings
 from .otp import BrokerBridge, OtpBroker
 from .queue import RUNTIME, STOPPED, private_dir, IDENTIFIER
 
@@ -89,14 +91,30 @@ class OperationalAudit:
 
 
 class Worker:
-    def __init__(self, queue, broker=None, *, runner_factory=ApplicationExecutor, relay=None):
+    def __init__(
+        self,
+        queue,
+        broker=None,
+        *,
+        runner_factory=ApplicationExecutor,
+        relay=None,
+        settings=None,
+    ):
         self.queue = queue
         self.broker = broker or OtpBroker(queue)
         self.runner_factory, self.relay = runner_factory, relay
+        self.settings = settings if settings is not None else load_settings()
         self.stop_event = threading.Event()
         self.answers = {}
         self.answers_lock = threading.RLock()
         self.active = None
+
+    def _runner_settings(self):
+        settings = copy.deepcopy(self.settings)
+        # Synthetic/isolated tests must never call an external model or Keychain.
+        if browser.browser_mode() in {"isolated", "test", "headless"}:
+            settings.setdefault("deepseek", {})["enabled"] = False
+        return settings
 
     def user_input(self, tid, answers):
         task = self.queue.get(tid)
@@ -158,7 +176,7 @@ class Worker:
                     return True
             audit = OperationalAudit(self.queue.root, tid, checkpoint, guard)
             bridge = BrokerBridge(self.broker, tid, self.queue, owner, guard, relay=self.relay)
-            runner = self.runner_factory(spec["target_url"], spec["profile_ref"], {"deepseek": {"enabled": False}}, execution_id=tid,
+            runner = self.runner_factory(spec["target_url"], spec["profile_ref"], self._runner_settings(), execution_id=tid,
                 otp_bridge=bridge, audit_store=audit, guard=guard,
                 resume_url=task.get("checkpoint_url"), existing_browser_only=True)
             with self.answers_lock:
