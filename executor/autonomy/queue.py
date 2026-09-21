@@ -217,7 +217,10 @@ class TaskQueue:
             if row["attempts"] >= json.loads(row["spec"])["max_attempts"] and row["stage"] == "ERROR":
                 raise ValueError("retry budget exhausted")
             assert_target_not_protected(json.loads(row["spec"])["target_url"])
-            attempts = 0 if row["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION", "BLOCKED"} else row["attempts"]
+            # Human input/action waits do not consume retry budget. A generic
+            # BLOCKED state (including user pause) must preserve attempts so
+            # pause/resume cannot manufacture fresh retries.
+            attempts = 0 if row["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"} else row["attempts"]
             db.execute("UPDATE tasks SET stage=checkpoint,blocker=NULL,next_run=0,attempts=?,owner=NULL,lease_until=NULL,updated=? WHERE task_id=?", (attempts, self.clock(), tid))
             self._event(db, tid, "resumed", row["checkpoint"])
         return self.get(tid)
@@ -234,6 +237,8 @@ class TaskQueue:
             self._view(row)
             if row["stage"] in STOPPED or row["stage"] in {"SUBMITTED", "VERIFIED"}:
                 raise ValueError("task is already at an immutable boundary")
+            if row["stage"] == "ERROR" and row["blocker"] == "retry_exhausted":
+                raise ValueError("retry budget exhausted")
             db.execute(
                 "UPDATE tasks SET stage='BLOCKED',blocker='user_paused',"
                 "owner=NULL,lease_until=NULL,next_run=0,updated=? WHERE task_id=?",
