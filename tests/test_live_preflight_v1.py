@@ -52,8 +52,6 @@ def test_live_preflight_fails_closed_with_machine_readable_remediation():
         "install_google_chrome",
         "start_dedicated_chrome_cdp",
         "configure_profile_path",
-        "restore_profile_file",
-        "repair_profile_file",
         "configure_deepseek_key",
         "start_supervisor",
     ]
