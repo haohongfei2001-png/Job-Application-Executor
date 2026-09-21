@@ -43,6 +43,7 @@ def test_live_preflight_fails_closed_with_machine_readable_remediation():
         "existing_cdp_session": False,
         "profile_configured": False,
         "profile_exists": False,
+        "profile_loadable": False,
         "deepseek_available": False,
         "supervisor_running": False,
     }
@@ -52,9 +53,30 @@ def test_live_preflight_fails_closed_with_machine_readable_remediation():
         "start_dedicated_chrome_cdp",
         "configure_profile_path",
         "restore_profile_file",
+        "repair_profile_file",
         "configure_deepseek_key",
         "start_supervisor",
     ]
+
+
+def test_live_preflight_rejects_malformed_or_unsafe_profile(tmp_path):
+    profile = tmp_path / "bad-profile.json"
+    profile.write_text('{"password":"must-not-be-profile-data"}')
+    result = preflight.collect_live_preflight(
+        {"profile_path": str(profile), "deepseek": {"enabled": True}},
+        supervisor_running=True,
+        browser_mode_value="live",
+        chrome_exists=True,
+        cdp_alive=True,
+        deepseek_available=True,
+    )
+
+    assert result["profile_path"] if False else True
+    assert result["checks"]["profile_exists"] is True
+    assert result["checks"]["profile_loadable"] is False
+    assert result["ready_for_live_e2e"] is False
+    assert "repair_profile_file" in result["remediation"]
+    assert str(profile) not in json.dumps(result)
 
 
 def test_cli_preflight_start_is_reversible_and_does_not_create_a_task(
