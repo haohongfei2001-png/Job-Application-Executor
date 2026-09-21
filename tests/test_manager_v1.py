@@ -644,7 +644,7 @@ def test_explicit_resume_does_not_guess_between_multiple_human_action_tasks(tmp_
     tids = []
     for suffix in ("role-1", "role-2"):
         task = q.enqueue(spec(
-            tmp_path / suffix,
+            tmp_path,
             url=f"https://jobs.example.test/apply?postId={suffix}",
         ))
         tids.append(task["task_id"])
