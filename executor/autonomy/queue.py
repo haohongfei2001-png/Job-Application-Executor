@@ -220,10 +220,24 @@ class TaskQueue:
             # Human input/action waits do not consume retry budget. If such a
             # wait was paused, pause() records that origin in the blocker so the
             # same reset semantics survive the BLOCKED intermediary state.
+            legacy_human_wait = False
+            if row["stage"] == "BLOCKED" and row["blocker"] == "user_paused":
+                # Compatibility with pre-marker rows: old pause() overwrote the
+                # blocker, but the preceding checkpoint event still records
+                # whether the task was waiting for facts or a human action.
+                previous_wait = db.execute(
+                    "SELECT stage FROM events WHERE task_id=? AND kind='checkpoint' "
+                    "ORDER BY seq DESC LIMIT 1",
+                    (tid,),
+                ).fetchone()
+                legacy_human_wait = bool(
+                    previous_wait
+                    and previous_wait["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"}
+                )
             human_wait = row["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"} or (
                 row["stage"] == "BLOCKED"
                 and row["blocker"] in {"user_paused_from_input", "user_paused_from_action"}
-            )
+            ) or legacy_human_wait
             attempts = 0 if human_wait else row["attempts"]
             db.execute("UPDATE tasks SET stage=checkpoint,blocker=NULL,next_run=0,attempts=?,owner=NULL,lease_until=NULL,updated=? WHERE task_id=?", (attempts, self.clock(), tid))
             self._event(db, tid, "resumed", row["checkpoint"])
