@@ -326,6 +326,8 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     "AWS_SECRET_ACCESS_KEY=abc",
     '"password"="abc"',
     '{"OPENAI_API_KEY":"sk-test"}',
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+    "-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc\n-----END PGP PRIVATE KEY BLOCK-----",
 ])
 def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
     turn = ManagerTurn(reply="不应调用模型。", decisions=[])
@@ -336,7 +338,9 @@ def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
     assert "DeepSeek" in result["reply"]
 
 
-def test_unlabeled_otp_is_local_only_while_otp_is_waiting(tmp_path):
+@pytest.mark.parametrize("blocker", ["otp_waiting", "otp_ambiguous"])
+@pytest.mark.parametrize("paused", [False, True])
+def test_unlabeled_otp_is_local_only_while_otp_is_waiting(tmp_path, blocker, paused):
     turn = ManagerTurn(reply="不应调用模型。", decisions=[])
     q, _, provider, manager = controller(tmp_path, turn)
     tid = q.enqueue(spec(tmp_path))["task_id"]
@@ -345,9 +349,12 @@ def test_unlabeled_otp_is_local_only_while_otp_is_waiting(tmp_path):
         tid,
         claimed["owner"],
         "NEEDS_USER_ACTION",
-        blocker="otp_waiting",
+        blocker=blocker,
         release=True,
     )
+    if paused:
+        paused_task = q.pause(tid)
+        assert paused_task["blocker"] == "user_paused_from_" + blocker
 
     result = manager.handle("482913")
     assert result["actions"] == []
@@ -414,6 +421,8 @@ def test_numeric_pending_answer_requires_complete_number_boundary(tmp_path):
     for message in (
         "我有10年相关经验",
         "I have 1.5 years of experience",
+        "I have 1,5 years of experience",
+        "我有1，5年相关经验",
         "I have -1 years",
         "I have 1,000 hours",
         "I have 1e3 hours",
