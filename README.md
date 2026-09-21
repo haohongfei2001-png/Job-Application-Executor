@@ -216,3 +216,12 @@ Live autonomous tasks may use the existing DeepSeek semantic field mapper, while
 isolated tests always force external model calls off.
 
 See [DeepSeek Application Agent v1](docs/DEEPSEEK_APPLICATION_AGENT.md).
+
+Before the first real-machine acceptance run, use the fail-closed readiness gate:
+
+    .venv/bin/python -m executor.autonomy.cli preflight --start
+
+It verifies the live browser mode, dedicated Chrome/CDP session, canonical
+profile availability, DeepSeek credential availability and localhost supervisor
+without creating an application task. See
+[Live E2E Acceptance v1](docs/LIVE_E2E_ACCEPTANCE.md).
