@@ -228,7 +228,7 @@ _SECRET_RE = re.compile(
     r"""(?ix)
     (?:
         (?:\b(?:otp|verification\s+code|one[-\s]?time\s+(?:password|code))\b|验证码|动态码|短信码)
-        \s*(?:(?:is|equals)\s+|是|为|[:：=])?\s*\d{4,8}\b
+        \s*(?:(?:is|equals)\s+|是|为|[:：=])?\s*\d{4,8}(?!\d)
     )
     |
     (?:
@@ -238,10 +238,10 @@ _SECRET_RE = re.compile(
             |
             \s*(?:是|为|[:：=])\s*
         )
-        \S{4,}
+        \S+
     )
     |
-    (?:\bbearer\s+[A-Za-z0-9._~+/=-]{8,})
+    (?:\bbearer\s+[A-Za-z0-9._~+/=-]+)
     """
 )
 
