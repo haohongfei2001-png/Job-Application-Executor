@@ -186,7 +186,7 @@ _PAUSE_RE = re.compile(r"(?:暂停|先别|等一下|pause|hold)", re.I)
 _CANCEL_RE = re.compile(r"(?:取消|停止|不投|放弃|cancel|stop|drop)", re.I)
 _APPLY_RE = re.compile(r"(?:投递|申请|开始投|apply|application)", re.I)
 _URL_LEFT_BOUNDARIES = set(" \t\r\n([{<\"'：，。；！？、")
-_URL_RIGHT_BOUNDARIES = set(" \t\r\n>\"'，。；：！？、")
+_URL_RIGHT_BOUNDARIES = set(" \t\r\n>\"'")
 
 
 def _url_right_boundary(message: str, end: int, target_url: str) -> bool:
@@ -201,7 +201,7 @@ def _url_right_boundary(message: str, end: int, target_url: str) -> bool:
     next_is_edge = end + 1 == len(message) or message[end + 1].isspace()
     if not next_is_edge:
         return False
-    if char in ".,;!":
+    if char in ".,;!，。；：！？、":
         return True
     if char == "?":
         return "?" in target_url
@@ -246,25 +246,32 @@ _SECRET_RE = re.compile(
 )
 
 
-_JSON_SECRET_RE = re.compile(
+_STRUCTURED_SECRET_RE = re.compile(
     r"""(?ix)
     ["']?
-    (?:otp|verification[_ -]?code|password|passwd|pwd|cookie|token|api[_ -]?key|secret|验证码|动态码|短信码|密码|口令|令牌|密钥)
+    (?:
+        [A-Za-z0-9_-]*
+        (?:api[_-]?key|token|password|passwd|pwd|cookie|secret)
+        [A-Za-z0-9_-]*
+        |
+        验证码|动态码|短信码|密码|口令|令牌|密钥
+    )
     ["']?
-    \s*:\s*
+    \s*[:=]\s*
     (?:
         "(?:\\.|[^"\\])*"
         |
         '(?:\\.|[^'\\])*'
         |
-        [^\s,}]+
+        [^\s,;}]+
     )
     """
 )
+_RAW_OTP_RE = re.compile(r"\d{4,8}")
 
 
 def _contains_sensitive_credential(message: str) -> bool:
-    return bool(_SECRET_RE.search(message) or _JSON_SECRET_RE.search(message))
+    return bool(_SECRET_RE.search(message) or _STRUCTURED_SECRET_RE.search(message))
 
 
 def _value_is_explicit(message: str, value: Any) -> bool:
@@ -409,9 +416,16 @@ class ManagerController:
         if not isinstance(message, str) or not message.strip() or len(message) > 4000:
             raise ValueError("invalid manager message")
         message = message.strip()
+        task_rows = self.queue.tasks()
+        otp_waiting = any(
+            task["stage"] == "NEEDS_USER_ACTION" and task["blocker"] == "otp_waiting"
+            for task in task_rows
+        )
         # Stop credentials locally before a provider payload can be built.
         # OTP has a dedicated local broker and must never be forwarded to DeepSeek.
-        if _contains_sensitive_credential(message):
+        if _contains_sensitive_credential(message) or (
+            otp_waiting and _RAW_OTP_RE.fullmatch(message)
+        ):
             return {
                 "reply": (
                     "检测到验证码或登录凭据。为避免发送给 DeepSeek，此消息已在本地拦截；"
@@ -420,7 +434,7 @@ class ManagerController:
                 "actions": [],
                 **self.state(),
             }
-        tasks = [safe_task_view(task) for task in self.queue.tasks()]
+        tasks = [safe_task_view(task) for task in task_rows]
         try:
             turn = self.provider.decide(message, tasks)
         except RuntimeError:
