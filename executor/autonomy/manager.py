@@ -189,6 +189,27 @@ _URL_LEFT_BOUNDARIES = set(" \t\r\n([{<\"'：，。；！？、")
 _URL_RIGHT_BOUNDARIES = set(" \t\r\n>\"'，。；：！？、")
 
 
+def _url_right_boundary(message: str, end: int, target_url: str) -> bool:
+    if end == len(message):
+        return True
+    char = message[end]
+    if char in _URL_RIGHT_BOUNDARIES:
+        return True
+    # Common ASCII sentence punctuation is accepted only at a sentence edge.
+    # Structural URL continuations stay strict: a '?' can start a query and an
+    # unmatched ')' can close a URL path component such as engineer_(ml).
+    next_is_edge = end + 1 == len(message) or message[end + 1].isspace()
+    if not next_is_edge:
+        return False
+    if char in ".,;!":
+        return True
+    if char == "?":
+        return "?" in target_url
+    if char == ")":
+        return target_url.count("(") <= target_url.count(")")
+    return False
+
+
 def _target_url_is_explicit(message: str, target_url: str) -> bool:
     """Require one complete user-supplied target URL, never a model substring."""
     if not target_url or not target_url.lower().startswith(("https://", "http://")):
@@ -200,8 +221,7 @@ def _target_url_is_explicit(message: str, target_url: str) -> bool:
             return False
         left_ok = index == 0 or message[index - 1] in _URL_LEFT_BOUNDARIES
         end = index + len(target_url)
-        right_ok = end == len(message) or message[end] in _URL_RIGHT_BOUNDARIES
-        if left_ok and right_ok:
+        if left_ok and _url_right_boundary(message, end, target_url):
             return True
         start = index + 1
 _SECRET_RE = re.compile(
@@ -213,7 +233,12 @@ _SECRET_RE = re.compile(
     |
     (?:
         (?:\b(?:password|passwd|pwd|cookie|token|api[_ -]?key|secret)\b|密码|口令|令牌|密钥)
-        \s*(?:(?:is|equals)\s+|是|为|[:：=])\s*\S{4,}
+        (?:
+            \s+(?:(?:is|equals)\s+)?
+            |
+            \s*(?:是|为|[:：=])\s*
+        )
+        \S{4,}
     )
     |
     (?:\bbearer\s+[A-Za-z0-9._~+/=-]{8,})
@@ -256,7 +281,14 @@ def _value_is_explicit(message: str, value: Any) -> bool:
         return any(option.casefold() in text for option in negative)
     rendered = str(value).casefold()
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return bool(re.search(r"(?<!\d)" + re.escape(rendered) + r"(?!\d)", text))
+        numeric_tokens = re.findall(
+            r"(?<![\w.])"
+            r"[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)"
+            r"(?:[eE][+-]?\d+)?"
+            r"(?![\w.])",
+            text,
+        )
+        return rendered in numeric_tokens
     return rendered in text
 
 
