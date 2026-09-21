@@ -95,6 +95,67 @@ class ApplicationExecutor:
             self._block_auth(page_index, "one_time_code", "OTP field unavailable or ambiguous")
             return False
 
+        phone_field = get_field(self.profile, "identity.phone")
+        phone = (
+            str(phone_field.value)
+            if phone_field is not None and phone_field.value not in (None, "")
+            else None
+        )
+        auth_terms = get_field(self.profile, "policy.auto_accept_privacy_terms")
+        allow_standard_auth_terms = bool(
+            auth_terms is not None
+            and auth_terms.user_confirmed
+            and auth_terms.value is True
+        )
+        try:
+            prepare = getattr(
+                adapter,
+                "prepare_one_time_code_auth",
+                lambda *_args, **_kwargs: "not_needed",
+            )(
+                phone,
+                allow_standard_auth_terms=allow_standard_auth_terms,
+            )
+        except Exception:
+            prepare = "ambiguous"
+        self.audit.record_action({
+            "type": "otp_authentication_prepare",
+            "ok": prepare in {"not_needed", "requested", "already_requested"},
+            "status": prepare,
+        })
+        if prepare == "phone_required":
+            self._block_auth(
+                page_index,
+                "sms_setup",
+                "SMS authentication requires a canonical phone number",
+            )
+            return False
+        if prepare == "consent_required":
+            self._block_auth(
+                page_index,
+                "sms_setup",
+                "SMS authentication requires an explicit auth/privacy consent decision",
+            )
+            return False
+        if prepare not in {"not_needed", "requested", "already_requested"}:
+            self._block_auth(
+                page_index,
+                "sms_setup",
+                "SMS authentication controls are unavailable or ambiguous",
+            )
+            return False
+
+        post_prepare_kind = self._auth_kind(adapter)
+        if post_prepare_kind not in {None, "one_time_code"}:
+            self._block_auth(
+                page_index,
+                post_prepare_kind,
+                f"{post_prepare_kind} authentication requires human handling",
+            )
+            return False
+        if post_prepare_kind is None:
+            return True
+
         try:
             hostname = adapter.current_page_hostname()
         except Exception:
