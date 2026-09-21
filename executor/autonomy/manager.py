@@ -107,7 +107,9 @@ class DeepSeekManagerProvider:
             '"task_id":"","field_key":"","value":null,"company":"","role":"","target_url":"","reason":""}]}. '
             "Use REPORT when no state change is justified. CREATE_TASK is allowed only "
             "when the user's message itself contains the exact target URL. ANSWER_PENDING "
-            "may only use a value explicitly present in the user's current message."
+            "may only use a value explicitly present in the user's current message. "
+            "Do not claim that a state-changing action has already succeeded; describe intent only. "
+            "The deterministic controller will append the actual execution result."
         )
         payload = {
             "model": self.client.model,
@@ -337,8 +339,19 @@ class ManagerController:
                         "reason": "state_or_policy_conflict",
                     }
                 )
+        reply = turn.reply
+        if actions:
+            accepted = [item["action"] for item in actions if item.get("status") in {"accepted", "observed"}]
+            denied = [item["action"] for item in actions if item.get("status") == "denied"]
+            summary = []
+            if accepted:
+                summary.append("已执行/确认：" + "、".join(accepted))
+            if denied:
+                summary.append("被系统门禁拒绝：" + "、".join(denied))
+            if summary:
+                reply = reply.rstrip() + "\n\n系统执行结果：" + "；".join(summary) + "。"
         return {
-            "reply": turn.reply,
+            "reply": reply,
             "actions": actions,
             **self.state(),
         }
