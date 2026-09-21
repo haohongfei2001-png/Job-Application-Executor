@@ -558,8 +558,21 @@ class GenericWebAdapter(SiteAdapter):
             self._otp_auth_terms_allowed = bool(
                 allow_standard_auth_terms or terms_already_accepted
             )
+            # Filling/checking can re-render React forms. Re-prove the exact
+            # send-code control after those mutations instead of trusting the
+            # pre-mutation global nth() index.
+            send_index = self._current_sms_initial_send_index()
+            if send_index < 0:
+                return "ambiguous"
             send = self.page.locator(BUTTON_SELECTOR).nth(send_index)
-            send_text = " ".join((send.inner_text() or send.get_attribute("value") or "").split())
+            send_text = " ".join(
+                (
+                    send.get_attribute("value")
+                    or send.get_attribute("aria-label")
+                    or send.inner_text()
+                    or ""
+                ).split()
+            )
             if (
                 not OTP_INITIAL_SEND_CONTROL_RE.fullmatch(send_text)
                 or OTP_RESEND_CONTROL_RE.search(send_text)
@@ -577,10 +590,10 @@ class GenericWebAdapter(SiteAdapter):
         except Exception:
             return "ambiguous"
 
-    def _has_preparable_sms_auth(self) -> bool:
-        """Read-only proof that the visible OTP belongs to a unique SMS-login setup."""
+    def _current_sms_initial_send_index(self) -> int:
+        """Return the one current send-code control in a proven SMS auth context."""
         try:
-            return bool(self.page.evaluate(r"""() => {
+            value = self.page.evaluate(r"""() => {
               const visible = e => {
                 const style = getComputedStyle(e), rect = e.getBoundingClientRect();
                 return style.display !== 'none'
@@ -602,7 +615,7 @@ class GenericWebAdapter(SiteAdapter):
                 (e.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code'
                 || otpHint.test(hint(e))
               ));
-              if (otps.length !== 1) return false;
+              if (otps.length !== 1) return -1;
               const otp = otps[0];
               let context = otp.closest('form');
               if (!context) {
@@ -613,7 +626,7 @@ class GenericWebAdapter(SiteAdapter):
                   + '[class*="dialog" i]'
                 );
               }
-              if (!context) return false;
+              if (!context) return -1;
               const contextText = (context.innerText || '').replace(/\s+/g, ' ').trim();
               const contextAttrs = [
                 context.id || '', context.getAttribute('class') || '',
@@ -621,7 +634,7 @@ class GenericWebAdapter(SiteAdapter):
                 context.getAttribute('aria-label') || '',
               ].join(' ');
               if (!/login|log[-_ ]?in|sign[-_ ]?in|signin|auth|account|register|注册|登录|登陆|账号|账户/i
-                    .test(contextText + ' ' + contextAttrs)) return false;
+                    .test(contextText + ' ' + contextAttrs)) return -1;
               const phones = inputs.filter(e => {
                 if (!visible(e) || !context.contains(e) || e === otp) return false;
                 const type = (e.getAttribute('type') || 'text').toLowerCase();
@@ -630,16 +643,22 @@ class GenericWebAdapter(SiteAdapter):
                   || (e.getAttribute('autocomplete') || '').toLowerCase() === 'tel'
                   || phoneHint.test(hint(e));
               });
-              if (phones.length !== 1) return false;
-              const controls = [...context.querySelectorAll(
+              if (phones.length !== 1) return -1;
+              const all = [...document.querySelectorAll(
                 'button, input[type="button"], input[type="submit"], [role="button"], a'
-              )].filter(visible);
+              )];
               const text = e => ((e.innerText || e.value || e.getAttribute('aria-label') || '') + '')
                 .replace(/\s+/g, ' ').trim();
-              return controls.filter(e => initialSend.test(text(e))).length === 1;
-            }"""))
+              const sends = all.filter(e => visible(e) && context.contains(e) && initialSend.test(text(e)));
+              return sends.length === 1 ? all.indexOf(sends[0]) : -1;
+            }""")
+            return int(value)
         except Exception:
-            return False
+            return -1
+
+    def _has_preparable_sms_auth(self) -> bool:
+        """Read-only proof that the visible OTP belongs to a unique SMS-login setup."""
+        return self._current_sms_initial_send_index() >= 0
 
     def auth_challenge_kind(self) -> str | None:
         try:
@@ -688,7 +707,10 @@ class GenericWebAdapter(SiteAdapter):
                 # QR/face/security alternatives may coexist in the same login dialog.
                 # Override them only when a read-only proof finds one phone field and
                 # one initial send-code control in that same explicit auth context.
-                if kinds <= {"one_time_code", "other"} and self._has_preparable_sms_auth():
+                if kinds <= {"one_time_code", "other"} and (
+                    bool(getattr(self, "_otp_request_prepared", False))
+                    or self._has_preparable_sms_auth()
+                ):
                     return "one_time_code"
             return next(iter(kinds)) if len(kinds) == 1 else "other" if kinds else None
         except Exception:
