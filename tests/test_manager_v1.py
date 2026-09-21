@@ -297,6 +297,7 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
 
 @pytest.mark.parametrize("message", [
     "验证码是 482913",
+    "验证码是482913五分钟有效",
     "OTP: 72941836",
     "Your verification code is 7294",
     "password: super-secret-value",
@@ -311,9 +312,13 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     '{"password":"my very secret passphrase"}',
     '{"密码":"我的 私密 口令"}',
     "password hunter2",
+    "my password is a very long passphrase",
+    "password abc",
     "token abcdefghijklmnop",
     "密码 hunter2",
+    "我的密码是a very long passphrase",
     "令牌 abcdefghijklmnop",
+    "Bearer x",
     "Bearer abcdefghijklmnop",
 ])
 def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
