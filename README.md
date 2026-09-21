@@ -192,3 +192,27 @@ are available through `.venv/bin/python -m executor.autonomy.cli`.
 See [Local Autonomy v1](docs/LOCAL_AUTONOMY.md) for lifecycle commands, API and
 Codex/Work handoff, private storage, restart recovery and the synthetic E2E.
 The daemon stops at `READY_TO_SUBMIT`; final submission remains user-only.
+
+## DeepSeek application manager
+
+Local Autonomy can be controlled through a policy-gated DeepSeek manager and a
+localhost chat dashboard. The user-facing model is simple: one task panel plus
+one conversation with the AI application manager. Queueing, checkpoints, OTP,
+browser adapters and the manual final-submit boundary stay behind that surface.
+
+Start the daemon and open the UI:
+
+    .venv/bin/python -m executor.autonomy.cli start
+    .venv/bin/python -m executor.autonomy.cli ui
+
+Or send one local chat turn from stdin:
+
+    printf '%s' '继续这个岗位' | .venv/bin/python -m executor.autonomy.cli chat
+
+The manager can propose only typed high-level decisions and every mutation is
+revalidated by deterministic Python policy. It has no arbitrary shell/JavaScript
+or final-submit capability. Raw OTPs remain inside the memory-only OTP broker.
+Live autonomous tasks may use the existing DeepSeek semantic field mapper, while
+isolated tests always force external model calls off.
+
+See [DeepSeek Application Agent v1](docs/DEEPSEEK_APPLICATION_AGENT.md).

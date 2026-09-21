@@ -108,17 +108,22 @@ def cleanup_live_pages(ctx, target_url: str | None = None) -> dict[str, int]:
 def _connect_isolated(target_url: str | None = None):
     pw = sync_playwright().start()
     try:
-        browser = pw.chromium.launch(
-            executable_path=CHROME,
-            headless=True,
-            args=[
+        launch_kwargs = {
+            "headless": True,
+            "args": [
                 "--disable-extensions",
                 "--disable-background-networking",
                 "--disable-component-update",
                 "--no-first-run",
                 "--no-default-browser-check",
             ],
-        )
+        }
+        # macOS live applications use the user's installed Google Chrome. Isolated
+        # tests must also run on CI/Linux, where that path does not exist; in that
+        # case use Playwright's bundled Chromium without touching the live profile.
+        if Path(CHROME).exists():
+            launch_kwargs["executable_path"] = CHROME
+        browser = pw.chromium.launch(**launch_kwargs)
         ctx = browser.new_context()
         page = ctx.new_page()
         if target_url:

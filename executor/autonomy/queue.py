@@ -222,6 +222,26 @@ class TaskQueue:
             self._event(db, tid, "resumed", row["checkpoint"])
         return self.get(tid)
 
+    def pause(self, tid):
+        """Pause a task at its last safe checkpoint without cancelling it.
+
+        An active worker is fenced immediately by clearing its lease. An in-flight
+        browser primitive may finish, but the worker guard prevents subsequent
+        mutations. Resume returns the task to its existing safe checkpoint.
+        """
+        with self.tx() as db:
+            row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
+            self._view(row)
+            if row["stage"] in STOPPED or row["stage"] in {"SUBMITTED", "VERIFIED"}:
+                raise ValueError("task is already at an immutable boundary")
+            db.execute(
+                "UPDATE tasks SET stage='BLOCKED',blocker='user_paused',"
+                "owner=NULL,lease_until=NULL,next_run=0,updated=? WHERE task_id=?",
+                (self.clock(), tid),
+            )
+            self._event(db, tid, "paused", "BLOCKED")
+        return self.get(tid)
+
     def cancel(self, tid):
         with self.tx() as db:
             row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
