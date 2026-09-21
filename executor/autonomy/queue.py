@@ -237,7 +237,12 @@ class TaskQueue:
                 )
             human_wait = row["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"} or (
                 row["stage"] == "BLOCKED"
-                and row["blocker"] in {"user_paused_from_input", "user_paused_from_action"}
+                and row["blocker"] in {
+                    "user_paused_from_input",
+                    "user_paused_from_action",
+                    "user_paused_from_otp_waiting",
+                    "user_paused_from_otp_ambiguous",
+                }
             ) or legacy_human_wait
             recoverable_block = (
                 row["stage"] == "BLOCKED"
@@ -270,6 +275,8 @@ class TaskQueue:
             preserved_pause_markers = {
                 "user_paused_from_input",
                 "user_paused_from_action",
+                "user_paused_from_otp_waiting",
+                "user_paused_from_otp_ambiguous",
                 "user_paused_from_session_unavailable",
                 "user_paused_from_validation",
             }
@@ -280,15 +287,27 @@ class TaskQueue:
                 "validation",
             }:
                 pause_blocker = "user_paused_from_" + row["blocker"]
+            elif row["stage"] == "NEEDS_USER_ACTION" and row["blocker"] in {
+                "otp_waiting",
+                "otp_ambiguous",
+            }:
+                pause_blocker = "user_paused_from_" + row["blocker"]
             else:
                 pause_blocker = {
                     "NEEDS_USER_INPUT": "user_paused_from_input",
                     "NEEDS_USER_ACTION": "user_paused_from_action",
                 }.get(row["stage"], "user_paused")
+            now = self.clock()
+            active_claim = bool(
+                row["owner"]
+                and row["lease_until"] is not None
+                and row["lease_until"] > now
+            )
+            paused_attempts = max(0, row["attempts"] - 1) if active_claim else row["attempts"]
             db.execute(
-                "UPDATE tasks SET stage='BLOCKED',blocker=?,"
+                "UPDATE tasks SET stage='BLOCKED',blocker=?,attempts=?,"
                 "owner=NULL,lease_until=NULL,next_run=0,updated=? WHERE task_id=?",
-                (pause_blocker, self.clock(), tid),
+                (pause_blocker, paused_attempts, now, tid),
             )
             self._event(db, tid, "paused", "BLOCKED")
         return self.get(tid)
