@@ -74,10 +74,28 @@ def test_retry_bound_cancel_and_human_gate(tmp_path):
     assert q.get(tid)['blocker'] == 'retry_exhausted'
     with pytest.raises(ValueError):
         q.resume(tid)
+    with pytest.raises(ValueError):
+        q.pause(tid)
     q.cancel(tid)
     assert q.claim('w') is None
     with pytest.raises(ValueError):
         q.resume(tid)
+
+
+def test_pause_resume_preserves_retry_attempts(tmp_path):
+    now = [1.]
+    q = TaskQueue(tmp_path / 'runtime', clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=2))['task_id']
+    claimed = q.claim('w')
+    q.checkpoint(tid, claimed['owner'], 'ERROR', blocker='retry_pending', release=True)
+    assert q.get(tid)['attempts'] == 1
+    q.pause(tid)
+    assert q.get(tid)['attempts'] == 1
+    q.resume(tid)
+    assert q.get(tid)['attempts'] == 1
+    now[0] += 100
+    claimed = q.claim('w')
+    assert claimed['attempts'] == 2
 
 
 @pytest.mark.parametrize('message,expected', [('您的验证码是 482913，五分钟有效','482913'), ('Your verification code is 7294.', '7294'), ('OTP 12345678', '12345678'), ('482913 and 7294', None), ('123456789', None)])
@@ -90,17 +108,19 @@ def test_otp_expiry_single_consumption_and_no_persistence(tmp_path, capsys):
     tid = waiting(q, tmp_path)
     now = [0.]
     broker = OtpBroker(q, clock=lambda: now[0])
-    assert broker.push(message='验证码 482913', task_id=tid)['accepted']
-    assert broker.consume(tid) == '482913'
+    assert broker.push(message='验证码 48291357', task_id=tid)['accepted']
+    assert broker.consume(tid) == '48291357'
     assert broker.consume(tid) is None
-    broker.push(message='OTP 7294', hint='example.test')
+    broker.push(message='OTP 72941836', hint='example.test')
     now[0] = 300
     assert broker.consume(tid) is None
+    # Use high-entropy 8-digit canaries when scanning raw SQLite bytes. A short
+    # 4-digit sequence can occur incidentally in random task IDs or page bytes.
     for path in q.root.rglob('*'):
         if path.is_file():
-            assert b'482913' not in path.read_bytes()
-            assert b'7294' not in path.read_bytes()
-    assert '482913' not in str(capsys.readouterr())
+            assert b'48291357' not in path.read_bytes()
+            assert b'72941836' not in path.read_bytes()
+    assert '48291357' not in str(capsys.readouterr())
     assert OtpBroker(TaskQueue(q.root)).consume(tid) is None
 
 
