@@ -162,6 +162,10 @@ def test_resume_resets_retry_budget_for_recoverable_block(tmp_path, blocker):
     q.checkpoint(tid, claimed["owner"], "BLOCKED", blocker=blocker, release=True)
     blocked = q.get(tid)
     assert blocked["attempts"] == 1
+    paused = q.pause(tid)
+    assert paused["blocker"] == "user_paused_from_" + blocker
+    paused_again = q.pause(tid)
+    assert paused_again["blocker"] == paused["blocker"]
     resumed = q.resume(tid)
     assert resumed["attempts"] == 0
     retried = q.claim("w")
