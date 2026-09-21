@@ -357,3 +357,16 @@ def test_dashboard_http_ticket_cookie_and_same_origin_chat(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_pause_fences_active_worker_lease(tmp_path):
+    q = TaskQueue(tmp_path / "runtime")
+    tid = q.enqueue(spec(tmp_path))["task_id"]
+    claimed = q.claim("active-worker")
+    paused = q.pause(tid)
+    assert paused["stage"] == "BLOCKED"
+    assert paused["blocker"] == "user_paused"
+    assert paused["owner"] is None
+    assert not q.renew(tid, claimed["owner"])
+    with pytest.raises(RuntimeError):
+        q.checkpoint(tid, claimed["owner"], "FORM_FILLED")
