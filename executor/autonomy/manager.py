@@ -455,6 +455,48 @@ class ManagerController:
                 "actions": [],
                 **self.state(),
             }
+        # A plain, explicit resume command for one human-action wait is
+        # deterministic control, not a semantic decision. Handle it locally so
+        # the model cannot downgrade "继续这个岗位" into a read-only REPORT.
+        # The executor still re-checks the current page and will immediately
+        # block again for a real CAPTCHA/password/ambiguous challenge.
+        explicit_resume = bool(_RESUME_RE.search(message))
+        conflicting_control = bool(
+            _PAUSE_RE.search(message)
+            or _CANCEL_RE.search(message)
+            or _APPLY_RE.search(message)
+        )
+        if explicit_resume and not conflicting_control:
+            waiting = [
+                task for task in task_rows
+                if task.get("stage") == "NEEDS_USER_ACTION"
+            ]
+            if len(waiting) == 1:
+                tid = waiting[0]["task_id"]
+                try:
+                    self.queue.resume(tid)
+                except (KeyError, ValueError, RuntimeError):
+                    return {
+                        "reply": "当前任务无法从该状态恢复；队列状态保持不变。",
+                        "actions": [{
+                            "action": str(ManagerAction.RESUME),
+                            "status": "denied",
+                            "reason": "state_or_policy_conflict",
+                        }],
+                        **self.state(),
+                    }
+                return {
+                    "reply": (
+                        "已收到明确继续指令，正在从安全检查点重新检查当前页面。"
+                        "如果仍是需要人工处理的安全验证，系统会再次停住。"
+                    ),
+                    "actions": [{
+                        "action": str(ManagerAction.RESUME),
+                        "status": "accepted",
+                        "task_id": tid,
+                    }],
+                    **self.state(),
+                }
         tasks = [safe_task_view(task) for task in task_rows]
         try:
             turn = self.provider.decide(message, tasks)
