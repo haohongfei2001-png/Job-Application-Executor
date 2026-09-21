@@ -230,3 +230,57 @@ def test_supervisor_chat_route_has_no_submit_action(tmp_path):
     assert result["reply"] == "只报告。"
     with pytest.raises(KeyError):
         supervisor.dispatch("POST", "/v1/submit", {})
+
+
+def test_pause_requires_explicit_intent_and_is_resumable(tmp_path):
+    turn = ManagerTurn(reply="先暂停。", decisions=[
+        ManagerDecision(action=ManagerAction.PAUSE, task_id="placeholder")
+    ])
+    q, _, provider, manager = controller(tmp_path, turn)
+    tid = q.enqueue(spec(tmp_path))["task_id"]
+    provider.turn.decisions[0].task_id = tid
+
+    denied = manager.handle("这个岗位先看看")
+    assert denied["actions"][0]["status"] == "denied"
+    assert q.get(tid)["stage"] == "DISCOVERED"
+
+    accepted = manager.handle("先暂停这个岗位")
+    assert accepted["actions"][0]["status"] == "accepted"
+    assert q.get(tid)["stage"] == "BLOCKED"
+    assert q.get(tid)["blocker"] == "user_paused"
+
+    resume_turn = ManagerTurn(reply="继续。", decisions=[
+        ManagerDecision(action=ManagerAction.RESUME, task_id=tid)
+    ])
+    provider.turn = resume_turn
+    resumed = manager.handle("继续这个岗位")
+    assert resumed["actions"][0]["status"] == "accepted"
+    assert q.get(tid)["stage"] == "DISCOVERED"
+
+
+def test_boolean_answer_does_not_flip_negated_chinese_text(tmp_path):
+    field = "preferences.accept_role_adjustment"
+    q = TaskQueue(tmp_path / "runtime")
+    worker = Worker(q, settings={"deepseek": {"enabled": False}})
+    tid = q.enqueue(spec(tmp_path))["task_id"]
+    claimed = q.claim("test-worker")
+    q.checkpoint(
+        tid,
+        claimed["owner"],
+        "NEEDS_USER_INPUT",
+        blocker="unknown_facts",
+        details={"unresolved_keys": [field]},
+        release=True,
+    )
+    provider = FakeProvider(ManagerTurn(reply="收到。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.ANSWER_PENDING,
+            task_id=tid,
+            field_key=field,
+            value=True,
+        )
+    ]))
+    manager = ManagerController(q, worker, provider=provider, settings={"profile_path": "unused"})
+    result = manager.handle("不接受岗位调剂")
+    assert result["actions"][0]["status"] == "denied"
+    assert q.get(tid)["stage"] == "NEEDS_USER_INPUT"
