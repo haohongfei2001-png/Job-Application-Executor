@@ -238,7 +238,11 @@ class TaskQueue:
                 row["stage"] == "BLOCKED"
                 and row["blocker"] in {"user_paused_from_input", "user_paused_from_action"}
             ) or legacy_human_wait
-            attempts = 0 if human_wait else row["attempts"]
+            recoverable_block = (
+                row["stage"] == "BLOCKED"
+                and row["blocker"] in {"session_unavailable", "validation"}
+            )
+            attempts = 0 if (human_wait or recoverable_block) else row["attempts"]
             db.execute("UPDATE tasks SET stage=checkpoint,blocker=NULL,next_run=0,attempts=?,owner=NULL,lease_until=NULL,updated=? WHERE task_id=?", (attempts, self.clock(), tid))
             self._event(db, tid, "resumed", row["checkpoint"])
         return self.get(tid)
