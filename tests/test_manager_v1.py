@@ -237,6 +237,29 @@ def test_create_task_preserves_legal_url_punctuation(tmp_path, url):
         assert denied["actions"][0]["reason"] == "exact_url_required"
 
 
+@pytest.mark.parametrize("suffix", [".", "!", "?", ")"])
+def test_create_task_accepts_ascii_sentence_punctuation(tmp_path, suffix):
+    url = "https://jobs.example.test/apply?postId=punctuated"
+    profile = tmp_path / "canonical.json"
+    profile.write_text("{}")
+    turn = ManagerTurn(reply="开始处理。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.CREATE_TASK,
+            company="Example",
+            role="Engineer",
+            target_url=url,
+        )
+    ])
+    q, _, _, manager = controller(
+        tmp_path,
+        turn,
+        settings={"profile_path": str(profile)},
+    )
+    result = manager.handle("Apply " + url + suffix)
+    assert result["actions"][0]["status"] == "accepted"
+    assert q.get(result["actions"][0]["task_id"])["spec"]["target_url"] == url
+
+
 def test_resume_ready_to_submit_is_never_allowed(tmp_path):
     q = TaskQueue(tmp_path / "runtime")
     worker = Worker(q, settings={"deepseek": {"enabled": False}})
@@ -287,6 +310,10 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     '{"令牌":"abcdefghijklmnop"}',
     '{"password":"my very secret passphrase"}',
     '{"密码":"我的 私密 口令"}',
+    "password hunter2",
+    "token abcdefghijklmnop",
+    "密码 hunter2",
+    "令牌 abcdefghijklmnop",
     "Bearer abcdefghijklmnop",
 ])
 def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
@@ -322,9 +349,10 @@ def test_numeric_pending_answer_requires_complete_number_boundary(tmp_path):
     ]))
     manager = ManagerController(q, worker, provider=provider, settings={"profile_path": "unused"})
 
-    denied = manager.handle("我有10年相关经验")
-    assert denied["actions"][0]["status"] == "denied"
-    assert q.get(tid)["stage"] == "NEEDS_USER_INPUT"
+    for message in ("我有10年相关经验", "I have 1.5 years of experience", "I have -1 years", "I have 1,000 hours"):
+        denied = manager.handle(message)
+        assert denied["actions"][0]["status"] == "denied"
+        assert q.get(tid)["stage"] == "NEEDS_USER_INPUT"
 
     accepted = manager.handle("我有1年相关经验")
     assert accepted["actions"][0]["status"] == "accepted"
