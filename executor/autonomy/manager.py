@@ -185,7 +185,7 @@ _RESUME_RE = re.compile(r"(?:继续|恢复|接着|resume|continue|retry)", re.I)
 _PAUSE_RE = re.compile(r"(?:暂停|先别|等一下|pause|hold)", re.I)
 _CANCEL_RE = re.compile(r"(?:取消|停止|不投|放弃|cancel|stop|drop)", re.I)
 _APPLY_RE = re.compile(r"(?:投递|申请|开始投|apply|application)", re.I)
-_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.I)
+_URL_RE = re.compile(r"https?://[^\s<>'\"，。；：！？、,;]+", re.I)
 _URL_TRAILING = ".,;:!?，。；：！？)]}】》」』"
 _SECRET_RE = re.compile(
     r"""(?ix)
@@ -208,8 +208,20 @@ def _message_urls(message: str) -> set[str]:
     return {match.rstrip(_URL_TRAILING) for match in _URL_RE.findall(message)}
 
 
+_JSON_SECRET_RE = re.compile(
+    r"""(?ix)
+    ["']?
+    (?:otp|verification[_ -]?code|password|passwd|pwd|cookie|token|api[_ -]?key|secret)
+    ["']?
+    \s*:\s*
+    ["']?
+    [^"'\s,}]{4,}
+    """
+)
+
+
 def _contains_sensitive_credential(message: str) -> bool:
-    return bool(_SECRET_RE.search(message))
+    return bool(_SECRET_RE.search(message) or _JSON_SECRET_RE.search(message))
 
 
 def _value_is_explicit(message: str, value: Any) -> bool:
