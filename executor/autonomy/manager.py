@@ -18,6 +18,7 @@ from .queue import TaskQueue, TaskSpec
 class ManagerAction(StrEnum):
     REPORT = "REPORT"
     RESUME = "RESUME"
+    PAUSE = "PAUSE"
     CANCEL = "CANCEL"
     ANSWER_PENDING = "ANSWER_PENDING"
     CREATE_TASK = "CREATE_TASK"
@@ -102,7 +103,7 @@ class DeepSeekManagerProvider:
             "Unknown objective facts must remain for the user. CAPTCHA, slider, QR, face "
             "or security-device challenges remain human actions. Final application submit "
             "is always performed by the user. Return strict JSON: "
-            '{"reply":"...", "decisions":[{"action":"REPORT|RESUME|CANCEL|ANSWER_PENDING|CREATE_TASK",'
+            '{"reply":"...", "decisions":[{"action":"REPORT|RESUME|PAUSE|CANCEL|ANSWER_PENDING|CREATE_TASK",'
             '"task_id":"","field_key":"","value":null,"company":"","role":"","target_url":"","reason":""}]}. '
             "Use REPORT when no state change is justified. CREATE_TASK is allowed only "
             "when the user's message itself contains the exact target URL. ANSWER_PENDING "
@@ -179,6 +180,7 @@ class DeepSeekManagerProvider:
 
 
 _RESUME_RE = re.compile(r"(?:继续|恢复|接着|resume|continue|retry)", re.I)
+_PAUSE_RE = re.compile(r"(?:暂停|先别|等一下|pause|hold)", re.I)
 _CANCEL_RE = re.compile(r"(?:取消|停止|不投|放弃|cancel|stop|drop)", re.I)
 _APPLY_RE = re.compile(r"(?:投递|申请|开始投|apply|application)", re.I)
 
@@ -257,6 +259,12 @@ class ManagerController:
             if task["stage"] == "READY_TO_SUBMIT":
                 return {"action": str(action), "status": "denied", "reason": "manual_submit_gate"}
             self.queue.resume(decision.task_id)
+            return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
+
+        if action == ManagerAction.PAUSE:
+            if not _PAUSE_RE.search(message):
+                return {"action": str(action), "status": "denied", "reason": "explicit_pause_required"}
+            self.queue.pause(decision.task_id)
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
         if action == ManagerAction.CANCEL:
