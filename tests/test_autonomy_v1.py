@@ -98,6 +98,28 @@ def test_pause_resume_preserves_retry_attempts(tmp_path):
     assert claimed['attempts'] == 2
 
 
+@pytest.mark.parametrize(
+    "stage,blocker",
+    [
+        ("NEEDS_USER_INPUT", "unknown_facts"),
+        ("NEEDS_USER_ACTION", "security_challenge"),
+    ],
+)
+def test_pause_resume_preserves_human_wait_retry_reset(tmp_path, stage, blocker):
+    now = [1.]
+    q = TaskQueue(tmp_path / 'runtime', clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=1))['task_id']
+    claimed = q.claim('w')
+    assert claimed['attempts'] == 1
+    q.checkpoint(tid, claimed['owner'], stage, blocker=blocker, release=True)
+    paused = q.pause(tid)
+    assert paused['stage'] == 'BLOCKED'
+    assert paused['blocker'] in {'user_paused_from_input', 'user_paused_from_action'}
+    resumed = q.resume(tid)
+    assert resumed['attempts'] == 0
+    assert q.claim('w')['attempts'] == 1
+
+
 @pytest.mark.parametrize('message,expected', [('您的验证码是 482913，五分钟有效','482913'), ('Your verification code is 7294.', '7294'), ('OTP 12345678', '12345678'), ('482913 and 7294', None), ('123456789', None)])
 def test_chinese_english_extraction(message, expected):
     assert extract_code(message) == expected
