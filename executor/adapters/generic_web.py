@@ -577,6 +577,70 @@ class GenericWebAdapter(SiteAdapter):
         except Exception:
             return "ambiguous"
 
+    def _has_preparable_sms_auth(self) -> bool:
+        """Read-only proof that the visible OTP belongs to a unique SMS-login setup."""
+        try:
+            return bool(self.page.evaluate(r"""() => {
+              const visible = e => {
+                const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                return style.display !== 'none'
+                  && style.visibility !== 'hidden'
+                  && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+                  && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+              };
+              const hint = e => [
+                ...(e.labels ? [...e.labels].map(x => x.innerText || '') : []),
+                e.getAttribute('name') || '', e.id || '',
+                e.getAttribute('placeholder') || '', e.getAttribute('aria-label') || '',
+                e.getAttribute('autocomplete') || '', e.getAttribute('type') || '',
+              ].join(' ');
+              const otpHint = /验证码|校验码|动态码|短信码|verification[\s_-]*code|one[\s_-]*time[\s_-]*code|otp/i;
+              const phoneHint = /phone|mobile|tel|手机号|手机号码|联系电话|电话/i;
+              const initialSend = /^(?:发送验证码|获取验证码|发送短信验证码|获取短信验证码|send\s+(?:the\s+)?code|get\s+(?:the\s+)?code|request\s+(?:the\s+)?code)$/i;
+              const inputs = [...document.querySelectorAll('input:not([type="hidden"])')];
+              const otps = inputs.filter(e => visible(e) && (
+                (e.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code'
+                || otpHint.test(hint(e))
+              ));
+              if (otps.length !== 1) return false;
+              const otp = otps[0];
+              let context = otp.closest('form');
+              if (!context) {
+                context = otp.closest(
+                  '[role="dialog"], [aria-modal="true"], [class*="auth" i], '
+                  + '[class*="login" i], [class*="register" i], [class*="verify" i], '
+                  + '[class*="verification" i], [class*="otp" i], [class*="modal" i], '
+                  + '[class*="dialog" i]'
+                );
+              }
+              if (!context) return false;
+              const contextText = (context.innerText || '').replace(/\s+/g, ' ').trim();
+              const contextAttrs = [
+                context.id || '', context.getAttribute('class') || '',
+                context.getAttribute('name') || '', context.getAttribute('action') || '',
+                context.getAttribute('aria-label') || '',
+              ].join(' ');
+              if (!/login|log[-_ ]?in|sign[-_ ]?in|signin|auth|account|register|注册|登录|登陆|账号|账户/i
+                    .test(contextText + ' ' + contextAttrs)) return false;
+              const phones = inputs.filter(e => {
+                if (!visible(e) || !context.contains(e) || e === otp) return false;
+                const type = (e.getAttribute('type') || 'text').toLowerCase();
+                if (['checkbox','radio','button','submit','reset','password','file'].includes(type)) return false;
+                return type === 'tel'
+                  || (e.getAttribute('autocomplete') || '').toLowerCase() === 'tel'
+                  || phoneHint.test(hint(e));
+              });
+              if (phones.length !== 1) return false;
+              const controls = [...context.querySelectorAll(
+                'button, input[type="button"], input[type="submit"], [role="button"], a'
+              )].filter(visible);
+              const text = e => ((e.innerText || e.value || e.getAttribute('aria-label') || '') + '')
+                .replace(/\s+/g, ' ').trim();
+              return controls.filter(e => initialSend.test(text(e))).length === 1;
+            }"""))
+        except Exception:
+            return False
+
     def auth_challenge_kind(self) -> str | None:
         try:
             kinds: set[str] = set()
@@ -619,10 +683,13 @@ class GenericWebAdapter(SiteAdapter):
             ) and self.page.locator(VISIBLE_FIELD_SELECTOR).count() < 12:
                 kinds.add("other")
             if "one_time_code" in kinds and not ({"captcha", "password"} & kinds):
+                if kinds == {"one_time_code"}:
+                    return "one_time_code"
                 # QR/face/security alternatives may coexist in the same login dialog.
-                # Prefer the explicit SMS path when a unique OTP field is available;
-                # prepare_one_time_code_auth still proves the phone/send context before mutation.
-                return "one_time_code"
+                # Override them only when a read-only proof finds one phone field and
+                # one initial send-code control in that same explicit auth context.
+                if kinds <= {"one_time_code", "other"} and self._has_preparable_sms_auth():
+                    return "one_time_code"
             return next(iter(kinds)) if len(kinds) == 1 else "other" if kinds else None
         except Exception:
             return "other"
@@ -703,7 +770,8 @@ class GenericWebAdapter(SiteAdapter):
             context.getAttribute('aria-label') || '',
           ].join(' ');
           const otherInputs = [...context.querySelectorAll('input:not([type="hidden"])')]
-            .filter(e => visible(e) && e !== otp && !['button', 'submit', 'reset'].includes((e.type || '').toLowerCase()));
+            .filter(e => visible(e) && e !== otp
+              && !['button', 'submit', 'reset', 'checkbox', 'radio'].includes((e.type || '').toLowerCase()));
           const identifier = /phone|mobile|tel|e-?mail|account|username|手机|电话|邮箱|账号|用户名/i;
           if (otherInputs.length > 1 || otherInputs.some(e => !identifier.test(hint(e)))) {
             return {safe: false, controls: []};
