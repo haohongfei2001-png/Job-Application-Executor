@@ -117,12 +117,21 @@ Codes are in memory, expire after 300 seconds, and are consumed once.
 Duplicate delivery is rejected for the remainder of the validity window. Both
 multiple plausible codes and multiple waiting tasks are rejected. A task ID
 must identify a currently waiting OTP task. Without an ID an exact site/company
-hint is required. Expired codes and cancelled-task codes are discarded. Ingestion
-resumes the waiting task; a code is only filled into the adapter's unique ordinary
-OTP field. Existing scoped authentication-confirmation rules still apply.
+hint is required. Expired codes and cancelled-task codes are discarded.
 
-CAPTCHA, slider/image challenges, QR login, face/hardware prompts and passwords
-remain `NEEDS_USER_ACTION`. Unknown facts, contradictory facts, salary choices
+Before entering the broker wait, the live generic adapter may prepare one proven
+SMS-login request: one OTP field, one phone field and one initial send-code control
+inside the same explicit auth context. It fills the canonical phone locally,
+never exposes it to DeepSeek/audit, never auto-resends, and only checks standard
+auth/privacy terms under the existing user-confirmed privacy policy (or if the
+user already checked them). QR/face alternatives may coexist visually; they are
+not automated. A CAPTCHA/password/ambiguous control after the request stops the
+task before the broker is consumed.
+
+Ingestion resumes the waiting task; a code is only filled into the adapter's
+unique ordinary OTP field. Existing scoped authentication-confirmation rules
+still apply. CAPTCHA, slider/image challenges, QR login, face/hardware prompts
+and passwords remain `NEEDS_USER_ACTION`. Unknown facts, contradictory facts, salary choices
 and unsupported family/compliance answers remain `NEEDS_USER_INPUT`. Canonical
 standing privacy/truthfulness consents can be handled automatically. Final
 submission/update confirmation always requires the user to click personally.

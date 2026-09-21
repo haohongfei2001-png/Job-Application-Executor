@@ -239,3 +239,150 @@ def test_generic_adapter_rejects_otp_only_confirm_in_application_form(tmp_path):
     with GenericWebAdapter(html.as_uri()) as adapter:
         assert adapter.confirm_one_time_code_auth() is False
         assert adapter.page.locator("#confirm").get_attribute("data-clicked") is None
+
+
+def _sms_login_page(tmp_path, body, name="sms-login.html"):
+    html = tmp_path / name
+    html.write_text(f"<!doctype html><meta charset=\"utf-8\"><body>{body}</body>", encoding="utf-8")
+    return html
+
+
+def test_sms_login_is_preferred_over_qr_alternative_and_requests_code_once(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>注册登录</h2>
+        <label>手机号 <input id="phone" type="tel" placeholder="请输入手机号"></label>
+        <label>验证码 <input id="otp" autocomplete="one-time-code"></label>
+        <button id="send" type="button"
+          onclick="this.dataset.clicked='yes'; this.textContent='重新发送'">发送验证码</button>
+        <div>扫码登录</div>
+      </div>
+    ''')
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.auth_challenge_kind() == "one_time_code"
+        assert adapter.prepare_one_time_code_auth("13800138000") == "requested"
+        assert adapter.page.locator("#phone").input_value() == "13800138000"
+        assert adapter.page.locator("#send").get_attribute("data-clicked") == "yes"
+        assert adapter.page.locator("#send").inner_text() == "重新发送"
+        assert adapter.auth_challenge_kind() == "one_time_code"
+
+
+def test_sms_login_requires_policy_before_checking_auth_terms(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>注册登录</h2>
+        <label>手机号 <input id="phone" type="tel"></label>
+        <label>验证码 <input id="otp"></label>
+        <label><input id="terms" type="checkbox">同意《注册协议》和《隐私政策》</label>
+        <button id="send" type="button" onclick="this.dataset.clicked='yes'">发送验证码</button>
+      </div>
+    ''', name="sms-terms.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.prepare_one_time_code_auth(
+            "13800138000",
+            allow_standard_auth_terms=False,
+        ) == "consent_required"
+        assert adapter.page.locator("#terms").is_checked() is False
+        assert adapter.page.locator("#phone").input_value() == ""
+        assert adapter.page.locator("#send").get_attribute("data-clicked") is None
+
+
+def test_sms_login_checks_only_auth_terms_when_policy_is_confirmed(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>注册登录</h2>
+        <label>手机号 <input id="phone" type="tel"></label>
+        <label>验证码 <input id="otp"></label>
+        <label><input id="terms" type="checkbox">同意《注册协议》和《隐私政策》</label>
+        <label><input id="marketing" type="checkbox">订阅产品营销消息</label>
+        <button id="send" type="button" onclick="this.dataset.clicked='yes'">发送验证码</button>
+      </div>
+    ''', name="sms-policy.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.prepare_one_time_code_auth(
+            "13800138000",
+            allow_standard_auth_terms=True,
+        ) == "requested"
+        assert adapter.page.locator("#terms").is_checked() is True
+        assert adapter.page.locator("#marketing").is_checked() is False
+        assert adapter.page.locator("#send").get_attribute("data-clicked") == "yes"
+
+
+def test_sms_login_never_auto_resends_code(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>登录</h2>
+        <label>手机号 <input id="phone" type="tel" value="13800138000"></label>
+        <label>验证码 <input id="otp"></label>
+        <button id="resend" type="button" onclick="this.dataset.clicked='yes'">重新发送</button>
+      </div>
+    ''', name="sms-resend.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.prepare_one_time_code_auth("13800138000") == "already_requested"
+        assert adapter.page.locator("#resend").get_attribute("data-clicked") is None
+
+
+def test_sms_login_rejects_ambiguous_phone_controls(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>登录</h2>
+        <label>手机号 <input id="phone1" type="tel"></label>
+        <label>备用手机号 <input id="phone2" name="mobile"></label>
+        <label>验证码 <input id="otp"></label>
+        <button id="send" type="button" onclick="this.dataset.clicked='yes'">发送验证码</button>
+      </div>
+    ''', name="sms-ambiguous-phone.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.prepare_one_time_code_auth("13800138000") == "ambiguous"
+        assert adapter.page.locator("#send").get_attribute("data-clicked") is None
+
+
+def test_sms_login_can_confirm_register_login_only_after_authorized_terms(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>注册登录</h2>
+        <label>手机号 <input id="phone" type="tel"></label>
+        <label>验证码 <input id="otp"></label>
+        <label><input id="terms" type="checkbox">同意《注册协议》和《隐私政策》</label>
+        <button id="send" type="button">发送验证码</button>
+        <button id="login" type="button"
+          onclick="document.querySelector('#login-dialog').remove()">注册/登录</button>
+      </div>
+    ''', name="sms-register-login.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.prepare_one_time_code_auth(
+            "13800138000",
+            allow_standard_auth_terms=True,
+        ) == "requested"
+        assert adapter.enter_one_time_code("462810") is True
+        assert adapter.confirm_one_time_code_auth() is True
+        assert adapter.page.locator("#login-dialog").count() == 0
+
+
+def test_sms_login_reproves_send_control_after_consent_rerender(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>注册登录</h2>
+        <label>手机号 <input id="phone" type="tel"></label>
+        <label>验证码 <input id="otp"></label>
+        <label><input id="terms" type="checkbox"
+          onchange="document.querySelector('#send').id='send2'">
+          同意《注册协议》和《隐私政策》
+        </label>
+        <button id="send" type="button" onclick="this.dataset.clicked='yes'">发送验证码</button>
+      </div>
+    ''', name="sms-rerender.html")
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.prepare_one_time_code_auth(
+            "13800138000",
+            allow_standard_auth_terms=True,
+        ) == "requested"
+        assert adapter.page.locator("#send").count() == 0
+        assert adapter.page.locator("#send2").get_attribute("data-clicked") == "yes"

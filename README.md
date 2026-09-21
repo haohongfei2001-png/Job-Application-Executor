@@ -129,22 +129,29 @@ Recovery deliberately does not inherit submission authorization.
 ### SMS one-time-code authentication
 
 When the local, gitignored `config/otp-bridge.json` enables the iPhone relay, the
-formal executor can resolve an SMS one-time-code challenge only when exactly one
-visible OTP input is identifiable. It sends the current page hostname to the
-relay, consumes one 4–8 digit code, fills that input, and continues only after
-the challenge disappears or the page advances. If entry alone does not advance,
-it may click exactly one visible, enabled authentication confirmation control in
-the OTP field's own form (or an unambiguous explicit auth/dialog container).
-Controls outside that context, ambiguous matches, send/resend controls, initial
-apply controls, account/destructive actions, and final-application controls are
-never clicked. A challenge that remains or changes after that single click stops
-in `BLOCKED`; password, CAPTCHA, QR, face, and other authentication always remain
-human-handled.
+formal executor can orchestrate a narrow SMS-login flow before waiting for the
+code. It must prove one explicit authentication context containing exactly one
+visible OTP field, one phone field and one initial send-code control. The phone
+comes only from the local canonical profile and is never sent to DeepSeek or
+written to audit. A QR/face alternative may coexist in the same dialog; it does
+not force the run to the QR path when the SMS path is uniquely proven.
 
-OTP values are transient and are never written to plans, action logs, screenshot
-metadata, exception messages, or other execution artifacts. Audit records contain
-only non-secret outcome and source information. This authentication convenience
-does not alter the mandatory manual final application click.
+The executor may fill the local canonical phone and click the initial send-code
+control once. It never automatically clicks resend/countdown controls. Standard
+authentication/privacy terms are checked only when
+`policy.auto_accept_privacy_terms` is user-confirmed, or when the user already
+checked them on the page; unrelated marketing/newsletter consent is untouched.
+A combined authentication control such as `注册/登录` is allowed only inside the
+same proven auth context after those terms are authorized. Password, CAPTCHA,
+slider/image challenges and ambiguous controls remain human-handled.
+
+After the request is sent, the existing OTP path remains unchanged: the executor
+passes only the current hostname to the local relay, consumes one 4–8 digit code,
+fills the unique OTP field, and continues only after the challenge disappears or
+the scoped authentication confirmation succeeds. OTP values are transient,
+single-use and never written to plans, action logs, screenshot metadata,
+exception messages, SQLite, or DeepSeek. This authentication convenience does
+not alter the mandatory manual final application click at `READY_TO_SUBMIT`.
 
 ## Resolution and safety rules
 

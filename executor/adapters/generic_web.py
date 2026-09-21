@@ -38,6 +38,25 @@ OTP_SEND_CONTROL_RE = re.compile(
     r"get\s+(?:the\s+)?code|resend",
     re.I,
 )
+OTP_INITIAL_SEND_CONTROL_RE = re.compile(
+    r"^(?:发送验证码|获取验证码|发送短信验证码|获取短信验证码|"
+    r"send\s+(?:the\s+)?code|get\s+(?:the\s+)?code|request\s+(?:the\s+)?code)$",
+    re.I,
+)
+OTP_RESEND_CONTROL_RE = re.compile(
+    r"重新发送|重发|resend|\d+\s*(?:s|sec|秒).*(?:发送|重发|resend)",
+    re.I,
+)
+PHONE_HINT_RE = re.compile(r"phone|mobile|tel|手机号|手机号码|联系电话|电话", re.I)
+AUTH_TERMS_RE = re.compile(
+    r"隐私政策|隐私协议|privacy\s+policy|注册协议|用户协议|服务协议|"
+    r"terms(?:\s+of\s+(?:service|use))?|terms\s*&\s*conditions",
+    re.I,
+)
+OTP_REGISTER_LOGIN_RE = re.compile(
+    r"^(?:注册\s*/\s*登录|登录\s*/\s*注册|注册并登录|register\s*/\s*log\s*in)$",
+    re.I,
+)
 ACCOUNT_OR_DESTRUCTIVE_RE = re.compile(
     r"注册|创建账号|创建账户|注销|删除|取消账号|sign\s*up|register|"
     r"create\s+(?:an?\s+)?account|delete|remove|destroy|deactivate",
@@ -384,6 +403,263 @@ class GenericWebAdapter(SiteAdapter):
                 matches.append(visible_inputs.nth(int(item["index"])))
         return matches
 
+    def prepare_one_time_code_auth(
+        self,
+        phone: str | None,
+        *,
+        allow_standard_auth_terms: bool = False,
+    ) -> str:
+        """Prepare one conservative SMS-login request before waiting for the OTP.
+
+        The phone value is supplied by the local canonical profile. It is never
+        returned from this method or written to audit. Resend controls are never
+        clicked automatically.
+        """
+        script = r"""() => {
+          const visible = e => {
+            const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+            return style.display !== 'none'
+              && style.visibility !== 'hidden'
+              && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+              && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+          };
+          const hint = e => [
+            ...(e.labels ? [...e.labels].map(x => x.innerText || '') : []),
+            e.getAttribute('name') || '', e.id || '',
+            e.getAttribute('placeholder') || '', e.getAttribute('aria-label') || '',
+            e.getAttribute('autocomplete') || '', e.getAttribute('type') || '',
+          ].join(' ');
+          const otpHint = /验证码|校验码|动态码|短信码|verification[\s_-]*code|one[\s_-]*time[\s_-]*code|otp/i;
+          const phoneHint = /phone|mobile|tel|手机号|手机号码|联系电话|电话/i;
+          const authTerms = /隐私政策|隐私协议|privacy\s+policy|注册协议|用户协议|服务协议|terms(?:\s+of\s+(?:service|use))?|terms\s*&\s*conditions/i;
+          const initialSend = /^(?:发送验证码|获取验证码|发送短信验证码|获取短信验证码|send\s+(?:the\s+)?code|get\s+(?:the\s+)?code|request\s+(?:the\s+)?code)$/i;
+          const resend = /重新发送|重发|resend|\d+\s*(?:s|sec|秒).*(?:发送|重发|resend)/i;
+          const inputs = [...document.querySelectorAll('input:not([type="hidden"])')];
+          const otps = inputs.filter(e => visible(e) && (
+            (e.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code'
+            || otpHint.test(hint(e))
+          ));
+          if (otps.length !== 1) return {status: 'ambiguous'};
+
+          const otp = otps[0];
+          let context = otp.closest('form');
+          if (!context) {
+            context = otp.closest(
+              '[role="dialog"], [aria-modal="true"], [class*="auth" i], '
+              + '[class*="login" i], [class*="register" i], [class*="verify" i], '
+              + '[class*="verification" i], [class*="otp" i], [class*="modal" i], '
+              + '[class*="dialog" i]'
+            );
+          }
+          if (!context) return {status: 'not_needed'};
+
+          const contextText = (context.innerText || '').replace(/\s+/g, ' ').trim();
+          const contextAttrs = [
+            context.id || '', context.getAttribute('class') || '',
+            context.getAttribute('name') || '', context.getAttribute('action') || '',
+            context.getAttribute('aria-label') || '',
+          ].join(' ');
+          const explicitAuth = /login|log[-_ ]?in|sign[-_ ]?in|signin|auth|account|register|注册|登录|登陆|账号|账户/i
+            .test(contextText + ' ' + contextAttrs);
+
+          const phones = inputs.filter(e => {
+            if (!visible(e) || !context.contains(e) || e === otp) return false;
+            const type = (e.getAttribute('type') || 'text').toLowerCase();
+            if (['checkbox','radio','button','submit','reset','password','file'].includes(type)) return false;
+            return type === 'tel'
+              || (e.getAttribute('autocomplete') || '').toLowerCase() === 'tel'
+              || phoneHint.test(hint(e));
+          });
+          if (!phones.length) return {status: 'not_needed'};
+          if (phones.length !== 1 || !explicitAuth) return {status: 'ambiguous'};
+
+          const allControls = [...document.querySelectorAll(
+            'button, input[type="button"], input[type="submit"], [role="button"], a'
+          )];
+          const controls = allControls.filter(e => visible(e) && context.contains(e));
+          const text = e => ((e.innerText || e.value || e.getAttribute('aria-label') || '') + '')
+            .replace(/\s+/g, ' ').trim();
+          const initial = controls.filter(e => initialSend.test(text(e)));
+          const resendControls = controls.filter(e => resend.test(text(e)));
+          if (initial.length > 1) return {status: 'ambiguous'};
+
+          const checkboxes = inputs.filter(e =>
+            visible(e) && context.contains(e)
+            && (e.getAttribute('type') || '').toLowerCase() === 'checkbox'
+          );
+          const terms = checkboxes.filter(e => {
+            const label = e.closest('label');
+            const parent = e.parentElement;
+            const t = [
+              hint(e),
+              label ? label.innerText || '' : '',
+              parent ? parent.innerText || '' : '',
+            ].join(' ');
+            return authTerms.test(t);
+          });
+
+          return {
+            status: initial.length === 1 ? 'prepare' : (resendControls.length ? 'already_requested' : 'not_needed'),
+            phoneIndex: inputs.indexOf(phones[0]),
+            sendIndex: initial.length === 1 ? allControls.indexOf(initial[0]) : -1,
+            consentIndices: terms.map(e => inputs.indexOf(e)),
+            uncheckedConsentIndices: terms.filter(e => !e.checked).map(e => inputs.indexOf(e)),
+            hasChina86: /(?:中国\s*)?\+\s*86/.test(contextText),
+          };
+        }"""
+        try:
+            result = self.page.evaluate(script) or {}
+        except Exception:
+            return "ambiguous"
+
+        status = str(result.get("status") or "ambiguous")
+        if status in {"not_needed", "already_requested", "ambiguous"}:
+            if status == "already_requested":
+                self._otp_request_prepared = True
+            return status
+        if status != "prepare":
+            return "ambiguous"
+
+        digits = re.sub(r"\D", "", str(phone or ""))
+        if not (6 <= len(digits) <= 15):
+            return "phone_required"
+        if result.get("hasChina86") and len(digits) == 13 and digits.startswith("86"):
+            digits = digits[2:]
+
+        inputs = self.page.locator('input:not([type="hidden"])')
+        phone_index = int(result.get("phoneIndex", -1))
+        send_index = int(result.get("sendIndex", -1))
+        if phone_index < 0 or send_index < 0:
+            return "ambiguous"
+
+        try:
+            phone_input = inputs.nth(phone_index)
+            existing_digits = re.sub(r"\D", "", phone_input.input_value() or "")
+            if existing_digits and existing_digits != digits:
+                return "ambiguous"
+
+            unchecked_terms = [int(i) for i in result.get("uncheckedConsentIndices") or []]
+            terms_present = bool(result.get("consentIndices"))
+            terms_already_accepted = terms_present and not unchecked_terms
+            if unchecked_terms and not allow_standard_auth_terms:
+                return "consent_required"
+
+            getattr(self, "mutation_guard", lambda: None)()
+            if not existing_digits:
+                phone_input.fill(digits)
+
+            if unchecked_terms:
+                for index in unchecked_terms:
+                    checkbox = inputs.nth(index)
+                    if not checkbox.is_checked():
+                        getattr(self, "mutation_guard", lambda: None)()
+                        checkbox.check()
+
+            self._otp_auth_terms_allowed = bool(
+                allow_standard_auth_terms or terms_already_accepted
+            )
+            # Filling/checking can re-render React forms. Re-prove the exact
+            # send-code control after those mutations instead of trusting the
+            # pre-mutation global nth() index.
+            send_index = self._current_sms_initial_send_index()
+            if send_index < 0:
+                return "ambiguous"
+            send = self.page.locator(BUTTON_SELECTOR).nth(send_index)
+            send_text = " ".join(
+                (
+                    send.get_attribute("value")
+                    or send.get_attribute("aria-label")
+                    or send.inner_text()
+                    or ""
+                ).split()
+            )
+            if (
+                not OTP_INITIAL_SEND_CONTROL_RE.fullmatch(send_text)
+                or OTP_RESEND_CONTROL_RE.search(send_text)
+                or is_final_submit(send_text)
+                or is_initial_apply(send_text)
+                or ACCOUNT_OR_DESTRUCTIVE_RE.search(send_text)
+            ):
+                return "ambiguous"
+            getattr(self, "mutation_guard", lambda: None)()
+            send.click()
+            self._otp_request_prepared = True
+            self.page.wait_for_timeout(800)
+            self.page = latest_page(self.ctx, self.page)
+            return "requested"
+        except Exception:
+            return "ambiguous"
+
+    def _current_sms_initial_send_index(self) -> int:
+        """Return the one current send-code control in a proven SMS auth context."""
+        try:
+            value = self.page.evaluate(r"""() => {
+              const visible = e => {
+                const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                return style.display !== 'none'
+                  && style.visibility !== 'hidden'
+                  && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+                  && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+              };
+              const hint = e => [
+                ...(e.labels ? [...e.labels].map(x => x.innerText || '') : []),
+                e.getAttribute('name') || '', e.id || '',
+                e.getAttribute('placeholder') || '', e.getAttribute('aria-label') || '',
+                e.getAttribute('autocomplete') || '', e.getAttribute('type') || '',
+              ].join(' ');
+              const otpHint = /验证码|校验码|动态码|短信码|verification[\s_-]*code|one[\s_-]*time[\s_-]*code|otp/i;
+              const phoneHint = /phone|mobile|tel|手机号|手机号码|联系电话|电话/i;
+              const initialSend = /^(?:发送验证码|获取验证码|发送短信验证码|获取短信验证码|send\s+(?:the\s+)?code|get\s+(?:the\s+)?code|request\s+(?:the\s+)?code)$/i;
+              const inputs = [...document.querySelectorAll('input:not([type="hidden"])')];
+              const otps = inputs.filter(e => visible(e) && (
+                (e.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code'
+                || otpHint.test(hint(e))
+              ));
+              if (otps.length !== 1) return -1;
+              const otp = otps[0];
+              let context = otp.closest('form');
+              if (!context) {
+                context = otp.closest(
+                  '[role="dialog"], [aria-modal="true"], [class*="auth" i], '
+                  + '[class*="login" i], [class*="register" i], [class*="verify" i], '
+                  + '[class*="verification" i], [class*="otp" i], [class*="modal" i], '
+                  + '[class*="dialog" i]'
+                );
+              }
+              if (!context) return -1;
+              const contextText = (context.innerText || '').replace(/\s+/g, ' ').trim();
+              const contextAttrs = [
+                context.id || '', context.getAttribute('class') || '',
+                context.getAttribute('name') || '', context.getAttribute('action') || '',
+                context.getAttribute('aria-label') || '',
+              ].join(' ');
+              if (!/login|log[-_ ]?in|sign[-_ ]?in|signin|auth|account|register|注册|登录|登陆|账号|账户/i
+                    .test(contextText + ' ' + contextAttrs)) return -1;
+              const phones = inputs.filter(e => {
+                if (!visible(e) || !context.contains(e) || e === otp) return false;
+                const type = (e.getAttribute('type') || 'text').toLowerCase();
+                if (['checkbox','radio','button','submit','reset','password','file'].includes(type)) return false;
+                return type === 'tel'
+                  || (e.getAttribute('autocomplete') || '').toLowerCase() === 'tel'
+                  || phoneHint.test(hint(e));
+              });
+              if (phones.length !== 1) return -1;
+              const all = [...document.querySelectorAll(
+                'button, input[type="button"], input[type="submit"], [role="button"], a'
+              )];
+              const text = e => ((e.innerText || e.value || e.getAttribute('aria-label') || '') + '')
+                .replace(/\s+/g, ' ').trim();
+              const sends = all.filter(e => visible(e) && context.contains(e) && initialSend.test(text(e)));
+              return sends.length === 1 ? all.indexOf(sends[0]) : -1;
+            }""")
+            return int(value)
+        except Exception:
+            return -1
+
+    def _has_preparable_sms_auth(self) -> bool:
+        """Read-only proof that the visible OTP belongs to a unique SMS-login setup."""
+        return self._current_sms_initial_send_index() >= 0
+
     def auth_challenge_kind(self) -> str | None:
         try:
             kinds: set[str] = set()
@@ -425,6 +701,17 @@ class GenericWebAdapter(SiteAdapter):
                 re.I,
             ) and self.page.locator(VISIBLE_FIELD_SELECTOR).count() < 12:
                 kinds.add("other")
+            if "one_time_code" in kinds and not ({"captcha", "password"} & kinds):
+                if kinds == {"one_time_code"}:
+                    return "one_time_code"
+                # QR/face/security alternatives may coexist in the same login dialog.
+                # Override them only when a read-only proof finds one phone field and
+                # one initial send-code control in that same explicit auth context.
+                if kinds <= {"one_time_code", "other"} and (
+                    bool(getattr(self, "_otp_request_prepared", False))
+                    or self._has_preparable_sms_auth()
+                ):
+                    return "one_time_code"
             return next(iter(kinds)) if len(kinds) == 1 else "other" if kinds else None
         except Exception:
             return "other"
@@ -505,7 +792,8 @@ class GenericWebAdapter(SiteAdapter):
             context.getAttribute('aria-label') || '',
           ].join(' ');
           const otherInputs = [...context.querySelectorAll('input:not([type="hidden"])')]
-            .filter(e => visible(e) && e !== otp && !['button', 'submit', 'reset'].includes((e.type || '').toLowerCase()));
+            .filter(e => visible(e) && e !== otp
+              && !['button', 'submit', 'reset', 'checkbox', 'radio'].includes((e.type || '').toLowerCase()));
           const identifier = /phone|mobile|tel|e-?mail|account|username|手机|电话|邮箱|账号|用户名/i;
           if (otherInputs.length > 1 || otherInputs.some(e => !identifier.test(hint(e)))) {
             return {safe: false, controls: []};
@@ -543,7 +831,8 @@ class GenericWebAdapter(SiteAdapter):
             for item in result.get("controls") or []:
                 text = str(item.get("text") or "")
                 normalized = " ".join(text.split()).casefold()
-                if normalized not in OTP_CONFIRM_TEXTS:
+                register_login = bool(OTP_REGISTER_LOGIN_RE.fullmatch(normalized))
+                if normalized not in OTP_CONFIRM_TEXTS and not register_login:
                     continue
                 if normalized in OTP_CONTEXTUAL_AUTH_CONFIRM_TEXTS and not auth_context:
                     continue
@@ -551,7 +840,12 @@ class GenericWebAdapter(SiteAdapter):
                     is_final_submit(text)
                     or is_initial_apply(text)
                     or OTP_SEND_CONTROL_RE.search(text)
-                    or ACCOUNT_OR_DESTRUCTIVE_RE.search(text)
+                ):
+                    continue
+                if ACCOUNT_OR_DESTRUCTIVE_RE.search(text) and not (
+                    register_login
+                    and auth_context
+                    and bool(getattr(self, "_otp_auth_terms_allowed", False))
                 ):
                     continue
                 eligible.append(item)
