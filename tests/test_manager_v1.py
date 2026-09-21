@@ -604,3 +604,86 @@ def test_pause_fences_active_worker_lease(tmp_path):
     assert not q.renew(tid, claimed["owner"])
     with pytest.raises(RuntimeError):
         q.checkpoint(tid, claimed["owner"], "FORM_FILLED")
+
+
+def test_explicit_resume_of_single_human_action_wait_is_local_and_deterministic(tmp_path):
+    turn = ManagerTurn(
+        reply="请先手动完成安全验证。",
+        decisions=[ManagerDecision(action=ManagerAction.REPORT, reason="challenge")],
+    )
+    q, _, provider, manager = controller(tmp_path, turn)
+    tid = q.enqueue(spec(tmp_path))["task_id"]
+    claimed = q.claim("test-worker")
+    q.checkpoint(
+        tid,
+        claimed["owner"],
+        "NEEDS_USER_ACTION",
+        blocker="security_challenge",
+        release=True,
+    )
+
+    result = manager.handle("继续这个岗位")
+
+    assert result["actions"] == [{
+        "action": "RESUME",
+        "status": "accepted",
+        "task_id": tid,
+    }]
+    assert q.get(tid)["stage"] == "DISCOVERED"
+    assert q.get(tid)["blocker"] is None
+    assert provider.seen is None
+    assert "重新检查当前页面" in result["reply"]
+
+
+def test_explicit_resume_does_not_guess_between_multiple_human_action_tasks(tmp_path):
+    turn = ManagerTurn(
+        reply="需要明确岗位。",
+        decisions=[ManagerDecision(action=ManagerAction.REPORT, reason="ambiguous")],
+    )
+    q, _, provider, manager = controller(tmp_path, turn)
+    tids = []
+    for suffix in ("role-1", "role-2"):
+        task = q.enqueue(spec(
+            tmp_path / suffix,
+            url=f"https://jobs.example.test/apply?postId={suffix}",
+        ))
+        tids.append(task["task_id"])
+        claimed = q.claim("test-worker")
+        q.checkpoint(
+            task["task_id"],
+            claimed["owner"],
+            "NEEDS_USER_ACTION",
+            blocker="security_challenge",
+            release=True,
+        )
+
+    result = manager.handle("继续这个岗位")
+
+    assert result["actions"] == [{"action": "REPORT", "status": "observed"}]
+    assert provider.seen is not None
+    assert all(q.get(tid)["stage"] == "NEEDS_USER_ACTION" for tid in tids)
+
+
+def test_conflicting_resume_and_pause_text_never_uses_local_resume_fast_path(tmp_path):
+    turn = ManagerTurn(
+        reply="先暂停。",
+        decisions=[ManagerDecision(action=ManagerAction.PAUSE, task_id="placeholder")],
+    )
+    q, _, provider, manager = controller(tmp_path, turn)
+    tid = q.enqueue(spec(tmp_path))["task_id"]
+    claimed = q.claim("test-worker")
+    q.checkpoint(
+        tid,
+        claimed["owner"],
+        "NEEDS_USER_ACTION",
+        blocker="security_challenge",
+        release=True,
+    )
+    provider.turn.decisions[0].task_id = tid
+
+    result = manager.handle("继续但先暂停这个岗位")
+
+    assert provider.seen is not None
+    assert result["actions"][0]["action"] == "PAUSE"
+    assert result["actions"][0]["status"] == "accepted"
+    assert q.get(tid)["stage"] == "BLOCKED"
