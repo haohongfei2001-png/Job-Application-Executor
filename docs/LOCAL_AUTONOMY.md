@@ -152,3 +152,23 @@ all pending keys together. `retry_exhausted`: inspect the safe status and repair
 the underlying issue; automatic retries stop. No error responses echo request
 bodies or browser exception text. A service startup failure may indicate the
 exclusive worker lock is held, a port conflict, or unsafe auth-token permissions.
+
+
+## DeepSeek manager dashboard
+
+The DeepSeek Application Agent adds a user-facing chat/control layer on top of
+this daemon. It does not replace the queue, OTP broker, protected-target checks
+or manual final-submit gate.
+
+Open the local panel with:
+
+    .venv/bin/python -m executor.autonomy.cli ui
+
+Send one chat turn from stdin with:
+
+    printf '%s' '继续这个岗位' | .venv/bin/python -m executor.autonomy.cli chat
+
+Task-level pause is available through the CLI/API and stores BLOCKED with the
+private blocker user_paused while preserving the last safe checkpoint. Resume
+returns to that checkpoint. See docs/DEEPSEEK_APPLICATION_AGENT.md for the
+manager decision schema, UI session security and privacy boundaries.
