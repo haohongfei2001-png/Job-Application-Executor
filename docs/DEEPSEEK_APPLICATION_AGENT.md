@@ -89,7 +89,9 @@ Job discovery from PJSDAS/Gmail is an upstream capability and should resolve an 
 
 OTP stays outside DeepSeek. The raw code remains memory-only, single-use and expires under the existing broker TTL. It is never sent to DeepSeek.
 
-CAPTCHA, slider/puzzle, image verification, QR login, face verification, hardware/security-device prompts and passwords remain NEEDS_USER_ACTION. Unknown objective facts remain NEEDS_USER_INPUT.
+For a live task, the deterministic browser executor—not DeepSeek—may choose a uniquely proven SMS path inside an authentication dialog, fill the canonical phone locally, accept only already-authorized standard auth/privacy terms, click one initial send-code control, and then wait on the local OTP broker. The phone value, OTP value, cookies and browser credentials are not part of the manager payload. Automatic resend is forbidden.
+
+A QR/face alternative may be visible beside the SMS form; that does not expose the QR flow to the manager or make it an automated action. CAPTCHA, slider/puzzle, image verification, password entry, ambiguous auth controls, hardware/security-device prompts and unsupported account actions remain NEEDS_USER_ACTION. Unknown objective facts remain NEEDS_USER_INPUT.
 
 ## Final submission boundary
 
