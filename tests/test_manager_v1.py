@@ -161,6 +161,20 @@ def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_pat
     assert denied["actions"][0]["status"] == "denied"
     assert not q.tasks()
 
+    # "apply" inside the URL is not independent user intent.
+    denied = manager.handle("帮我看看这个链接：" + url)
+    assert denied["actions"][0]["status"] == "denied"
+    assert denied["actions"][0]["reason"] == "explicit_apply_required"
+    assert not q.tasks()
+
+    # The model cannot shorten or otherwise mutate a precise user-supplied URL.
+    provider.turn.decisions[0].target_url = "https://jobs.example.test/apply"
+    denied = manager.handle("投递这个职位：" + url)
+    assert denied["actions"][0]["status"] == "denied"
+    assert denied["actions"][0]["reason"] == "exact_url_required"
+    assert not q.tasks()
+    provider.turn.decisions[0].target_url = url
+
     accepted = manager.handle("投递这个职位：" + url)
     assert accepted["actions"][0]["status"] == "accepted"
     task = q.get(accepted["actions"][0]["task_id"])
@@ -201,6 +215,55 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     assert result["actions"] == []
     assert "unavailable" in result["reply"].lower()
     assert q.get(tid)["stage"] == "DISCOVERED"
+
+
+@pytest.mark.parametrize("message", [
+    "验证码是 482913",
+    "OTP: 72941836",
+    "password: super-secret-value",
+    "token = abcdefghijklmnop",
+    "Bearer abcdefghijklmnop",
+])
+def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
+    turn = ManagerTurn(reply="不应调用模型。", decisions=[])
+    _, _, provider, manager = controller(tmp_path, turn)
+    result = manager.handle(message)
+    assert result["actions"] == []
+    assert provider.seen is None
+    assert "DeepSeek" in result["reply"]
+
+
+def test_numeric_pending_answer_requires_complete_number_boundary(tmp_path):
+    field = "experience.years"
+    q = TaskQueue(tmp_path / "runtime")
+    worker = Worker(q, settings={"deepseek": {"enabled": False}})
+    tid = q.enqueue(spec(tmp_path))["task_id"]
+    claimed = q.claim("test-worker")
+    q.checkpoint(
+        tid,
+        claimed["owner"],
+        "NEEDS_USER_INPUT",
+        blocker="unknown_facts",
+        details={"unresolved_keys": [field]},
+        release=True,
+    )
+    provider = FakeProvider(ManagerTurn(reply="收到。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.ANSWER_PENDING,
+            task_id=tid,
+            field_key=field,
+            value=1,
+        )
+    ]))
+    manager = ManagerController(q, worker, provider=provider, settings={"profile_path": "unused"})
+
+    denied = manager.handle("我有10年相关经验")
+    assert denied["actions"][0]["status"] == "denied"
+    assert q.get(tid)["stage"] == "NEEDS_USER_INPUT"
+
+    accepted = manager.handle("我有1年相关经验")
+    assert accepted["actions"][0]["status"] == "accepted"
+    assert worker.answers[tid][field] == 1
 
 
 def test_ui_ticket_is_one_time_and_session_is_ephemeral(tmp_path):
