@@ -57,7 +57,10 @@ class GenericWebAdapter(SiteAdapter):
         return target_url.startswith(("http://", "https://", "file://"))
 
     def open(self) -> None:
-        self.pw, self.browser, self.ctx, self.page = connect(self.target_url)
+        if getattr(self, "existing_browser_only", False):
+            self.pw, self.browser, self.ctx, self.page = connect(self.target_url, existing_only=True)
+        else:
+            self.pw, self.browser, self.ctx, self.page = connect(self.target_url)
 
     def close(self) -> None:
         if self.pw:
@@ -245,6 +248,7 @@ class GenericWebAdapter(SiteAdapter):
     def apply_resolutions(self, resolutions: Iterable[FieldResolution]) -> list[dict]:
         actions: list[dict] = []
         for resolution in resolutions:
+            getattr(self, "mutation_guard", lambda: None)()
             if resolution.status != ResolutionStatus.RESOLVED:
                 continue
             element = self._locate(resolution.selector, resolution.label)
@@ -410,7 +414,7 @@ class GenericWebAdapter(SiteAdapter):
             ).count() > 0:
                 kinds.add("captcha")
             body = (self.page.locator("body").inner_text(timeout=2500) or "")[-7000:]
-            if re.search(r"captcha|verify you are human|人机验证", body, re.I):
+            if re.search(r"captcha|verify you are human|人机验证|滑块|滑动.*验证|拖动.*验证|图形验证码|图片验证|slide.*verify|drag.*puzzle", body, re.I):
                 kinds.add("captcha")
             if re.search(r"扫码登录|二维码|qr[ -]?code|face (?:id|verification)|人脸|安全密钥", body, re.I):
                 kinds.add("other")
@@ -435,6 +439,7 @@ class GenericWebAdapter(SiteAdapter):
             return super().current_page_hostname()
 
     def enter_one_time_code(self, code: str) -> bool:
+        getattr(self, "mutation_guard", lambda: None)()
         if not re.fullmatch(r"\d{4,8}", code or ""):
             return False
         candidates = self._otp_candidates()
@@ -553,6 +558,7 @@ class GenericWebAdapter(SiteAdapter):
             if len(eligible) != 1:
                 return False
             index = int(eligible[0]["index"])
+            getattr(self, "mutation_guard", lambda: None)()
             self.page.locator(BUTTON_SELECTOR).nth(index).click()
             self.page.wait_for_timeout(1800)
             self.page = latest_page(self.ctx, self.page)
@@ -567,6 +573,7 @@ class GenericWebAdapter(SiteAdapter):
         return "ambiguous" if count > 1 else "unavailable"
 
     def start_application(self) -> bool:
+        getattr(self, "mutation_guard", lambda: None)()
         matches = [(el, text) for el, text in self._buttons() if is_initial_apply(text) and not is_final_submit(text)]
         if len(matches) != 1:
             return False
@@ -576,6 +583,7 @@ class GenericWebAdapter(SiteAdapter):
         return True
 
     def save_draft(self) -> bool:
+        getattr(self, "mutation_guard", lambda: None)()
         matches = [
             (element, text) for element, text in self._buttons()
             if re.search(r"^(?:save draft|save as draft|保存草稿|暂存)$", " ".join(text.split()), re.I)
@@ -588,6 +596,7 @@ class GenericWebAdapter(SiteAdapter):
         return True
 
     def advance(self) -> bool:
+        getattr(self, "mutation_guard", lambda: None)()
         for element, text in self._buttons():
             if is_next(text) and not is_final_submit(text):
                 element.click()
@@ -601,14 +610,7 @@ class GenericWebAdapter(SiteAdapter):
         return matches[0] if len(matches) == 1 else None
 
     def submit(self) -> dict:
-        matches = [(element, text) for element, text in self._buttons() if is_final_submit(text)]
-        if len(matches) != 1:
-            raise RuntimeError(f"expected exactly one final submit control, found {len(matches)}")
-        control, text = matches[0]
-        control.click()
-        self.page.wait_for_timeout(2200)
-        self.page = latest_page(self.ctx, self.page)
-        return {"control": text, "url": self.page.url}
+        raise RuntimeError("automated final submission is disabled; user click required")
 
     def verify_submission(self) -> SubmissionVerification:
         try:

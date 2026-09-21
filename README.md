@@ -184,3 +184,11 @@ The existing Schneider/BOSS adapter and its unit tests are preserved. The BOSS c
 Already-submitted targets are protected separately through local, gitignored `config/protected-targets.json`. The migrated local configuration contains the submitted Schneider target identifiers, so a fresh generic execution against those exact targets is refused before browser mutation. A sanitized example schema is tracked as `config/protected-targets.example.json`.
 
 The old `python -m executor.cli schneider-*` compatibility commands remain available for regression/reference, including their existing submitted-state refusal. Do not use them to alter an already submitted application.
+
+## Local autonomous supervision
+
+The durable task queue, local daemon, OTP broker and authenticated localhost API
+are available through `.venv/bin/python -m executor.autonomy.cli`.
+See [Local Autonomy v1](docs/LOCAL_AUTONOMY.md) for lifecycle commands, API and
+Codex/Work handoff, private storage, restart recovery and the synthetic E2E.
+The daemon stops at `READY_TO_SUBMIT`; final submission remains user-only.

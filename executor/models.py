@@ -89,6 +89,9 @@ class ApplicationStage(StrEnum):
     VERIFIED = "VERIFIED"
     BLOCKED = "BLOCKED"
     ERROR = "ERROR"
+    NEEDS_USER_INPUT = "NEEDS_USER_INPUT"
+    NEEDS_USER_ACTION = "NEEDS_USER_ACTION"
+    CANCELLED = "CANCELLED"
 
 
 class ApplicationPlan(BaseModel):

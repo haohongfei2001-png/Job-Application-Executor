@@ -31,6 +31,10 @@ class ApplicationExecutor:
         submit_authorized: bool = False,
         execution_id: str | None = None,
         otp_bridge: OtpBridge | None = None,
+        audit_store=None,
+        guard=None,
+        resume_url: str | None = None,
+        existing_browser_only: bool = False,
     ):
         self.target_url = target_url
         self.profile_path = Path(profile_path).expanduser().resolve()
@@ -49,7 +53,10 @@ class ApplicationExecutor:
                 if isinstance(asset, dict) and asset.get("path")
             },
         )
-        self.audit = AuditStore(self.plan.execution_id)
+        self.audit = audit_store or AuditStore(self.plan.execution_id)
+        self.guard = guard or (lambda: None)
+        self.resume_url = resume_url
+        self.existing_browser_only = existing_browser_only
         self.user_answers = self.audit.load_user_answers()
         self.otp_bridge = otp_bridge or OtpBridge()
 
@@ -130,7 +137,7 @@ class ApplicationExecutor:
             return False
 
         reported_source = result.get("source")
-        source = reported_source if reported_source in {"iphone_relay", "mac_messages"} else "unknown"
+        source = reported_source if reported_source in {"iphone_relay", "mac_messages", "local_broker"} else "unknown"
         code = str(result.get("code") or "")
         entered = False
         try:
@@ -303,9 +310,22 @@ class ApplicationExecutor:
         return {"ok": not errors, "errors": errors, "warnings": warnings}
 
     def run(self, max_pages: int = 15) -> ApplicationPlan:
+        self.guard()
         adapter = adapter_for_url(self.target_url)
+        adapter.mutation_guard = self.guard
+        adapter.existing_browser_only = self.existing_browser_only
+        if self.resume_url:
+            from .protected_targets import assert_target_not_protected
+            if urlparse(self.resume_url).netloc != urlparse(self.target_url).netloc:
+                raise RuntimeError("checkpoint origin differs from exact target")
+            assert_target_not_protected(self.resume_url)
+            adapter.target_url = self.resume_url
         with adapter:
             for page_index in range(max_pages):
+                self.guard()
+                page = getattr(adapter, "page", None)
+                if page is not None:
+                    self.plan.metadata["checkpoint_url"] = page.url
                 auth_kind = self._auth_kind(adapter)
                 if auth_kind == "one_time_code":
                     if not self._resolve_otp_challenge(adapter, page_index):

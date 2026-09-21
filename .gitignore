@@ -20,3 +20,4 @@ applications/*
 !applications/.gitkeep
 config/protected-targets.json
 config/otp-bridge.json
+runtime/

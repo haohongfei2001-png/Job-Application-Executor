@@ -41,7 +41,7 @@ def classify(hint: str,input_type: str="text",autocomplete: str=""):
         if any(re.search(p,h,re.I) for p in rule.patterns): return "AUTO_FILL",rule.key,"deterministic label/name rule"
     return "UNKNOWN",None,"no deterministic rule"
 
-FINAL_SUBMIT_PATTERNS=(r"^submit$",r"submit application",r"complete application",r"final submit",r"^提交$",r"提交申请",r"确认提交",r"立即投递",r"确认投递",r"正式投递")
+FINAL_SUBMIT_PATTERNS=(r"^submit$",r"submit application",r"complete application",r"final submit",r"提交",r"立即投递",r"确认投递",r"正式投递",r"确认.*(?:更新|申请|报名)",r"(?:confirm|final).*(?:update|application)")
 NEXT_PATTERNS=(r"^next$",r"continue",r"save and continue",r"下一步",r"继续",r"保存并继续")
 APPLY_PATTERNS=(r"apply now",r"start application",r"开始申请",r"申请职位",r"立即申请")
 

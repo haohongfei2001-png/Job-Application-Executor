@@ -107,29 +107,38 @@ def cleanup_live_pages(ctx, target_url: str | None = None) -> dict[str, int]:
 
 def _connect_isolated(target_url: str | None = None):
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(
-        executable_path=CHROME,
-        headless=True,
-        args=[
-            "--disable-extensions",
-            "--disable-background-networking",
-            "--disable-component-update",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ],
-    )
-    ctx = browser.new_context()
-    page = ctx.new_page()
-    if target_url:
-        page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-    return pw, browser, ctx, page
+    try:
+        browser = pw.chromium.launch(
+            executable_path=CHROME,
+            headless=True,
+            args=[
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-component-update",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        ctx = browser.new_context()
+        page = ctx.new_page()
+        if target_url:
+            page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+        return pw, browser, ctx, page
+    except BaseException:
+        pw.stop()
+        raise
 
 
-def connect(target_url: str | None = None):
+
+def connect(target_url: str | None = None, *, existing_only: bool = False):
     if browser_mode() in {"test", "isolated", "headless"}:
         return _connect_isolated(target_url)
 
-    ensure_chrome("about:blank")
+    if existing_only:
+        if not _alive():
+            raise RuntimeError("existing CDP session unavailable")
+    else:
+        ensure_chrome("about:blank")
     pw = sync_playwright().start()
     browser = pw.chromium.connect_over_cdp(CDP, no_defaults=True)
     ctx = browser.contexts[0]
