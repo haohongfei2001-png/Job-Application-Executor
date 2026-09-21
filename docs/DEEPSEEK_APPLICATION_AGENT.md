@@ -36,6 +36,15 @@ Deterministic policy rules:
 
 DeepSeek can interpret meaning and choose among safe tools; it cannot invent applicant facts.
 
+Unambiguous control commands do not have to depend on model discretion. When the
+current message contains explicit resume intent and exactly one task is waiting
+at `NEEDS_USER_ACTION`, the deterministic local controller resumes that task
+directly after the credential/OTP interception gate. Conflicting control language
+or multiple waiting tasks disables this shortcut. This prevents a clear command
+such as `继续这个岗位` from being downgraded by the model to a read-only REPORT.
+Resume never bypasses the browser safety checks: a real CAPTCHA, password or
+ambiguous challenge is re-detected and blocks again.
+
 ## DeepSeek configuration
 
 The manager reuses the existing executor DeepSeek configuration and macOS Keychain lookup. No second API key is created or stored. The existing private settings file provides profile_path plus the deepseek configuration already documented in config/settings.example.json.
