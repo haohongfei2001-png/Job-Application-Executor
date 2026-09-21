@@ -185,8 +185,25 @@ _RESUME_RE = re.compile(r"(?:继续|恢复|接着|resume|continue|retry)", re.I)
 _PAUSE_RE = re.compile(r"(?:暂停|先别|等一下|pause|hold)", re.I)
 _CANCEL_RE = re.compile(r"(?:取消|停止|不投|放弃|cancel|stop|drop)", re.I)
 _APPLY_RE = re.compile(r"(?:投递|申请|开始投|apply|application)", re.I)
-_URL_RE = re.compile(r"https?://[^\s<>'\"，。；：！？、]+", re.I)
-_URL_TRAILING = ".,;:!?，。；：！？)]}】》」』"
+_URL_LEFT_BOUNDARIES = set(" \t\r\n([{<\"'：，。；！？、")
+_URL_RIGHT_BOUNDARIES = set(" \t\r\n>\"'，。；：！？、")
+
+
+def _target_url_is_explicit(message: str, target_url: str) -> bool:
+    """Require one complete user-supplied target URL, never a model substring."""
+    if not target_url or not target_url.lower().startswith(("https://", "http://")):
+        return False
+    start = 0
+    while True:
+        index = message.find(target_url, start)
+        if index < 0:
+            return False
+        left_ok = index == 0 or message[index - 1] in _URL_LEFT_BOUNDARIES
+        end = index + len(target_url)
+        right_ok = end == len(message) or message[end] in _URL_RIGHT_BOUNDARIES
+        if left_ok and right_ok:
+            return True
+        start = index + 1
 _SECRET_RE = re.compile(
     r"""(?ix)
     (?:
@@ -204,18 +221,19 @@ _SECRET_RE = re.compile(
 )
 
 
-def _message_urls(message: str) -> set[str]:
-    return {match.rstrip(_URL_TRAILING) for match in _URL_RE.findall(message)}
-
-
 _JSON_SECRET_RE = re.compile(
     r"""(?ix)
     ["']?
     (?:otp|verification[_ -]?code|password|passwd|pwd|cookie|token|api[_ -]?key|secret|验证码|动态码|短信码|密码|口令|令牌|密钥)
     ["']?
     \s*:\s*
-    ["']?
-    [^"'\s,}]{4,}
+    (?:
+        "(?:\\.|[^"\\])*"
+        |
+        '(?:\\.|[^'\\])*'
+        |
+        [^\s,}]+
+    )
     """
 )
 
@@ -334,13 +352,13 @@ class ManagerController:
             }
 
         if action == ManagerAction.CREATE_TASK:
-            # A target URL can itself contain "apply"; application intent must
-            # exist independently in the user's surrounding text.
-            intent_text = _URL_RE.sub(" ", message)
+            if not decision.target_url or not _target_url_is_explicit(message, decision.target_url):
+                return {"action": str(action), "status": "denied", "reason": "exact_url_required"}
+            # Remove the exact, validated target before checking intent so
+            # "apply" inside a URL can never authorize task creation.
+            intent_text = message.replace(decision.target_url, " ")
             if not _APPLY_RE.search(intent_text):
                 return {"action": str(action), "status": "denied", "reason": "explicit_apply_required"}
-            if not decision.target_url or decision.target_url not in _message_urls(message):
-                return {"action": str(action), "status": "denied", "reason": "exact_url_required"}
             if not decision.company or not decision.role:
                 return {"action": str(action), "status": "denied", "reason": "target_identity_required"}
             spec = TaskSpec(
