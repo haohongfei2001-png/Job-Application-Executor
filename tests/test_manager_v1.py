@@ -175,7 +175,7 @@ def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_pat
     assert not q.tasks()
     provider.turn.decisions[0].target_url = url
 
-    accepted = manager.handle(url + "，请帮我申请")
+    accepted = manager.handle(url + "， 请帮我申请")
     assert accepted["actions"][0]["status"] == "accepted"
     task = q.get(accepted["actions"][0]["task_id"])
     assert task["spec"]["profile_ref"] == str(profile)
@@ -320,6 +320,12 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     "令牌 abcdefghijklmnop",
     "Bearer x",
     "Bearer abcdefghijklmnop",
+    "OPENAI_API_KEY=sk-test",
+    "ACCESS_TOKEN=abc",
+    "CLIENT_PASSWORD=a",
+    "AWS_SECRET_ACCESS_KEY=abc",
+    '"password"="abc"',
+    '{"OPENAI_API_KEY":"sk-test"}',
 ])
 def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
     turn = ManagerTurn(reply="不应调用模型。", decisions=[])
@@ -328,6 +334,57 @@ def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
     assert result["actions"] == []
     assert provider.seen is None
     assert "DeepSeek" in result["reply"]
+
+
+def test_unlabeled_otp_is_local_only_while_otp_is_waiting(tmp_path):
+    turn = ManagerTurn(reply="不应调用模型。", decisions=[])
+    q, _, provider, manager = controller(tmp_path, turn)
+    tid = q.enqueue(spec(tmp_path))["task_id"]
+    claimed = q.claim("test-worker")
+    q.checkpoint(
+        tid,
+        claimed["owner"],
+        "NEEDS_USER_ACTION",
+        blocker="otp_waiting",
+        release=True,
+    )
+
+    result = manager.handle("482913")
+    assert result["actions"] == []
+    assert provider.seen is None
+    assert "DeepSeek" in result["reply"]
+
+
+def test_unlabeled_numeric_chat_is_not_globally_treated_as_otp(tmp_path):
+    turn = ManagerTurn(reply="只报告。", decisions=[])
+    _, _, provider, manager = controller(tmp_path, turn)
+    result = manager.handle("482913")
+    assert result["reply"] == "只报告。"
+    assert provider.seen["message"] == "482913"
+
+
+def test_create_task_rejects_prefix_before_internal_localized_punctuation(tmp_path):
+    full_url = "https://jobs.example.test/roles/工程，研发"
+    prefix = "https://jobs.example.test/roles/工程"
+    profile = tmp_path / "canonical.json"
+    profile.write_text("{}")
+    turn = ManagerTurn(reply="开始处理。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.CREATE_TASK,
+            company="Example",
+            role="Engineer",
+            target_url=prefix,
+        )
+    ])
+    q, _, _, manager = controller(
+        tmp_path,
+        turn,
+        settings={"profile_path": str(profile)},
+    )
+    denied = manager.handle("请申请这个岗位 " + full_url)
+    assert denied["actions"][0]["status"] == "denied"
+    assert denied["actions"][0]["reason"] == "exact_url_required"
+    assert not q.tasks()
 
 
 def test_numeric_pending_answer_requires_complete_number_boundary(tmp_path):
