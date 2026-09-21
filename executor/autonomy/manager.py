@@ -24,7 +24,7 @@ class ManagerAction(StrEnum):
 
 
 class ManagerDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid")
 
     action: ManagerAction
     task_id: str = Field(default="", max_length=120)
@@ -44,7 +44,7 @@ class ManagerDecision(BaseModel):
 
 
 class ManagerTurn(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid")
 
     reply: str = Field(min_length=1, max_length=3000)
     decisions: list[ManagerDecision] = Field(default_factory=list, max_length=8)
@@ -186,13 +186,19 @@ _APPLY_RE = re.compile(r"(?:投递|申请|开始投|apply|application)", re.I)
 def _value_is_explicit(message: str, value: Any) -> bool:
     text = message.casefold()
     if isinstance(value, bool):
-        options = (
-            ("是", "接受", "同意", "yes", "true")
-            if value
-            else ("否", "不接受", "不同意", "no", "false")
-        )
-        return any(option.casefold() in text for option in options)
-    return str(value).casefold() in text
+        positive = ("是", "接受", "同意", "yes", "true")
+        negative = ("不是", "否", "不接受", "不同意", "no", "false")
+        if value:
+            # Conservative: a negated phrase must never satisfy a positive value
+            # merely because "接受"/"同意"/"是" is a substring of it.
+            if any(option.casefold() in text for option in negative):
+                return False
+            return any(option.casefold() in text for option in positive)
+        return any(option.casefold() in text for option in negative)
+    rendered = str(value).casefold()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(re.search(r"(?<!\\d)" + re.escape(rendered) + r"(?!\\d)", text))
+    return rendered in text
 
 
 class ManagerController:
@@ -285,9 +291,11 @@ class ManagerController:
                 return {"action": str(action), "status": "denied", "reason": "explicit_apply_required"}
             if not decision.target_url or decision.target_url not in message:
                 return {"action": str(action), "status": "denied", "reason": "exact_url_required"}
+            if not decision.company or not decision.role:
+                return {"action": str(action), "status": "denied", "reason": "target_identity_required"}
             spec = TaskSpec(
-                company=decision.company or "Unknown company",
-                role=decision.role or "Unknown role",
+                company=decision.company,
+                role=decision.role,
                 target_url=decision.target_url,
                 profile_ref=self._profile_ref(),
                 live_authorized=True,
