@@ -168,13 +168,34 @@ def test_legacy_generic_pause_does_not_reuse_stale_human_checkpoint(tmp_path):
     claimed_again = q.claim("w")
     assert claimed_again["attempts"] == 1
 
-    # An ordinary active pause after the later claim must not inherit the old
-    # human-wait checkpoint and manufacture a fresh retry budget.
-    paused = q.pause(tid)
-    assert paused["blocker"] == "user_paused"
+    # Simulate the durable row written by the old pause implementation:
+    # it cleared the active owner but did not refund the in-flight claim.
+    with q.tx() as db:
+        db.execute(
+            "UPDATE tasks SET stage='BLOCKED',blocker='user_paused',"
+            "owner=NULL,lease_until=NULL,next_run=0 WHERE task_id=?",
+            (tid,),
+        )
+        q._event(db, tid, "paused", "BLOCKED")
     resumed = q.resume(tid)
     assert resumed["attempts"] == 1
     assert q.claim("w")["attempts"] == 2
+
+
+def test_active_user_pause_refunds_inflight_final_attempt(tmp_path):
+    now = [1.]
+    q = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=1))["task_id"]
+    claimed = q.claim("w")
+    assert claimed["attempts"] == 1
+    paused = q.pause(tid)
+    assert paused["stage"] == "BLOCKED"
+    assert paused["attempts"] == 0
+    resumed = q.resume(tid)
+    assert resumed["attempts"] == 0
+    reclaimed = q.claim("w")
+    assert reclaimed is not None
+    assert reclaimed["attempts"] == 1
 
 
 @pytest.mark.parametrize("blocker", ["session_unavailable", "validation"])
