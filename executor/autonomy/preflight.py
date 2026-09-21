@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import browser
+from ..profile import load_profile
 from ..settings import load_settings
 from .manager import DeepSeekManagerProvider
 
@@ -17,6 +18,7 @@ def collect_live_preflight(
     cdp_alive: bool | None = None,
     deepseek_available: bool | None = None,
     profile_exists: bool | None = None,
+    profile_loadable: bool | None = None,
 ) -> dict[str, Any]:
     """Read-only readiness check for a real local application E2E run."""
     settings = settings or load_settings()
@@ -29,6 +31,14 @@ def collect_live_preflight(
         profile_exists = bool(
             profile_configured and Path(profile_ref).expanduser().is_file()
         )
+    if profile_loadable is None:
+        profile_loadable = False
+        if profile_exists:
+            try:
+                load_profile(profile_ref)
+                profile_loadable = True
+            except Exception:
+                profile_loadable = False
 
     if chrome_exists is None:
         chrome_exists = Path(browser.CHROME).is_file()
@@ -47,6 +57,7 @@ def collect_live_preflight(
         "existing_cdp_session": bool(cdp_alive),
         "profile_configured": bool(profile_configured),
         "profile_exists": bool(profile_exists),
+        "profile_loadable": bool(profile_loadable),
         "deepseek_available": bool(deepseek_available),
         "supervisor_running": bool(supervisor_running),
     }
@@ -58,6 +69,7 @@ def collect_live_preflight(
             ("start_dedicated_chrome_cdp", checks["existing_cdp_session"]),
             ("configure_profile_path", checks["profile_configured"]),
             ("restore_profile_file", checks["profile_exists"]),
+            ("repair_profile_file", checks["profile_loadable"]),
             ("configure_deepseek_key", checks["deepseek_available"]),
             ("start_supervisor", checks["supervisor_running"]),
         )
