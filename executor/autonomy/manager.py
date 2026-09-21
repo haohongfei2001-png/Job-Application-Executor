@@ -268,10 +268,18 @@ _STRUCTURED_SECRET_RE = re.compile(
     """
 )
 _RAW_OTP_RE = re.compile(r"\d{4,8}")
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?:[A-Z0-9][A-Z0-9 -]* )?PRIVATE KEY(?: BLOCK)?-----",
+    re.I,
+)
 
 
 def _contains_sensitive_credential(message: str) -> bool:
-    return bool(_SECRET_RE.search(message) or _STRUCTURED_SECRET_RE.search(message))
+    return bool(
+        _SECRET_RE.search(message)
+        or _STRUCTURED_SECRET_RE.search(message)
+        or _PRIVATE_KEY_RE.search(message)
+    )
 
 
 def _value_is_explicit(message: str, value: Any) -> bool:
@@ -289,10 +297,10 @@ def _value_is_explicit(message: str, value: Any) -> bool:
     rendered = str(value).casefold()
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         numeric_tokens = re.findall(
-            r"(?<![0-9A-Za-z_.])"
+            r"(?<![0-9A-Za-z_.])(?<!\d[,，])"
             r"[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)"
             r"(?:[eE][+-]?\d+)?"
-            r"(?![0-9A-Za-z_.])",
+            r"(?![0-9A-Za-z_.])(?![,，]\d)",
             text,
         )
         return rendered in numeric_tokens
@@ -418,7 +426,20 @@ class ManagerController:
         message = message.strip()
         task_rows = self.queue.tasks()
         otp_waiting = any(
-            task["stage"] == "NEEDS_USER_ACTION" and task["blocker"] == "otp_waiting"
+            (
+                task["stage"] == "NEEDS_USER_ACTION"
+                and task["blocker"] in {"otp_waiting", "otp_ambiguous"}
+            )
+            or (
+                task["stage"] == "BLOCKED"
+                and task["blocker"] in {
+                    "user_paused_from_otp_waiting",
+                    "user_paused_from_otp_ambiguous",
+                    # Compatibility with earlier marker revisions where all
+                    # NEEDS_USER_ACTION pauses used this generic origin.
+                    "user_paused_from_action",
+                }
+            )
             for task in task_rows
         )
         # Stop credentials locally before a provider payload can be built.
