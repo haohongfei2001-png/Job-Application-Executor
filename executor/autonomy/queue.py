@@ -217,7 +217,43 @@ class TaskQueue:
             if row["attempts"] >= json.loads(row["spec"])["max_attempts"] and row["stage"] == "ERROR":
                 raise ValueError("retry budget exhausted")
             assert_target_not_protected(json.loads(row["spec"])["target_url"])
-            attempts = 0 if row["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION", "BLOCKED"} else row["attempts"]
+            # Human input/action waits do not consume retry budget. If such a
+            # wait was paused, pause() records that origin in the blocker so the
+            # same reset semantics survive the BLOCKED intermediary state.
+            legacy_human_wait = False
+            if row["stage"] == "BLOCKED" and row["blocker"] == "user_paused":
+                # Compatibility with pre-marker rows: old pause() overwrote the
+                # blocker, but the preceding checkpoint event still records
+                # whether the task was waiting for facts or a human action.
+                previous_wait = db.execute(
+                    "SELECT kind,stage FROM events WHERE task_id=? AND kind!='paused' "
+                    "ORDER BY seq DESC LIMIT 1",
+                    (tid,),
+                ).fetchone()
+                legacy_human_wait = bool(
+                    previous_wait
+                    and previous_wait["kind"] == "checkpoint"
+                    and previous_wait["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"}
+                )
+            human_wait = row["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"} or (
+                row["stage"] == "BLOCKED"
+                and row["blocker"] in {
+                    "user_paused_from_input",
+                    "user_paused_from_action",
+                    "user_paused_from_otp_waiting",
+                    "user_paused_from_otp_ambiguous",
+                }
+            ) or legacy_human_wait
+            recoverable_block = (
+                row["stage"] == "BLOCKED"
+                and row["blocker"] in {
+                    "session_unavailable",
+                    "validation",
+                    "user_paused_from_session_unavailable",
+                    "user_paused_from_validation",
+                }
+            )
+            attempts = 0 if (human_wait or recoverable_block) else row["attempts"]
             db.execute("UPDATE tasks SET stage=checkpoint,blocker=NULL,next_run=0,attempts=?,owner=NULL,lease_until=NULL,updated=? WHERE task_id=?", (attempts, self.clock(), tid))
             self._event(db, tid, "resumed", row["checkpoint"])
         return self.get(tid)
@@ -234,10 +270,44 @@ class TaskQueue:
             self._view(row)
             if row["stage"] in STOPPED or row["stage"] in {"SUBMITTED", "VERIFIED"}:
                 raise ValueError("task is already at an immutable boundary")
+            if row["stage"] == "ERROR" and row["blocker"] == "retry_exhausted":
+                raise ValueError("retry budget exhausted")
+            preserved_pause_markers = {
+                "user_paused_from_input",
+                "user_paused_from_action",
+                "user_paused_from_otp_waiting",
+                "user_paused_from_otp_ambiguous",
+                "user_paused_from_session_unavailable",
+                "user_paused_from_validation",
+            }
+            if row["stage"] == "BLOCKED" and row["blocker"] in preserved_pause_markers:
+                pause_blocker = row["blocker"]
+            elif row["stage"] == "BLOCKED" and row["blocker"] in {
+                "session_unavailable",
+                "validation",
+            }:
+                pause_blocker = "user_paused_from_" + row["blocker"]
+            elif row["stage"] == "NEEDS_USER_ACTION" and row["blocker"] in {
+                "otp_waiting",
+                "otp_ambiguous",
+            }:
+                pause_blocker = "user_paused_from_" + row["blocker"]
+            else:
+                pause_blocker = {
+                    "NEEDS_USER_INPUT": "user_paused_from_input",
+                    "NEEDS_USER_ACTION": "user_paused_from_action",
+                }.get(row["stage"], "user_paused")
+            now = self.clock()
+            active_claim = bool(
+                row["owner"]
+                and row["lease_until"] is not None
+                and row["lease_until"] > now
+            )
+            paused_attempts = max(0, row["attempts"] - 1) if active_claim else row["attempts"]
             db.execute(
-                "UPDATE tasks SET stage='BLOCKED',blocker='user_paused',"
+                "UPDATE tasks SET stage='BLOCKED',blocker=?,attempts=?,"
                 "owner=NULL,lease_until=NULL,next_run=0,updated=? WHERE task_id=?",
-                (self.clock(), tid),
+                (pause_blocker, paused_attempts, now, tid),
             )
             self._event(db, tid, "paused", "BLOCKED")
         return self.get(tid)

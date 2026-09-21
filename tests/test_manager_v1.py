@@ -141,7 +141,7 @@ def test_pending_answer_must_be_pending_and_verbatim_user_fact(tmp_path):
 
 
 def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_path):
-    url = "https://jobs.example.test/apply?postId=new-role"
+    url = "https://jobs.example.test/apply?position=AI,ML"
     profile = tmp_path / "canonical.json"
     profile.write_text("{}")
     turn = ManagerTurn(reply="开始处理。", decisions=[
@@ -161,11 +161,103 @@ def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_pat
     assert denied["actions"][0]["status"] == "denied"
     assert not q.tasks()
 
-    accepted = manager.handle("投递这个职位：" + url)
+    # "apply" inside the URL is not independent user intent.
+    denied = manager.handle("帮我看看这个链接：" + url)
+    assert denied["actions"][0]["status"] == "denied"
+    assert denied["actions"][0]["reason"] == "explicit_apply_required"
+    assert not q.tasks()
+
+    # The model cannot shorten or otherwise mutate a precise user-supplied URL.
+    provider.turn.decisions[0].target_url = "https://jobs.example.test/apply"
+    denied = manager.handle("投递这个职位：" + url)
+    assert denied["actions"][0]["status"] == "denied"
+    assert denied["actions"][0]["reason"] == "exact_url_required"
+    assert not q.tasks()
+    provider.turn.decisions[0].target_url = url
+
+    accepted = manager.handle(url + "， 请帮我申请")
     assert accepted["actions"][0]["status"] == "accepted"
     task = q.get(accepted["actions"][0]["task_id"])
     assert task["spec"]["profile_ref"] == str(profile)
     assert task["spec"]["live_authorized"] is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://jobs.example.test/apply?position=AI,ML",
+        "https://jobs.example.test/apply?position=AI;ML",
+        "https://jobs.example.test/roles/engineer_(ml)",
+    ],
+)
+def test_create_task_preserves_legal_url_punctuation(tmp_path, url):
+    profile = tmp_path / "canonical.json"
+    profile.write_text("{}")
+    turn = ManagerTurn(reply="开始处理。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.CREATE_TASK,
+            company="Example",
+            role="Engineer",
+            target_url=url,
+        )
+    ])
+    q, _, provider, manager = controller(
+        tmp_path,
+        turn,
+        settings={"profile_path": str(profile)},
+    )
+
+    accepted = manager.handle("请申请这个岗位 " + url)
+    assert accepted["actions"][0]["status"] == "accepted"
+
+    # A model-proposed prefix of a longer URL is never accepted as exact.
+    if url.endswith(")"):
+        q2, worker2, _, _ = controller(
+            tmp_path / "truncated",
+            ManagerTurn(reply="开始处理。", decisions=[]),
+            settings={"profile_path": str(profile)},
+        )
+        truncated = url[:-1]
+        provider2 = FakeProvider(ManagerTurn(reply="开始处理。", decisions=[
+            ManagerDecision(
+                action=ManagerAction.CREATE_TASK,
+                company="Example",
+                role="Engineer",
+                target_url=truncated,
+            )
+        ]))
+        manager2 = ManagerController(
+            q2,
+            worker2,
+            provider=provider2,
+            settings={"profile_path": str(profile)},
+        )
+        denied = manager2.handle("请申请这个岗位 " + url)
+        assert denied["actions"][0]["status"] == "denied"
+        assert denied["actions"][0]["reason"] == "exact_url_required"
+
+
+@pytest.mark.parametrize("suffix", [".", "!", "?", ")"])
+def test_create_task_accepts_ascii_sentence_punctuation(tmp_path, suffix):
+    url = "https://jobs.example.test/apply?postId=punctuated"
+    profile = tmp_path / "canonical.json"
+    profile.write_text("{}")
+    turn = ManagerTurn(reply="开始处理。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.CREATE_TASK,
+            company="Example",
+            role="Engineer",
+            target_url=url,
+        )
+    ])
+    q, _, _, manager = controller(
+        tmp_path,
+        turn,
+        settings={"profile_path": str(profile)},
+    )
+    result = manager.handle("Apply " + url + suffix)
+    assert result["actions"][0]["status"] == "accepted"
+    assert q.get(result["actions"][0]["task_id"])["spec"]["target_url"] == url
 
 
 def test_resume_ready_to_submit_is_never_allowed(tmp_path):
@@ -201,6 +293,148 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     assert result["actions"] == []
     assert "unavailable" in result["reply"].lower()
     assert q.get(tid)["stage"] == "DISCOVERED"
+
+
+@pytest.mark.parametrize("message", [
+    "验证码是 482913",
+    "验证码是482913五分钟有效",
+    "OTP: 72941836",
+    "Your verification code is 7294",
+    "password: super-secret-value",
+    "my password is hunter2",
+    "token = abcdefghijklmnop",
+    '{"password":"hunter2"}',
+    '{"token":"abcdefghijklmnop"}',
+    '{"otp":"7294"}',
+    '{"密码":"hunter2"}',
+    '{"验证码":"7294"}',
+    '{"令牌":"abcdefghijklmnop"}',
+    '{"password":"my very secret passphrase"}',
+    '{"密码":"我的 私密 口令"}',
+    "password hunter2",
+    "my password is a very long passphrase",
+    "password abc",
+    "token abcdefghijklmnop",
+    "密码 hunter2",
+    "我的密码是a very long passphrase",
+    "令牌 abcdefghijklmnop",
+    "Bearer x",
+    "Bearer abcdefghijklmnop",
+    "OPENAI_API_KEY=sk-test",
+    "ACCESS_TOKEN=abc",
+    "CLIENT_PASSWORD=a",
+    "AWS_SECRET_ACCESS_KEY=abc",
+    '"password"="abc"',
+    '{"OPENAI_API_KEY":"sk-test"}',
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+    "-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc\n-----END PGP PRIVATE KEY BLOCK-----",
+])
+def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
+    turn = ManagerTurn(reply="不应调用模型。", decisions=[])
+    _, _, provider, manager = controller(tmp_path, turn)
+    result = manager.handle(message)
+    assert result["actions"] == []
+    assert provider.seen is None
+    assert "DeepSeek" in result["reply"]
+
+
+@pytest.mark.parametrize("blocker", ["otp_waiting", "otp_ambiguous"])
+@pytest.mark.parametrize("paused", [False, True])
+def test_unlabeled_otp_is_local_only_while_otp_is_waiting(tmp_path, blocker, paused):
+    turn = ManagerTurn(reply="不应调用模型。", decisions=[])
+    q, _, provider, manager = controller(tmp_path, turn)
+    tid = q.enqueue(spec(tmp_path))["task_id"]
+    claimed = q.claim("test-worker")
+    q.checkpoint(
+        tid,
+        claimed["owner"],
+        "NEEDS_USER_ACTION",
+        blocker=blocker,
+        release=True,
+    )
+    if paused:
+        paused_task = q.pause(tid)
+        assert paused_task["blocker"] == "user_paused_from_" + blocker
+
+    result = manager.handle("482913")
+    assert result["actions"] == []
+    assert provider.seen is None
+    assert "DeepSeek" in result["reply"]
+
+
+def test_unlabeled_numeric_chat_is_not_globally_treated_as_otp(tmp_path):
+    turn = ManagerTurn(reply="只报告。", decisions=[])
+    _, _, provider, manager = controller(tmp_path, turn)
+    result = manager.handle("482913")
+    assert result["reply"] == "只报告。"
+    assert provider.seen["message"] == "482913"
+
+
+def test_create_task_rejects_prefix_before_internal_localized_punctuation(tmp_path):
+    full_url = "https://jobs.example.test/roles/工程，研发"
+    prefix = "https://jobs.example.test/roles/工程"
+    profile = tmp_path / "canonical.json"
+    profile.write_text("{}")
+    turn = ManagerTurn(reply="开始处理。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.CREATE_TASK,
+            company="Example",
+            role="Engineer",
+            target_url=prefix,
+        )
+    ])
+    q, _, _, manager = controller(
+        tmp_path,
+        turn,
+        settings={"profile_path": str(profile)},
+    )
+    denied = manager.handle("请申请这个岗位 " + full_url)
+    assert denied["actions"][0]["status"] == "denied"
+    assert denied["actions"][0]["reason"] == "exact_url_required"
+    assert not q.tasks()
+
+
+def test_numeric_pending_answer_requires_complete_number_boundary(tmp_path):
+    field = "experience.years"
+    q = TaskQueue(tmp_path / "runtime")
+    worker = Worker(q, settings={"deepseek": {"enabled": False}})
+    tid = q.enqueue(spec(tmp_path))["task_id"]
+    claimed = q.claim("test-worker")
+    q.checkpoint(
+        tid,
+        claimed["owner"],
+        "NEEDS_USER_INPUT",
+        blocker="unknown_facts",
+        details={"unresolved_keys": [field]},
+        release=True,
+    )
+    provider = FakeProvider(ManagerTurn(reply="收到。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.ANSWER_PENDING,
+            task_id=tid,
+            field_key=field,
+            value=1,
+        )
+    ]))
+    manager = ManagerController(q, worker, provider=provider, settings={"profile_path": "unused"})
+
+    for message in (
+        "我有10年相关经验",
+        "I have 1.5 years of experience",
+        "I have 1,5 years of experience",
+        "我有1，5年相关经验",
+        "I have -1 years",
+        "I have 1,000 hours",
+        "I have 1e3 hours",
+        "release v1",
+    ):
+        denied = manager.handle(message)
+        assert denied["actions"][0]["status"] == "denied"
+        assert q.get(tid)["stage"] == "NEEDS_USER_INPUT"
+
+    accepted = manager.handle("我有1年相关经验")
+    assert accepted["actions"][0]["status"] == "accepted"
+    assert worker.answers[tid][field] == 1
 
 
 def test_ui_ticket_is_one_time_and_session_is_ephemeral(tmp_path):

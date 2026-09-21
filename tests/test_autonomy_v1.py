@@ -74,10 +74,149 @@ def test_retry_bound_cancel_and_human_gate(tmp_path):
     assert q.get(tid)['blocker'] == 'retry_exhausted'
     with pytest.raises(ValueError):
         q.resume(tid)
+    with pytest.raises(ValueError):
+        q.pause(tid)
     q.cancel(tid)
     assert q.claim('w') is None
     with pytest.raises(ValueError):
         q.resume(tid)
+
+
+def test_pause_resume_preserves_retry_attempts(tmp_path):
+    now = [1.]
+    q = TaskQueue(tmp_path / 'runtime', clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=2))['task_id']
+    claimed = q.claim('w')
+    q.checkpoint(tid, claimed['owner'], 'ERROR', blocker='retry_pending', release=True)
+    assert q.get(tid)['attempts'] == 1
+    q.pause(tid)
+    assert q.get(tid)['attempts'] == 1
+    q.resume(tid)
+    assert q.get(tid)['attempts'] == 1
+    now[0] += 100
+    claimed = q.claim('w')
+    assert claimed['attempts'] == 2
+
+
+@pytest.mark.parametrize(
+    "stage,blocker",
+    [
+        ("NEEDS_USER_INPUT", "unknown_facts"),
+        ("NEEDS_USER_ACTION", "security_challenge"),
+    ],
+)
+def test_pause_resume_preserves_human_wait_retry_reset(tmp_path, stage, blocker):
+    now = [1.]
+    q = TaskQueue(tmp_path / 'runtime', clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=1))['task_id']
+    claimed = q.claim('w')
+    assert claimed['attempts'] == 1
+    q.checkpoint(tid, claimed['owner'], stage, blocker=blocker, release=True)
+    paused = q.pause(tid)
+    assert paused['stage'] == 'BLOCKED'
+    assert paused['blocker'] in {'user_paused_from_input', 'user_paused_from_action'}
+    original_pause_blocker = paused['blocker']
+    paused_again = q.pause(tid)
+    assert paused_again['blocker'] == original_pause_blocker
+    resumed = q.resume(tid)
+    assert resumed['attempts'] == 0
+    assert q.claim('w')['attempts'] == 1
+
+
+@pytest.mark.parametrize(
+    "stage,blocker",
+    [
+        ("NEEDS_USER_INPUT", "unknown_facts"),
+        ("NEEDS_USER_ACTION", "security_challenge"),
+    ],
+)
+def test_resume_migrates_legacy_generic_paused_human_wait(tmp_path, stage, blocker):
+    now = [1.]
+    q = TaskQueue(tmp_path / 'runtime', clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=1))['task_id']
+    claimed = q.claim('w')
+    assert claimed['attempts'] == 1
+    q.checkpoint(tid, claimed['owner'], stage, blocker=blocker, release=True)
+    q.pause(tid)
+    # Simulate the durable row written by the pre-marker pause() implementation.
+    with q.tx() as db:
+        db.execute(
+            "UPDATE tasks SET blocker='user_paused' WHERE task_id=?",
+            (tid,),
+        )
+    legacy = q.get(tid)
+    assert legacy['stage'] == 'BLOCKED'
+    assert legacy['blocker'] == 'user_paused'
+    resumed = q.resume(tid)
+    assert resumed['attempts'] == 0
+    assert q.claim('w')['attempts'] == 1
+
+
+def test_legacy_generic_pause_does_not_reuse_stale_human_checkpoint(tmp_path):
+    now = [1.]
+    q = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=2))["task_id"]
+    claimed = q.claim("w")
+    q.checkpoint(
+        tid,
+        claimed["owner"],
+        "NEEDS_USER_INPUT",
+        blocker="unknown_facts",
+        release=True,
+    )
+    assert q.resume(tid)["attempts"] == 0
+    claimed_again = q.claim("w")
+    assert claimed_again["attempts"] == 1
+
+    # Simulate the durable row written by the old pause implementation:
+    # it cleared the active owner but did not refund the in-flight claim.
+    with q.tx() as db:
+        db.execute(
+            "UPDATE tasks SET stage='BLOCKED',blocker='user_paused',"
+            "owner=NULL,lease_until=NULL,next_run=0 WHERE task_id=?",
+            (tid,),
+        )
+        q._event(db, tid, "paused", "BLOCKED")
+    resumed = q.resume(tid)
+    assert resumed["attempts"] == 1
+    assert q.claim("w")["attempts"] == 2
+
+
+def test_active_user_pause_refunds_inflight_final_attempt(tmp_path):
+    now = [1.]
+    q = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=1))["task_id"]
+    claimed = q.claim("w")
+    assert claimed["attempts"] == 1
+    paused = q.pause(tid)
+    assert paused["stage"] == "BLOCKED"
+    assert paused["attempts"] == 0
+    resumed = q.resume(tid)
+    assert resumed["attempts"] == 0
+    reclaimed = q.claim("w")
+    assert reclaimed is not None
+    assert reclaimed["attempts"] == 1
+
+
+@pytest.mark.parametrize("blocker", ["session_unavailable", "validation"])
+def test_resume_resets_retry_budget_for_recoverable_block(tmp_path, blocker):
+    now = [1.]
+    q = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=1))["task_id"]
+    claimed = q.claim("w")
+    assert claimed["attempts"] == 1
+    q.checkpoint(tid, claimed["owner"], "BLOCKED", blocker=blocker, release=True)
+    blocked = q.get(tid)
+    assert blocked["attempts"] == 1
+    paused = q.pause(tid)
+    assert paused["blocker"] == "user_paused_from_" + blocker
+    paused_again = q.pause(tid)
+    assert paused_again["blocker"] == paused["blocker"]
+    resumed = q.resume(tid)
+    assert resumed["attempts"] == 0
+    retried = q.claim("w")
+    assert retried is not None
+    assert retried["attempts"] == 1
 
 
 @pytest.mark.parametrize('message,expected', [('您的验证码是 482913，五分钟有效','482913'), ('Your verification code is 7294.', '7294'), ('OTP 12345678', '12345678'), ('482913 and 7294', None), ('123456789', None)])
@@ -90,17 +229,19 @@ def test_otp_expiry_single_consumption_and_no_persistence(tmp_path, capsys):
     tid = waiting(q, tmp_path)
     now = [0.]
     broker = OtpBroker(q, clock=lambda: now[0])
-    assert broker.push(message='验证码 482913', task_id=tid)['accepted']
-    assert broker.consume(tid) == '482913'
+    assert broker.push(message='验证码 48291357', task_id=tid)['accepted']
+    assert broker.consume(tid) == '48291357'
     assert broker.consume(tid) is None
-    broker.push(message='OTP 7294', hint='example.test')
+    broker.push(message='OTP 72941836', hint='example.test')
     now[0] = 300
     assert broker.consume(tid) is None
+    # Use high-entropy 8-digit canaries when scanning raw SQLite bytes. A short
+    # 4-digit sequence can occur incidentally in random task IDs or page bytes.
     for path in q.root.rglob('*'):
         if path.is_file():
-            assert b'482913' not in path.read_bytes()
-            assert b'7294' not in path.read_bytes()
-    assert '482913' not in str(capsys.readouterr())
+            assert b'48291357' not in path.read_bytes()
+            assert b'72941836' not in path.read_bytes()
+    assert '48291357' not in str(capsys.readouterr())
     assert OtpBroker(TaskQueue(q.root)).consume(tid) is None
 
 

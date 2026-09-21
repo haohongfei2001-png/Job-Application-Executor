@@ -185,6 +185,101 @@ _RESUME_RE = re.compile(r"(?:继续|恢复|接着|resume|continue|retry)", re.I)
 _PAUSE_RE = re.compile(r"(?:暂停|先别|等一下|pause|hold)", re.I)
 _CANCEL_RE = re.compile(r"(?:取消|停止|不投|放弃|cancel|stop|drop)", re.I)
 _APPLY_RE = re.compile(r"(?:投递|申请|开始投|apply|application)", re.I)
+_URL_LEFT_BOUNDARIES = set(" \t\r\n([{<\"'：，。；！？、")
+_URL_RIGHT_BOUNDARIES = set(" \t\r\n>\"'")
+
+
+def _url_right_boundary(message: str, end: int, target_url: str) -> bool:
+    if end == len(message):
+        return True
+    char = message[end]
+    if char in _URL_RIGHT_BOUNDARIES:
+        return True
+    # Common ASCII sentence punctuation is accepted only at a sentence edge.
+    # Structural URL continuations stay strict: a '?' can start a query and an
+    # unmatched ')' can close a URL path component such as engineer_(ml).
+    next_is_edge = end + 1 == len(message) or message[end + 1].isspace()
+    if not next_is_edge:
+        return False
+    if char in ".,;!，。；：！？、":
+        return True
+    if char == "?":
+        return "?" in target_url
+    if char == ")":
+        return target_url.count("(") <= target_url.count(")")
+    return False
+
+
+def _target_url_is_explicit(message: str, target_url: str) -> bool:
+    """Require one complete user-supplied target URL, never a model substring."""
+    if not target_url or not target_url.lower().startswith(("https://", "http://")):
+        return False
+    start = 0
+    while True:
+        index = message.find(target_url, start)
+        if index < 0:
+            return False
+        left_ok = index == 0 or message[index - 1] in _URL_LEFT_BOUNDARIES
+        end = index + len(target_url)
+        if left_ok and _url_right_boundary(message, end, target_url):
+            return True
+        start = index + 1
+_SECRET_RE = re.compile(
+    r"""(?ix)
+    (?:
+        (?:\b(?:otp|verification\s+code|one[-\s]?time\s+(?:password|code))\b|验证码|动态码|短信码)
+        \s*(?:(?:is|equals)\s+|是|为|[:：=])?\s*\d{4,8}(?!\d)
+    )
+    |
+    (?:
+        (?:\b(?:password|passwd|pwd|cookie|token|api[_ -]?key|secret)\b|密码|口令|令牌|密钥)
+        (?:
+            \s+(?:(?:is|equals)\s+)?
+            |
+            \s*(?:是|为|[:：=])\s*
+        )
+        \S+
+    )
+    |
+    (?:\bbearer\s+[A-Za-z0-9._~+/=-]+)
+    """
+)
+
+
+_STRUCTURED_SECRET_RE = re.compile(
+    r"""(?ix)
+    ["']?
+    (?:
+        [A-Za-z0-9_-]*
+        (?:api[_-]?key|token|password|passwd|pwd|cookie|secret|otp|verification[_-]?code)
+        [A-Za-z0-9_-]*
+        |
+        验证码|动态码|短信码|密码|口令|令牌|密钥
+    )
+    ["']?
+    \s*[:=]\s*
+    (?:
+        "(?:\\.|[^"\\])*"
+        |
+        '(?:\\.|[^'\\])*'
+        |
+        [^\s,;}]+
+    )
+    """
+)
+_RAW_OTP_RE = re.compile(r"\d{4,8}")
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?:[A-Z0-9][A-Z0-9 -]* )?PRIVATE KEY(?: BLOCK)?-----",
+    re.I,
+)
+
+
+def _contains_sensitive_credential(message: str) -> bool:
+    return bool(
+        _SECRET_RE.search(message)
+        or _STRUCTURED_SECRET_RE.search(message)
+        or _PRIVATE_KEY_RE.search(message)
+    )
 
 
 def _value_is_explicit(message: str, value: Any) -> bool:
@@ -201,7 +296,14 @@ def _value_is_explicit(message: str, value: Any) -> bool:
         return any(option.casefold() in text for option in negative)
     rendered = str(value).casefold()
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return bool(re.search(r"(?<!\\d)" + re.escape(rendered) + r"(?!\\d)", text))
+        numeric_tokens = re.findall(
+            r"(?<![0-9A-Za-z_.])(?<!\d[,，])"
+            r"[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)"
+            r"(?:[eE][+-]?\d+)?"
+            r"(?![0-9A-Za-z_.])(?![,，]\d)",
+            text,
+        )
+        return rendered in numeric_tokens
     return rendered in text
 
 
@@ -297,10 +399,13 @@ class ManagerController:
             }
 
         if action == ManagerAction.CREATE_TASK:
-            if not _APPLY_RE.search(message):
-                return {"action": str(action), "status": "denied", "reason": "explicit_apply_required"}
-            if not decision.target_url or decision.target_url not in message:
+            if not decision.target_url or not _target_url_is_explicit(message, decision.target_url):
                 return {"action": str(action), "status": "denied", "reason": "exact_url_required"}
+            # Remove the exact, validated target before checking intent so
+            # "apply" inside a URL can never authorize task creation.
+            intent_text = message.replace(decision.target_url, " ")
+            if not _APPLY_RE.search(intent_text):
+                return {"action": str(action), "status": "denied", "reason": "explicit_apply_required"}
             if not decision.company or not decision.role:
                 return {"action": str(action), "status": "denied", "reason": "target_identity_required"}
             spec = TaskSpec(
@@ -318,9 +423,41 @@ class ManagerController:
     def handle(self, message: str) -> dict[str, Any]:
         if not isinstance(message, str) or not message.strip() or len(message) > 4000:
             raise ValueError("invalid manager message")
-        tasks = [safe_task_view(task) for task in self.queue.tasks()]
+        message = message.strip()
+        task_rows = self.queue.tasks()
+        otp_waiting = any(
+            (
+                task["stage"] == "NEEDS_USER_ACTION"
+                and task["blocker"] in {"otp_waiting", "otp_ambiguous"}
+            )
+            or (
+                task["stage"] == "BLOCKED"
+                and task["blocker"] in {
+                    "user_paused_from_otp_waiting",
+                    "user_paused_from_otp_ambiguous",
+                    # Compatibility with earlier marker revisions where all
+                    # NEEDS_USER_ACTION pauses used this generic origin.
+                    "user_paused_from_action",
+                }
+            )
+            for task in task_rows
+        )
+        # Stop credentials locally before a provider payload can be built.
+        # OTP has a dedicated local broker and must never be forwarded to DeepSeek.
+        if _contains_sensitive_credential(message) or (
+            otp_waiting and _RAW_OTP_RE.fullmatch(message)
+        ):
+            return {
+                "reply": (
+                    "检测到验证码或登录凭据。为避免发送给 DeepSeek，此消息已在本地拦截；"
+                    "验证码请使用本地 OTP 流程，密码、Cookie、Token 或密钥不要粘贴到聊天中。"
+                ),
+                "actions": [],
+                **self.state(),
+            }
+        tasks = [safe_task_view(task) for task in task_rows]
         try:
-            turn = self.provider.decide(message.strip(), tasks)
+            turn = self.provider.decide(message, tasks)
         except RuntimeError:
             return {
                 "reply": "DeepSeek manager is unavailable. Existing queued tasks are unchanged.",
