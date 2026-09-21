@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from pathlib import Path
 
 from ..otp.bridge import OtpBridge
@@ -101,8 +102,9 @@ def main(argv=None):
     parser.add_argument("--runtime", type=Path, default=RUNTIME)
     parser.add_argument("--port", type=int, default=9344)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events"):
+    for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui"):
         commands.add_parser(name)
+    commands.add_parser("chat")
     enqueue = commands.add_parser("enqueue")
     enqueue.add_argument("--file", type=Path, required=True)
     for name in ("get", "resume", "cancel"):
@@ -126,6 +128,16 @@ def main(argv=None):
             result = request(args.runtime, args.port, "/v1/tasks", json.loads(args.file.read_text()))
         elif args.command in {"tasks", "events"}:
             result = request(args.runtime, args.port, "/v1/" + args.command)
+        elif args.command == "chat":
+            message = sys.stdin.read(4001)
+            result = request(args.runtime, args.port, "/v1/chat", {"message": message})
+        elif args.command == "ui":
+            ticket = request(args.runtime, args.port, "/v1/ui-ticket", {})["ticket"]
+            opened = webbrowser.open(
+                f"http://127.0.0.1:{args.port}/ui-login?ticket={ticket}",
+                new=2,
+            )
+            result = {"ok": bool(opened), "opened": bool(opened)}
         elif args.command == "otp":
             result = request(args.runtime, args.port, "/v1/otp", {"message": sys.stdin.read(4097), "task_id": args.task, "hint": args.hint})
         elif args.command == "user-input":
