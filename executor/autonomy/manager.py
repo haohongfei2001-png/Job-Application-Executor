@@ -251,7 +251,7 @@ _STRUCTURED_SECRET_RE = re.compile(
     ["']?
     (?:
         [A-Za-z0-9_-]*
-        (?:api[_-]?key|token|password|passwd|pwd|cookie|secret)
+        (?:api[_-]?key|token|password|passwd|pwd|cookie|secret|otp|verification[_-]?code)
         [A-Za-z0-9_-]*
         |
         验证码|动态码|短信码|密码|口令|令牌|密钥
