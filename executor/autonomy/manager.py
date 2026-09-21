@@ -282,10 +282,10 @@ def _value_is_explicit(message: str, value: Any) -> bool:
     rendered = str(value).casefold()
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         numeric_tokens = re.findall(
-            r"(?<![\w.])"
+            r"(?<![0-9A-Za-z_.])"
             r"[+-]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)"
             r"(?:[eE][+-]?\d+)?"
-            r"(?![\w.])",
+            r"(?![0-9A-Za-z_.])",
             text,
         )
         return rendered in numeric_tokens
