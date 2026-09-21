@@ -104,6 +104,8 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui"):
         commands.add_parser(name)
+    preflight = commands.add_parser("preflight")
+    preflight.add_argument("--start", action="store_true")
     commands.add_parser("chat")
     enqueue = commands.add_parser("enqueue")
     enqueue.add_argument("--file", type=Path, required=True)
@@ -124,6 +126,15 @@ def main(argv=None):
             return 0
         if args.command in {"start", "stop", "restart", "status", "health"}:
             result = lifecycle(args.command, args.runtime, args.port)
+        elif args.command == "preflight":
+            from .preflight import collect_live_preflight
+
+            if args.start:
+                lifecycle("start", args.runtime, args.port)
+            health = lifecycle("health", args.runtime, args.port)
+            result = collect_live_preflight(
+                supervisor_running=bool(health.get("ok")),
+            )
         elif args.command == "enqueue":
             result = request(args.runtime, args.port, "/v1/tasks", json.loads(args.file.read_text()))
         elif args.command in {"tasks", "events"}:
