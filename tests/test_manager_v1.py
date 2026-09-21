@@ -349,7 +349,14 @@ def test_numeric_pending_answer_requires_complete_number_boundary(tmp_path):
     ]))
     manager = ManagerController(q, worker, provider=provider, settings={"profile_path": "unused"})
 
-    for message in ("我有10年相关经验", "I have 1.5 years of experience", "I have -1 years", "I have 1,000 hours"):
+    for message in (
+        "我有10年相关经验",
+        "I have 1.5 years of experience",
+        "I have -1 years",
+        "I have 1,000 hours",
+        "I have 1e3 hours",
+        "release v1",
+    ):
         denied = manager.handle(message)
         assert denied["actions"][0]["status"] == "denied"
         assert q.get(tid)["stage"] == "NEEDS_USER_INPUT"
