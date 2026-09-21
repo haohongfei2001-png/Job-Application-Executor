@@ -175,7 +175,7 @@ def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_pat
     assert not q.tasks()
     provider.turn.decisions[0].target_url = url
 
-    accepted = manager.handle("投递这个职位：" + url)
+    accepted = manager.handle(url + "，请帮我申请")
     assert accepted["actions"][0]["status"] == "accepted"
     task = q.get(accepted["actions"][0]["task_id"])
     assert task["spec"]["profile_ref"] == str(profile)
@@ -224,6 +224,9 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     "password: super-secret-value",
     "my password is hunter2",
     "token = abcdefghijklmnop",
+    '{"password":"hunter2"}',
+    '{"token":"abcdefghijklmnop"}',
+    '{"otp":"7294"}',
     "Bearer abcdefghijklmnop",
 ])
 def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
