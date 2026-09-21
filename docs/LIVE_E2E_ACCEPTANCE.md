@@ -68,6 +68,7 @@ The preflight remediation codes are deliberately machine-readable:
 - `start_dedicated_chrome_cdp`
 - `configure_profile_path`
 - `restore_profile_file`
+- `repair_profile_file`
 - `configure_deepseek_key`
 - `start_supervisor`
 
