@@ -191,12 +191,12 @@ _SECRET_RE = re.compile(
     r"""(?ix)
     (?:
         (?:\b(?:otp|verification\s+code|one[-\s]?time\s+(?:password|code))\b|验证码|动态码|短信码)
-        \s*(?:是|为|[:：=])?\s*\d{4,8}\b
+        \s*(?:(?:is|equals)\s+|是|为|[:：=])?\s*\d{4,8}\b
     )
     |
     (?:
         (?:\b(?:password|passwd|pwd|cookie|token|api[_ -]?key|secret)\b|密码|口令|令牌|密钥)
-        \s*(?:是|为|[:：=])\s*\S{4,}
+        \s*(?:(?:is|equals)\s+|是|为|[:：=])\s*\S{4,}
     )
     |
     (?:\bbearer\s+[A-Za-z0-9._~+/=-]{8,})
