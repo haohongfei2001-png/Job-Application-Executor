@@ -220,7 +220,9 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
 @pytest.mark.parametrize("message", [
     "验证码是 482913",
     "OTP: 72941836",
+    "Your verification code is 7294",
     "password: super-secret-value",
+    "my password is hunter2",
     "token = abcdefghijklmnop",
     "Bearer abcdefghijklmnop",
 ])
