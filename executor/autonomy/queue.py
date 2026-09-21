@@ -226,12 +226,13 @@ class TaskQueue:
                 # blocker, but the preceding checkpoint event still records
                 # whether the task was waiting for facts or a human action.
                 previous_wait = db.execute(
-                    "SELECT stage FROM events WHERE task_id=? AND kind='checkpoint' "
+                    "SELECT kind,stage FROM events WHERE task_id=? AND kind!='paused' "
                     "ORDER BY seq DESC LIMIT 1",
                     (tid,),
                 ).fetchone()
                 legacy_human_wait = bool(
                     previous_wait
+                    and previous_wait["kind"] == "checkpoint"
                     and previous_wait["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"}
                 )
             human_wait = row["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"} or (
