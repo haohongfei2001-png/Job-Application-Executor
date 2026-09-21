@@ -26,6 +26,31 @@ def _profile_file(tmp_path):
     return path
 
 
+def _sms_profile_file(tmp_path, *, allow_terms=True):
+    path = tmp_path / "sms-profile.json"
+    path.write_text(json.dumps({
+        "fields": {
+            "identity.full_name": {
+                "value": "Example User",
+                "confidence": 1.0,
+                "user_confirmed": True,
+            },
+            "identity.phone": {
+                "value": "13800138000",
+                "confidence": 1.0,
+                "user_confirmed": True,
+                "sensitive": True,
+            },
+            "policy.auto_accept_privacy_terms": {
+                "value": bool(allow_terms),
+                "confidence": 1.0,
+                "user_confirmed": True,
+            },
+        }
+    }), encoding="utf-8")
+    return path
+
+
 class FakeAdapter:
     def __init__(self, fields, final=None, verification_level="page_signal"):
         self.fields = fields
@@ -242,6 +267,8 @@ class AuthAdapter(FakeAdapter):
         final=None,
         confirms=False,
         kind_after_confirm=None,
+        prepare_status="not_needed",
+        kind_after_prepare=None,
     ):
         super().__init__(
             [WebField(field_id="name", selector="#name", label="姓名", required=True)],
@@ -254,6 +281,9 @@ class AuthAdapter(FakeAdapter):
         self.confirms = confirms
         self.kind_after_confirm = kind_after_confirm
         self.confirm_calls = 0
+        self.prepare_status = prepare_status
+        self.kind_after_prepare = kind_after_prepare
+        self.prepare_calls = []
 
     def auth_challenge_kind(self):
         return self.kind
@@ -263,6 +293,12 @@ class AuthAdapter(FakeAdapter):
 
     def current_page_hostname(self):
         return "auth.example.test"
+
+    def prepare_one_time_code_auth(self, phone, *, allow_standard_auth_terms=False):
+        self.prepare_calls.append((phone, allow_standard_auth_terms))
+        if self.kind_after_prepare is not None:
+            self.kind = self.kind_after_prepare
+        return self.prepare_status
 
     def enter_one_time_code(self, code):
         self.entered = bool(code)
@@ -438,3 +474,100 @@ def test_challenge_after_otp_confirmation_blocks(tmp_path, monkeypatch, kind):
     assert plan.metadata["block_reason"] == "authentication challenge remains after OTP confirmation"
     assert adapter.confirm_calls == 1
     assert adapter.submit_calls == 0
+
+
+def test_sms_auth_preparation_uses_local_phone_and_policy_before_relay(tmp_path, monkeypatch):
+    adapter = AuthAdapter(
+        "one_time_code",
+        prepare_status="requested",
+        final="Submit application",
+    )
+    bridge = FakeOtpBridge({"code": "462810", "source": "local_broker"})
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: adapter)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+
+    runner = ApplicationExecutor(
+        "https://example.test/apply",
+        _sms_profile_file(tmp_path, allow_terms=True),
+        {"deepseek": {"enabled": False}},
+        otp_bridge=bridge,
+    )
+    plan = runner.run(max_pages=1)
+
+    assert adapter.prepare_calls == [("13800138000", True)]
+    assert bridge.sites == ["auth.example.test"]
+    assert adapter.entered is True
+    assert plan.stage == ApplicationStage.READY_TO_SUBMIT
+    actions = runner.audit.actions_path.read_text(encoding="utf-8")
+    assert "13800138000" not in actions
+    assert "462810" not in actions
+    assert "otp_authentication_prepare" in actions
+
+
+def test_sms_auth_consent_requirement_blocks_before_requesting_relay(tmp_path, monkeypatch):
+    adapter = AuthAdapter(
+        "one_time_code",
+        prepare_status="consent_required",
+    )
+    bridge = FakeOtpBridge({"code": "462810", "source": "local_broker"})
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: adapter)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+
+    plan = ApplicationExecutor(
+        "https://example.test/apply",
+        _sms_profile_file(tmp_path, allow_terms=False),
+        {"deepseek": {"enabled": False}},
+        otp_bridge=bridge,
+    ).run(max_pages=1)
+
+    assert adapter.prepare_calls == [("13800138000", False)]
+    assert bridge.sites == []
+    assert adapter.entered is False
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["auth_kind"] == "sms_setup"
+    assert "consent" in plan.metadata["block_reason"].lower()
+
+
+def test_sms_auth_missing_canonical_phone_blocks_before_relay(tmp_path, monkeypatch):
+    adapter = AuthAdapter(
+        "one_time_code",
+        prepare_status="phone_required",
+    )
+    bridge = FakeOtpBridge({"code": "462810", "source": "local_broker"})
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: adapter)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+
+    plan = ApplicationExecutor(
+        "https://example.test/apply",
+        _profile_file(tmp_path),
+        {"deepseek": {"enabled": False}},
+        otp_bridge=bridge,
+    ).run(max_pages=1)
+
+    assert adapter.prepare_calls == [(None, False)]
+    assert bridge.sites == []
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["auth_kind"] == "sms_setup"
+
+
+def test_sms_auth_captcha_after_code_request_stops_before_relay(tmp_path, monkeypatch):
+    adapter = AuthAdapter(
+        "one_time_code",
+        prepare_status="requested",
+        kind_after_prepare="captcha",
+    )
+    bridge = FakeOtpBridge({"code": "462810", "source": "local_broker"})
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: adapter)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+
+    plan = ApplicationExecutor(
+        "https://example.test/apply",
+        _sms_profile_file(tmp_path, allow_terms=True),
+        {"deepseek": {"enabled": False}},
+        otp_bridge=bridge,
+    ).run(max_pages=1)
+
+    assert bridge.sites == []
+    assert adapter.entered is False
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["auth_kind"] == "captcha"
