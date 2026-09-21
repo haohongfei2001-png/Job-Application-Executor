@@ -152,6 +152,31 @@ def test_resume_migrates_legacy_generic_paused_human_wait(tmp_path, stage, block
     assert q.claim('w')['attempts'] == 1
 
 
+def test_legacy_generic_pause_does_not_reuse_stale_human_checkpoint(tmp_path):
+    now = [1.]
+    q = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
+    tid = q.enqueue(spec(tmp_path, max_attempts=2))["task_id"]
+    claimed = q.claim("w")
+    q.checkpoint(
+        tid,
+        claimed["owner"],
+        "NEEDS_USER_INPUT",
+        blocker="unknown_facts",
+        release=True,
+    )
+    assert q.resume(tid)["attempts"] == 0
+    claimed_again = q.claim("w")
+    assert claimed_again["attempts"] == 1
+
+    # An ordinary active pause after the later claim must not inherit the old
+    # human-wait checkpoint and manufacture a fresh retry budget.
+    paused = q.pause(tid)
+    assert paused["blocker"] == "user_paused"
+    resumed = q.resume(tid)
+    assert resumed["attempts"] == 1
+    assert q.claim("w")["attempts"] == 2
+
+
 @pytest.mark.parametrize("blocker", ["session_unavailable", "validation"])
 def test_resume_resets_retry_budget_for_recoverable_block(tmp_path, blocker):
     now = [1.]
