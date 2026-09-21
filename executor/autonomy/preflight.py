@@ -61,20 +61,24 @@ def collect_live_preflight(
         "deepseek_available": bool(deepseek_available),
         "supervisor_running": bool(supervisor_running),
     }
-    remediation = [
-        code
-        for code, passed in (
-            ("use_live_browser_mode", checks["live_browser_mode"]),
-            ("install_google_chrome", checks["chrome_installed"]),
-            ("start_dedicated_chrome_cdp", checks["existing_cdp_session"]),
-            ("configure_profile_path", checks["profile_configured"]),
-            ("restore_profile_file", checks["profile_exists"]),
-            ("repair_profile_file", checks["profile_loadable"]),
-            ("configure_deepseek_key", checks["deepseek_available"]),
-            ("start_supervisor", checks["supervisor_running"]),
-        )
-        if not passed
-    ]
+    remediation = []
+    for code, passed in (
+        ("use_live_browser_mode", checks["live_browser_mode"]),
+        ("install_google_chrome", checks["chrome_installed"]),
+        ("start_dedicated_chrome_cdp", checks["existing_cdp_session"]),
+    ):
+        if not passed:
+            remediation.append(code)
+    if not checks["profile_configured"]:
+        remediation.append("configure_profile_path")
+    elif not checks["profile_exists"]:
+        remediation.append("restore_profile_file")
+    elif not checks["profile_loadable"]:
+        remediation.append("repair_profile_file")
+    if not checks["deepseek_available"]:
+        remediation.append("configure_deepseek_key")
+    if not checks["supervisor_running"]:
+        remediation.append("start_supervisor")
     ready = all(checks.values())
     return {
         "ok": ready,
