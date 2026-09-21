@@ -22,12 +22,13 @@ The user talks to one manager. Queueing, checkpoints, OTP handling, browser adap
 
 ## Allowed manager decisions
 
-The DeepSeek manager may propose only REPORT, RESUME, CANCEL, ANSWER_PENDING, or CREATE_TASK. It never receives arbitrary shell, JavaScript, CDP, filesystem, or final-submit capabilities.
+The DeepSeek manager may propose only REPORT, RESUME, PAUSE, CANCEL, ANSWER_PENDING, or CREATE_TASK. It never receives arbitrary shell, JavaScript, CDP, filesystem, or final-submit capabilities.
 
 Deterministic policy rules:
 
 - CANCEL requires explicit cancel/stop intent in the current user message.
 - RESUME requires explicit continue/resume intent.
+- PAUSE requires explicit pause/hold intent and fences an active worker at the next guard.
 - ANSWER_PENDING is accepted only for a currently pending field and only when the proposed value is explicitly present in the current user message.
 - CREATE_TASK requires explicit application intent and the exact target URL in the current user message.
 - READY_TO_SUBMIT can never be resumed by the manager.
