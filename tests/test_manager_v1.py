@@ -141,7 +141,7 @@ def test_pending_answer_must_be_pending_and_verbatim_user_fact(tmp_path):
 
 
 def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_path):
-    url = "https://jobs.example.test/apply?postId=new-role"
+    url = "https://jobs.example.test/apply?position=AI,ML"
     profile = tmp_path / "canonical.json"
     profile.write_text("{}")
     turn = ManagerTurn(reply="开始处理。", decisions=[
@@ -227,6 +227,9 @@ def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     '{"password":"hunter2"}',
     '{"token":"abcdefghijklmnop"}',
     '{"otp":"7294"}',
+    '{"密码":"hunter2"}',
+    '{"验证码":"7294"}',
+    '{"令牌":"abcdefghijklmnop"}',
     "Bearer abcdefghijklmnop",
 ])
 def test_sensitive_chat_is_rejected_before_provider(tmp_path, message):
