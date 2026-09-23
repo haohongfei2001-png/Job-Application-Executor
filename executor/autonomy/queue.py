@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ..models import ApplicationStage
 from ..protected_targets import assert_target_not_protected
+from ..discovery.core import normalize_component
 
 RUNTIME = Path(__file__).resolve().parents[2] / "runtime" / "autonomy"
 SAFE_STAGES = {"DISCOVERED", "PROFILE_RESOLVED", "FORM_FILLED", "VALIDATED"}
@@ -24,13 +25,27 @@ STAGES = {str(x) for x in ApplicationStage}
 IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.:-]{0,150}$")
 
 
+def _safe_hash_job_id(fragment: str) -> str:
+    """Only a plain job route may survive in durable operational state."""
+    match = re.fullmatch(r"/(?:job|jobs|position|positions)/([A-Za-z0-9_-]{2,150})", fragment)
+    if not match:
+        raise ValueError("unsupported or secret-bearing URL fragment")
+    return match.group(1)
+
+
 class TaskSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     company: str = Field(min_length=1, max_length=150)
     role: str = Field(min_length=1, max_length=200)
     target_url: str = Field(max_length=2000)
     job_id: str = Field(default="", max_length=150)
+    tenant: str = Field(default="", max_length=150)
     campaign: str = Field(default="", max_length=150)
+    location: str = Field(default="", max_length=150)
+    employment_type: str = Field(default="", max_length=100)
+    target_evidence_digest: str = Field(default="", max_length=64)
+    target_source_chain: list[str] = Field(default_factory=list, max_length=4)
+    target_verified: bool = False
     profile_ref: str = Field(min_length=1, max_length=1000)
     attachment_refs: dict[str, str] = Field(default_factory=dict)
     live_authorized: bool = False
@@ -38,17 +53,37 @@ class TaskSpec(BaseModel):
 
     @model_validator(mode="after")
     def consistent_job(self):
-        ids = {v for k, v in parse_qsl(urlsplit(self.target_url).query) if k.lower() in {"postid", "jobid", "positionid"}}
+        parsed = urlsplit(self.target_url)
+        ids = {v for k, v in parse_qsl(parsed.query) if k.lower() in {"postid", "jobid", "positionid"}}
+        if parsed.fragment:
+            ids.add(_safe_hash_job_id(parsed.fragment))
         if len(ids) > 1 or (ids and self.job_id and self.job_id not in ids):
             raise ValueError("conflicting target identifiers")
+        if self.target_verified and not (
+            self.tenant and self.job_id and len(self.target_evidence_digest) == 64
+            and self.target_source_chain
+        ):
+            raise ValueError("verified target requires tenant, job and source evidence")
         return self
+
+    @field_validator("target_source_chain")
+    @classmethod
+    def official_sources(cls, value):
+        for source in value:
+            parsed = urlsplit(source)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.query or parsed.fragment):
+                raise ValueError("unsafe target source chain")
+        return value
 
     @field_validator("target_url")
     @classmethod
     def safe_url(cls, value):
         u = urlsplit(value)
-        if u.scheme not in {"https", "http", "file"} or u.username or u.password or u.fragment:
+        if u.scheme not in {"https", "http", "file"} or u.username or u.password:
             raise ValueError("invalid operational target URL")
+        if u.fragment:
+            _safe_hash_job_id(u.fragment)
         if u.scheme != "file" and not u.hostname:
             raise ValueError("target host required")
         # Only job identifiers/routing parameters belong in durable operational state.
@@ -217,12 +252,18 @@ class TaskQueue:
         return d
 
     def enqueue(self, spec: TaskSpec):
-        assert_target_not_protected(spec.target_url)
+        if spec.tenant and spec.job_id:
+            assert_target_not_protected(spec.target_url, tenant=spec.tenant,
+                                        job_id=spec.job_id, campaign=spec.campaign)
+        else:
+            assert_target_not_protected(spec.target_url)
         # Profile, campaign and display text cannot defeat exact-target duplicate suppression.
         u = urlsplit(spec.target_url)
         ids = [v for k, v in parse_qsl(u.query) if k.lower() in {"postid", "jobid", "positionid"}]
-        job_id = ids[0] if ids else spec.job_id
-        identity = f"{u.hostname}:{job_id}" if job_id else spec.target_url
+        job_id = ids[0] if ids else (_safe_hash_job_id(u.fragment) if u.fragment else spec.job_id)
+        identity = (f"{spec.tenant.casefold()}:{job_id}:{normalize_component(spec.campaign)}"
+                    if spec.tenant and job_id else
+                    f"{u.hostname}:{job_id}" if job_id else spec.target_url)
         key = hashlib.sha256(identity.encode()).hexdigest()
         now = self.clock()
         with self.tx() as db:
@@ -234,10 +275,11 @@ class TaskQueue:
             self._event(db, tid, "enqueued", "DISCOVERED")
             return self._view(db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone())
 
-    def retarget_same_origin_landing(self, tid, new_url, *, job_id=""):
+    def retarget_same_origin_landing(self, tid, new_url, *, job_id="", tenant="",
+                                     campaign="", location="", employment_type="",
+                                     evidence_digest="", source_chain=()):
         """Replace a known landing-page task with one exact same-origin job target."""
         TaskSpec.safe_url(new_url)
-        assert_target_not_protected(new_url)
         with self.tx() as db:
             row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
             view = self._view(row)
@@ -260,18 +302,29 @@ class TaskQueue:
                 **old_spec.model_dump(),
                 "target_url": new_url,
                 "job_id": str(job_id or old_spec.job_id),
+                "tenant": str(tenant or old_spec.tenant),
+                "campaign": str(campaign or old_spec.campaign),
+                "location": str(location or old_spec.location),
+                "employment_type": str(employment_type or old_spec.employment_type),
+                "target_evidence_digest": str(evidence_digest),
+                "target_source_chain": list(source_chain),
+                "target_verified": bool(tenant and job_id and evidence_digest and source_chain),
+                "live_authorized": bool(old_spec.live_authorized and tenant and job_id and evidence_digest and source_chain),
             })
+            if new_spec.tenant and new_spec.job_id:
+                assert_target_not_protected(new_url, tenant=new_spec.tenant,
+                                            job_id=new_spec.job_id, campaign=new_spec.campaign)
+            else:
+                assert_target_not_protected(new_url)
             ids = [
                 value
                 for key, value in parse_qsl(resolved_url.query)
                 if key.lower() in {"postid", "jobid", "positionid"}
             ]
             identity_job = ids[0] if ids else new_spec.job_id
-            identity = (
-                f"{resolved_url.hostname}:{identity_job}"
-                if identity_job
-                else new_spec.target_url
-            )
+            identity = (f"{new_spec.tenant.casefold()}:{identity_job}:{normalize_component(new_spec.campaign)}"
+                        if new_spec.tenant and identity_job else
+                        f"{resolved_url.hostname}:{identity_job}" if identity_job else new_spec.target_url)
             key = hashlib.sha256(identity.encode()).hexdigest()
             conflict = db.execute(
                 "SELECT task_id FROM tasks WHERE idempotency_key=? AND task_id!=?",
@@ -504,7 +557,14 @@ class TaskQueue:
                 (tid,),
             ).fetchone():
                 raise ValueError("external outcome requires read-only reconciliation")
-            assert_target_not_protected(json.loads(row["spec"])["target_url"])
+            current_spec = json.loads(row["spec"])
+            if current_spec.get("tenant") and current_spec.get("job_id"):
+                assert_target_not_protected(current_spec["target_url"],
+                                            tenant=current_spec["tenant"],
+                                            job_id=current_spec["job_id"],
+                                            campaign=current_spec.get("campaign", ""))
+            else:
+                assert_target_not_protected(current_spec["target_url"])
             # Human input/action waits do not consume retry budget. If such a
             # wait was paused, pause() records that origin in the blocker so the
             # same reset semantics survive the BLOCKED intermediary state.
