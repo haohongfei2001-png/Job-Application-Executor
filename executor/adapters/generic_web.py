@@ -660,6 +660,48 @@ class GenericWebAdapter(SiteAdapter):
         """Read-only proof that the visible OTP belongs to a unique SMS-login setup."""
         return self._current_sms_initial_send_index() >= 0
 
+    def _visible_alternative_auth_challenge(self) -> bool:
+        """Detect QR/face/security-key auth only inside a visible auth container."""
+        try:
+            return bool(self.page.evaluate(r"""() => {
+              const visible = e => {
+                const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                return style.display !== 'none'
+                  && style.visibility !== 'hidden'
+                  && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0);
+              };
+              const selectors = [
+                '[role="dialog"]',
+                '[aria-modal="true"]',
+                '[class*="login" i]',
+                '[class*="signin" i]',
+                '[class*="auth" i]',
+                '[class*="verify" i]',
+                '[id*="login" i]',
+                '[id*="signin" i]',
+                '[id*="auth" i]',
+                '[id*="verify" i]'
+              ];
+              const containers = [...new Set(
+                selectors.flatMap(selector => [...document.querySelectorAll(selector)])
+              )].filter(visible);
+              const alternative = /扫码登录|二维码|qr[ -]?code|face (?:id|verification)|人脸|安全密钥/i;
+              const auth = /登录|登陆|sign\s*in|log\s*in|账号|账户|account|authentication|身份验证|安全登录/i;
+              return containers.some(container => {
+                const text = (container.innerText || '').replace(/\s+/g, ' ').trim();
+                const attrs = [
+                  container.id || '',
+                  container.getAttribute('class') || '',
+                  container.getAttribute('aria-label') || ''
+                ].join(' ');
+                return alternative.test(text) && (
+                  auth.test(text) || /login|signin|auth|verify/i.test(attrs)
+                );
+              });
+            }"""))
+        except Exception:
+            return False
+
     def auth_challenge_kind(self) -> str | None:
         try:
             kinds: set[str] = set()
@@ -692,7 +734,7 @@ class GenericWebAdapter(SiteAdapter):
             body = (self.page.locator("body").inner_text(timeout=2500) or "")[-7000:]
             if re.search(r"captcha|verify you are human|人机验证|滑块|滑动.*验证|拖动.*验证|图形验证码|图片验证|slide.*verify|drag.*puzzle", body, re.I):
                 kinds.add("captcha")
-            if re.search(r"扫码登录|二维码|qr[ -]?code|face (?:id|verification)|人脸|安全密钥", body, re.I):
+            if self._visible_alternative_auth_challenge():
                 kinds.add("other")
             if not kinds and re.search(
                 r"verification code|one.?time code|\botp\b|two.?factor|multi.?factor|"

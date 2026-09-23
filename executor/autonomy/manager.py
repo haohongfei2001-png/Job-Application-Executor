@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..resolver import DeepSeekMapper
 from ..settings import load_settings
+from ..target_resolver import is_oppo_campus_landing, resolve_known_landing
 from .queue import TaskQueue, TaskSpec
 
 
@@ -362,6 +363,33 @@ class ManagerController:
             task = self.queue.get(decision.task_id)
             if task["stage"] == "READY_TO_SUBMIT":
                 return {"action": str(action), "status": "denied", "reason": "manual_submit_gate"}
+            spec = task.get("spec") or {}
+            if is_oppo_campus_landing(str(spec.get("target_url") or "")):
+                try:
+                    candidate = resolve_known_landing(
+                        str(spec.get("company") or ""),
+                        str(spec.get("role") or ""),
+                        str(spec.get("target_url") or ""),
+                    )
+                except Exception:
+                    candidate = None
+                if candidate is None:
+                    return {
+                        "action": str(action),
+                        "status": "denied",
+                        "reason": "exact_job_resolution_required",
+                    }
+                self.queue.retarget_same_origin_landing(
+                    decision.task_id,
+                    candidate.job_url,
+                    job_id=candidate.job_id,
+                )
+                return {
+                    "action": str(action),
+                    "status": "accepted",
+                    "task_id": decision.task_id,
+                    "resolved_target": True,
+                }
             self.queue.resume(decision.task_id)
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
@@ -408,15 +436,42 @@ class ManagerController:
                 return {"action": str(action), "status": "denied", "reason": "explicit_apply_required"}
             if not decision.company or not decision.role:
                 return {"action": str(action), "status": "denied", "reason": "target_identity_required"}
+
+            target_url = decision.target_url
+            job_id = ""
+            resolved_target = False
+            if is_oppo_campus_landing(target_url):
+                try:
+                    candidate = resolve_known_landing(
+                        decision.company,
+                        decision.role,
+                        target_url,
+                    )
+                except Exception:
+                    candidate = None
+                if candidate is None:
+                    return {
+                        "action": str(action),
+                        "status": "denied",
+                        "reason": "exact_job_resolution_required",
+                    }
+                target_url = candidate.job_url
+                job_id = candidate.job_id
+                resolved_target = True
+
             spec = TaskSpec(
                 company=decision.company,
                 role=decision.role,
-                target_url=decision.target_url,
+                target_url=target_url,
+                job_id=job_id,
                 profile_ref=self._profile_ref(),
                 live_authorized=True,
             )
             task = self.queue.enqueue(spec)
-            return {"action": str(action), "status": "accepted", "task_id": task["task_id"]}
+            result = {"action": str(action), "status": "accepted", "task_id": task["task_id"]}
+            if resolved_target:
+                result["resolved_target"] = True
+            return result
 
         return {"action": str(action), "status": "denied", "reason": "unsupported_action"}
 
@@ -472,29 +527,78 @@ class ManagerController:
                 if task.get("stage") == "NEEDS_USER_ACTION"
             ]
             if len(waiting) == 1:
-                tid = waiting[0]["task_id"]
-                try:
-                    self.queue.resume(tid)
-                except (KeyError, ValueError, RuntimeError):
-                    return {
-                        "reply": "当前任务无法从该状态恢复；队列状态保持不变。",
-                        "actions": [{
-                            "action": str(ManagerAction.RESUME),
-                            "status": "denied",
-                            "reason": "state_or_policy_conflict",
-                        }],
-                        **self.state(),
-                    }
+                task = waiting[0]
+                tid = task["task_id"]
+                spec = task.get("spec") or {}
+                landing_retargeted = False
+                if is_oppo_campus_landing(str(spec.get("target_url") or "")):
+                    try:
+                        candidate = resolve_known_landing(
+                            str(spec.get("company") or ""),
+                            str(spec.get("role") or ""),
+                            str(spec.get("target_url") or ""),
+                        )
+                    except Exception:
+                        candidate = None
+                    if candidate is None:
+                        return {
+                            "reply": (
+                                "当前 OPPO 任务指向校招首页，但没有唯一解析出对应的具体岗位。"
+                                "任务未继续，避免在错误页面上操作。"
+                            ),
+                            "actions": [{
+                                "action": str(ManagerAction.RESUME),
+                                "status": "denied",
+                                "reason": "exact_job_resolution_required",
+                            }],
+                            **self.state(),
+                        }
+                    try:
+                        self.queue.retarget_same_origin_landing(
+                            tid,
+                            candidate.job_url,
+                            job_id=candidate.job_id,
+                        )
+                        landing_retargeted = True
+                    except (KeyError, ValueError, RuntimeError):
+                        return {
+                            "reply": "具体岗位已解析，但当前任务无法安全切换目标；队列状态保持不变。",
+                            "actions": [{
+                                "action": str(ManagerAction.RESUME),
+                                "status": "denied",
+                                "reason": "state_or_policy_conflict",
+                            }],
+                            **self.state(),
+                        }
+                else:
+                    try:
+                        self.queue.resume(tid)
+                    except (KeyError, ValueError, RuntimeError):
+                        return {
+                            "reply": "当前任务无法从该状态恢复；队列状态保持不变。",
+                            "actions": [{
+                                "action": str(ManagerAction.RESUME),
+                                "status": "denied",
+                                "reason": "state_or_policy_conflict",
+                            }],
+                            **self.state(),
+                        }
+                action_result = {
+                    "action": str(ManagerAction.RESUME),
+                    "status": "accepted",
+                    "task_id": tid,
+                }
+                if landing_retargeted:
+                    action_result["resolved_target"] = True
                 return {
                     "reply": (
+                        "已解析到具体 OPPO 岗位并切换任务目标，正在进入岗位详情继续处理。"
+                        if landing_retargeted
+                        else
                         "已收到明确继续指令，正在从安全检查点重新检查当前页面。"
                         "如果仍是需要人工处理的安全验证，系统会再次停住。"
                     ),
-                    "actions": [{
-                        "action": str(ManagerAction.RESUME),
-                        "status": "accepted",
-                        "task_id": tid,
-                    }],
+                    "actions": [action_result],
                     **self.state(),
                 }
         tasks = [safe_task_view(task) for task in task_rows]

@@ -88,7 +88,7 @@ def test_generic_adapter_rejects_ambiguous_one_time_code_fields(tmp_path):
     [
         ('<label>Password <input type="password"></label>', "password"),
         ('<div class="captcha">Verify you are human</div>', "captcha"),
-        ('<p>请扫码登录</p>', "other"),
+        ('<div role="dialog"><h2>登录</h2><p>请扫码登录</p></div>', "other"),
     ],
 )
 def test_generic_adapter_distinguishes_non_otp_auth_challenges(tmp_path, body, expected):
@@ -386,3 +386,17 @@ def test_sms_login_reproves_send_control_after_consent_rerender(tmp_path):
         ) == "requested"
         assert adapter.page.locator("#send").count() == 0
         assert adapter.page.locator("#send2").get_attribute("data-clicked") == "yes"
+
+
+def test_page_level_qr_copy_is_not_an_auth_challenge(tmp_path):
+    html = tmp_path / "qr-marketing-copy.html"
+    html.write_text(
+        '''<!doctype html><meta charset="utf-8"><body>
+        <header>OPPO 校园招聘</header>
+        <main><h1>开启新征程</h1><p>扫码关注 OPPO 招聘二维码，获取更多校园资讯。</p></main>
+        </body>''',
+        encoding="utf-8",
+    )
+
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.auth_challenge_kind() is None

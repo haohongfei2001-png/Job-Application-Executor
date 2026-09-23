@@ -687,3 +687,253 @@ def test_conflicting_resume_and_pause_text_never_uses_local_resume_fast_path(tmp
     assert result["actions"][0]["action"] == "PAUSE"
     assert result["actions"][0]["status"] == "accepted"
     assert q.get(tid)["stage"] == "BLOCKED"
+
+
+def test_create_oppo_landing_task_resolves_to_unique_exact_job(tmp_path, monkeypatch):
+    from executor.target_resolver import Candidate, OPPO_CAMPUS_ROOT
+
+    profile = tmp_path / "canonical.json"
+    profile.write_text("{}")
+    turn = ManagerTurn(reply="开始处理。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.CREATE_TASK,
+            company="OPPO",
+            role="AI产品经理",
+            target_url=OPPO_CAMPUS_ROOT,
+        )
+    ])
+    q, _, _, manager = controller(
+        tmp_path,
+        turn,
+        settings={"profile_path": str(profile)},
+    )
+    candidate = Candidate(
+        title="AI 产品经理",
+        job_id="2048",
+        location="北京市",
+        category="产品类",
+        job_url=OPPO_CAMPUS_ROOT + "/post/2048?recruitType=Campus",
+        exact_title=True,
+    )
+    monkeypatch.setattr(
+        "executor.autonomy.manager.resolve_known_landing",
+        lambda company, role, url: candidate,
+    )
+
+    result = manager.handle(
+        "投递 OPPO 的 AI产品经理：" + OPPO_CAMPUS_ROOT
+    )
+
+    action = result["actions"][0]
+    assert action["status"] == "accepted"
+    assert action["resolved_target"] is True
+    task = q.get(action["task_id"])
+    assert task["spec"]["target_url"] == candidate.job_url
+    assert task["spec"]["job_id"] == "2048"
+
+
+def test_create_oppo_landing_task_fails_closed_without_unique_exact_job(
+    tmp_path, monkeypatch
+):
+    from executor.target_resolver import OPPO_CAMPUS_ROOT
+
+    profile = tmp_path / "canonical.json"
+    profile.write_text("{}")
+    turn = ManagerTurn(reply="开始处理。", decisions=[
+        ManagerDecision(
+            action=ManagerAction.CREATE_TASK,
+            company="OPPO",
+            role="AI产品经理",
+            target_url=OPPO_CAMPUS_ROOT,
+        )
+    ])
+    q, _, _, manager = controller(
+        tmp_path,
+        turn,
+        settings={"profile_path": str(profile)},
+    )
+    monkeypatch.setattr(
+        "executor.autonomy.manager.resolve_known_landing",
+        lambda *_: None,
+    )
+
+    result = manager.handle(
+        "投递 OPPO 的 AI产品经理：" + OPPO_CAMPUS_ROOT
+    )
+
+    assert result["actions"][0] == {
+        "action": "CREATE_TASK",
+        "status": "denied",
+        "reason": "exact_job_resolution_required",
+    }
+    assert q.tasks() == []
+
+
+def test_resume_existing_oppo_landing_task_retargets_same_task(tmp_path, monkeypatch):
+    from executor.target_resolver import Candidate, OPPO_CAMPUS_ROOT
+
+    q = TaskQueue(tmp_path / "runtime")
+    profile = tmp_path / "profile.json"
+    profile.write_text("{}")
+    task = q.enqueue(TaskSpec(
+        company="OPPO",
+        role="AI产品经理",
+        target_url=OPPO_CAMPUS_ROOT,
+        profile_ref=str(profile),
+        live_authorized=True,
+    ))
+    claimed = q.claim("test-worker")
+    q.checkpoint(
+        task["task_id"],
+        claimed["owner"],
+        "NEEDS_USER_ACTION",
+        blocker="security_challenge",
+        release=True,
+    )
+    candidate = Candidate(
+        title="AI 产品经理",
+        job_id="2048",
+        location="北京市",
+        category="产品类",
+        job_url=OPPO_CAMPUS_ROOT + "/post/2048?recruitType=Campus",
+        exact_title=True,
+    )
+    monkeypatch.setattr(
+        "executor.autonomy.manager.resolve_known_landing",
+        lambda *_: candidate,
+    )
+    worker = Worker(q, settings={"deepseek": {"enabled": False}})
+    provider = FakeProvider(ManagerTurn(
+        reply="不应调用模型。",
+        decisions=[ManagerDecision(action=ManagerAction.REPORT)],
+    ))
+    manager = ManagerController(
+        q,
+        worker,
+        provider=provider,
+        settings={"profile_path": str(profile)},
+    )
+
+    result = manager.handle("继续这个岗位")
+
+    assert result["actions"][0]["action"] == "RESUME"
+    assert result["actions"][0]["status"] == "accepted"
+    assert result["actions"][0]["resolved_target"] is True
+    assert provider.seen is None
+    retargeted = q.get(task["task_id"])
+    assert retargeted["stage"] == "DISCOVERED"
+    assert retargeted["checkpoint"] == "DISCOVERED"
+    assert retargeted["blocker"] is None
+    assert retargeted["attempts"] == 0
+    assert retargeted["spec"]["target_url"] == candidate.job_url
+    assert retargeted["spec"]["job_id"] == "2048"
+
+
+def test_queue_retarget_rejects_cross_origin_or_non_detail_target(tmp_path):
+    from executor.target_resolver import OPPO_CAMPUS_ROOT
+
+    q = TaskQueue(tmp_path / "runtime")
+    profile = tmp_path / "profile.json"
+    profile.write_text("{}")
+    task = q.enqueue(TaskSpec(
+        company="OPPO",
+        role="AI产品经理",
+        target_url=OPPO_CAMPUS_ROOT,
+        profile_ref=str(profile),
+        live_authorized=True,
+    ))
+
+    with pytest.raises(ValueError):
+        q.retarget_same_origin_landing(
+            task["task_id"],
+            "https://evil.example/post/2048",
+            job_id="2048",
+        )
+    with pytest.raises(ValueError):
+        q.retarget_same_origin_landing(
+            task["task_id"],
+            OPPO_CAMPUS_ROOT + "/about",
+            job_id="2048",
+        )
+
+    unchanged = q.get(task["task_id"])
+    assert unchanged["stage"] == "DISCOVERED"
+    assert unchanged["spec"]["target_url"] == OPPO_CAMPUS_ROOT
+
+
+def test_model_selected_oppo_resume_also_retargets_landing(tmp_path, monkeypatch):
+    from executor.target_resolver import Candidate, OPPO_CAMPUS_ROOT
+
+    q = TaskQueue(tmp_path / "runtime")
+    profile = tmp_path / "profile.json"
+    profile.write_text("{}")
+    oppo = q.enqueue(TaskSpec(
+        company="OPPO 2027届校园招聘",
+        role="AI产品经理",
+        target_url=OPPO_CAMPUS_ROOT,
+        profile_ref=str(profile),
+        live_authorized=True,
+    ))
+    claimed = q.claim("worker-oppo")
+    q.checkpoint(
+        oppo["task_id"],
+        claimed["owner"],
+        "NEEDS_USER_ACTION",
+        blocker="security_challenge",
+        release=True,
+    )
+
+    other = q.enqueue(TaskSpec(
+        company="Other Co",
+        role="Other Role",
+        target_url="https://jobs.example.test/apply?postId=other",
+        job_id="other",
+        profile_ref=str(profile),
+        live_authorized=True,
+    ))
+    claimed_other = q.claim("worker-other")
+    q.checkpoint(
+        other["task_id"],
+        claimed_other["owner"],
+        "NEEDS_USER_ACTION",
+        blocker="security_challenge",
+        release=True,
+    )
+
+    candidate = Candidate(
+        title="AI 产品经理",
+        job_id="2048",
+        location="北京市",
+        category="产品类",
+        job_url=OPPO_CAMPUS_ROOT + "/post/2048?recruitType=Campus",
+        exact_title=True,
+    )
+    monkeypatch.setattr(
+        "executor.autonomy.manager.resolve_known_landing",
+        lambda *_: candidate,
+    )
+    provider = FakeProvider(ManagerTurn(
+        reply="继续 OPPO。",
+        decisions=[
+            ManagerDecision(
+                action=ManagerAction.RESUME,
+                task_id=oppo["task_id"],
+            )
+        ],
+    ))
+    worker = Worker(q, settings={"deepseek": {"enabled": False}})
+    manager = ManagerController(
+        q,
+        worker,
+        provider=provider,
+        settings={"profile_path": str(profile)},
+    )
+
+    result = manager.handle("继续 OPPO 这个岗位")
+
+    assert provider.seen is not None
+    assert result["actions"][0]["status"] == "accepted"
+    assert result["actions"][0]["resolved_target"] is True
+    assert q.get(oppo["task_id"])["spec"]["target_url"] == candidate.job_url
+    assert q.get(oppo["task_id"])["stage"] == "DISCOVERED"
+    assert q.get(other["task_id"])["stage"] == "NEEDS_USER_ACTION"
