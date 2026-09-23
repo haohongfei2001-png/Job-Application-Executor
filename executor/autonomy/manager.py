@@ -467,6 +467,7 @@ class ManagerController:
             self.worker.user_input(
                 decision.task_id,
                 {decision.field_key: decision.value},
+                expected_revision=expected_revision,
             )
             return {
                 "action": str(action),

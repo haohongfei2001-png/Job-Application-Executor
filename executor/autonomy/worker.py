@@ -118,6 +118,8 @@ class Worker:
 
     def user_input(self, tid, answers, *, expected_revision=None):
         task = self.queue.get(tid)
+        if expected_revision is None:
+            expected_revision = task["revision"]
         if expected_revision is not None and task["revision"] != expected_revision:
             raise RuntimeError("stale task revision")
         if task["owner"] or task["stage"] != "NEEDS_USER_INPUT":

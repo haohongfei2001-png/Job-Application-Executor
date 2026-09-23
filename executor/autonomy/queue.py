@@ -123,7 +123,7 @@ class TaskQueue:
                 db.execute("UPDATE tasks SET paused_from='NEEDS_USER_INPUT' WHERE blocker='user_paused_from_input'")
                 db.execute("UPDATE tasks SET paused_from='NEEDS_USER_ACTION' WHERE blocker IN ('user_paused_from_action','user_paused_from_otp_waiting','user_paused_from_otp_ambiguous')")
                 db.execute("UPDATE tasks SET paused_from='BLOCKED' WHERE blocker IN ('user_paused_from_session_unavailable','user_paused_from_validation')")
-            db.execute("UPDATE tasks SET run_state=CASE WHEN stage='BLOCKED' AND blocker LIKE 'user_paused%' THEN 'PAUSED' WHEN stage IN ('BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION') THEN 'WAITING' WHEN stage='READY_TO_SUBMIT' THEN 'READY' WHEN stage IN ('SUBMITTED','VERIFIED') THEN 'DONE' WHEN stage='CANCELLED' THEN 'CANCELLED' WHEN stage='ERROR' THEN 'ERROR' ELSE 'RUNNABLE' END")
+            db.execute("UPDATE tasks SET run_state=CASE WHEN stage='BLOCKED' AND blocker LIKE 'user_paused%' THEN 'PAUSED' WHEN stage IN ('BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION') THEN 'WAITING' WHEN stage='READY_TO_SUBMIT' THEN 'READY' WHEN stage IN ('SUBMITTED','VERIFIED') THEN 'DONE' WHEN stage='CANCELLED' THEN 'CANCELLED' WHEN stage='ERROR' THEN 'ERROR' WHEN owner IS NOT NULL AND lease_until>? THEN 'RUNNING' ELSE 'RUNNABLE' END", (self.clock(),))
             db.execute('''CREATE TABLE IF NOT EXISTS commands (
                 command_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
                 action TEXT NOT NULL, receipt TEXT NOT NULL, created REAL NOT NULL)''')
@@ -146,7 +146,7 @@ class TaskQueue:
 
     def _event(self, db, task_id, kind, stage):
         db.execute("INSERT INTO events(task_id,at,kind,stage) VALUES(?,?,?,?)", (task_id, self.clock(), kind, stage))
-        row = db.execute("SELECT stage,checkpoint,blocker FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        row = db.execute("SELECT stage,checkpoint,blocker,owner,lease_until FROM tasks WHERE task_id=?", (task_id,)).fetchone()
         run_state = (
             "PAUSED" if row["stage"] == "BLOCKED" and str(row["blocker"] or "").startswith("user_paused")
             else "WAITING" if row["stage"] in {"BLOCKED", "NEEDS_USER_INPUT", "NEEDS_USER_ACTION"}
@@ -154,6 +154,7 @@ class TaskQueue:
             else "DONE" if row["stage"] in {"SUBMITTED", "VERIFIED"}
             else "CANCELLED" if row["stage"] == "CANCELLED"
             else "ERROR" if row["stage"] == "ERROR"
+            else "RUNNING" if row["owner"] and row["lease_until"] and row["lease_until"] > self.clock()
             else "RUNNABLE"
         )
         db.execute("UPDATE tasks SET revision=revision+1,phase=?,run_state=?,wait_reason=? WHERE task_id=?",

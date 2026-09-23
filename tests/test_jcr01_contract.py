@@ -56,6 +56,17 @@ def test_command_receipt_replay_and_stale_revision(tmp_path):
     assert queue.get(tid)["paused_from"] is None
 
 
+def test_run_state_tracks_worker_lease_and_local_pause(tmp_path):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = task(queue, tmp_path)["task_id"]
+    assert queue.get(tid)["run_state"] == "RUNNABLE"
+    claimed = queue.claim("worker")
+    assert claimed["run_state"] == "RUNNING"
+    paused = queue.pause(tid)
+    assert paused["run_state"] == "PAUSED"
+    assert queue.renew(tid, claimed["owner"]) is False
+
+
 def test_command_cas_one_winner_across_queue_instances(tmp_path):
     root = tmp_path / "runtime"
     queue = TaskQueue(root)
