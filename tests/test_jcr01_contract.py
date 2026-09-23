@@ -281,3 +281,49 @@ def test_one_thousand_seeded_control_steps_preserve_manual_boundary(tmp_path):
             assert after["stage"] not in {"SUBMITTED", "VERIFIED"}
             operations += 1
     assert operations == 1000
+
+
+@pytest.mark.parametrize("message", ["不要暂停这个任务", "我不想暂停", "do not pause this task", "别暂停"])
+def test_negated_pause_cannot_be_authorized_by_model(tmp_path, message):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = task(queue, tmp_path)["task_id"]
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+
+    class PauseProposal:
+        available = True
+
+        def decide(self, *_):
+            return ManagerTurn(reply="pause proposed", decisions=[
+                ManagerDecision(action=ManagerAction.PAUSE, task_id=tid)
+            ])
+
+    manager = ManagerController(queue, worker, provider=PauseProposal(), settings={})
+    result = manager.handle(message)
+    assert result["actions"][0]["status"] == "denied"
+    assert queue.get(tid)["stage"] == "DISCOVERED"
+
+
+def test_model_cannot_pause_task_a_when_user_names_task_b(tmp_path):
+    queue = TaskQueue(tmp_path / "runtime")
+    a = task(queue, tmp_path)
+    b = queue.enqueue(TaskSpec(company="Other Company", role="Designer",
+        target_url="https://jobs.example.test/apply?postId=other",
+        profile_ref=str(tmp_path / "synthetic-profile.json")))
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+
+    class WrongProposal:
+        available = True
+
+        def decide(self, *_):
+            return ManagerTurn(reply="pause proposed", decisions=[
+                ManagerDecision(action=ManagerAction.PAUSE, task_id=a["task_id"])
+            ])
+
+    manager = ManagerController(queue, worker, provider=WrongProposal(), settings={})
+    wrong = manager.handle("暂停 Other Company")
+    assert wrong["actions"][0]["reason"] == "ambiguous_task_reference"
+    assert queue.get(a["task_id"])["stage"] == "DISCOVERED"
+    assert queue.get(b["task_id"])["stage"] == "DISCOVERED"
+    right = manager.handle("暂停 Synthetic")
+    assert right["actions"][0]["status"] == "accepted"
+    assert queue.get(a["task_id"])["stage"] == "BLOCKED"

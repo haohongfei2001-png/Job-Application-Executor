@@ -189,6 +189,40 @@ _RESUME_RE = re.compile(r"(?:继续|恢复|接着|resume|continue|retry)", re.I)
 _PAUSE_RE = re.compile(r"(?:暂停|先别|等一下|pause|hold)", re.I)
 _CANCEL_RE = re.compile(r"(?:取消|停止|不投|放弃|cancel|stop|drop)", re.I)
 _APPLY_RE = re.compile(r"(?:投递|申请|开始投|apply|application)", re.I)
+_NEGATED_CONTROL = re.compile(r"(?:不(?:要|想|用|必|需)?|别|请勿|无须|无需|don't|do not|not|never)\s*$", re.I)
+
+
+def _explicit_control(message: str, pattern: re.Pattern[str]) -> bool:
+    return any(not _NEGATED_CONTROL.search(message[max(0, match.start() - 12):match.start()])
+               for match in pattern.finditer(message))
+
+
+def _selected_task_is_explicit(message: str, selected: dict[str, Any], tasks: list[dict[str, Any]]) -> bool:
+    active = [task for task in tasks if task.get("stage") not in {"CANCELLED", "SUBMITTED", "VERIFIED"}]
+    if len(active) <= 1:
+        return True
+    text = message.casefold()
+    identifiers = [str(selected.get("task_id") or "")[:8]]
+    spec = selected.get("spec") or {}
+    for key in ("company", "role"):
+        value = str(spec.get(key) or "").casefold().strip()
+        if len(value) >= 3:
+            identifiers.append(value)
+        identifiers.extend(token for token in re.findall(r"[a-z0-9\u4e00-\u9fff]+", value)
+                           if len(token) >= 3)
+    for identifier in identifiers:
+        if not identifier or identifier not in text:
+            continue
+        competing = 0
+        for task in active:
+            other = task.get("spec") or {}
+            if (identifier in str(task.get("task_id") or "")
+                    or identifier in str(other.get("company") or "").casefold()
+                    or identifier in str(other.get("role") or "").casefold()):
+                competing += 1
+        if competing == 1:
+            return True
+    return False
 _URL_LEFT_BOUNDARIES = set(" \t\r\n([{<\"'：，。；！？、")
 _URL_RIGHT_BOUNDARIES = set(" \t\r\n>\"'")
 
@@ -276,6 +310,12 @@ _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN (?:[A-Z0-9][A-Z0-9 -]* )?PRIVATE KEY(?: BLOCK)?-----",
     re.I,
 )
+_PRIVATE_FACT_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|"
+    r"(?<!\d)1[3-9]\d{9}(?!\d)|"
+    r"(?<!\d)\d{15,18}[0-9Xx]?(?!\d)|"
+    r"CANARY_PRIVATE", re.I,
+)
 
 
 def _contains_sensitive_credential(message: str) -> bool:
@@ -361,7 +401,7 @@ class ManagerController:
             return {"action": str(action), "status": "observed"}
 
         if action == ManagerAction.RESUME:
-            if not _RESUME_RE.search(message):
+            if not _explicit_control(message, _RESUME_RE):
                 return {"action": str(action), "status": "denied", "reason": "explicit_resume_required"}
             task = self.queue.get(decision.task_id)
             if task["stage"] == "READY_TO_SUBMIT":
@@ -399,7 +439,7 @@ class ManagerController:
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
         if action == ManagerAction.PAUSE:
-            if not _PAUSE_RE.search(message):
+            if not _explicit_control(message, _PAUSE_RE):
                 return {"action": str(action), "status": "denied", "reason": "explicit_pause_required"}
             self.queue.control("PAUSE", decision.task_id,
                 command_id="manager-" + uuid.uuid4().hex,
@@ -407,7 +447,7 @@ class ManagerController:
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
         if action == ManagerAction.CANCEL:
-            if not _CANCEL_RE.search(message):
+            if not _explicit_control(message, _CANCEL_RE):
                 return {"action": str(action), "status": "denied", "reason": "explicit_cancel_required"}
             self.queue.control("CANCEL", decision.task_id,
                 command_id="manager-" + uuid.uuid4().hex,
@@ -508,13 +548,13 @@ class ManagerController:
         )
         # Stop credentials locally before a provider payload can be built.
         # OTP has a dedicated local broker and must never be forwarded to DeepSeek.
-        if _contains_sensitive_credential(message) or (
+        if _contains_sensitive_credential(message) or _PRIVATE_FACT_RE.search(message) or (
             otp_waiting and _RAW_OTP_RE.fullmatch(message)
         ):
             return {
                 "reply": (
                     "检测到验证码或登录凭据。为避免发送给 DeepSeek，此消息已在本地拦截；"
-                    "验证码请使用本地 OTP 流程，密码、Cookie、Token 或密钥不要粘贴到聊天中。"
+                    "验证码请使用本地 OTP 流程；请不要在聊天中粘贴私人资料。"
                 ),
                 "actions": [],
                 **self.state(),
@@ -524,10 +564,10 @@ class ManagerController:
         # the model cannot downgrade "继续这个岗位" into a read-only REPORT.
         # The executor still re-checks the current page and will immediately
         # block again for a real CAPTCHA/password/ambiguous challenge.
-        explicit_resume = bool(_RESUME_RE.search(message))
+        explicit_resume = _explicit_control(message, _RESUME_RE)
         conflicting_control = bool(
-            _PAUSE_RE.search(message)
-            or _CANCEL_RE.search(message)
+            _explicit_control(message, _PAUSE_RE)
+            or _explicit_control(message, _CANCEL_RE)
             or _APPLY_RE.search(message)
         )
         if explicit_resume and not conflicting_control:
@@ -535,7 +575,7 @@ class ManagerController:
                 task for task in task_rows
                 if task.get("stage") == "NEEDS_USER_ACTION"
             ]
-            if len(waiting) == 1:
+            if len(waiting) == 1 and _selected_task_is_explicit(message, waiting[0], task_rows):
                 task = waiting[0]
                 tid = task["task_id"]
                 spec = task.get("spec") or {}
@@ -629,6 +669,11 @@ class ManagerController:
                         actions.append({"action": str(decision.action), "status": "denied",
                                         "reason": "stale_task_revision"})
                         continue
+                    selected = next(task for task in task_rows if task["task_id"] == decision.task_id)
+                    if not _selected_task_is_explicit(message, selected, task_rows):
+                        actions.append({"action": str(decision.action), "status": "denied",
+                                        "reason": "ambiguous_task_reference"})
+                        continue
                 if decision.action == ManagerAction.CREATE_TASK:
                     current = {task["task_id"]: task["revision"] for task in self.queue.tasks()}
                     if current != observed_revisions:
@@ -646,16 +691,14 @@ class ManagerController:
                     }
                 )
         reply = turn.reply
-        if actions:
-            accepted = [item["action"] for item in actions if item.get("status") in {"accepted", "observed"}]
-            denied = [item["action"] for item in actions if item.get("status") == "denied"]
-            summary = []
-            if accepted:
-                summary.append("已执行/确认：" + "、".join(accepted))
-            if denied:
-                summary.append("被系统门禁拒绝：" + "、".join(denied))
-            if summary:
-                reply = reply.rstrip() + "\n\n系统执行结果：" + "；".join(summary) + "。"
+        if any(item["action"] != "REPORT" for item in actions):
+            # A model's conversational claim is not a command receipt. Build
+            # the user-visible result only from deterministic controller output.
+            reply = "系统执行结果：" + "；".join(
+                f"{item['action']} {item['status']}"
+                + (f"（{item['reason']}）" if item.get("reason") else "")
+                for item in actions
+            ) + "。"
         return {
             "reply": reply,
             "actions": actions,

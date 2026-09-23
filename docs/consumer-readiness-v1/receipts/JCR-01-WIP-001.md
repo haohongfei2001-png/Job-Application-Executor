@@ -20,8 +20,9 @@ Status: IMPLEMENTING. This is a checkpoint, not round certification.
 - 1,000 seeded control steps, migration/backup readback, duplicate command replay and cross-process CAS tests: local AUTO tests passed.
 - Local UI → supervisor → worker → headless browser → SyntheticATS server draft: expected synthetic name/email matched actual server state; automated submission count was 0.
 - Wrong-city select after rerender, project-title prefix and location mismatch counterexamples: targeted AUTO tests passed.
-- Historical suite plus current JCR-01 tests: 255 passed in an isolated macOS run after the review fixes. Exact-head CI and post-merge main integration are pending.
-- PR review found a multi-page selector regression and an update/command admission race. Both received production fixes and targeted regressions before this 255-test run.
+- Historical suite plus current JCR-01 tests: 261 passed in an isolated macOS run after the review and task-reference fixes. Exact-head CI and post-merge main integration are pending.
+- PR review found a multi-page selector regression and an update/command admission race. Both received production fixes and targeted regressions before this 261-test run.
+- New negative-control and A/B task-reference regressions deny a model proposal when the user says not to pause or names another task; the user-facing mutation reply is built from deterministic receipts.
 
 ## Boundaries and remaining work
 
