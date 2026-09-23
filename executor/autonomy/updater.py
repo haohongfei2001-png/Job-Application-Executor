@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from .queue import TaskQueue
+
 
 EXPECTED_REMOTE = re.compile(
     r"^(?:https://github\.com/|git@github\.com:)"
