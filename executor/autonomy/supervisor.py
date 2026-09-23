@@ -101,7 +101,13 @@ class Supervisor:
                 continue
             attempt = self.worker.broker.attempts.valid_wait(task["task_id"])
             if not attempt:
+                previous = self.worker.broker.attempts.current(task["task_id"])
                 task["otp_status"] = "attempt_expired_or_unverified"
+                if previous and previous["send_outcome"] in {"CLICK_OBSERVED", "SEND_UNKNOWN"}:
+                    task["resend_eligible"] = True
+                    task["resend_wait_seconds"] = max(
+                        0, int((previous.get("cooldown_until") or self.queue.clock())
+                               - self.queue.clock()))
                 continue
             task["auth_attempt_id"] = attempt["attempt_id"]
             task["otp_status"] = "waiting"

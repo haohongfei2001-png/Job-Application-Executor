@@ -329,6 +329,40 @@ def observe_bound_draft(target_url: str, binding: dict | None) -> dict:
     }
 
 
+def observe_bound_auth(target_url: str, binding: dict | None, origin: str) -> str:
+    """Read-only proof for a continuing OTP wait on the same owned document."""
+    if (not binding or not binding.get("document_epoch")
+            or browser_mode() in {"test", "isolated", "headless"}):
+        return "AUTH_DOCUMENT_UNVERIFIED"
+    epoch = owned_cdp_fingerprint()
+    if not epoch or epoch != binding.get("process_epoch"):
+        return "AUTH_PROCESS_UNVERIFIED"
+    pw = None
+    try:
+        pw, _browser, ctx, page = connect(
+            target_url, existing_only=True, task_binding=binding,
+            session_epoch=epoch)
+        if urlsplit(page.url).hostname != origin:
+            return "AUTH_ORIGIN_CHANGED"
+        from .adapters.generic_web import GenericWebAdapter
+        observer = GenericWebAdapter(target_url)
+        observer.page = page
+        observer._otp_request_prepared = True
+        if (observer.auth_challenge_kind() != "one_time_code"
+                or observer.otp_field_status() != "unique"
+                or page_target_id(ctx, page) != binding["target_id"]
+                or page_document_epoch(page) != binding["document_epoch"]):
+            return "AUTH_CONTEXT_UNVERIFIED"
+        return "BOUND_OTP_WAIT_OBSERVED"
+    except BrowserOwnershipError:
+        return "AUTH_OWNERSHIP_UNVERIFIED"
+    except Exception:
+        return "AUTH_OBSERVATION_UNAVAILABLE"
+    finally:
+        if pw is not None:
+            pw.stop()
+
+
 def latest_page(ctx, fallback):
     pages = [page for page in ctx.pages if not page.is_closed()]
     return pages[-1] if pages else fallback

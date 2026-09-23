@@ -11,13 +11,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from playwright.sync_api import sync_playwright
 
+from executor import browser as browser_module
 from executor.auth.attempts import AuthAttemptStore
+from executor.application import ApplicationExecutor
 from executor.autonomy.otp import OtpBroker
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.supervisor import Supervisor, create_server
-from executor.autonomy.worker import Worker
+from executor.autonomy.worker import Worker, outcome
 from executor.evidence import write_profile
-from executor.models import ApplicantProfile, ProfileField
+from executor.models import ApplicantProfile, ApplicationPlan, ApplicationStage, ProfileField
 
 
 def _task(tmp_path, queue, *, suffix="one"):
@@ -137,6 +139,34 @@ def test_closed_unknown_send_cannot_silently_start_fresh_sms(tmp_path):
         store.begin(tid, owner, "auth.example.test", spec.target_url)
 
 
+def test_unverified_live_account_identity_blocks_direct_task_resume(tmp_path):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid, spec = _task(tmp_path, queue)
+    claimed = queue.claim("synthetic-worker")
+    plan = ApplicationPlan(execution_id="synthetic", target_url=spec.target_url,
+                           site_id="generic_web")
+    plan.stage = ApplicationStage.BLOCKED
+    plan.metadata["auth_kind"] = "account_identity_unverified"
+    stage, blocker = outcome(plan)
+    assert (stage, blocker) == ("BLOCKED", "account_identity_unverified")
+    queue.checkpoint(tid, claimed["owner"], stage, blocker=blocker, release=True)
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        queue.resume(tid)
+
+
+def test_return_target_includes_hash_routed_job_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    profile = tmp_path / "synthetic-profile.json"
+    write_profile(ApplicantProfile(), profile)
+    target = "https://auth.example.test/#/job/abc"
+    runner = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}})
+    page = type("Page", (), {"url": "https://auth.example.test/#/job/def"})()
+    adapter = type("Adapter", (), {"page": page})()
+    assert not runner._auth_return_target_verified(adapter)
+    page.url = target
+    assert runner._auth_return_target_verified(adapter)
+
+
 def test_resend_requires_explicit_command_cooldown_and_one_new_attempt(tmp_path):
     now = [1000.0]
     queue = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
@@ -190,6 +220,85 @@ def test_resend_invalidates_buffered_old_code_and_is_task_scoped(tmp_path):
     with pytest.raises(ValueError, match="another task"):
         store.authorize_resend(other_tid, command_id="resend-one", expected_revision=0)
     assert b"482913" not in queue.path.read_bytes()
+
+
+def test_expired_otp_wait_still_exposes_explicit_resend_action(tmp_path):
+    now = [1000.0]
+    queue = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
+    tid, spec = _task(tmp_path, queue)
+    store, owner, first = _attempt(queue, tid, spec)
+    store.record_send_intent(first["attempt_id"], tid, owner)
+    queue.checkpoint(tid, owner, "NEEDS_USER_ACTION", blocker="otp_waiting", release=True)
+    supervisor = Supervisor(queue, worker=Worker(
+        queue, settings={"deepseek": {"enabled": False}}), token="x" * 40)
+    now[0] += 301
+    task = next(t for t in supervisor.ui_state()["tasks"] if t["task_id"] == tid)
+    assert task["otp_status"] == "attempt_expired_or_unverified"
+    assert "auth_attempt_id" not in task
+    assert task["resend_eligible"] is True
+    assert task["resend_wait_seconds"] == 0
+    resumed = supervisor.dispatch("POST", f"/v1/tasks/{tid}/authorize-otp-resend", {
+        "command_id": "expired-resend", "expected_revision": task["revision"],
+    })
+    assert resumed["status"] == "RESEND_AUTHORIZED_ONCE"
+    assert resumed["attempt_id"] != first["attempt_id"]
+
+
+@pytest.mark.parametrize("observation", ["BOUND_OTP_WAIT_OBSERVED", "AUTH_CONTEXT_UNVERIFIED"])
+def test_live_late_code_continues_only_with_bound_auth_observation(
+        tmp_path, monkeypatch, observation):
+    target = "https://jobs.example.test/apply?postId=auth-1"
+    profile = tmp_path / "synthetic-profile.json"
+    write_profile(ApplicantProfile(), profile)
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = queue.enqueue(TaskSpec(company="Synthetic", role="Tester", target_url=target,
+                                 profile_ref=str(profile), live_authorized=True))["task_id"]
+    claimed = queue.claim("first")
+    owner = claimed["owner"]
+    store = AuthAttemptStore(queue)
+    attempt = store.begin(tid, owner, "jobs.example.test", target)
+    store.record_send_intent(attempt["attempt_id"], tid, owner)
+    store.record_send_result(attempt["attempt_id"], outcome="CLICK_OBSERVED")
+    queue.bind_browser_page(tid, owner, "synthetic-epoch", "synthetic-target")
+    queue.record_browser_document(tid, owner, "synthetic-epoch",
+                                  "synthetic-target", "1234.5")
+    previous_run = queue.begin_run_attempt(tid, owner)
+    queue.finish_run_attempt(previous_run, "RETURNED_UNVERIFIED")
+    queue.checkpoint(tid, owner, "NEEDS_USER_ACTION", blocker="otp_waiting", release=True)
+    broker = OtpBroker(queue)
+    assert broker.push(task_id=tid, attempt_id=attempt["attempt_id"],
+                       message="OTP 482913")["accepted"]
+    queue.resume(tid)
+    monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser_module, "owned_cdp_fingerprint", lambda: "synthetic-epoch")
+    seen = []
+    monkeypatch.setattr(browser_module, "observe_bound_auth",
+                        lambda url, binding, origin: seen.append((url, binding, origin)) or observation)
+
+    class FakeRunner:
+        def __init__(self, *_args, **kwargs):
+            self.bridge = kwargs["otp_bridge"]
+            self.plan = ApplicationPlan(execution_id=tid, target_url=target,
+                                        site_id="synthetic")
+
+        def run(self):
+            seen.append("runner")
+            self.bridge.begin_attempt("jobs.example.test")
+            result = self.bridge.wait_for_code("jobs.example.test")
+            assert result["code"] == "482913"
+            self.plan.stage = ApplicationStage.BLOCKED
+            self.plan.metadata["auth_kind"] = "account_identity_unverified"
+            return self.plan
+
+    worker = Worker(queue, broker=broker, runner_factory=FakeRunner,
+                    settings={"deepseek": {"enabled": False}})
+    assert worker.run_once()
+    if observation == "BOUND_OTP_WAIT_OBSERVED":
+        assert "runner" in seen
+        assert queue.get(tid)["blocker"] == "account_identity_unverified"
+    else:
+        assert "runner" not in seen
+        assert queue.get(tid)["blocker"] == "browser_ownership_unknown"
 
 
 def test_late_source_resumes_exact_wait_without_worker_lease(tmp_path):

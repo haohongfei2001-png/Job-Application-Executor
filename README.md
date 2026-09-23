@@ -154,7 +154,9 @@ source can continue listening after the short browser wait; local Messages
 requires a site-specific sender and body rule. The executor fills the unique OTP
 field and continues only after the challenge disappears or the scoped
 authentication confirmation succeeds. Segmented fields without a certified
-driver remain human-handled. OTP values are transient,
+driver remain human-handled. Live form writes require a certified site driver
+to prove the active account matches the applicant; the generic driver pauses
+when this identity cannot be established. OTP values are transient,
 single-use and never written to plans, action logs, screenshot metadata,
 exception messages, SQLite, or DeepSeek. This authentication convenience does
 not alter the mandatory manual final application click at `READY_TO_SUBMIT`.

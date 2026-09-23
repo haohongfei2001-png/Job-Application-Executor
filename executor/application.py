@@ -88,8 +88,9 @@ class ApplicationExecutor:
             return False
         actual = urlparse(current)
         expected = urlparse(self.target_url)
-        return ((actual.scheme, actual.netloc, actual.path, actual.query) ==
-                (expected.scheme, expected.netloc, expected.path, expected.query))
+        return ((actual.scheme, actual.netloc, actual.path, actual.query, actual.fragment) ==
+                (expected.scheme, expected.netloc, expected.path, expected.query,
+                 expected.fragment))
 
     def _resolve_otp_challenge(self, adapter, page_index: int) -> bool:
         if not self.otp_bridge.enabled:
@@ -463,6 +464,18 @@ class ApplicationExecutor:
                         auth_kind,
                         f"{auth_kind} authentication requires human handling",
                     )
+
+                if browser_mode() not in {"isolated", "test", "headless"}:
+                    try:
+                        account_verified = bool(adapter.account_identity_verified(self.profile))
+                    except BrowserOwnershipError:
+                        raise
+                    except Exception:
+                        account_verified = False
+                    if not account_verified:
+                        return self._block_auth(
+                            page_index, "account_identity_unverified",
+                            "active account identity is unverified")
 
                 fields = adapter.discover_fields()
                 if not fields and adapter.start_application():

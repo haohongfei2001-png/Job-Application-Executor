@@ -48,8 +48,11 @@ class ProcessLock:
 def outcome(plan):
     if plan.stage == ApplicationStage.BLOCKED:
         if plan.metadata.get("auth_kind"):
-            if plan.metadata["auth_kind"] == "return_target_unverified":
-                return "BLOCKED", "auth_return_unverified"
+            if plan.metadata["auth_kind"] in {
+                    "return_target_unverified", "account_identity_unverified"}:
+                return "BLOCKED", ("auth_return_unverified"
+                                   if plan.metadata["auth_kind"] == "return_target_unverified"
+                                   else "account_identity_unverified")
             return "NEEDS_USER_ACTION", "otp_waiting" if plan.metadata["auth_kind"] == "one_time_code" else "security_challenge"
         if plan.unresolved_fields:
             return "NEEDS_USER_INPUT", "unknown_facts"
@@ -315,15 +318,31 @@ class Worker:
                 if not spec["live_authorized"]:
                     checkpoint("BLOCKED", blocker="live_not_authorized", release=True)
                     return True
-                # Until a durable task-to-tab binding is observed, a prior
-                # runner return cannot justify a second live browser write.
-                if self.queue.run_attempts(tid):
-                    checkpoint("BLOCKED", blocker="browser_ownership_unknown", release=True)
-                    return True
                 session_epoch = browser.owned_cdp_fingerprint()
                 if session_epoch is None:
                     checkpoint("BLOCKED", blocker="session_unavailable", release=True)
                     return True
+                prior_runs = self.queue.run_attempts(tid)
+                if prior_runs:
+                    # The only permitted continuation is a code already bound
+                    # to the one SMS request stopped at the original auth page.
+                    # Read-only observation proves same process/tab/document
+                    # and active OTP controls before another run intent exists.
+                    auth_attempt = self.broker.attempts.valid_wait(tid)
+                    binding = self.queue.browser_binding(tid)
+                    if (len(prior_runs) != 1
+                            or prior_runs[0]["outcome"] != "RETURNED_UNVERIFIED"
+                            or task["checkpoint"] != "DISCOVERED"
+                            or not auth_attempt
+                            or auth_attempt["send_outcome"] not in {"CLICK_OBSERVED", "SEND_UNKNOWN"}
+                            or not self.broker.pending(tid)
+                            or not binding
+                            or binding["process_epoch"] != session_epoch
+                            or browser.observe_bound_auth(
+                                spec["target_url"], binding,
+                                auth_attempt["origin"]) != "BOUND_OTP_WAIT_OBSERVED"):
+                        checkpoint("BLOCKED", blocker="browser_ownership_unknown", release=True)
+                        return True
             audit = OperationalAudit(self.queue.root, tid, checkpoint, guard)
             bridge = BrokerBridge(self.broker, tid, self.queue, owner, guard,
                                   relay=self.relay, target_url=spec["target_url"])

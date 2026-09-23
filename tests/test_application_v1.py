@@ -103,6 +103,30 @@ class FakeAdapter:
         return None
 
 
+def test_live_form_write_requires_certified_account_identity(tmp_path, monkeypatch):
+    fields = [WebField(field_id="name", selector="#name", label="姓名", required=True)]
+    unverified = FakeAdapter(fields, final="Submit application")
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: unverified)
+    monkeypatch.setattr("executor.application.browser_mode", lambda: "live")
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    runner = ApplicationExecutor("https://example.test/apply", _profile_file(tmp_path),
+                                 {"deepseek": {"enabled": False}})
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["auth_kind"] == "account_identity_unverified"
+    assert unverified.applied == []
+    assert unverified.submit_calls == 0
+
+    verified = FakeAdapter(fields, final="Submit application")
+    verified.account_identity_verified = lambda _profile: True
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: verified)
+    plan = ApplicationExecutor("https://example.test/apply", _profile_file(tmp_path),
+                               {"deepseek": {"enabled": False}}).run(max_pages=1)
+    assert plan.stage == ApplicationStage.READY_TO_SUBMIT
+    assert [item.field_id for item in verified.applied] == ["name"]
+    assert verified.submit_calls == 0
+
+
 def test_deterministic_fields_are_filled_before_required_question(tmp_path, monkeypatch):
     fields = [
         WebField(field_id="name", selector="#name", label="姓名", required=True),
