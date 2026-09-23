@@ -363,6 +363,33 @@ class ManagerController:
             task = self.queue.get(decision.task_id)
             if task["stage"] == "READY_TO_SUBMIT":
                 return {"action": str(action), "status": "denied", "reason": "manual_submit_gate"}
+            spec = task.get("spec") or {}
+            if is_oppo_campus_landing(str(spec.get("target_url") or "")):
+                try:
+                    candidate = resolve_known_landing(
+                        str(spec.get("company") or ""),
+                        str(spec.get("role") or ""),
+                        str(spec.get("target_url") or ""),
+                    )
+                except Exception:
+                    candidate = None
+                if candidate is None:
+                    return {
+                        "action": str(action),
+                        "status": "denied",
+                        "reason": "exact_job_resolution_required",
+                    }
+                self.queue.retarget_same_origin_landing(
+                    decision.task_id,
+                    candidate.job_url,
+                    job_id=candidate.job_id,
+                )
+                return {
+                    "action": str(action),
+                    "status": "accepted",
+                    "task_id": decision.task_id,
+                    "resolved_target": True,
+                }
             self.queue.resume(decision.task_id)
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
