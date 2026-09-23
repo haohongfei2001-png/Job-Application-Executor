@@ -35,6 +35,15 @@ Before any Git mutation, the local updater requires:
 - no immediately runnable task;
 - no OTP wait/ambiguity in progress.
 
+Only one updater process may exist at a time. A process-level file lock is
+acquired before the detached updater is launched and remains held by that child
+until it exits. Update-state JSON is written to a private temporary file and
+atomically replaced, so the supervisor's mutation fence never disappears during
+a partial write.
+
+The updater also treats active and paused OTP waits as update-sensitive because
+the code is intentionally memory-only.
+
 The updater then executes an HTTP/1.1 fetch of `origin/main`. This intentionally
 avoids the HTTP/2 framing failure observed on the local Mac. If the current HEAD
 is already latest, no restart happens.
