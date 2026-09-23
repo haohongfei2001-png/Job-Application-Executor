@@ -636,7 +636,7 @@ def test_supervisor_fences_mutations_while_update_is_running(
         release=True,
     )
     monkeypatch.setattr(
-        "executor.autonomy.supervisor.read_update_state",
+        "executor.autonomy.supervisor.reconciled_update_state",
         lambda root: {
             "status": "updating",
             "old_version": "a" * 12,
