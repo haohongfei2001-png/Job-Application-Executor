@@ -32,6 +32,34 @@ def task(queue, tmp_path):
     ))
 
 
+def test_protected_target_guard_covers_enqueue_resume_retarget_and_worker(tmp_path, monkeypatch):
+    queue = TaskQueue(tmp_path / "runtime")
+    original = task(queue, tmp_path)
+    landing = queue.enqueue(TaskSpec(
+        company="Synthetic", role="Engineer",
+        target_url="https://jobs.example.test/campus",
+        profile_ref=str(tmp_path / "synthetic-profile.json"),
+    ))
+    protected = [{
+        "hosts": ["jobs.example.test"],
+        "query_any": {"postId": ["jcr01", "protected-detail"]},
+        "status": "submitted",
+    }]
+    monkeypatch.setattr("executor.protected_targets.load_protected_targets", lambda: protected)
+    with pytest.raises(RuntimeError, match="protected"):
+        queue.enqueue(TaskSpec.model_validate(original["spec"]))
+    with pytest.raises(RuntimeError, match="protected"):
+        queue.resume(original["task_id"])
+    with pytest.raises(RuntimeError, match="protected"):
+        queue.retarget_same_origin_landing(
+            landing["task_id"],
+            "https://jobs.example.test/campus/post/2?postId=protected-detail",
+        )
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    assert worker.run_once()
+    assert queue.get(original["task_id"])["blocker"] == "protected_target"
+
+
 def test_command_receipt_replay_and_stale_revision(tmp_path):
     queue = TaskQueue(tmp_path / "runtime")
     original = task(queue, tmp_path)

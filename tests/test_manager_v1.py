@@ -458,6 +458,20 @@ def test_ui_ticket_is_one_time_and_session_is_ephemeral(tmp_path):
     assert "final_click_actor" in supervisor.ui_state()
 
 
+def test_ui_ticket_and_session_expire_without_auth_relaxation(tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("executor.autonomy.supervisor.time.monotonic", lambda: now[0])
+    q = TaskQueue(tmp_path / "runtime")
+    supervisor = Supervisor(q, token="x" * 40)
+    expired_ticket = supervisor.issue_ui_ticket()
+    now[0] += 61
+    assert supervisor.consume_ui_ticket(expired_ticket) is None
+    session = supervisor.consume_ui_ticket(supervisor.issue_ui_ticket())
+    assert supervisor.valid_ui_session(session)
+    now[0] += 3601
+    assert not supervisor.valid_ui_session(session)
+
+
 def test_supervisor_chat_route_has_no_submit_action(tmp_path):
     q = TaskQueue(tmp_path / "runtime")
     worker = Worker(q, settings={"deepseek": {"enabled": False}})
@@ -605,6 +619,11 @@ def test_dashboard_http_ticket_cookie_and_same_origin_chat(tmp_path):
         )
         with pytest.raises(urllib.error.HTTPError) as exc:
             opener.open(evil)
+        assert exc.value.code == 403
+
+        wrong_host = urllib.request.Request(base + "/ui/api/state", headers={"Host": "evil.test"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            opener.open(wrong_host)
         assert exc.value.code == 403
     finally:
         server.shutdown()
