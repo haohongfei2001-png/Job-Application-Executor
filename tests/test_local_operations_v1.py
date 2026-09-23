@@ -257,6 +257,44 @@ def test_reconciled_update_state_recovers_stale_busy_file(tmp_path):
     assert state["reason"] == "stale_update_recovered"
 
 
+def test_reconcile_holds_update_lock_through_stale_state_write(
+    tmp_path, monkeypatch
+):
+    runtime = tmp_path / "runtime"
+    updater.write_update_state(
+        runtime,
+        "checking",
+        old_version="a" * 40,
+    )
+    original_write = updater.write_update_state
+    entered = threading.Event()
+    release = threading.Event()
+    result = {}
+
+    def blocking_write(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(updater, "write_update_state", blocking_write)
+
+    def reconcile():
+        result.update(updater.reconciled_update_state(runtime))
+
+    thread = threading.Thread(target=reconcile)
+    thread.start()
+    assert entered.wait(1)
+
+    competing = updater.acquire_update_lock(runtime)
+    assert competing is None
+
+    release.set()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert result["status"] == "failed"
+    assert result["reason"] == "stale_update_recovered"
+
+
 @pytest.mark.parametrize("status", ["updating", "restarting"])
 def test_reconciled_post_mutation_stale_state_requires_restart(tmp_path, status):
     runtime = tmp_path / "runtime"
@@ -483,8 +521,9 @@ def test_restart_required_can_be_retried_when_code_is_already_current(
     assert state["status"] == "success"
 
 
-def test_restart_only_failure_never_releases_restart_fence(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("timeout_on", ["stop", "start"])
+def test_restart_only_bypasses_git_and_timeout_keeps_restart_fence(
+    tmp_path, monkeypatch, timeout_on
 ):
     old = "a" * 40
     monkeypatch.setattr(
@@ -498,10 +537,20 @@ def test_restart_only_failure_never_releases_restart_fence(
         lambda repo: {"ok": True, "head": old},
     )
 
-    def timeout_fetch(repo, args, **kwargs):
-        raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 1))
+    def forbidden_git(*args, **kwargs):
+        raise AssertionError("restart-only retry must not fetch or merge")
 
-    monkeypatch.setattr(updater, "_run", timeout_fetch)
+    service_calls = []
+
+    def fake_service(args, **kwargs):
+        action = args[-1]
+        service_calls.append(action)
+        if action == timeout_on:
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 20))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(updater, "_run", forbidden_git)
+    monkeypatch.setattr(updater.subprocess, "run", fake_service)
 
     rc = updater.perform_update(
         tmp_path / "repo",
@@ -511,9 +560,12 @@ def test_restart_only_failure_never_releases_restart_fence(
     )
 
     assert rc == 1
+    assert service_calls == (
+        ["stop"] if timeout_on == "stop" else ["stop", "start"]
+    )
     state = updater.read_update_state(tmp_path / "runtime")
     assert state["status"] == "restart_required"
-    assert state["reason"] == "update_timeout"
+    assert state["reason"] == "service_restart_timeout"
 
 
 def test_failure_after_git_mutation_stays_restart_required(
