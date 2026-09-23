@@ -1,5 +1,6 @@
 """Structured form observations use synthetic pages and isolated headless browser."""
 
+import hashlib
 import json
 
 import pytest
@@ -153,6 +154,33 @@ def test_month_precision_never_invents_day_for_date_control(tmp_path):
         assert adapter.page.locator("#graduation").input_value() == ""
 
 
+def test_scoped_aria_combobox_requires_exact_choice_and_readback(tmp_path):
+    html = tmp_path / "combo.html"
+    html.write_text("""<!doctype html><body>
+      <label>现居城市</label>
+      <div id='city' role='combobox' aria-controls='cities' aria-required='true'
+           tabindex='0' onclick="document.querySelector('#cities').hidden=false">请选择</div>
+      <div id='cities' role='listbox' hidden>
+        <div role='option' onclick="document.querySelector('#city').innerText=this.innerText;this.parentElement.hidden=true">Synthetic City</div>
+        <div role='option' onclick="document.querySelector('#city').innerText=this.innerText;this.parentElement.hidden=true">Synthetic City East</div>
+      </div>
+    """, encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        observation = adapter.observe_form()
+        assert observation.unsupported_component_count == 0
+        assert len(observation.fields) == 1
+        failed = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic")])
+        assert failed[0]["reason"] == "combobox_exact_choice_unavailable"
+        assert adapter.page.locator("#city").inner_text() == "请选择"
+        chosen = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert chosen[0]["ok"] is True
+        assert adapter.observe_form().fields[0].current_value == "Synthetic City"
+
+
 def test_site_error_prevents_false_ready_after_fill(tmp_path, monkeypatch):
     runner, _html = _runner(tmp_path, monkeypatch, """
       <label>姓名<input id='name' name='full_name' required></label>
@@ -163,6 +191,40 @@ def test_site_error_prevents_false_ready_after_fill(tmp_path, monkeypatch):
     assert plan.stage == ApplicationStage.BLOCKED
     assert plan.metadata["block_reason"] == "validation failed"
     assert "site validation errors remain visible" in plan.metadata["validation"]["errors"]
+
+
+def test_attachment_slots_require_distinct_type_and_canonical_hash(tmp_path, monkeypatch):
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+    resume = tmp_path / "resume.pdf"
+    photo = tmp_path / "portrait.png"
+    resume.write_bytes(b"%PDF-1.4 synthetic resume")
+    photo.write_bytes(b"synthetic image")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"assets": {
+        "resume": {"path": str(resume), "kind": "resume_pdf",
+                   "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()},
+        "photo": {"path": str(photo), "kind": "photo_png",
+                  "sha256": hashlib.sha256(photo.read_bytes()).hexdigest()},
+    }}), encoding="utf-8")
+    runner = ApplicationExecutor("file:///synthetic/form.html", profile,
+                                 {"deepseek": {"enabled": False}})
+    resume_field = WebField(field_id="resume", selector="#resume", label="简历",
+                            input_type="file", required=True,
+                            metadata={"accept": ".pdf"})
+    photo_field = WebField(field_id="photo", selector="#photo", label="证件照",
+                           input_type="file", required=True,
+                           metadata={"accept": "image/png"})
+    assert runner._attachment_resolution(resume_field).value == str(resume)
+    assert runner._attachment_resolution(photo_field).value == str(photo)
+    ambiguous = photo_field.model_copy(update={"label": "简历与证件照"})
+    assert runner._attachment_resolution(ambiguous).status == ResolutionStatus.UNRESOLVED
+    wrong_type = photo_field.model_copy(update={"metadata": {"accept": ".pdf"}})
+    assert runner._attachment_resolution(wrong_type).status == ResolutionStatus.UNRESOLVED
+    too_large = photo_field.model_copy(update={"metadata": {"accept": "image/png",
+                                                           "max_size": "1"}})
+    assert runner._attachment_resolution(too_large).status == ResolutionStatus.UNRESOLVED
+    photo.write_bytes(b"changed image after canonical capture")
+    assert runner._attachment_resolution(photo_field).status == ResolutionStatus.UNRESOLVED
 
 
 def test_form_observation_and_fill_plan_do_not_expose_values_in_receipts():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from datetime import date
@@ -21,7 +22,8 @@ from ..models import (
 )
 
 
-VISIBLE_FIELD_SELECTOR = 'input:not([type="hidden"]), textarea, select'
+VISIBLE_FIELD_SELECTOR = ('input:not([type="hidden"]), textarea, select, '
+                          '[role="combobox"]:not(input):not(textarea):not(select)')
 BUTTON_SELECTOR = 'button, input[type="button"], input[type="submit"], [role="button"], a'
 OTP_HINT_RE = re.compile(
     r"(?:验证码|校验码|动态码|短信码|verification[\s_-]*code|"
@@ -168,7 +170,7 @@ class GenericWebAdapter(SiteAdapter):
         in-page once.
         """
         script = r"""() => {
-          const selector = 'input:not([type="hidden"]), textarea, select';
+          const selector = 'input:not([type="hidden"]), textarea, select, [role="combobox"]:not(input):not(textarea):not(select)';
           const clean = s => (s || '').replace(/\s+/g, ' ').trim();
           const known = /^(个人信息|教育经历|实习经历|工作经历|项目经历|项目\/活动经历|科研经历|语言能力|证书|家庭情况|家庭成员|获奖情况|在校实践|论文\/?专著|附加信息|简历附件|personal information|education|internship|work experience|projects?|research|family|awards?)$/i;
           const visible = e => {
@@ -213,7 +215,8 @@ class GenericWebAdapter(SiteAdapter):
 
           return [...document.querySelectorAll(selector)].slice(0, 350).map((e, index) => {
             const tag = e.tagName.toLowerCase();
-            const inputType = (e.getAttribute('type') || tag).toLowerCase();
+            const inputType = e.getAttribute('role') === 'combobox' ? 'combobox'
+              : (e.getAttribute('type') || tag).toLowerCase();
             const name = e.getAttribute('name') || '';
             const id = e.id || '';
             let cssSelector = '__field_index__:' + index;
@@ -228,6 +231,7 @@ class GenericWebAdapter(SiteAdapter):
               : '';
             let current = null;
             if (inputType === 'checkbox' || inputType === 'radio') current = !!e.checked;
+            else if (inputType === 'combobox') current = e.value ?? e.getAttribute('aria-valuetext') ?? clean(e.innerText);
             else if (!['submit', 'button'].includes(inputType)) current = e.value ?? '';
 
             return {
@@ -240,6 +244,9 @@ class GenericWebAdapter(SiteAdapter):
               current,
               options,
               selectedText,
+              accept: e.getAttribute('accept') || '',
+              multiple: !!e.multiple,
+              maxSize: e.getAttribute('data-max-size') || e.getAttribute('data-max-file-size') || '',
               selector: cssSelector,
               fieldId: name || id || ('field-' + index),
               section: section(e),
@@ -266,6 +273,9 @@ class GenericWebAdapter(SiteAdapter):
                     "tag": item.get("tag"),
                     "section": item.get("section") or "",
                     "selected_text": item.get("selectedText") or "",
+                    "accept": item.get("accept") or "",
+                    "multiple": bool(item.get("multiple")),
+                    "max_size": item.get("maxSize") or "",
                 },
             )
             for item in snapshot
@@ -285,9 +295,20 @@ class GenericWebAdapter(SiteAdapter):
               const required = [...document.querySelectorAll(
                 'input:not([type="hidden"]), textarea, select')].filter(e =>
                   e.required || e.getAttribute('aria-required') === 'true');
-              const unsupported = [...document.querySelectorAll(
+              const custom = [...document.querySelectorAll(
                 '[role="combobox"], [role="listbox"], [contenteditable="true"], iframe')]
                 .filter(visible);
+              const controlled = new Set([...document.querySelectorAll('[role="combobox"][aria-controls]')]
+                .map(e => e.getAttribute('aria-controls')).filter(Boolean));
+              const unsupported = custom.filter(e => {
+                if (e.getAttribute('role') === 'combobox') {
+                  const id = e.getAttribute('aria-controls');
+                  const list = id && document.getElementById(id);
+                  return !list || list.getAttribute('role') !== 'listbox';
+                }
+                if (e.getAttribute('role') === 'listbox' && controlled.has(e.id)) return false;
+                return true;
+              });
               const errors = [...document.querySelectorAll(
                 '[aria-invalid="true"], [role="alert"], .error-message, [data-error]')]
                 .filter(visible);
@@ -377,6 +398,38 @@ class GenericWebAdapter(SiteAdapter):
                     return True
         return False
 
+    def _fill_combobox(self, element, selector: str, value) -> bool:
+        if not isinstance(value, (str, int, float)):
+            return False
+        target = str(value).strip()
+        if not target:
+            return False
+        controlled_id = element.get_attribute("aria-controls")
+        if not controlled_id:
+            return False
+        listbox = self.page.locator(f'[id={json.dumps(controlled_id)}][role="listbox"]')
+        if listbox.count() != 1:
+            return False
+        getattr(self, "mutation_guard", lambda: None)()
+        element.click()
+        choices = listbox.locator('[role="option"]')
+        exact = [choices.nth(index) for index in range(choices.count())
+                 if choices.nth(index).is_visible()
+                 and (choices.nth(index).get_attribute("aria-label") or
+                      choices.nth(index).inner_text()).strip() == target]
+        if len(exact) != 1:
+            return False
+        getattr(self, "mutation_guard", lambda: None)()
+        exact[0].click()
+        self.await_form_render()
+        selected = self._locate(selector)
+        if selected.count() != 1:
+            raise BrowserOwnershipError("combobox selection outcome unknown")
+        actual = selected.evaluate("e => e.value ?? e.getAttribute('aria-valuetext') ?? (e.innerText || '').trim()")
+        if str(actual).strip() != target:
+            raise BrowserOwnershipError("combobox selection outcome unknown")
+        return True
+
     def apply_resolutions(self, resolutions: Iterable[FieldResolution]) -> list[dict]:
         actions: list[dict] = []
         for resolution in resolutions:
@@ -403,6 +456,11 @@ class GenericWebAdapter(SiteAdapter):
                     actions.append({"field_id": resolution.field_id, "ok": False,
                                     "reason": "upload_receipt_unsupported"})
                     continue
+                elif input_type == "combobox" or element.get_attribute("role") == "combobox":
+                    if not self._fill_combobox(element, resolution.selector, value):
+                        actions.append({"field_id": resolution.field_id, "ok": False,
+                                        "reason": "combobox_exact_choice_unavailable"})
+                        continue
                 elif tag == "select":
                     getattr(self, "mutation_guard", lambda: None)()
                     if not self._fill_select(element, value):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import re
 import time
 from pathlib import Path
@@ -323,27 +324,58 @@ class ApplicationExecutor:
         if field.input_type != "file":
             return None
         label = (field.label or "").casefold()
-        asset_name = None
-        if re.search(r"resume|cv|简历", label, re.I):
-            asset_name = "resume"
-        elif re.search(r"photo|portrait|证件照|照片", label, re.I):
-            asset_name = "photo"
-        if not asset_name:
+        matches = [name for name, pattern in (
+            ("resume", r"resume|\bcv\b|简历"),
+            ("photo", r"photo|portrait|证件照|照片"),
+        ) if re.search(pattern, label, re.I)]
+        if not matches:
             return None
+        asset_name = matches[0] if len(matches) == 1 else None
+        def unsupported(reason: str) -> FieldResolution:
+            return FieldResolution(
+                field_id=field.field_id, selector=field.selector, label=field.label,
+                canonical_key=f"assets.{asset_name}" if asset_name else None,
+                status=ResolutionStatus.UNRESOLVED, required=field.required,
+                reason=reason,
+            )
+        if asset_name is None or field.metadata.get("multiple"):
+            return unsupported("attachment slot is ambiguous or accepts multiple files")
         asset = (self.profile.get("assets") or {}).get(asset_name) or {}
         path = asset.get("path") if isinstance(asset, dict) else None
         if not path or not Path(path).expanduser().is_file():
-            return None
+            return unsupported("canonical attachment is unavailable")
+        path_obj = Path(path).expanduser().resolve()
+        max_size = str(field.metadata.get("max_size") or "")
+        if max_size and (not max_size.isdecimal() or path_obj.stat().st_size > int(max_size)):
+            return unsupported("attachment size exceeds or cannot be checked against slot limit")
+        expected_hash = str(asset.get("sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+            return unsupported("canonical attachment hash is unavailable")
+        digest = hashlib.sha256()
+        with path_obj.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        actual_hash = digest.hexdigest()
+        if actual_hash != expected_hash:
+            return unsupported("canonical attachment file changed since evidence capture")
+        accept = str(field.metadata.get("accept") or "").lower()
+        if accept:
+            mime = mimetypes.guess_type(path_obj.name)[0] or "application/octet-stream"
+            permitted = [token.strip() for token in accept.split(",") if token.strip()]
+            if not any(token == mime or (token.endswith("/*") and mime.startswith(token[:-1]))
+                       or (token.startswith(".") and path_obj.suffix.lower() == token)
+                       for token in permitted):
+                return unsupported("attachment type is not accepted by this slot")
         return FieldResolution(
             field_id=field.field_id,
             selector=field.selector,
             label=field.label,
             canonical_key=f"assets.{asset_name}",
             status=ResolutionStatus.RESOLVED,
-            value=str(Path(path).expanduser().resolve()),
+            value=str(path_obj),
             source="profile_asset",
             confidence=1.0,
-            reason="attachment type matched from field label",
+            reason="attachment slot and canonical hash verified locally; upload still unverified",
             required=field.required,
         )
 

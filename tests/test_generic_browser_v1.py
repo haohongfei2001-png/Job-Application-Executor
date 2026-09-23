@@ -1,4 +1,5 @@
 import json
+import hashlib
 
 import pytest
 
@@ -24,7 +25,8 @@ def test_generic_browser_blocks_unproven_upload_before_submit(tmp_path, monkeypa
             "identity.email": {"value": "example@example.test", "confidence": 1.0},
         },
         "assets": {
-            "resume": {"path": str(resume), "kind": "resume_pdf"}
+            "resume": {"path": str(resume), "kind": "resume_pdf",
+                       "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()}
         }
     }), encoding="utf-8")
     monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
