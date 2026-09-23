@@ -105,6 +105,13 @@ class Supervisor:
             repo_root=Path(__file__).resolve().parents[2],
         )
 
+    def update_in_progress(self) -> bool:
+        return read_update_state(self.queue.root).get("status") in {
+            "checking",
+            "updating",
+            "restarting",
+        }
+
     def begin_update(self, port: int):
         safe, reason = safe_to_update(self)
         if not safe:
@@ -122,6 +129,12 @@ class Supervisor:
     def dispatch(self, method, path, data):
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
+        if (
+            method == "POST"
+            and parts != ["v1", "ui-ticket"]
+            and self.update_in_progress()
+        ):
+            raise RuntimeError("update in progress")
         if method == "GET" and parts == ["health"]:
             return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user"}
         if method == "GET" and parts == ["v1", "tasks"]:
@@ -287,6 +300,8 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         self._send_json(200 if result.get("ok") else 409, result)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/chat":
+                        if supervisor.update_in_progress():
+                            raise RuntimeError("update in progress")
                         data = self._read_json()
                         if set(data) != {"message"}:
                             raise ValueError("invalid chat envelope")
