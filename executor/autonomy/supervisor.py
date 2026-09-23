@@ -12,8 +12,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .dashboard import DASHBOARD_HTML
+from .diagnostics import collect_diagnostics
 from .manager import ManagerController
 from .queue import TaskQueue, TaskSpec, private_dir
+from .updater import read_update_state, safe_to_update, spawn_update
 from .worker import Worker
 
 
@@ -93,8 +95,29 @@ class Supervisor:
         return {
             "ok": True,
             "worker_active": self.worker.active,
+            "update": read_update_state(self.queue.root),
             **state,
         }
+
+    def diagnostics(self):
+        return collect_diagnostics(
+            self,
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+
+    def begin_update(self, port: int):
+        safe, reason = safe_to_update(self)
+        if not safe:
+            return {
+                "ok": False,
+                "status": "denied",
+                "reason": reason,
+            }
+        return spawn_update(
+            repo_root=Path(__file__).resolve().parents[2],
+            runtime=self.queue.root,
+            port=port,
+        )
 
     def dispatch(self, method, path, data):
         parsed = urlsplit(path)
@@ -105,6 +128,10 @@ class Supervisor:
             return {"tasks": self.queue.tasks()}
         if method == "GET" and parts == ["v1", "events"]:
             return {"events": self.queue.events(int(parse_qs(parsed.query).get("after", [0])[0]))}
+        if method == "GET" and parts == ["v1", "diagnostics"]:
+            return self.diagnostics()
+        if method == "GET" and parts == ["v1", "update-status"]:
+            return read_update_state(self.queue.root)
         if method == "POST" and parts == ["v1", "tasks"]:
             return self.queue.enqueue(TaskSpec.model_validate(data))
         if method == "POST" and parts == ["v1", "chat"] and set(data) == {"message"}:
@@ -245,6 +272,19 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/state":
                         self._send_json(200, supervisor.ui_state())
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/diagnostics":
+                        self._send_json(200, supervisor.diagnostics())
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/update-status":
+                        self._send_json(200, read_update_state(supervisor.queue.root))
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/update":
+                        data = self._read_json()
+                        if data:
+                            raise ValueError("invalid update envelope")
+                        result = supervisor.begin_update(self.server.server_address[1])
+                        self._send_json(200 if result.get("ok") else 409, result)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/chat":
                         data = self._read_json()
