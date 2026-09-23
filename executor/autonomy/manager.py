@@ -651,8 +651,17 @@ class ManagerController:
                     **self.state(),
                 }
         tasks = [safe_task_view(task) for task in task_rows]
+        # Pending answers are private task input. A model can propose a typed
+        # action from the safe task view, but it never receives the user's raw
+        # answer text. The deterministic controller checks the original local
+        # message before accepting any proposed value.
+        provider_message = (
+            "LOCAL_PRIVATE_ANSWER_PENDING"
+            if any(task["stage"] == "NEEDS_USER_INPUT" for task in task_rows)
+            else message
+        )
         try:
-            turn = self.provider.decide(message, tasks)
+            turn = self.provider.decide(provider_message, tasks)
         except RuntimeError:
             return {
                 "reply": "DeepSeek manager is unavailable. Existing queued tasks are unchanged.",

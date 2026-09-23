@@ -138,6 +138,7 @@ def test_pending_answer_must_be_pending_and_verbatim_user_fact(tmp_path):
     assert accepted["actions"][0]["status"] == "accepted"
     assert q.get(tid)["stage"] != "NEEDS_USER_INPUT"
     assert worker.answers[tid][field] == "群众"
+    assert provider.seen["message"] == "LOCAL_PRIVATE_ANSWER_PENDING"
 
 
 def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_path):
