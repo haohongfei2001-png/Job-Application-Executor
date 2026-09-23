@@ -210,3 +210,25 @@ def test_company_legal_assent_is_auto_accepted_by_standing_policy():
     assert item.canonical_key == "policy.auto_decide_company_legal_compliance"
     assert item.value is True
     assert item.source == "standing_user_policy"
+
+
+def test_standing_policy_select_and_ai_mapping_require_observed_representation(monkeypatch):
+    resolver = _resolver()
+    field = WebField(field_id="compliance-clearance", selector="#compliance",
+                     label="Corporate compliance clearance", input_type="select",
+                     options=["是", "否"], required=True)
+    monkeypatch.setattr(resolver.ai, "map_field",
+                        lambda *_: ("compliance.coamc_employee_recusal_requirements_met",
+                                    0.95, "synthetic mapping"))
+    item = resolver.resolve(field)
+    assert item.status == ResolutionStatus.UNRESOLVED
+    assert "representation" in item.reason
+    field.options = ["True", "False"]
+    resolved = resolver.resolve(field)
+    assert resolved.status == ResolutionStatus.RESOLVED
+    assert resolved.value == "True"
+
+    assent = WebField(field_id="assent", selector="#assent",
+                       label="本人同意遵守本公司合规政策与行为准则",
+                       input_type="select", options=["是", "否"], required=True)
+    assert resolver.resolve(assent).status == ResolutionStatus.UNRESOLVED

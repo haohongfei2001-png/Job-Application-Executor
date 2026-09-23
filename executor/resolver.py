@@ -429,19 +429,41 @@ class FieldResolver:
                 "policy.auto_accept_privacy_terms",
                 "policy.auto_accept_truth_submission_declarations",
             }:
+                policy_value = True
+                if field.input_type == "select" and field.options:
+                    choice = represent_choice(True, field.options)
+                    if choice is None:
+                        return FieldResolution(
+                            field_id=field.field_id, selector=field.selector,
+                            label=field.label, canonical_key=policy_key,
+                            status=ResolutionStatus.UNRESOLVED, required=field.required,
+                            reason="site option representation is unverified",
+                        )
+                    policy_value = choice.site_value
                 return FieldResolution(
                     field_id=field.field_id, selector=field.selector, label=field.label,
                     canonical_key=policy_key, status=ResolutionStatus.RESOLVED,
-                    value=True, source="standing_user_policy", confidence=1.0,
+                    value=policy_value, source="standing_user_policy", confidence=1.0,
                     reason=f"standing user policy: {policy_key}", required=field.required,
                 )
 
             if policy_enabled and policy_key == "policy.auto_decide_company_legal_compliance":
                 if _matches_any(field.label, LEGAL_ASSENT_PATTERNS):
+                    policy_value = True
+                    if field.input_type == "select" and field.options:
+                        choice = represent_choice(True, field.options)
+                        if choice is None:
+                            return FieldResolution(
+                                field_id=field.field_id, selector=field.selector,
+                                label=field.label, canonical_key=policy_key,
+                                status=ResolutionStatus.UNRESOLVED, required=field.required,
+                                reason="site option representation is unverified",
+                            )
+                        policy_value = choice.site_value
                     return FieldResolution(
                         field_id=field.field_id, selector=field.selector, label=field.label,
                         canonical_key=policy_key, status=ResolutionStatus.RESOLVED,
-                        value=True, source="standing_user_policy", confidence=1.0,
+                        value=policy_value, source="standing_user_policy", confidence=1.0,
                         reason="standing user policy: company legal/compliance assent",
                         required=field.required,
                     )
@@ -457,10 +479,22 @@ class FieldResolver:
                 if ai_key and ai_conf >= 0.80:
                     mapped = get_field(self.profile, ai_key)
                     if mapped and _nonempty(mapped.value) and field_is_current(mapped) and not has_unresolved_conflict(self.profile, ai_key):
+                        represented = mapped.value
+                        if field.input_type == "select" and field.options:
+                            choice = represent_choice(mapped.value, field.options)
+                            if choice is None:
+                                return FieldResolution(
+                                    field_id=field.field_id, selector=field.selector,
+                                    label=field.label, canonical_key=ai_key,
+                                    status=ResolutionStatus.UNRESOLVED, required=field.required,
+                                    reason="site option representation is unverified",
+                                    sensitive=mapped.sensitive or is_sensitive_key(ai_key),
+                                )
+                            represented = choice.site_value
                         return FieldResolution(
                             field_id=field.field_id, selector=field.selector, label=field.label,
                             canonical_key=ai_key, status=ResolutionStatus.RESOLVED,
-                            value=mapped.value, source="standing_policy_ai_mapping",
+                            value=represented, source="standing_policy_ai_mapping",
                             confidence=min(ai_conf, mapped.confidence),
                             reason=ai_reason, required=field.required,
                             sensitive=mapped.sensitive or is_sensitive_key(ai_key),

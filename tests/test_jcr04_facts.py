@@ -66,6 +66,21 @@ def test_task_answer_survives_worker_restart_without_cross_task_reuse(tmp_path):
     assert queue.get(first)["stage"] == "READY_TO_SUBMIT"
 
 
+@pytest.mark.parametrize("key,value", [
+    ("education.highest.graduation_date", "2026"),
+    ("identity.postal_code", "123456"),
+    ("preferences.salary_policy", "10000"),
+])
+def test_numeric_applicant_fact_is_not_mistaken_for_otp(tmp_path, key, value):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = _task(queue, tmp_path)
+    _wait_for_fact(queue, tid, key)
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    worker.user_input(tid, {key: value})
+    assert worker.answer_store.load(tid) == {key: value}
+    assert queue.get(tid)["stage"] == "DISCOVERED"
+
+
 def test_rejected_resume_rolls_back_answer_and_racing_input(tmp_path, monkeypatch):
     queue = TaskQueue(tmp_path / "runtime")
     tid = _task(queue, tmp_path)

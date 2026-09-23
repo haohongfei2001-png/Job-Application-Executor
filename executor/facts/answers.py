@@ -20,15 +20,19 @@ _AUTH_FRAGMENTS = ("password", "cookie", "token", "otp", "secret",
 
 
 def _validate_applicant_answer(key: str, value, *, label: str = "") -> None:
-    context = f"{key} {label}".casefold()
+    context = re.sub(r"[_-]+", " ", f"{key} {label}".casefold())
     if any(fragment in context for fragment in _AUTH_FRAGMENTS):
         raise ValueError("authentication values are not applicant facts")
-    if isinstance(value, str) and (
-        re.fullmatch(r"\s*\d{4,8}\s*", value)
-        or any(fragment in value.casefold() for fragment in
-               ("otp", "verification code", "security code", "验证码", "短信码"))
-    ):
+    if isinstance(value, str) and any(fragment in value.casefold() for fragment in
+                                      ("otp", "verification code", "security code", "验证码", "短信码")):
         raise ValueError("OTP-like values require the dedicated in-memory channel")
+    # Numeric applicant facts include years, salaries and postal codes. Reject
+    # impossible all-digit names/roles by their field semantics, not by an OTP
+    # length heuristic that cannot distinguish a valid numeric fact from a code.
+    if isinstance(value, str) and re.fullmatch(r"\s*\d+\s*", value) and re.search(
+        r"(?:^|\.)(?:role|name|relationship|school|major)$", key, re.I
+    ):
+        raise ValueError("numeric value is invalid for this applicant field")
 
 
 def _private_cipher(root: Path, key_name: str) -> Fernet:
