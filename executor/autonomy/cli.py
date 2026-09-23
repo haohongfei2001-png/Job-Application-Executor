@@ -172,6 +172,7 @@ def main(argv=None):
     push = otp_commands.add_parser("push")
     push.add_argument("--task")
     push.add_argument("--hint")
+    push.add_argument("--attempt", required=True)
     # stdin avoids retaining OTP text in shell history or process arguments.
     args = parser.parse_args(argv)
     try:
@@ -210,7 +211,7 @@ def main(argv=None):
         elif args.command == "ui":
             result = open_ui(args.runtime, args.port)
         elif args.command == "otp":
-            result = request(args.runtime, args.port, "/v1/otp", {"message": sys.stdin.read(4097), "task_id": args.task, "hint": args.hint})
+            result = request(args.runtime, args.port, "/v1/otp", {"message": sys.stdin.read(4097), "task_id": args.task, "hint": args.hint, "attempt_id": args.attempt})
         elif args.command == "user-input":
             result = request(args.runtime, args.port, "/v1/tasks/" + args.task_id + "/user-input", {"answers": json.load(sys.stdin)})
         else:

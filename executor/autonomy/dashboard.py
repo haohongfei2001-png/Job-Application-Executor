@@ -23,6 +23,7 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
 .factinput{display:flex;gap:5px;margin-top:8px}.factinput input,.factinput select{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.factinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}
 .factinput .remember-fact{flex:0 0 16px;width:16px;min-width:16px;padding:0}
+.otpinput{display:flex;gap:5px;margin-top:8px}.otpinput input{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.otpinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}.otpnote{font-size:12px;color:#64748b;line-height:1.4;margin-top:7px}
 .newtask{display:grid;gap:7px;margin:12px 0 17px}.newtask input{width:100%;border:1px solid #cbd5e1;border-radius:7px;padding:8px}.newtask button{padding:9px}
 .candidates{display:grid;gap:7px;margin-bottom:16px}.candidate{border:1px solid #d7dce2;border-radius:9px;padding:9px;font-size:12px}.candidate button{display:block;margin-top:7px;padding:6px 9px;font-size:12px}.candidate-note{font-size:12px;color:#92400e}
 .chat{padding:20px 24px;overflow:auto}.bubble{max-width:820px;padding:11px 13px;border-radius:13px;margin:8px 0;white-space:pre-wrap;line-height:1.5}
@@ -100,6 +101,8 @@ const blockerText={
   security_challenge:'需要安全验证',
   otp_waiting:'正在等待验证码',
   otp_ambiguous:'验证码需要确认',
+  auth_return_unverified:'登录后未回到原岗位，已安全暂停',
+  account_identity_unverified:'当前登录账号尚未核实，已安全暂停',
   sms_setup:'正在准备短信验证',
   unknown_facts:'需要补充信息',
   session_unavailable:'浏览器连接中断',
@@ -139,10 +142,19 @@ function render(state){
         <label class="factinput"><span>${esc(key)}</span>${(t.boolean_keys||[]).includes(key)?`<select aria-label="${esc(key)}"><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select>`:`<input autocomplete="off" aria-label="${esc(key)}">`}
           <button type="button" data-answer="true" data-key="${esc(key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button>
           ${(t.reusable_keys||[]).includes(key)?'<input type="checkbox" class="remember-fact" aria-label="保存为可复用事实"><span>经我确认后记住，供以后申请使用</span>':''}</label>`).join(''):''}
+      ${t.blocker==='otp_waiting'&&t.auth_attempt_id?`
+        <div class="otpnote">${t.otp_source==='configured_unverified'?'已配置自动接收，正在等待；若接收失败可在此输入。':'自动接收来源未验证；可在此本地输入。'}验证码不会发送给 AI 或保存在任务中。</div>
+        <label class="otpinput"><input type="password" inputmode="numeric" autocomplete="off" maxlength="8" aria-label="当前任务验证码" data-otp-task="${esc(t.task_id)}"><button type="button" data-otp-send="true" data-task="${esc(t.task_id)}" data-attempt="${esc(t.auth_attempt_id)}">本地输入验证码</button></label>
+        ${t.resend_eligible?(t.resend_wait_seconds===0?`<button class="headerbtn" type="button" data-otp-resend="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">授权重发一次</button>`:`<div class="otpnote">重发冷却中：约 ${Number(t.resend_wait_seconds)||0} 秒</div>`):''}
+      `:t.blocker==='otp_waiting'?`<div class="otpnote">本次验证码等待已过期或身份不明；旧码不会再被接受。</div>
+        ${t.resend_eligible?(t.resend_wait_seconds===0?`<button class="headerbtn" type="button" data-otp-resend="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">授权重发一次</button>`:`<div class="otpnote">重发冷却中：约 ${Number(t.resend_wait_seconds)||0} 秒</div>`):''}`:''}
+      ${t.blocker==='security_challenge'?'<div class="otpnote">请在任务专用浏览器由本人完成安全验证；完成后继续，系统会重新核对目标。</div>':''}
+      ${t.blocker==='auth_return_unverified'?'<div class="otpnote">系统无法证明登录后仍在原岗位。请核对页面；此任务不会自动重发短信或继续写入。</div>':''}
+      ${t.blocker==='account_identity_unverified'?'<div class="otpnote">系统无法证明当前账号属于申请人。此站点表单保持只读，直到有受验证的站点账号识别能力。</div>':''}
       <div class="taskcontrols">
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
         ${['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="OBSERVE" data-task="${esc(t.task_id)}">只读核对</button>`:''}
-        ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
+        ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown','auth_return_unverified','account_identity_unverified'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
         ${!['SUBMITTED','VERIFIED','CANCELLED','READY_TO_SUBMIT'].includes(t.stage)?`<button type="button" data-action="CANCEL" data-task="${esc(t.task_id)}" data-revision="${t.revision}">取消</button>`:''}
       </div>
     </div>`).join('');
@@ -170,6 +182,27 @@ tasksEl.addEventListener('click',async event=>{
     notify({PAUSE:'任务已暂停',RESUME:'任务已继续',CANCEL:'任务已取消'}[action]);
     await state();
   }catch(e){notify('任务状态已变化，请刷新后重试。');await state()}
+});
+tasksEl.addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-otp-send],button[data-otp-resend]');if(!button)return;
+  event.preventDefault();button.disabled=true;
+  if(button.dataset.otpSend){
+    const input=button.parentElement.querySelector('input[data-otp-task]');
+    const message=input.value.trim();input.value='';
+    if(!/^\d{4,8}$/.test(message)){notify('请输入当前短信中的 4 到 8 位验证码。');button.disabled=false;return}
+    try{
+      const r=await fetch('/ui/api/otp',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+        body:JSON.stringify({task_id:button.dataset.task,attempt_id:button.dataset.attempt,message})});
+      if(!r.ok)throw new Error();notify('验证码已通过本地专用通道交给当前任务。');await state();
+    }catch(e){notify('验证码未被当前尝试接受；请核对短信和任务状态。');await state()}
+  }else{
+    try{
+      const r=await fetch('/ui/api/otp-resend',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+        body:JSON.stringify({task_id:button.dataset.task,command_id:'ui-resend-'+crypto.randomUUID(),expected_revision:Number(button.dataset.revision)})});
+      if(!r.ok)throw new Error();notify('已授权当前任务重发一次；系统会重新核对控件与冷却状态。');await state();
+    }catch(e){notify('无法安全重发；请检查冷却时间和当前任务。');await state()}
+  }
+  button.disabled=false;
 });
 newTaskForm.addEventListener('submit',async event=>{
   event.preventDefault();
@@ -350,7 +383,7 @@ async function state(){
     const r=await fetch('/ui/api/state',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
     const data=await r.json();
-    if(![...tasksEl.querySelectorAll('.factinput input:not([type=checkbox]),.factinput select')].some(input=>input.value))render(data);
+    if(![...tasksEl.querySelectorAll('.factinput input:not([type=checkbox]),.factinput select,.otpinput input')].some(input=>input.value))render(data);
     updateLabel(data.update);
   }catch(e){document.getElementById('health').textContent='连接异常'}
 }

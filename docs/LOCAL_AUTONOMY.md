@@ -107,17 +107,21 @@ holds the full applicant values for the user's final review.
 
 ## OTP and human boundaries
 
-Ordinary user-received Chinese/English 4–8 digit codes may be ingested through
-`otp push --task TASK_ID` or `otp push --hint EXACT_HOST_OR_COMPANY`, with the
-message on stdin. Do not pass OTPs in command arguments or shell history. The
-existing Shortcut can POST the same narrow JSON envelope locally. An existing,
-explicitly enabled private iPhone bridge is reused; no new cloud relay is created.
+Ordinary user-received Chinese/English 4–8 digit codes may be entered in the
+authenticated local task card, or through `otp push --task TASK_ID --attempt
+AUTH_ATTEMPT_ID` with the message on stdin. Do not pass OTPs in command arguments,
+chat, or shell history. A local Shortcut may POST to `/v1/otp` only with the
+current task and attempt ID. An existing, explicitly enabled private iPhone
+bridge may be reused; no new cloud relay is created.
 
 Codes are in memory, expire after 300 seconds, and are consumed once.
 Duplicate delivery is rejected for the remainder of the validity window. Both
-multiple plausible codes and multiple waiting tasks are rejected. A task ID
-must identify a currently waiting OTP task. Without an ID an exact site/company
-hint is required. Expired codes and cancelled-task codes are discarded.
+multiple plausible codes and multiple waiting tasks are rejected. A code must
+match the current task, authentication attempt, site and deadline. Expired codes,
+old-attempt codes and cancelled-task codes are discarded. A local Messages source
+requires an explicit per-site sender and body rule; the optional relay response
+must return the matching attempt and origin. Source configuration is not treated
+as proof that delivery is online.
 
 Before entering the broker wait, the live generic adapter may prepare one proven
 SMS-login request: one OTP field, one phone field and one initial send-code control
@@ -126,9 +130,12 @@ never exposes it to DeepSeek/audit, never auto-resends, and only checks standard
 auth/privacy terms under the existing user-confirmed privacy policy (or if the
 user already checked them). QR/face alternatives may coexist visually; they are
 not automated. A CAPTCHA/password/ambiguous control after the request stops the
-task before the broker is consumed.
+task before the broker is consumed. The task card can explicitly authorize one
+resend after the cooldown; a durable unknown-effect marker is committed before
+each click, and a crash never silently clicks again.
 
-Ingestion resumes the waiting task; a code is only filled into the adapter's
+Ingestion resumes the waiting task. A configured source may keep listening after
+the short browser wait without holding a worker lease. A code is only filled into the adapter's
 unique ordinary OTP field. Existing scoped authentication-confirmation rules
 still apply. CAPTCHA, slider/image challenges, QR login, face/hardware prompts
 and passwords remain `NEEDS_USER_ACTION`. Unknown facts, contradictory facts, salary choices

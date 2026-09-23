@@ -42,16 +42,16 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 ### DFG-001 — Free-form applicant facts in manager chat
 
 - **Source round:** JCR-01
-- **Type / status:** `ENGINEERING_DEBT` / `RESOLVED` by JCR-04 engineering (pending exact-head/main integration receipt).
+- **Type / status:** `ENGINEERING_DEBT` / `RESOLVED` by JCR-04 engineering and main integration.
 - **Blocking scope:** None for durable local task-card fact recovery. Free-form manager chat remains intentionally unsupported for private fact entry; this is a product boundary, not an unresolved engineering shortcut.
 - **Non-blocked work:** Command/state controls, browser ownership, SyntheticATS, migration compatibility, discovery, fact-store and UI development.
 - **Safe degradation:** Model requests receive fixed local intent flags and bounded task state; private answers stay in the local UI/API and encrypted task-only journal. Reuse requires an explicit local checkbox and a known canonical key. OTP/authentication and one-time policy values cannot enter reusable facts. No F-class final-live PASS is claimed.
 - **Existing evidence:** `tests/test_manager_v1.py`, `tests/test_jcr01_privacy.py` with novel name/family/URL/DOM and provider-retry canaries, local fact-input browser/API tests, and SyntheticATS runs on PR #11. Final PR-head and merged-main `foundation`/full `test` CI passed at `f44fc2a` and `f09f419` respectively; see `receipts/JCR-01-MAIN-INTEGRATION.md`.
-- **Existing JCR-04 evidence:** `tests/test_jcr04_facts.py` covers encrypted task answer restart and cross-task isolation, explicit reuse in the isolated local browser, concurrent atomic canonical writes, stale READY review invalidation, encrypted legacy CLI migration and privacy canaries. The final exact-head/main CI evidence is recorded in the JCR-04 integration receipt after merge.
+- **Existing JCR-04 evidence:** `tests/test_jcr04_facts.py` covers encrypted task answer restart and cross-task isolation, explicit reuse in the isolated local browser, concurrent atomic canonical writes, stale READY review invalidation, encrypted legacy CLI migration and privacy canaries. PR #14 final head `466fed1`, merged main `fc2ba21`, exact-head CI 35924391280 and exact-main CI 35924692517 passed; see `receipts/JCR-04-MAIN-INTEGRATION.md`.
 - **Missing final evidence:** Per-case F-01 through F-09 final-live certification remains pending and is not inferred from these automatic tests; see DFG-004.
-- **Final convergence condition:** The engineering debt is resolved when JCR-04 exact-head/main CI and migration receipts are integrated. The separate real applicant evidence remains DFG-004/005.
+- **Final convergence condition:** Engineering resolution and integration are complete. Separate real applicant evidence remains DFG-004/005 for JCR-09.
 - **Related acceptance IDs:** F-01, F-02, F-03; E-class fact-store cases in JCR-04.
-- **Evidence / PR / commit:** PR #11 merge `f09f419af4eb6d9cda7b4a5efd0641b8eaf790c7`; JCR-04 sole writer PR #14 and integration receipt; no final-live PASS claimed.
+- **Evidence / PR / commit:** PR #11 merge `f09f419af4eb6d9cda7b4a5efd0641b8eaf790c7`; PR #14 merge `fc2ba2185b9dddfdec07e3dcd95b30489603ce73` and JCR-04 integration receipt; no final-live PASS claimed.
 
 ### DFG-002 — Browser page ownership after uncertain action
 
@@ -90,7 +90,7 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 - **Missing final evidence:** Owner review of actual canonical facts and project/research inventory, any desired cross-application reuse consent, and real-source conflict resolution.
 - **Final convergence condition:** JCR-09 owner reviews the private profile locally, confirms or corrects only necessary facts and reuse choices, and the final-live E/F cases receive evidence; no final submit is delegated.
 - **Related acceptance IDs:** E-01 through E-09, F-01 through F-09.
-- **Evidence / PR / commit:** JCR-04 PR #14 pending main integration; final-live NOT_RUN.
+- **Evidence / PR / commit:** JCR-04 PR #14 merged as `fc2ba2185b9dddfdec07e3dcd95b30489603ce73`; final-live NOT_RUN.
 
 ### DFG-005 — Real legacy/private profile migration proof
 
@@ -103,7 +103,20 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 - **Missing final evidence:** Actual private source inventory, sanitized migration comparison, and owner acceptance of any conflicts; no real private data is accessed unattended.
 - **Final convergence condition:** JCR-09 reviews the real migration snapshot and differences locally with the owner, or keeps the affected path read-only if proof is unavailable.
 - **Related acceptance IDs:** E-04, E-06, E-08, E-09, G-03, G-04.
-- **Evidence / PR / commit:** JCR-04 PR #14 pending main integration; real migration UNVERIFIED.
+- **Evidence / PR / commit:** JCR-04 PR #14 merged as `fc2ba2185b9dddfdec07e3dcd95b30489603ce73`; real migration UNVERIFIED.
+
+### DFG-006 — Real SMS transport, device permission and security challenge evidence
+
+- **Source round:** JCR-05
+- **Type / status:** `FINAL_LIVE` / `MITIGATED_FOR_ENGINEERING`
+- **Blocking scope:** Claiming real-account SMS delivery, Mac Messages permission, owner-enabled relay identity, CAPTCHA/password/QR/face/security-key handoff, or a real return to an intended job after authentication.
+- **Non-blocked work:** Durable non-secret AuthAttempt metadata, attempt-bound in-memory OTP, fake SMS and relay transport fixtures, isolated browser login, explicit resend and cooldown contract, crash recovery, handoff UI, return-target checks and all later independent engineering.
+- **Safe degradation:** No real SMS, account, private Messages database, new permission or security challenge is used during unattended development. Local push requires a current task/attempt token; relay responses without matching attempt and origin are ignored. Mac Messages is read only when private configuration explicitly enables it and provides site-specific sender and body rules; a configured source is never reported as proven online. Wrong-job return blocks direct resume. A live form write without certified active-account identity proof is blocked before the first field. Unsupported or ambiguous real authentication remains human-handled.
+- **Existing evidence:** JCR-05 isolated fake SMS, guarded resend, late-source, local UI, secret exit-scan and wrong-job tests are recorded in `receipts/JCR-05-ENGINEERING.md`; exact-head/main integration evidence is pending this round.
+- **Missing final evidence:** Authorized real account/phone, existing or owner-enabled transport and device permission, ordinary delivered SMS matched to one attempt, real security handoff and same-job return proof.
+- **Final convergence condition:** In JCR-09, the owner enables or confirms only the chosen real transport and performs unavoidable security actions on the real site; the system records redacted attempt and return-target evidence without retaining code or granting automated final submit.
+- **Related acceptance IDs:** C-01 through C-15 and G-class auth recovery cases.
+- **Evidence / PR / commit:** JCR-05 sole writer `feat/jcr05-auth-attempts`; final-live NOT_RUN.
 
 ## Invariants
 

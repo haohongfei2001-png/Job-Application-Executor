@@ -51,6 +51,10 @@ class SiteAdapter(ABC):
     def current_page_hostname(self) -> str:
         return urlparse(self.target_url).hostname or ""
 
+    def account_identity_verified(self, profile) -> bool:
+        """Site drivers must prove the active account matches the applicant."""
+        return False
+
     def prepare_one_time_code_auth(
         self,
         phone: str | None,

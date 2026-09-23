@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .adapters.registry import adapter_for_url, site_id_for_url
-from .browser import BrowserOwnershipError
+from .browser import BrowserOwnershipError, browser_mode
 from .audit import AuditStore
 from .models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus, WebField
 from .otp.bridge import OtpBridge, OtpBridgeError
@@ -81,9 +81,39 @@ class ApplicationExecutor:
         self.audit.save_plan(self.plan)
         return self.plan
 
+    def _auth_return_target_verified(self, adapter) -> bool:
+        page = getattr(adapter, "page", None)
+        current = getattr(page, "url", None)
+        if not isinstance(current, str):
+            return False
+        actual = urlparse(current)
+        expected = urlparse(self.target_url)
+        return ((actual.scheme, actual.netloc, actual.path, actual.query, actual.fragment) ==
+                (expected.scheme, expected.netloc, expected.path, expected.query,
+                 expected.fragment))
+
     def _resolve_otp_challenge(self, adapter, page_index: int) -> bool:
         if not self.otp_bridge.enabled:
             self._block_auth(page_index, "one_time_code", "one-time-code authentication requires human handling")
+            return False
+
+        try:
+            hostname = adapter.current_page_hostname()
+        except Exception:
+            hostname = ""
+        if not hostname:
+            self._block_auth(page_index, "one_time_code", "OTP page hostname unavailable")
+            return False
+        begin_attempt = getattr(self.otp_bridge, "begin_attempt", None)
+        attempt = None
+        if callable(begin_attempt):
+            try:
+                attempt = begin_attempt(hostname)
+            except (RuntimeError, ValueError):
+                self._block_auth(page_index, "one_time_code", "authentication attempt or target unverified")
+                return False
+        elif browser_mode() not in {"isolated", "test", "headless"}:
+            self._block_auth(page_index, "one_time_code", "durable authentication journal unavailable")
             return False
 
         try:
@@ -111,14 +141,31 @@ class ApplicationExecutor:
             and auth_terms.value is True
         )
         try:
-            prepare = getattr(
-                adapter,
-                "prepare_one_time_code_auth",
-                lambda *_args, **_kwargs: "not_needed",
-            )(
-                phone,
-                allow_standard_auth_terms=allow_standard_auth_terms,
-            )
+            if attempt and attempt["send_outcome"] != "PREPARED":
+                # A pre-click unknown-effect marker survives a crash. Never
+                # infer that a second click is safe from page appearance.
+                prepare = "already_requested"
+            else:
+                send_callbacks = (
+                    {"before_send": self.otp_bridge.before_send,
+                     "after_send": self.otp_bridge.after_send,
+                     "authorized_resend": bool(attempt.get("resend_parent_id"))}
+                    if attempt else {}
+                )
+                prepare = getattr(
+                    adapter,
+                    "prepare_one_time_code_auth",
+                    lambda *_args, **_kwargs: "not_needed",
+                )(
+                    phone,
+                    allow_standard_auth_terms=allow_standard_auth_terms,
+                    **send_callbacks,
+                )
+                if attempt and prepare == "not_needed":
+                    if browser_mode() in {"isolated", "test", "headless"}:
+                        self.otp_bridge.observe_existing()
+                    else:
+                        prepare = "external_request_unverified"
         except BrowserOwnershipError:
             raise
         except Exception:
@@ -159,15 +206,12 @@ class ApplicationExecutor:
             )
             return False
         if post_prepare_kind is None:
+            if attempt:
+                if not self._auth_return_target_verified(adapter):
+                    self._block_auth(page_index, "return_target_unverified", "return target after authentication unverified")
+                    return False
+                self.otp_bridge.complete_attempt()
             return True
-
-        try:
-            hostname = adapter.current_page_hostname()
-        except Exception:
-            hostname = ""
-        if not hostname:
-            self._block_auth(page_index, "one_time_code", "OTP page hostname unavailable")
-            return False
 
         try:
             result = self.otp_bridge.wait_for_code(hostname)
@@ -264,6 +308,11 @@ class ApplicationExecutor:
             )
             return False
 
+        if attempt:
+            if not self._auth_return_target_verified(adapter):
+                self._block_auth(page_index, "return_target_unverified", "return target after authentication unverified")
+                return False
+            self.otp_bridge.complete_attempt()
         self.audit.record_action({
             "type": "otp_authentication", "source": source, "ok": True,
         })
@@ -415,6 +464,18 @@ class ApplicationExecutor:
                         auth_kind,
                         f"{auth_kind} authentication requires human handling",
                     )
+
+                if browser_mode() not in {"isolated", "test", "headless"}:
+                    try:
+                        account_verified = bool(adapter.account_identity_verified(self.profile))
+                    except BrowserOwnershipError:
+                        raise
+                    except Exception:
+                        account_verified = False
+                    if not account_verified:
+                        return self._block_auth(
+                            page_index, "account_identity_unverified",
+                            "active account identity is unverified")
 
                 fields = adapter.discover_fields()
                 if not fields and adapter.start_application():

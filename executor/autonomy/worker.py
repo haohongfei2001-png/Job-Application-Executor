@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -47,6 +48,11 @@ class ProcessLock:
 def outcome(plan):
     if plan.stage == ApplicationStage.BLOCKED:
         if plan.metadata.get("auth_kind"):
+            if plan.metadata["auth_kind"] in {
+                    "return_target_unverified", "account_identity_unverified"}:
+                return "BLOCKED", ("auth_return_unverified"
+                                   if plan.metadata["auth_kind"] == "return_target_unverified"
+                                   else "account_identity_unverified")
             return "NEEDS_USER_ACTION", "otp_waiting" if plan.metadata["auth_kind"] == "one_time_code" else "security_challenge"
         if plan.unresolved_fields:
             return "NEEDS_USER_INPUT", "unknown_facts"
@@ -113,6 +119,59 @@ class Worker:
         self.answers_lock = threading.RLock()
         self.answer_store = TaskAnswerStore(queue)
         self.active = None
+        self._otp_watch_lock = threading.RLock()
+        self._otp_watchers = set()
+        self._otp_watch_retry_after = {}
+
+    def _watch_late_otp(self):
+        """Listen after the short browser wait without holding a task lease."""
+        if not self.relay or not self.relay.enabled:
+            return
+        with self._otp_watch_lock:
+            now = time.monotonic()
+            self._otp_watch_retry_after = {
+                aid: retry_at for aid, retry_at in self._otp_watch_retry_after.items()
+                if retry_at > now or aid in self._otp_watchers}
+        for task in self.queue.tasks():
+            if task["stage"] != "NEEDS_USER_ACTION" or task["blocker"] != "otp_waiting":
+                continue
+            tid = task["task_id"]
+            attempt = self.broker.attempts.valid_wait(tid)
+            if not attempt:
+                continue
+            aid = attempt["attempt_id"]
+            with self._otp_watch_lock:
+                if (aid in self._otp_watchers or
+                        time.monotonic() < self._otp_watch_retry_after.get(aid, 0)):
+                    continue
+                self._otp_watchers.add(aid)
+
+            def listen(task_id=tid, attempt_id=aid, origin=attempt["origin"],
+                       requested_at=attempt["requested_at"], deadline=attempt["deadline"]):
+                try:
+                    remaining = min(300, max(1, int(deadline - self.queue.clock())))
+                    result = self.relay.wait_for_code(
+                        origin, timeout_seconds=remaining, attempt_id=attempt_id,
+                        requested_at=requested_at)
+                    if (self.stop_event.is_set() or not isinstance(result, dict)
+                            or result.get("attempt_id") != attempt_id
+                            or result.get("origin") != origin):
+                        return
+                    accepted = self.broker.push(task_id=task_id, attempt_id=attempt_id,
+                                                message=str(result.get("code") or ""))
+                    if accepted["accepted"]:
+                        current = self.queue.get(task_id)
+                        if not current["owner"] and current["stage"] == "NEEDS_USER_ACTION":
+                            self.queue.resume(task_id)
+                except Exception:
+                    # A disconnected source leaves the task at a visible wait.
+                    pass
+                finally:
+                    with self._otp_watch_lock:
+                        self._otp_watchers.discard(attempt_id)
+                        self._otp_watch_retry_after[attempt_id] = time.monotonic() + 15
+
+            threading.Thread(target=listen, daemon=True).start()
 
     def _runner_settings(self):
         settings = copy.deepcopy(self.settings)
@@ -206,6 +265,7 @@ class Worker:
         task = self.queue.claim("worker-" + str(os.getpid()))
         if not task:
             self.broker.expire()
+            self._watch_late_otp()
             return False
         tid, owner, spec = task["task_id"], task["owner"], task["spec"]
         done, lost = threading.Event(), threading.Event()
@@ -258,17 +318,34 @@ class Worker:
                 if not spec["live_authorized"]:
                     checkpoint("BLOCKED", blocker="live_not_authorized", release=True)
                     return True
-                # Until a durable task-to-tab binding is observed, a prior
-                # runner return cannot justify a second live browser write.
-                if self.queue.run_attempts(tid):
-                    checkpoint("BLOCKED", blocker="browser_ownership_unknown", release=True)
-                    return True
                 session_epoch = browser.owned_cdp_fingerprint()
                 if session_epoch is None:
                     checkpoint("BLOCKED", blocker="session_unavailable", release=True)
                     return True
+                prior_runs = self.queue.run_attempts(tid)
+                if prior_runs:
+                    # The only permitted continuation is a code already bound
+                    # to the one SMS request stopped at the original auth page.
+                    # Read-only observation proves same process/tab/document
+                    # and active OTP controls before another run intent exists.
+                    auth_attempt = self.broker.attempts.valid_wait(tid)
+                    binding = self.queue.browser_binding(tid)
+                    if (len(prior_runs) != 1
+                            or prior_runs[0]["outcome"] != "RETURNED_UNVERIFIED"
+                            or task["checkpoint"] != "DISCOVERED"
+                            or not auth_attempt
+                            or auth_attempt["send_outcome"] not in {"CLICK_OBSERVED", "SEND_UNKNOWN"}
+                            or not self.broker.pending(tid)
+                            or not binding
+                            or binding["process_epoch"] != session_epoch
+                            or browser.observe_bound_auth(
+                                spec["target_url"], binding,
+                                auth_attempt["origin"]) != "BOUND_OTP_WAIT_OBSERVED"):
+                        checkpoint("BLOCKED", blocker="browser_ownership_unknown", release=True)
+                        return True
             audit = OperationalAudit(self.queue.root, tid, checkpoint, guard)
-            bridge = BrokerBridge(self.broker, tid, self.queue, owner, guard, relay=self.relay)
+            bridge = BrokerBridge(self.broker, tid, self.queue, owner, guard,
+                                  relay=self.relay, target_url=spec["target_url"])
             runner = self.runner_factory(spec["target_url"], spec["profile_ref"], self._runner_settings(), execution_id=tid,
                 otp_bridge=bridge, audit_store=audit, guard=guard,
                 resume_url=task.get("checkpoint_url"), existing_browser_only=True)

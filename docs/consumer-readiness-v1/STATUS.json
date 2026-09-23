@@ -59,12 +59,12 @@
     },
     {
       "id": "JCR-05",
-      "status": "READY",
+      "status": "ADVANCE_ALLOWED_WITH_DEFERRED",
       "authorized": true
     },
     {
       "id": "JCR-06",
-      "status": "NOT_STARTED",
+      "status": "READY",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "Finish sole JCR-04 PR #14 exact-head CI, review closure, merge and exact-main readback, then immediately begin JCR-05 auth and OTP lifecycle. JCR-04 is ADVANCE_ALLOWED_WITH_DEFERRED, not consumer certified: DFG-004/005 hold real applicant and migration evidence for JCR-09, while DFG-002/003 remain isolated engineering debts. JCR-05 uses fake SMS and isolated browser fixtures; no real transport, account challenge, private data or final submit is authorized. Continue all independent later rounds until automatable engineering is exhausted.",
+  "next_action": "JCR-05 sole writer PR #15 completed synthetic auth/OTP engineering with local isolated/headless 384 passing tests. Three automated review findings on hash-routed return identity, expired wait recovery and live late-code browser continuity were fixed with direct regressions; their final PR-head CI and review thread closure remain the immediate merge gates. Then merge, verify exact-main CI and remote STATUS readback, and begin JCR-06 structured forms. DFG-006 keeps real account/SMS/device/security and real job-return evidence FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,
