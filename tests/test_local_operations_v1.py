@@ -257,6 +257,23 @@ def test_reconciled_update_state_recovers_stale_busy_file(tmp_path):
     assert state["reason"] == "stale_update_recovered"
 
 
+@pytest.mark.parametrize("status", ["updating", "restarting"])
+def test_reconciled_post_mutation_stale_state_requires_restart(tmp_path, status):
+    runtime = tmp_path / "runtime"
+    updater.write_update_state(
+        runtime,
+        status,
+        old_version="a" * 40,
+        new_version="b" * 40,
+    )
+
+    assert updater.update_lock_held(runtime) is False
+    state = updater.reconciled_update_state(runtime)
+
+    assert state["status"] == "restart_required"
+    assert state["reason"] == "stale_update_recovered"
+
+
 def test_begin_update_waits_for_inflight_mutation_to_drain(tmp_path, monkeypatch):
     _, _, supervisor = _supervisor(tmp_path)
     entered = threading.Event()
