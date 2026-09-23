@@ -1,0 +1,2679 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI投递经理 · 完整审计与产品化计划</title><style>
+:root{color-scheme:light;--ink:#17252d;--muted:#64707a;--line:#dce3e7;--paper:#fff;--wash:#f5f7f8;--accent:#166675}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:24px}body{margin:0;background:var(--wash);color:var(--ink);font:16px/1.85 -apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}aside{width:245px;position:fixed;inset:0 auto 0 0;padding:32px 22px;background:var(--paper);border-right:1px solid var(--line);overflow:auto}aside strong{display:block;line-height:1.5;margin-bottom:9px;font-size:19px}aside small{display:block;color:var(--muted);font-size:12px;margin-bottom:20px}nav a{display:block;font-size:14px;padding:7px 8px;border-radius:6px}nav a:hover{background:var(--wash)}main{margin-left:245px;padding:36px 48px 70px;max-width:1550px}.hero{padding:35px 40px;background:var(--paper);border:1px solid var(--line);border-top:5px solid var(--accent);border-radius:10px;margin-bottom:30px}.eyebrow{font-size:12px;letter-spacing:.12em;color:var(--accent);font-weight:650}.hero h1{font-size:34px;margin:10px 0 14px;line-height:1.4}.hero p{max-width:900px}.badge{display:inline-block;padding:5px 11px;font-size:13px;background:#e9f3f3;border-radius:5px;margin:0 8px 8px 0}.muted{color:var(--muted);font-size:14px}.chapter{background:var(--paper);padding:32px 40px;border:1px solid var(--line);border-radius:10px;margin:24px 0}.chapter h1{font-size:28px;line-height:1.5;margin:0 0 24px;border-bottom:1px solid var(--line);padding-bottom:18px}.chapter h2{font-size:23px;margin-top:36px;line-height:1.5}.chapter h3{font-size:19px;line-height:1.55;margin-top:27px}.chapter p{margin:12px 0}code{font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;background:#f0f3f5;padding:2px 5px;border-radius:4px;overflow-wrap:anywhere}pre{background:#f0f3f5;padding:18px;border-radius:7px;overflow-x:auto}pre code{padding:0}.table-wrap{overflow-x:auto;margin:20px 0;border:1px solid var(--line);border-radius:7px}table{border-collapse:collapse;width:100%;font-size:14px;line-height:1.75;min-width:660px}th,td{padding:11px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{background:#eef3f4;font-weight:650}tr:last-child td{border-bottom:0}td:first-child{font-weight:550}blockquote{border-left:4px solid var(--accent);margin:20px 0;padding:8px 18px;background:#f4f8f8}li{margin:6px 0}button{cursor:pointer;border:1px solid var(--line);padding:8px 14px;background:white;border-radius:6px;color:var(--ink)}footer{color:var(--muted);font-size:13px} @media(max-width:960px){aside{position:static;width:auto;border-right:0;border-bottom:1px solid var(--line);padding:20px}nav{display:flex;flex-wrap:wrap}main{margin:0;padding:18px}.hero,.chapter{padding:24px}.hero h1{font-size:27px}}@media print{aside,.print-button{display:none}main{margin:0;padding:0;max-width:none}body{background:white;font-size:10pt}.hero,.chapter{border:0;padding:0}.chapter{page-break-before:always}table{min-width:0;font-size:8pt}h1,h2,h3{break-after:avoid}.table-wrap{overflow:visible}a{color:inherit}}
+</style></head><body><aside><strong>AI 投递经理<br>消费级产品化审计</strong><small>2026-09-23 · JAE-CONSUMER-READINESS-v1<br>固定基线 72dd892c1446</small><nav><a href="#readme">阅读指南</a><a href="#01_audit">01 完整审计</a><a href="#02_architecture">02 架构与边界</a><a href="#03_test_strategy">03 测试体系</a><a href="#04_acceptance_matrix">04 验收矩阵</a><a href="#05_rounds">05 九轮执行合同</a><a href="#06_execution_protocol">06 执行协议</a><a href="#07_final_certification">07 最终认证</a><a href="#08_evidence_index">08 证据与限制</a><a href="#09_traceability">09 问题追踪</a></nav></aside><main><header class="hero"><div class="eyebrow">PRODUCT READINESS / END-TO-END RELIABILITY</div><h1>从可运行的执行器，<br>到可以长期信任的投递产品</h1><span class="badge">现状：工程 Alpha</span><span class="badge">设计：可注册</span><span class="badge">开发：尚未开始</span><p><strong>保留安全与事务基础，重建目标、执行、事实、最终复核和日常运行的闭环。</strong>本包包含完整审计、118项结果验收合同、16层测试体系和9轮开发计划。真人验收集中在最后1–3个时段。</p><p class="muted">本次未修改 GitHub / runtime，未操作用户 Mac 或真实申请。远端240项测试通过与本次3个源码片段探针，均不等于真人网站认证。所有新验收项初始为 NOT_RUN。</p><button class="print-button" onclick="window.print()">打印 / 保存阅读版</button></header><section id="readme" class="chapter"><h1 id="readme-jae-consumer-readiness-v1">JAE-CONSUMER-READINESS-v1</h1>
+<h2 id="readme-consumer-grade-product-readiness-audit--end-to-end-reliability-audit--final-productization-plan">Consumer-Grade Product Readiness Audit · End-to-End Reliability Audit · Final Productization Plan</h2>
+<p>审计日期：2026-09-23<br/>
+仓库：<code>haohongfei2001-png/Job-Application-Executor</code><br/>
+审计基线：<code>72dd892c144699f8a9e9988265bfb20f50b3db4e</code><br/>
+建议注册目录：<code>docs/consumer-readiness-v1/</code></p>
+<p><strong>状态：DESIGN_READY_FOR_REGISTRATION。实现未开始，尚未注册到 GitHub，尚未获得 consumer-ready 认证。</strong></p>
+<p>本包是产品审计与开发合同，不是运行时补丁。此次交付没有修改远端仓库、用户 Mac、真实申请、浏览器资料、短信或个人资料。<code>evidence/source_excerpt_probes.py</code> 只包含从固定版本摘取的三个纯逻辑片段和合成替身，不是新产品实现，也不是全仓库测试结果。</p>
+<h2 id="readme-核心结论">核心结论</h2>
+<p>当前是<strong>有真实浏览器执行、安全边界和持久任务基础的工程 Alpha</strong>，不是仅差美化的消费级产品。最需要改变的是：从“模块能工作、控制器能停下”提升到“从意图到可提交申请的结果有证据，发生中断仍能继续，只有确实需要人时才打扰人”。</p>
+<p>保留 Python / Playwright / SQLite / DeepSeek advisory + deterministic control，不做云化、微服务化或无限通用网站平台。以 9 个工程闭环完成产品化；开发期使用合成、脱敏、公开只读证据，真人验收集中到最后 1–3 个时段。</p>
+<h2 id="readme-阅读顺序">阅读顺序</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>文件</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="#01_audit">01_AUDIT.md</a></td>
+<td>真实产品模型、完整链路、系统性缺口、假完成、用户体验审计</td>
+</tr>
+<tr>
+<td><a href="#02_architecture">02_ARCHITECTURE.md</a></td>
+<td>拟冻结范围、架构决策、边界、数据与迁移设计</td>
+</tr>
+<tr>
+<td><a href="#03_test_strategy">03_TEST_STRATEGY.md</a></td>
+<td>16 层测试、独立判据、故障注入、隐私与 CI 分层</td>
+</tr>
+<tr>
+<td><a href="#04_acceptance_matrix">04_ACCEPTANCE_MATRIX.md</a></td>
+<td>最终验收逐项 PASS / FAIL；配套 JSON 可机读</td>
+</tr>
+<tr>
+<td><a href="#05_rounds">05_ROUNDS.md</a></td>
+<td>JCR-01～09 的目标、表面、实现、自动测试、门槛、停止条件、回退</td>
+</tr>
+<tr>
+<td><a href="#06_execution_protocol">06_EXECUTION_PROTOCOL.md</a></td>
+<td>注册与逐轮执行、唯一 writer、远端事实、完成和阻塞协议</td>
+</tr>
+<tr>
+<td><a href="#07_final_certification">07_FINAL_CERTIFICATION.md</a></td>
+<td>真实平台覆盖、1–3 次验收、最终证书、日常使用边界</td>
+</tr>
+<tr>
+<td><a href="#08_evidence_index">08_EVIDENCE_INDEX.md</a></td>
+<td>固定 SHA 源码、文档、CI、PR 和实验的证据索引与限制</td>
+</tr>
+<tr>
+<td><a href="STATUS.json">STATUS.json</a></td>
+<td>本包状态、轮次、授权与真人验收状态</td>
+</tr>
+<tr>
+<td><a href="evidence/source_excerpt_probes.json">evidence/source_excerpt_probes.json</a></td>
+<td>三个源码片段反例的实测输出</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="readme-使用规则">使用规则</h2>
+<p>当前任务只授权审计和计划交付。注册文件不等于授权实现，也不等于授权真实网站申请、发送验证码、安装登录项或购买服务。后续每次执行先读取当前远端 main、活跃 PR、STATUS 与本轮合同，不使用本包的旧 SHA 强行覆盖新工作。</p>
+<p>本包内阈值与最终门槛是<strong>待实现的产品要求</strong>，不是当前测量值。“历史已通过”“本次实测”“静态推演”“拟验收”必须分别记录。所有最终矩阵项初始均为 NOT_RUN，不能把审计发现或旧 CI 填成新版本认证。</p>
+<p>拟冻结范围的变更需要留下产品理由、受影响验收项和替代证据。不得通过减少真实范围、把必填项变为可选、隐藏失败或放松最终提交/隐私边界获得绿色结果。</p>
+</section><section id="01_audit" class="chapter"><h1 id="01_audit-完整产品与端到端可靠性审计">完整产品与端到端可靠性审计</h1>
+<p>基线：<code>main@72dd892c144699f8a9e9988265bfb20f50b3db4e</code>。证据编号见 <a href="#08_evidence_index">08_EVIDENCE_INDEX.md</a>。凡“应当”“建议”“目标”“PASS”均为拟定产品要求，不是当前实现状态。</p>
+<h2 id="01_audit-1-结论与成熟度">1. 结论与成熟度</h2>
+<p>当前系统是<strong>有严格边界和真实执行能力的工程 Alpha</strong>：已不是只有 mock 的概念原型，但也不是稍加视觉包装即可每天放心使用的产品。它比较擅长“在已知精确 URL、可识别的简单表单和预先配置的本地环境下执行保守动作，遇到异常停止”，尚未形成“从用户意图到完整申请结果的自主闭环”。</p>
+<p>本次核验的远端 CI 为 240 passed / 56.33s。它证明当前测试集合通过，不证明多个真实招聘平台能完成完整 consumer journey。本次没有测量真实成功率，因此不提供“已完成 80%”“还需三天”等无依据数字。[E00,E19–E24]</p>
+<p>距离 v1 的主要工作不是再补十几个公司名正则，而是补齐四个横向闭环：<strong>目标身份、执行与恢复、事实与完整性、产品运行与发布</strong>。可保留技术栈和安全内核，用 9 轮有明确成果的产品化工程完成，不需要另起云平台。</p>
+<h3 id="01_audit-11-十个系统性缺口">1.1 十个系统性缺口</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>优先级</th>
+<th>系统性缺口</th>
+<th>用户后果</th>
+<th>关键证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>发布阻断</td>
+<td>READY 未由完整、独立的最终复核决定</td>
+<td>以为只差点击，实际还存在遗漏/未经证实的数据</td>
+<td>E03–E05</td>
+</tr>
+<tr>
+<td>发布阻断</td>
+<td>标签页、会话、岗位身份没有贯穿绑定</td>
+<td>可能定位到无关页；恢复后不能证明仍是原申请</td>
+<td>E06,E07,E17</td>
+</tr>
+<tr>
+<td>发布阻断</td>
+<td>关键按钮依赖文字而非认证动作语义</td>
+<td>禁止 submit 方法仍不能证明 next/apply/Enter 无最终副作用</td>
+<td>E05,E18</td>
+</tr>
+<tr>
+<td>核心体验阻断</td>
+<td>消费端 CREATE 强制用户当前消息给 exact URL</td>
+<td>“投递 OPPO AI 产品经理”不能按理想体验工作</td>
+<td>E02,E17</td>
+</tr>
+<tr>
+<td>核心体验阻断</td>
+<td>通用表单主要是原生控件列表，不是结构化表单模型</td>
+<td>重复经历、依赖字段、异步上传和自定义控件不可靠</td>
+<td>E05,E15,E16</td>
+</tr>
+<tr>
+<td>核心体验阻断</td>
+<td>消费端已确认事实仍是内存回答</td>
+<td>重启/更新后再问；CLI 的复用能力没有成为产品能力</td>
+<td>E08,E16</td>
+</tr>
+<tr>
+<td>核心体验阻断</td>
+<td>认证没有完整 attempt 与 transport 生命周期</td>
+<td>短时等待、迟到短信、重发、返回原岗位仍需人工串联</td>
+<td>E14,E05</td>
+</tr>
+<tr>
+<td>核心体验阻断</td>
+<td>命令、任务、健康和 UI 状态混杂</td>
+<td>“继续这个”上下文弱，绿色就绪不是实际可执行，暂停可能被模型等待阻塞</td>
+<td>E02,E09,E10</td>
+</tr>
+<tr>
+<td>运维阻断</td>
+<td>launcher / diagnostics / updater 未形成独立恢复面</td>
+<td>服务坏了打不开诊断，更新后的坏依赖不能自动回到可用版本</td>
+<td>E11–E13</td>
+</tr>
+<tr>
+<td>认证阻断</td>
+<td>测试的判据与用户结果之间存在断层</td>
+<td>基础问题持续由真人应用暴露</td>
+<td>E19–E24</td>
+</tr>
+</tbody>
+</table></div>
+<p>“发布阻断”是必须修复/证伪的门槛，不表示本次观察到真实错误提交或隐私泄漏。对于能构造安全反例的路径，即使还未发生真实事故，也不能认证可用。</p>
+<h2 id="01_audit-2-真实产品模型与职责">2. 真实产品模型与职责</h2>
+<h3 id="01_audit-21-当前模型">2.1 当前模型</h3>
+<p>当前实际上有三层并存：原始/迁移后的 CLI 申请执行器、Local Autonomy 队列守护进程、后来增加的对话 Manager 与 launcher。新的界面包住了旧执行链，但目标发现、资料确认、浏览器会话、复核、更新仍分别存在于不同入口里。[E01,E02,E07–E13,E16]</p>
+<p>DeepSeek 不是全程自由控制电脑的 agent。它负责生成有限的任务控制提议，另一个 mapper 解释字段对应哪个 canonical key。决定能否执行、取哪个真实值、调用哪个浏览器动作的是本地确定性逻辑。这种分工应保留，而不是为了显得智能让模型直接执行任意 JavaScript 或臆造资料。[E02,E15]</p>
+<h3 id="01_audit-22-从意图到提交前的当前-journey">2.2 从意图到提交前的当前 journey</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>步骤</th>
+<th>当前主责</th>
+<th>实际发生的行为</th>
+<th>断点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>打开入口</td>
+<td>launcher + local runtime</td>
+<td>启动 Chrome、服务、预检，然后普通浏览器打开 UI</td>
+<td>配置缺失时 UI 也不开；原服务中途死亡没有独立产品恢复面</td>
+</tr>
+<tr>
+<td>理解“投递/继续/暂停”</td>
+<td>DeepSeek + ManagerController</td>
+<td>typed decisions，经当前消息正则和任务条件批准</td>
+<td>部分清晰命令仍依赖模型；缺乏持久选中任务和版本绑定</td>
+</tr>
+<tr>
+<td>找岗位</td>
+<td>Manager + target_resolver</td>
+<td>创建通常要求 URL，OPPO 首页有特例补救</td>
+<td>没有独立的发现→候选→证据→任务流程</td>
+</tr>
+<tr>
+<td>持久化任务</td>
+<td>TaskQueue</td>
+<td>URL/标识去重、SQLite、租约、保护目标检查</td>
+<td>durable task 不等于 durable browser draft 或 action result</td>
+</tr>
+<tr>
+<td>获取浏览器</td>
+<td>Worker + browser.py</td>
+<td>活跃 CDP、exact URL 页、last page</td>
+<td>无严格任务标签归属/重定向证明；死浏览器让用户恢复</td>
+</tr>
+<tr>
+<td>认证</td>
+<td>ApplicationExecutor + GenericWebAdapter + OTP bridge</td>
+<td>检测验证码/密码/人机验证；保守发送一次初始 SMS；读取 broker</td>
+<td>auth mode、attempt、迟到短信和恢复路径不完整</td>
+</tr>
+<tr>
+<td>解析/填写</td>
+<td>adapter + FieldResolver + canonical profile</td>
+<td>原生字段快照、规则/语义映射、确定性真实值、原生 fill/select</td>
+<td>重复行与复杂组件不成为一等结构；映射失败容易变成问事实</td>
+</tr>
+<tr>
+<td>保存/验证</td>
+<td>adapter + ApplicationExecutor</td>
+<td>读回当前可见控件，部分核对；遇到 blocker 保存草稿</td>
+<td>可见范围不等于完整表单；异步持久化、隐藏/遗漏区段不足</td>
+</tr>
+<tr>
+<td>最终复核</td>
+<td>review helper + 用户</td>
+<td>生成 checklist/项目覆盖，并已置 READY</td>
+<td>checklist 不是已完成检查；UI 没提供完整复核和差异</td>
+</tr>
+<tr>
+<td>用户最终点击以后</td>
+<td>用户；旧接口具备部分验证逻辑</td>
+<td>文档允许只读验证；consumer 队列 READY 不自动续跑</td>
+<td>“已投递”证据和 protected registry 的消费级闭环不完整</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="01_audit-23-责任混乱的根源">2.3 责任混乱的根源</h3>
+<p>Manager 既解释自然语言，又掺入 OPPO resolver/retarget 细节；ApplicationExecutor、adapter 各自承担认证判定；TaskQueue 的业务状态、wait reason、暂停前来源混在 blocker 字符串中；UI 使用安全标记推导服务就绪；review 同时承担“需要用户检查的说明”和“足够可提交的证明”。这些不是命名问题，而是导致跨步骤不一致的实际边界问题。[E02,E03,E05,E07,E09,E10]</p>
+<p>新架构的核心要求是：<strong>意图可以来自模型，事实来自证据，状态来自唯一控制器，成功来自观察到的网页/草稿结果，展示来自同一份任务读模型。</strong></p>
+<h2 id="01_audit-3-a--启动安装与运行准备">3. A — 启动、安装与运行准备</h2>
+<p>首次安装不是真正自包含：<code>.app</code> 引用仓库绝对路径和已有 <code>.venv</code>，缺环境时提示重新安装。没有完整资料导入、凭证/短信来源配置、权限解释和预览流程。日常双击已能启动可逆依赖，值得保留；但服务缺配置时连 UI 都不开，使用者无法在产品里修复自己。[E11]</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>当前判断</th>
+<th>消费级要求</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>第一次安装</td>
+<td>依赖开发目录/虚拟环境；非独立安装体验</td>
+<td>安装包包含或自动配置受支持运行环境；无 Terminal onboarding；资料和凭证只在本地</td>
+</tr>
+<tr>
+<td>日常打开</td>
+<td>可重用/启动 Chrome 和服务，但打开普通浏览器新页</td>
+<td>单一应用窗口、恢复上次任务；不增加重复 manager 窗口</td>
+</tr>
+<tr>
+<td>Mac 重启</td>
+<td>文档明确服务到登出/重启为止；再打开 app 可重新启动</td>
+<td>重启后打开 app 即恢复；可选登录启动需用户同意；不声称休眠/关机时工作</td>
+</tr>
+<tr>
+<td>Chrome 未开/崩溃</td>
+<td>launcher 可启动；Worker 只接受现有 session，失败则 block</td>
+<td>应用管理自己的浏览器，安全重建、重新观察原任务，不接管普通 Chrome</td>
+</tr>
+<tr>
+<td>daemon 未开/崩溃</td>
+<td>launcher 生命周期接口存在；无完整独立健康面</td>
+<td>app/bootstrap 始终可显示任务缓存、故障和恢复；自动重启受控服务</td>
+</tr>
+<tr>
+<td>DeepSeek 不可用</td>
+<td>available 主要是 key 存在，不是网络或余额验证</td>
+<td>显示凭证已配置/服务连通/最近调用结果；离线暂停、取消、已知事实处理可继续</td>
+</tr>
+<tr>
+<td>profile 缺失/损坏</td>
+<td>基本 JSON loadable 检查，不是完整/无冲突验证</td>
+<td>产品内导入/修复；明确缺资料与解析失败，已有任务不丢</td>
+</tr>
+<tr>
+<td>OTP transport 不可用</td>
+<td>不在当前完整 readiness 检查中</td>
+<td>按任务能力显示短信接收可用/降级；可安全手工填入本地控件，不发给模型</td>
+</tr>
+<tr>
+<td>GitHub 更新失败</td>
+<td>有守卫和 restart_required</td>
+<td>仍能使用旧健康版本、看到原因并重试；不能用“检查 ChatGPT”代替修复路径</td>
+</tr>
+<tr>
+<td>网络/VPN 异常</td>
+<td>多处通用异常/阻塞</td>
+<td>区分招聘站、模型、更新源、短信源；不重置已确认事实，不消耗无限重试</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="01_audit-4-b--岗位发现与精确定位">4. B — 岗位发现与精确定位</h2>
+<p>**过度依赖 exact URL 是明确事实。**消费端 schema/policy 主动拒绝没有当前消息 exact URL 的任务创建；文档把发现交给上游 PJSDAS/Gmail。因此这不是偶尔 resolver 失败，而是产品入口合同与目标体验不一致。[E02]</p>
+<p>正确修法不是取消目标约束：应当取消“URL 必须由用户亲自提供”，保留“执行器必须收到已经证明身份的精确目标”。公司+岗位名先变成只读发现任务；官方搜索/列表/详情证据构成 VerifiedJobTarget，然后才能填表。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>现有薄弱点</th>
+<th>结构性修法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>精确职位 URL</td>
+<td>URL 看起来像职位不等于已核验公司/地点/批次</td>
+<td>页面身份核对后建立 job_id+tenant+campaign+location 绑定</td>
+</tr>
+<tr>
+<td>公司+岗位名</td>
+<td>CREATE 入口不能完成；resolver 只有有限公司</td>
+<td>discovery 接口和受支持门户目录；正确返回候选或无法可靠定位</td>
+</tr>
+<tr>
+<td>招聘首页</td>
+<td>OPPO landing 有特例而非通用页面分类</td>
+<td>landing/list/detail/auth/form/success page type；基于证据转移</td>
+</tr>
+<tr>
+<td>岗位列表</td>
+<td>未形成可验证的查询、分页、筛选完整性</td>
+<td>记录搜索词、筛选、分页终点/来源；不得见到一个 exact title 就宣布唯一</td>
+</tr>
+<tr>
+<td>同名多岗</td>
+<td>标题 exact 不足以判唯一；OPPO location 参数缺乏有效落实</td>
+<td>显示地点、业务、毕业批次、职位 ID；用户仅作真正选择</td>
+</tr>
+<tr>
+<td>岗位下线</td>
+<td>没有统一 unavailable 结果</td>
+<td>明确下线；不替换为“相近岗位”</td>
+</tr>
+<tr>
+<td>第三方 ATS</td>
+<td>checkpoint 偏同主机，target 同源与登录跳转未统一</td>
+<td>验证官方→ATS 重定向链，记录雇主/tenant身份；不广泛信任跨域</td>
+</tr>
+<tr>
+<td>登录后 URL 改变</td>
+<td>重开原 URL/取最后页不保证同一申请</td>
+<td>任务绑定的会话/弹窗/草稿 ID，重新核实岗位</td>
+</tr>
+<tr>
+<td>SPA</td>
+<td>native snapshot + 固定等待，task URL 又限制 fragment</td>
+<td>将安全路由和秘密参数分开解析；不把所有 hash 路由视为安全或一律不能用</td>
+</tr>
+</tbody>
+</table></div>
+<p>公开只读验证能提早发现页面变化和查询失败，但不能证明登录后的表单可写或自动认证可用。[E06,E07,E17]</p>
+<h2 id="01_audit-5-c--认证与身份">5. C — 认证与身份</h2>
+<p>现有 SMS 路径比简单“填验证码”更成熟：唯一 OTP/手机号/初始发送控件、explicit auth container、标准协议授权、再次证明重渲染后的发送控件、禁止自动重发和最终提交，都有真实 DOM 测试。应拆为明确认证子系统，不应丢弃这些守卫。[E05,E14,E19]</p>
+<p>但当前仍有三种错位。第一，显式同屏密码/短信/扫码模式没有完整的 active-mode 状态；密码可使整页保守退为人类处理，即便存在可确认的 SMS。第二，OTP 接收没有贯穿发送事件和重试的 attempt identity；在内存单次消费并不证明跨进程只发送一次。第三，BrokerBridge 对已有 relay 的短时调用与取消，不构成用户收到迟到短信后自动续跑的持续监听。[E05,E14]</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>认证场景</th>
+<th>必须达到的用户结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>已登录</td>
+<td>验证当前账户和目标，直接进入表单，不再发码</td>
+</tr>
+<tr>
+<td>手机短信</td>
+<td>从已确认 phone 本地填入；发送行为有授权、限频和结果记录</td>
+</tr>
+<tr>
+<td>自动 OTP</td>
+<td>匹配 task + auth_attempt + site + 时间窗；只在内存进入确证的 OTP 字段</td>
+</tr>
+<tr>
+<td>迟到/错误/多条 OTP</td>
+<td>不误用于新 attempt 或另一任务；需要重发时说明理由；不把旧码重复猜测</td>
+</tr>
+<tr>
+<td>resend</td>
+<td>本 v1 只允许用户明确批准的单次重发，记录 cooldown；不得默默循环</td>
+</tr>
+<tr>
+<td>QR/password/CAPTCHA/slider/face/security key</td>
+<td>不绕过；定位正确窗口，告诉用户做什么；完成后自己检测并恢复适当步骤</td>
+</tr>
+<tr>
+<td>多种登录方式</td>
+<td>可以选择已经证实和授权的 SMS 模式；不是因为存在扫码文字就永远停下</td>
+</tr>
+<tr>
+<td>登录过期</td>
+<td>重新认证而不是重建任务；草稿/事实不丢；旧 readiness 失效</td>
+</tr>
+<tr>
+<td>登录后没回岗位</td>
+<td>恢复 VerifiedJobTarget，不能停在个人中心却说正在投递</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="01_audit-otp-隐私限定">OTP 隐私限定</h3>
+<p>broker memory-only 值得保留，但不能声称 OTP 在整个设备/生态中从未落盘：系统短信库本来保存短信，已有 relay 的保存行为也需要单独审计。产品应保证<strong>执行器不新增 OTP 持久副本，不传给 DeepSeek，不写队列/日志/诊断/截图/仓库</strong>。现有 relay 的真正网络位置和隐私配置在本次未读取，不能假定它是纯本地。[E14]</p>
+<h2 id="01_audit-6-d--表单执行">6. D — 表单执行</h2>
+<p>现有 adapter 有实际填充和读回，不是“只发 fill 不验证”。但主要发现范围是可见且启用的 native input/textarea/select，数量有上限。它不拥有完整的 section/row/dependency graph；字段 locator 的 ID/name/global nth 与 first match 在重复行和重绘下没有强身份。控件可填不等于经历填对、上传成功、草稿保存。[E05]</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>表面</th>
+<th>当前风险</th>
+<th>要求</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>普通 input/select</td>
+<td>可用基础良好；select 包含匹配/不一致 warning 过宽</td>
+<td>对 exact enum 和授权 normalization 作明确映射，错误城市是 FAIL</td>
+</tr>
+<tr>
+<td>React/Vue controlled</td>
+<td><code>.fill</code> 触发标准交互，但固定 sleep 不证明 state/网络保存</td>
+<td>重渲染后重取 scoped locator、值和保存状态；真实 controlled fixture</td>
+</tr>
+<tr>
+<td>动态/依赖字段</td>
+<td>静态列表不能表示选择省后城市重置</td>
+<td>每次依赖变化重建局部结构和验证期望值</td>
+</tr>
+<tr>
+<td>教育/工作/项目多行</td>
+<td>相同 name 或 index 可能选错行；无完整增删/对齐</td>
+<td>stable record ID + section/row identity；不能把项目自动当正式工作</td>
+</tr>
+<tr>
+<td>自定义下拉/日期/地区</td>
+<td>不只 native select；虚拟化/级联控件不覆盖</td>
+<td>capability drivers，明确支持范围；不支持≠缺用户个人事实</td>
+</tr>
+<tr>
+<td>日期</td>
+<td>month/day 不得靠猜补齐</td>
+<td>记录 precision，确实缺日/月且网站要求时才问</td>
+</tr>
+<tr>
+<td>工资</td>
+<td>数字、月/年、税前/后和币种语义未形成强类型</td>
+<td>明确用户选择与单位转换，不自动用通用默认覆盖</td>
+</tr>
+<tr>
+<td>简历/照片</td>
+<td>设置文件、basename 不代表服务器资产就绪</td>
+<td>检查文件类型/大小/hash/正确资产 + 上传完成/服务器 draft 附件标识</td>
+</tr>
+<tr>
+<td>简历解析</td>
+<td>原文要求其不可信，但修复完整性未自动完成</td>
+<td>与 canonical structured inventory 比较误分类/遗漏，修复后读回</td>
+</tr>
+<tr>
+<td>合规/声明</td>
+<td>standing policy 有价值，但泛化过度会误用</td>
+<td>独立 scoped consent/声明版本；新承诺、法律判断、签名本人决定</td>
+</tr>
+<tr>
+<td>主观问题</td>
+<td>当前不是可靠的基于资料撰写子系统</td>
+<td>仅基于明确事实形成候选答案、按授权策略复用；不得为减少提问编经历</td>
+</tr>
+<tr>
+<td>未知客观事实</td>
+<td>存在正确保守停止，但映射失败和事实缺失混用</td>
+<td>先查已确认事实/文档，再判断是否需要人；批量有上下文提问</td>
+</tr>
+<tr>
+<td>required-but-hidden</td>
+<td>未出现在 native-visible 范围不代表无要求</td>
+<td>展开必要区段、依赖/站点错误、契约判定；无法证实不可 READY</td>
+</tr>
+<tr>
+<td>validation error</td>
+<td>当前 missing/error 不是完整网站 validator</td>
+<td>field/form/server errors 都保留局部归因，修复后独立复查</td>
+</tr>
+<tr>
+<td>autosave / 多页</td>
+<td>固定等待/plan 累积不能证明前页仍保存</td>
+<td>以服务器 draft 或重新进入页面的读回结果核验；跨页完成清单</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="01_audit-本次反例">本次反例</h3>
+<p>本容器运行的源码片段 P02：期望城市“北京”，实际 select“上海”，现有 <code>validate()</code> 仍返回 <code>ok=true</code>，只记录 warning。它不代表已错填某个真实岗位，但足以证明 validator 不能作为当前可靠提交判据。[E05；evidence/source_excerpt_probes.json]</p>
+<h2 id="01_audit-7-e--个人资料证据与记忆">7. E — 个人资料、证据与记忆</h2>
+<p>正确基础包括：canonical key、证据来源、显式用户覆盖、较低权重历史资料、文件 hash 和项目清单。资料不应被随意改成另一个 schema/云数据库，更不能用模型总结覆盖真实原始事实。[E15,E16]</p>
+<p>当前产品缺口在读写闭环。CLI 的 application-scoped answer / promote-profile 设计与消费者 Worker 的内存答案不同；消费者告诉系统的普通事实在服务重启后可消失。把 OTP 的 memory-only 原则扩展到所有个人回答，牺牲了用户要求的可靠记忆。隐私需要权限、最小化、scope 和受控本地持久化，不等于普通事实不得保存。[E07,E08,E16]</p>
+<p>新的事实分类必须明确：一次性答案（只此申请）；可复用客观事实（用户明确确认保存）；偏好/薪资策略（有作用域和有效期）；一次声明/法律承诺（不偷渡成永久政策）；模型推导或站点既有值（不是已确认事实）。冲突要保留来源和版本，新确认不能被旧简历覆盖。</p>
+<p>项目/科研必须使用稳定记录身份，不再仅靠标题包含判覆盖。研究经历不因投产品岗而消失；用户针对单一申请的排除不得删除 canonical inventory。没有项目区的站点应记录真实的 NOT_APPLICABLE，而不是强迫伪造结构；有区但没填是另一回事。</p>
+<p>重复提问应按原因诊断：profile 确实没有；资料导入没提取；字段语义未识别；重复行上下文丢失；曾经回答但未持久化；scope/版本冲突。这些不能全变成“请问你的学校是什么”。</p>
+<h2 id="01_audit-8-f--安全与隐私">8. F — 安全与隐私</h2>
+<p>现有 localhost Host/Origin/token 检查、UI 一次 ticket、HttpOnly cookie、0700/0600 本地操作数据、credential-like 拒绝、敏感值屏蔽、禁止最终提交，有重要保留价值。不能把这些摘要标记当作全路径信息流审计。[E07–E15]</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>数据</th>
+<th>当前边界/风险</th>
+<th>v1 要求</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>OTP</td>
+<td>broker 内存短期；relay/OS 另有边界</td>
+<td>不新落盘/不模型/不导出；attempt 匹配；用户验证码输入独立本地通道</td>
+</tr>
+<tr>
+<td>手机号</td>
+<td>canonical 本地可填；自由聊天可能直接被发给模型</td>
+<td>优先本地事实表单；输入脱敏分类与外发预览，禁止认证 phone 外发</td>
+</tr>
+<tr>
+<td>cookies / password / API keys</td>
+<td>专用 Chrome、Keychain 等已有基础</td>
+<td>不进入模型、queue、diagnostics、Git；可撤销本机授权，不复制默认浏览器 profile</td>
+</tr>
+<tr>
+<td>applicant facts</td>
+<td>canonical 本地持久化，脱敏 export</td>
+<td>本地完整复核可见；copy-safe export 采用 schema allowlist，而非靠字段名或布尔声明自证</td>
+</tr>
+<tr>
+<td>DOM labels/options</td>
+<td>虽不发送 value 字段，label 邻近文本可能带个人内容</td>
+<td>在模型边界做语义数据分类/最小化；站点 DOM 属不可信数据，不是指令</td>
+</tr>
+<tr>
+<td>logs / errors</td>
+<td>删除所有异常文字保护隐私，却失去原因</td>
+<td>保存 safe error class、子系统、时间、命令/事件 ID；不保存原始异常 request body</td>
+</tr>
+<tr>
+<td>screenshots / trace</td>
+<td>通用 adapter 可全页截图；daemon operational audit 禁用</td>
+<td>合成环境可完整 trace；真站默认关闭导出，明确授权、脱敏复核后才分享</td>
+</tr>
+<tr>
+<td>browser ownership</td>
+<td>loopback 不等于证明连接到本应用进程</td>
+<td>进程/profile/session 归属证明、私有权限；不误接端口占用服务</td>
+</tr>
+<tr>
+<td>GitHub</td>
+<td>当前忽略私人目录和 artifacts 是正确边界</td>
+<td>public-safe fixtures/代码/摘要；私人真站截图、DOM、Cookie、简历绝不提交</td>
+</tr>
+</tbody>
+</table></div>
+<p>无法从本次代码审阅推断“已经泄漏”，也不能推断“绝不会泄漏”。发布门槛应包含带 canary 的全出口测试和威胁模型：恶意网页/提示注入、错误目标/重定向、错误本地客户端、秘密进入日志，以及释放后的旧 UI/worker 请求。对已完全攻陷用户 OS 的防护不作为个人 v1 可以保证的安全性质。</p>
+<h2 id="01_audit-9-g--故障与恢复路径推演">9. G — 故障与恢复路径推演</h2>
+<p>**本节是固定版本的代码级故障推演，不是已经在用户 Mac 执行过的故障注入。**本次实测仅有 P01–P03；真正系统级注入属于 JCR-01/02/05/08/09 的自动门槛。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>故障/中断</th>
+<th>当前可从代码推出的行为/限制</th>
+<th>v1 安全结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Browser crash</td>
+<td>Worker 对 CDP 不可用 block，launcher 另能重开</td>
+<td>自动恢复自有浏览器；目标/草稿重新证明后续跑，不让用户理解 CDP</td>
+</tr>
+<tr>
+<td>daemon crash</td>
+<td>SQLite/lease 保留任务，内存答案/OTP 失去；无人负责常态重启</td>
+<td>bootstrap 重启；事实恢复；OTP 作废并重新协商，不能重放已过期码</td>
+</tr>
+<tr>
+<td>Mac sleep</td>
+<td>租约和外部页面/session 的有效性可能分离；无完整 wake 协调证据</td>
+<td>唤醒事件标记 session epoch，读回后续跑；休眠期间不宣称执行</td>
+</tr>
+<tr>
+<td>reboot</td>
+<td>服务和 cookie memory 消失；任务留存</td>
+<td>app 冷启动恢复；旧 review 失效并只读复核，稳定事实不重问</td>
+</tr>
+<tr>
+<td>network loss</td>
+<td>部分通用 ERROR/backoff，缺外部副作用结果判别</td>
+<td>区分断网前/后、已知未发生/已发生/未知；未知效果不盲目重发</td>
+</tr>
+<tr>
+<td>tab closed</td>
+<td>URL 匹配可能开新页，不保证同草稿</td>
+<td>从 task-owned session/draft 再定位；不改别的标签</td>
+</tr>
+<tr>
+<td>page refresh</td>
+<td>原生控件重新发现，但 plan/row identity 可能不一致</td>
+<td>放弃旧 locator/观测版本，重新结构化对齐</td>
+</tr>
+<tr>
+<td>session expired</td>
+<td>auth 重新 block，任务原目标/草稿不一定已贯通</td>
+<td>挂起表单写入→正确安全接管→返回原岗位</td>
+</tr>
+<tr>
+<td>site timeout</td>
+<td>短 sleep 和通用异常可能导致假空页或重复动作</td>
+<td>有限自恢复；保留 task + facts + progress；不返回假 READY</td>
+</tr>
+<tr>
+<td>DeepSeek timeout</td>
+<td>fail closed 保状态是好的；全局 mutation lock 可阻塞控制</td>
+<td>remote 调用不占本地控制锁；暂停/取消独立；陈旧提议失效</td>
+</tr>
+<tr>
+<td>OTP late arrival</td>
+<td>短 relay wait 可结束；没 first-class attempt</td>
+<td>等待可持续且超时明确；旧码不进新请求，按授权重发一次</td>
+</tr>
+<tr>
+<td>retry exhaustion</td>
+<td>停止且不能简单 resume 是安全的，但只有笼统原因</td>
+<td>指向具体可修条件；修复后新受控 recovery attempt，不清空历史</td>
+</tr>
+<tr>
+<td>partial form</td>
+<td>checkpoint 是 URL+stage，不是外部副作用账本</td>
+<td>对当前 draft 与意图做差异恢复；重复行/附件/短信不重复造成副作用</td>
+</tr>
+<tr>
+<td>update paused task</td>
+<td>guard 阻止活跃/OTP更新；普通 answers 仍可能因重启消失</td>
+<td>凭据暂态安全终止；普通事实持久；schema 兼容；任务 identity 不变</td>
+</tr>
+<tr>
+<td>code/dependency update fail</td>
+<td>ff 后 restart_required，无完整 known-good 回退</td>
+<td>候选隔离检查，不健康不激活；已激活失败原子回退且不丢新事实</td>
+</tr>
+</tbody>
+</table></div>
+<p>本次 P03 证明 <code>latest_page()</code> 在给定“任务页 + 后开无关页”时选择后者。这是标签归属不足的确定性反例，不应等真人发现后再局部排除某个网页。[E06；探针结果]</p>
+<h2 id="01_audit-10-h--ready_to_submit-与最终复核">10. H — READY_TO_SUBMIT 与最终复核</h2>
+<p>当前最关键的差距是：**“自动程序必须停止”不等于“申请已经值得用户放心提交”。**在当前代码中，检测到 final control 后先置 READY，再构造 review；review 可以含 <code>REVIEW_REQUIRED</code>。项目覆盖来自 plan 值和标题子串，附件清单来自配置 basename，具体复核工作仍大量委托用户。[E03,E04]</p>
+<p>最终应检查：精确公司/职位 ID/地点/批次、当前登录身份、全部已知必填与潜在必需区段、教育/工作/项目/研究的分类和完整性、日期精度、工资单位、声明范围、未知/冲突事实、意外默认值、附件服务器状态、保存结果。最终页面没有可验证证据时，状态必须是“仍需检查/部分就绪”，不能是 READY。</p>
+<p>具体证书及逐项客观门槛见架构与 acceptance matrix。用户的最后一步应该是判断“这确实是我愿意提交的申请”，不是重新逐项查找自动化是否漏了一个项目或把城市选错。</p>
+<h2 id="01_audit-11-consumer-ux不只是配色">11. Consumer UX：不只是配色</h2>
+<p>截图的主要问题不是米黄色，而是<strong>没有清楚地回答：系统正在做什么、为什么停在这里、现在确实需要我做什么</strong>。顶部绿色“已就绪”与任务卡 security/validation blocker 并存；服务健康、任务状态与安全原则混为一谈。代码中卡片不能提供任务级操作和完整复核，聊天状态留在页面 DOM，重新打开无法重建真正的上下文。[E09,E10]</p>
+<h3 id="01_audit-111-目标信息架构">11.1 目标信息架构</h3>
+<p>主窗口只保留三个层级：当前任务/需要我的事项；任务详情与可执行对话；较低优先级的资料/设置/诊断。不是四个大数字占据关键位置。队列多任务不等于同时控制多个申请：单一浏览器 writer，多个持久任务，可跳过等待任务处理另一个安全任务。</p>
+<p>每项等待显示：具体公司/职位、已完成结果、等待类型、下一步按钮和恢复方式。举例：“牛客登录页面要求滑块验证。点击‘打开验证窗口’完成后，我会重新检查并继续。”不是“NEEDS_USER_ACTION/security_challenge”，也不是让人输入“继续”来猜任务。</p>
+<p>对话仍是自然主入口，但关键操作同时有可靠按钮和本地表单：暂停、取消、切换具体任务、填写未知事实、决定是否记住、查看复核、打开真实网站。输入受理马上返回 command receipt；进度根据真实 observation/result 更新，不用虚构百分比。</p>
+<h3 id="01_audit-112-错误与通知">11.2 错误与通知</h3>
+<p>将“离线等待自动重试”“你需要决定”“你需要完成安全验证”“当前控件尚不支持”“系统故障需要诊断”分开。不可把未知保存结果报告为“一切没变”。重复通知去重；不因每个字段/重试弹窗。系统正常后台工作不抢焦点，只有验证码手动接管、安全验证和最终提交前请求注意。</p>
+<h3 id="01_audit-113-应用形态">11.3 应用形态</h3>
+<p>建议薄 macOS shell 承载本地 manager UI，同时提供独立 bootstrap/诊断/服务生命周期；招聘站继续使用专用 Chrome，不嵌进同一个 WKWebView，不复制 Cookie，不换浏览器内核。主窗口不需要暴露 localhost 地址和完整 Chrome chrome，但登录/最终提交时真实网站域名必须清楚可见。</p>
+<p>浏览器不必永久与经理物理嵌在一个窗口。**任务级视觉关联和准确接管比“看起来一体”更重要。**正确任务窗口聚焦、清楚返回按钮、人工期间暂停写入、完成后自动重新观察，已经足以实现低摩擦体验。PWA/Chrome app mode 可过渡，但仅隐藏地址栏不能修 daemon/更新/权限问题。[技术参考见 E-index]</p>
+<h2 id="01_audit-12-已经实现但产品没有完成的清单">12. “已经实现但产品没有完成”的清单</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>已有资产</th>
+<th>不成立的等号</th>
+<th>未完成的结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>.app launcher</td>
+<td>launcher = 独立 Mac app</td>
+<td>安装、自修复、单窗口、离线设置/诊断</td>
+</tr>
+<tr>
+<td>preflight</td>
+<td>key/file/port 存在 = 准备好执行</td>
+<td>网络、资料覆盖/冲突、附件、OTP source、当前 session</td>
+</tr>
+<tr>
+<td>DeepSeek Manager</td>
+<td>typed tool call = 自然语言经理</td>
+<td>上下文绑定、拒绝原因、异步执行回执、离线控制</td>
+</tr>
+<tr>
+<td>resolver</td>
+<td>能搜 OPPO = 能自主定位岗位</td>
+<td>landing/list/分页/筛选/候选歧义/third-party identity</td>
+</tr>
+<tr>
+<td>generic adapter</td>
+<td>原生输入可填 = 招聘网站通用</td>
+<td>结构化经历、自定义/依赖/异步/多页</td>
+</tr>
+<tr>
+<td>profile keys</td>
+<td>资料存在 = 用户不会被重复问</td>
+<td>持久 consumer answer、版本、context、有效 scope</td>
+</tr>
+<tr>
+<td>evidence</td>
+<td>source 引用 = 每个当前值都正确</td>
+<td>冲突、缺失、失效时间、导入失败和错误解析</td>
+</tr>
+<tr>
+<td>project coverage</td>
+<td>标题命中 = 实际项目填全</td>
+<td>真实重复行、项目身份、内容/时间、排除理由</td>
+</tr>
+<tr>
+<td>attachment refs</td>
+<td>文件输入/名字 = 上传成功</td>
+<td>upload receipt、正确版本、draft 保存</td>
+</tr>
+<tr>
+<td>validation</td>
+<td>可见 native fields 通过 = 所有必需信息正确</td>
+<td>隐藏/未展开/前页/异步服务端校验</td>
+</tr>
+<tr>
+<td>final checklist</td>
+<td>提醒人去查 = 系统已经查过</td>
+<td>独立 observed review certificate</td>
+</tr>
+<tr>
+<td>no submit API</td>
+<td>submit() 抛错 = 任意点击都无最终副作用</td>
+<td>next/apply/Enter/确认必须受动作语义边界约束</td>
+</tr>
+<tr>
+<td>OTP broker</td>
+<td>收到内存 code = 自动登录完成</td>
+<td>send/wait/late/mode/resend/attempt/return-target 生命周期</td>
+</tr>
+<tr>
+<td>SMS orchestration</td>
+<td>初始发送测试通过 = crash 不重复发码</td>
+<td>durable request metadata + unknown-effect reconcile</td>
+</tr>
+<tr>
+<td>queue</td>
+<td>多个 task rows = 安全多任务</td>
+<td>浏览器与人工接管归属、命令任务绑定</td>
+</tr>
+<tr>
+<td>checkpoint</td>
+<td>stage/URL 保存 = 真实崩溃恢复</td>
+<td>外部草稿/重复行/附件结果重新证明</td>
+</tr>
+<tr>
+<td>retries</td>
+<td>重试有上限 = 自动恢复</td>
+<td>故障分类、恢复计划、未知副作用不重放</td>
+</tr>
+<tr>
+<td>diagnostics</td>
+<td>摘要可以复制 = AI 足以定位本机问题</td>
+<td>safe root cause、时间线、加载版本、独立故障入口</td>
+</tr>
+<tr>
+<td>updater</td>
+<td>ff-only/restart = 消费级更新</td>
+<td>依赖/schema/staged activation/rollback/失败仍可用</td>
+</tr>
+<tr>
+<td>green header</td>
+<td>程序知道 user-click = 当前任务已就绪</td>
+<td>真实状态模型与 readiness 证据</td>
+</tr>
+<tr>
+<td>tests</td>
+<td>240 pass = consumer reliable</td>
+<td>独立判据、macOS/真实浏览器/多平台最终认证</td>
+</tr>
+<tr>
+<td>protected targets</td>
+<td>已知 registry 拒绝 = 新提交也不会重复</td>
+<td>用户最终动作后只读验证与保护登记</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="01_audit-13-保留强化拆分退役">13. 保留、强化、拆分、退役</h2>
+<p>**保留：**local-first、确定性 policy 和已知事实优先、ApplicationExecutor 的执行骨架、SQLite claim/租约/fencing、单 live worker、OTP 的短生命周期、保护已提交目标、隔离浏览器测试、Host/Origin/token 防护、更新锁/原子状态/安全 fence。对这些保留回归测试，边界加固而非整块重写。[E02–E15,E19–E23]</p>
+<p>**结构性拆分：**Manager 中的 discovery；GenericWebAdapter 中的认证/通用组件/页面观察；TaskQueue 的任务业务状态与暂停来源；profile 的证据导入和消费级确认流程；review 的说明与客观 gate；UI 静态 HTML 与任务读模型；runtime bootstrap 与可更新业务版本。</p>
+<p>**有条件退役：**全局 last-page / unscoped nth 默认选择、把 readiness 写死的 UI、因缺 key 拒绝展示修复界面的启动合同、消费者普通事实 memory-only 合同、生产目录原地 pull 的主更新路径；旧 Schneider/legacy CLI 中重复事实/策略只保留明确兼容隔离，不让新主链路调用两套规则。没有证明已迁移和通过历史安全回归前不删除旧实现。</p>
+<p>正则可以继续用于可测试的标签别名和候选特征；**不能让越来越长的正则列表继续承担岗位身份、认证状态、表单结构和外部动作副作用的全部模型。**这就是从局部 patch 累积走向子系统的必要改造。</p>
+<h2 id="01_audit-14-对最终目标的十项明确回答">14. 对最终目标的十项明确回答</h2>
+<ol>
+<li>距离：已经有可利用的执行地基，但缺少一整层端到端产品化与认证；不是仅差 UI 的尾声。</li>
+<li>最大缺口：见前述十项；前三项安全/正确性 gate 必须优先。</li>
+<li>不值得重写：SQLite/fencing、local-first、typed policy、OTP 最小秘密面、专用测试浏览器、受保护目标和现有有效回归。</li>
+<li>必须结构性重构：目标发现与绑定、浏览器归属、结构化表单、auth lifecycle、durable facts、independent review、bootstrap/update 和 UI read model。</li>
+<li>未来日常使用：打开 app→一句话交代目标→真实进度/后台处理→仅必要决策/验证→本地复核→用户点网站最终提交。</li>
+<li>人仍须做：首次私密资料/权限配置、歧义岗位选择、新事实/主观偏好/新承诺、安全验证、最终审阅和点击。</li>
+<li>不应再做：Terminal/端口/服务定位、日志拼装、已知资料重复输入、正常崩溃恢复、每轮测试、受支持门户的常规 URL 搜寻。</li>
+<li>Desktop Commander：不应成为正常运行或维护依赖，只可作为开发和特别故障的可选工具。</li>
+<li>真人验收：可将计划中的验收集中到最后 1–3 个时段，条件是前面门槛真实通过、选择适当真实岗位；不能保证任何外部平台的挑战都只出现三次。</li>
+<li>v1 consumer-ready：所有强制结果门槛满足、明确支持矩阵获得真实证据，候选安装/恢复/更新通过，再经过短期正常日用确认无需工程介入；不是九个 PR 合并当天自动宣布。</li>
+</ol>
+</section><section id="02_architecture" class="chapter"><h1 id="02_architecture-拟冻结范围与架构决策">拟冻结范围与架构决策</h1>
+<p>状态：设计交付，等待注册/执行授权。本文件定义 v1 目标，不声明相关模块已存在。现有代码事实见审计和证据索引。</p>
+<h2 id="02_architecture-1-产品承诺与支持范围">1. 产品承诺与支持范围</h2>
+<p>面向一名用户、单台主要 macOS 电脑、专用 Chrome、现有 canonical profile 与现有 DeepSeek 配置。允许多个持久任务排队，但同一受控浏览器 profile 只有一个自动写入者。产品允许断网、休眠、平台不支持和用户暂停；不能允许错误目标、虚假事实、自动最终提交或假 READY。</p>
+<p>v1 必须认证至少 3 种实际招聘流程/平台机制，不能把同 ATS 上三个公司 logo 当作三种覆盖。优先将 OPPO、牛客招聘流列为候选；第三种由 JCR-03 公开只读调查选定并在支持矩阵冻结。最终使用用户真实愿意申请、尚未提交的岗位；已受保护岗位不做写入验收。若前两种平台因真实限制不适宜，变更需明确理由和同等机制覆盖，不默默换成容易网站。</p>
+<p>面向这些认证范围提供：公司+角色、精确 URL、招聘首页/列表、站内搜索、候选消歧、已登录/SMS/人工安全验证、动态结构化表单、附件、资料复用、恢复、最终复核和人工提交后只读记录。未认证站点可只读探索/人工辅助，但必须明确“不在已验证范围”；不能依靠 universal generic 名称宣称所有网站都可靠。</p>
+<h2 id="02_architecture-2-non-goals">2. Non-goals</h2>
+<p>不自动点击最终提交或最终修改确认；不绕过 CAPTCHA/滑块/人脸/安全设备/密码；不让模型任意操作 shell/CDP/文件；不为缺资料编造事实、日期、经历或新承诺；不新增短信云中转；不做云端存储、团队版、多用户企业权限、微服务、通用 RPA 平台或无限并行浏览器集群；不以向量库替代结构化 canonical 事实；不迁移用户日常 Chrome 默认 profile；不因产品化去重写已有效的安全基础。</p>
+<h2 id="02_architecture-3-invariants任何轮次不可削弱">3. Invariants（任何轮次不可削弱）</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>不变量</th>
+<th>验证方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>I01</td>
+<td>所有自动路径无最终提交能力；unknown-effect 控件拒绝自动操作</td>
+<td>server submit counter、action journal、对抗 UI、真实手动边界</td>
+</tr>
+<tr>
+<td>I02</td>
+<td>操作前任务/岗位/tenant/页面归属得到证明</td>
+<td>wrong-tab、redirect、同名岗位、stale observation fixtures</td>
+</tr>
+<tr>
+<td>I03</td>
+<td>个人事实只能来自用户/受控证据；模型不得产生事实值</td>
+<td>fake provider 对抗提议、来源审查、actual draft oracle</td>
+</tr>
+<tr>
+<td>I04</td>
+<td>OTP/password/cookies/keys 不进入模型、普通持久层、日志和 export</td>
+<td>canary information-flow、network denylist、数据类型边界</td>
+</tr>
+<tr>
+<td>I05</td>
+<td>成功必须由观察到的结果证明，而不是 plan 或按钮点击回执</td>
+<td>独立 draft oracle、read-back、upload receipt</td>
+</tr>
+<tr>
+<td>I06</td>
+<td>READY 仅由有效 ReviewCertificate 推导</td>
+<td>missing/unknown/conflict/stale certificate 否定测试</td>
+</tr>
+<tr>
+<td>I07</td>
+<td>暂停/取消后不再批准新的写入；已在途操作按结果协调</td>
+<td>operation barrier 双侧注入；不得假称可撤销已发请求</td>
+</tr>
+<tr>
+<td>I08</td>
+<td>一个 profile 同一时刻最多一个自动 writer；人工接管时自动写入停止</td>
+<td>concurrent command/worker/handoff tests</td>
+</tr>
+<tr>
+<td>I09</td>
+<td>已确认普通事实按授权 scope 持久，旧证据不能覆盖新确认</td>
+<td>restart/update/rebuild/conflict/version tests</td>
+</tr>
+<tr>
+<td>I10</td>
+<td>更新不丢任务、事实、保护记录；失败保持/恢复可用版本</td>
+<td>migration backup + process-level rollback tests</td>
+</tr>
+<tr>
+<td>I11</td>
+<td>受保护已提交目标默认只读；不能通过新 URL 别名重新写入</td>
+<td>identity alias/idempotency tests</td>
+</tr>
+<tr>
+<td>I12</td>
+<td>原始真实个人 DOM/截图/trace/简历不进 GitHub</td>
+<td>fixture manifest、canary、导出门禁</td>
+</tr>
+<tr>
+<td>I13</td>
+<td>健康、进度、失败与完成状态真实；无法证明即 unknown，不报绿</td>
+<td>service/version/offline/ambiguous reply tests</td>
+</tr>
+<tr>
+<td>I14</td>
+<td>任何持久命令可查询是否受理/完成；网络重试不重复副作用</td>
+<td>command idempotency、lost-response tests</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="02_architecture-4-adr局部单体不另起平台">4. ADR：局部单体，不另起平台</h2>
+<p>保留 Python + Playwright + SQLite。新增子系统仍为同仓库可测试模块，除必要 bootstrap/updater/worker 隔离进程外不引入分布式基础设施。API/UI 只接受业务意图，不开放任意代码执行。拆分按责任，而非为了文件数或抽象层数。</p>
+<p>建议模块表面（路径为提案，实施可等价组织）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>子系统</th>
+<th>建议表面</th>
+<th>责任</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Commands / Task domain</td>
+<td><code>executor/commands/</code>, <code>executor/tasks/</code></td>
+<td>typed commands、receipt、任务状态、authorization、priority controls</td>
+</tr>
+<tr>
+<td>Discovery</td>
+<td><code>executor/discovery/</code></td>
+<td>只读页面分类、官方搜索、候选与 VerifiedJobTarget</td>
+</tr>
+<tr>
+<td>Browser ownership</td>
+<td><code>executor/browser_runtime/</code></td>
+<td>profile/session/tab/popup ownership、epoch、人工接管、恢复</td>
+</tr>
+<tr>
+<td>Auth</td>
+<td><code>executor/auth/</code></td>
+<td>active mode、attempt、发送/等待/重发政策、OTP transport</td>
+</tr>
+<tr>
+<td>Facts</td>
+<td><code>executor/facts/</code></td>
+<td>evidence、versions、scope、conflict、私有回答持久化</td>
+</tr>
+<tr>
+<td>Forms</td>
+<td><code>executor/forms/</code></td>
+<td>结构图、组件驱动、字段/行、观察/计划/读回</td>
+</tr>
+<tr>
+<td>Review</td>
+<td><code>executor/review/</code> 或等价拆分</td>
+<td>独立证据、证书、差异、本地可读复核</td>
+</tr>
+<tr>
+<td>Runtime health</td>
+<td><code>executor/runtime/</code></td>
+<td>service health、错误分类、重启协调、最小诊断</td>
+</tr>
+<tr>
+<td>Release</td>
+<td><code>executor/release/</code>, <code>app/</code></td>
+<td>稳定 bootstrap、Mac shell、候选构建/激活/回退</td>
+</tr>
+<tr>
+<td>Consumer UI</td>
+<td><code>ui/</code></td>
+<td>任务读模型、对话/决策/复核，不依赖内部工程枚举</td>
+</tr>
+</tbody>
+</table></div>
+<p>不得在新包和旧模块之间建立两套可写真相。兼容 wrapper 只委托同一权威实现；旧入口退役前必须有路由/契约测试。</p>
+<h2 id="02_architecture-5-adr意图控制和回执">5. ADR：意图、控制和回执</h2>
+<p>建议 CommandEnvelope：<code>command_id</code>、<code>kind</code>、<code>task_id/target_request_id</code>、<code>expected_task_revision</code>、<code>conversation_context_id</code>、<code>payload_ref</code>、<code>authorization_ref</code>、<code>issued_at</code>。这些是语义要求，不要求固定类名。</p>
+<p>本地明确控制命令（pause/cancel/resume/status）不等待 DeepSeek；中文否定、冲突意图或不明确指代先澄清。UI 按钮/选中任务附带显式 task ID；“继续 OPPO”不能因另一个任务恰好是唯一 NEEDS_USER_ACTION 而操作另一个任务。没有选中上下文时必须从文本和候选证明目标，不能选列表最后一条。</p>
+<p>远程模型调用不持有写入锁。流程为：读取一致快照→调用模型→取得 typed proposal→验证当前任务版本/当前授权→短事务接受或拒绝。暂停/取消应使迟到 proposal 失效。reply 必须由 command receipt 与实际动作结果生成，不在 action denied 后仍说“开始了”。</p>
+<p>持久 task/state 与 chat 记录分开。消费端事实补充优先走本地 fact input；原始含敏感值聊天不默认持久或外发。保存脱敏 command history 足以恢复对话上下文；需要显示的私有事实从本地 vault 按权限读取。</p>
+<h2 id="02_architecture-6-adr业务状态与等待原因">6. ADR：业务状态与等待原因</h2>
+<p>不要继续用越来越多 <code>user_paused_from_...</code> 字符串承载状态机。Task 保存 <code>phase</code>、<code>run_state</code>、<code>wait_reason</code>、<code>paused_from</code>、<code>retry_budget</code>、<code>revision</code>、<code>last_observation_ref</code>、<code>review_ref</code>，通过合法转移表和事务更新。旧状态必须有明确迁移映射和历史 event 保留，不清空重试历史。</p>
+<p>phase 示例：DISCOVERY → TARGET_VERIFIED → AUTH → FORM → REVIEW → READY；run_state：RUNNABLE/RUNNING/WAITING/PAUSED/FAILED/CANCELLED；wait_reason：USER_FACT/USER_DECISION/SECURITY/NETWORK/OTP/UNSUPPORTED/REPAIR。安全暂停不等于失败；用户等待不消耗网络重试预算。</p>
+<p>ApplicationExecutor 负责一次观察—动作—验证循环，Worker 负责调度/租约，Controller 负责命令与合法转移；不得各自再维护一套互不一致的业务真相。</p>
+<h2 id="02_architecture-7-adr目标发现与授权">7. ADR：目标发现与授权</h2>
+<p><code>DiscoveryRequest</code> 可由 company+role/location/campaign 或 URL 形成，不立即授权任意网站写入。访问公开招聘页只读观察与搜索；忽略网页里的指令或诱导。结果包含候选、查询条件、来源、取证时间和覆盖边界。</p>
+<p><code>VerifiedJobTarget</code> 至少包含 employer identity、ATS tenant、canonical job ID、campaign、title、location、official source chain、detail URL、allowed navigation scope、evidence digest。唯一性必须相对于完整查询条件证明；“找到一个”不是“只有一个”。</p>
+<p>用户一句“投递 OPPO AI 产品经理”可授权系统找到唯一符合条件的岗位并准备申请；多地点/多批次等真实歧义必须问。不得为了避免提问擅自替换地点、岗位、用工类别或毕业批次。用户只说“看看”不得创建可写申请。</p>
+<h2 id="02_architecture-8-adr浏览器归属与外部副作用">8. ADR：浏览器归属与外部副作用</h2>
+<p>每个运行 session 绑定应用自有 profile、受控浏览器进程/实例标记、session epoch。每个 task 绑定 tab/popup lineage、target identity、draft identity；不能使用全局最后 tab。读取失败必须是 observation error，不能当成“表单没有字段”。</p>
+<p>每次写入前验证 guard：worker lease + task revision + session epoch + document identity + field/action scope + authorization。DOM 重绘/导航后旧 observation 失效；locator 用 role/label/section/record 与稳定属性组合，不能把 global nth 作为主要身份。</p>
+<p>Action receipt 区分 <code>NOT_ATTEMPTED</code>、<code>ATTEMPTED</code>、<code>OBSERVED_SUCCESS</code>、<code>OBSERVED_FAILURE</code>、<code>UNKNOWN_OUTCOME</code>。外站没有幂等 API 时不承诺网络意义上的 exactly-once；以持久意图、动作前后证据和恢复协调避免重复副作用。UNKNOWN 时先只读重新检查，不能盲目重复短信发送/新增经历/上传/保存。</p>
+<p>人类操作网站时获取 human handoff ownership，自动写入暂停。任务可在人工接管期间被取消，但不能偷偷继续填写。用户完成挑战后系统只读重新验证；如果用户修改了已审核字段，证书失效重新复核。</p>
+<h2 id="02_architecture-9-adr认证与-otp">9. ADR：认证与 OTP</h2>
+<p>AuthAttempt 的非秘密元数据可持久：task、origin、active mode、phone fact reference、attempt ID、request timestamp、request outcome、deadline、cooldown、return-target ref。OTP 值及可用于猜解的低熵摘要不落盘；只能绑定到有效 attempt 的内存条目。</p>
+<p>Transport 统一接口：本地 authenticated push；获得权限后的 Mac Messages 只读 source；用户已存在并明确启用的 relay。Mac Messages 不应必须先成功访问 relay 才有资格工作。严禁隐式新建云服务或发送整份短信库；source 只读最小匹配窗口。</p>
+<p>收到 code 后必须重新证明 active auth context、unique OTP 控件与 target/attempt；分段验证码控件仅在明确认证的 driver 支持。CAPTCHA/password/QR/face/hardware 都不由系统绕过。密码输入由用户在真实站点完成。</p>
+<p>发送 SMS 属外部可见副作用，不等于普通读取。默认允许在本任务明确申请授权和有效登录政策下发送一次初始验证码；重发需要额外用户明确授权并遵守 cooldown。未知发送结果不得自动再发送。暂停/取消/reboot/update 使不再有效的 code 清除，任务和普通事实保留。</p>
+<h2 id="02_architecture-10-adr个人事实持久化与最少提问">10. ADR：个人事实持久化与最少提问</h2>
+<p>保留 canonical profile 和 evidence provenance。新增私有 fact journal / answer store，0700/0600、原子写入/事务、版本与校验，不与 public audit、UI chat export 共用同一个序列化器。凭证使用 Keychain；不要求用户为了所有普通事实另购加密服务。</p>
+<p>FactRecord：stable key/record ID、value、source/evidence ref、confirmed_at、scope、validity、precision、supersedes/conflict。一次性回答可在该申请的私有存储持久化以支持重启，但不可跨申请复用；可复用事实必须是明确确认的持久 scope。OTP 永远不属于此 store。</p>
+<p>已有 source/import 格式兼容；资料重建先合并 explicit overrides，不静默覆盖。冲突不是随机取最大 confidence；可解释权重与实质冲突分别处理。当前任务绑定 profile version，若事实变化需要重算受影响字段及 review。</p>
+<p>结构化项目和研究使用 stable IDs；名称变化是表示变化，不是自动生成/删除一个项目。每条申请记录 included / excluded(reason,scope,owner-policy) / not-applicable(evidence) / unresolved。未判断不算排除。</p>
+<h2 id="02_architecture-11-adr结构化表单与能力驱动">11. ADR：结构化表单与能力驱动</h2>
+<p><code>FormObservation</code> 包含 page/document epoch、sections、record rows、fields、requiredness evidence、visibility/enabled、dependencies、validation messages、save status、attachment receipts、observed identity。<code>FillPlan</code> 只描述意图，不能充当 observation。</p>
+<p>通用 driver 处理常见 native 与标准 ARIA component；site driver 处理受支持平台特例，明确能力清单。不支持的组件不落到通用“请告诉我资料”；系统诊断应说明是控件识别失败，并保留已经完成的工作。</p>
+<p>先观察→解析事实与表示→最小写入→等待可验证 postcondition→重新观察。受控组件使用真实输入事件，读回框架重渲染后的状态。repeat sections 使用 row binding/idempotent reconcile；不因恢复多添一条项目。salary/date/location 是有类型的域，不用字符串包含做真实性判据。</p>
+<p>校验需要跨页覆盖和 server/网站 validation。网站没有可读 draft API 时使用重新进入/刷新后的可见表单证据，但应明确证据等级；附件存在 input.value 只能是初步信号。无法证明上传保存即不能认证 READY。</p>
+<h2 id="02_architecture-12-adr独立最终证书">12. ADR：独立最终证书</h2>
+<p><code>ReviewCertificate</code> 由当前实际 FormObservation/draft read-back、facts、target、driver contract生成，不由 executor 计划直接生成。</p>
+<p>绑定：task ID、task revision、target identity digest、profile version、draft/form revision、session epoch、adapter contract version、observed_at、evidence refs。输出各检查项 PASS / FAIL / NOT_APPLICABLE_WITH_EVIDENCE / UNKNOWN；只有所有 required checks 为 PASS 或有证明的 NOT_APPLICABLE 才允许 READY。</p>
+<p>必须覆盖：目标/公司/地点/批次/账号；所有必需字段与区段；教育、工作、实习、项目、科研及排除理由；解析结果误分类；日期精度；薪酬表示；附件实际版本/上传完成；隐私/声明授权；未解决事实/冲突/未经证实默认值；网站错误和保存结果；最终动作边界。</p>
+<p>证书不是永久票据。表单编辑、profile 变化、身份变化、更新涉及相关合同、session 过期或复核证据丢失时失效。任务 READY 可以触发只读 <code>REVALIDATE_REVIEW</code>，不能因此偷偷跨过原先的 manual boundary 或变成无约束 resume。</p>
+<p>本地复核界面向本人显示必要的真实值和差异；copy-safe diagnostics 不含这些值。不得为了不泄露日志而让本人只能看“***、共填 30 项”的空泛复核。</p>
+<p>用户点击真实站点最终按钮，系统没有提交代理命令。后续 observer 只读读取成功页/申请历史；服务器证据可标 verified，人确认可标 user-confirmed，page-only signal 不冒充 server verified。相同身份的已提交目标进入保护记录，准备新投递不会重复创建。</p>
+<h2 id="02_architecture-13-adr自诊断与产品壳">13. ADR：自诊断与产品壳</h2>
+<p>稳定 bootstrap 与可更新业务运行时分离；业务导入失败也能打开 app、看到健康/版本/任务摘要、复制安全诊断或恢复旧版本。服务不足不应阻止设置/诊断页面显示。</p>
+<p>诊断字段：schema/version、loaded runtime SHA/build digest、checkout/candidate version（分别）、OS/browser compatibility、service heartbeat、task phase/wait reason、last observation age、safe error kind/subsystem/cause chain、相关 command/event IDs 与时间、最近恢复动作/结果。未知值记 unknown，禁止 git 命令失败时把 clean 判为 true。</p>
+<p>初期使用 SwiftUI + WKWebView 或功能等价的最小原生 shell 承载本地 UI，继续 Python/Chrome执行；shell 不做招聘站内核，也不拿到任意 shell 执行权限。若编译/本机信任需要人工首次确认，将其放入最后 onboarding 时段。登录项仅明确 opt-in。个人 v1 不以公众分发 App Store/商业签名为前提；若以后公众分发则另列发布工作。</p>
+<h2 id="02_architecture-14-adr事务式本地更新与回退">14. ADR：事务式本地更新与回退</h2>
+<p>代码事实源仍是 remote main，但正常用户安装源应是<strong>绑定已通过认证 SHA 的候选 release manifest</strong>，不是每次自动把未经消费级认证的 main 直接 pull 进运行目录。</p>
+<p>流程：检查来源/摘要→下载/准备隔离版本与锁定依赖→候选 startup self-test + schema compatibility→任务写入 quiesce 和权限检查→一致备份/迁移→原子切换 active version→健康/加载版本/私有数据可读验证→确认成功。候选失败不激活；激活后健康失败由独立 bootstrap 回退。</p>
+<p>保留现有 update lock、原子状态文件、OTP/in-flight 阻止更新与 mutation fence。升级失败不能覆盖唯一旧版本。数据库迁移优先向后兼容 expand/contract；破坏性迁移需另外可验证的 snapshot restore。发生新的用户写入后，禁止简单恢复旧快照把新事实丢掉；要么阻止这种回退，要么进行经过验证的兼容转换。</p>
+<p>不强制引入远程签名服务。最低要求是可信仓库授权、固定 commit/build manifest、内容校验和门槛证据；分支保护若可用应开启与现有计划兼容的 required checks，无权限时作为明确治理限制记录，不能伪称设置成功。</p>
+<h2 id="02_architecture-15-迁移策略">15. 迁移策略</h2>
+<p>逐轮添加表/字段和兼容层，迁移旧 task IDs、URLs、protected identity、用户确认事实、暂停原因与 retry history。旧真实 Chrome profile 保留而非重建；默认禁止 fixture 访问它。历史 application records 保留 read-only。</p>
+<p>把旧行为断言分为安全不变量（必须保留）与被本包明确替代的产品合同。例如“缺 key 不打开 UI”和“普通回答永不持久化”可经正式变更替换；OTP 不落盘、无自动 submit、保护已提交对象不能随之删除。每轮退出前证明新旧路径不同时可写，并完成 retirement checklist。</p>
+</section><section id="03_test_strategy" class="chapter"><h1 id="03_test_strategy-测试与验收体系让开发者发现问题而不是让用户逐轮找-bug">测试与验收体系：让开发者发现问题，而不是让用户逐轮找 bug</h1>
+<h2 id="03_test_strategy-1-当前测试的真实价值与边界">1. 当前测试的真实价值与边界</h2>
+<p>现有 CI 使用隔离 Chromium，包含 native DOM、真实 supervisor subprocess、HTTP OTP 和最终提交请求计数，这些是真实价值。队列原子 claim、过期所有者 fencing、pause/retry、update locks、Origin/token、OTP canary 等也不是空测试。[E19–E23]</p>
+<p>但当前 subprocess E2E 在已经到 READY 后才重启；consumer launch 通过替换真实依赖测试调用顺序；update success 主要替换 git/subprocess；review 测试允许 READY plan 搭配 REVIEW_REQUIRED。它们分别证明局部合同，而非用户需要的跨组件结果。[E04,E19–E21]</p>
+<p>核心改变：**被测程序不能自己给自己发合格证。**任何“任务完成”必须有独立 fixture server/draft observer 的真实结果，不只看内部 stage 或生成的 plan。</p>
+<h2 id="03_test_strategy-2-测试环境与网络边界">2. 测试环境与网络边界</h2>
+<p>T0：纯函数/状态模型，fake clock/seed，无网络。T1：真实浏览器 + 本地 fixture server，合成人名/简历/OTP，无真人资料。T2：真实服务进程 + UI + 浏览器 + 存储 + 更新 bootstrap，仍全合成。T3：公开网站只读 contract smoke，不登录、不发码、不上传、不投递。T4：用户授权的真实账号/岗位最终验收。</p>
+<p>默认测试不允许访问 live profile、9333、Keychain、Messages 数据库、私人 config 或外部模型；进程层/网络层双重拒绝，而不只靠环境变量。T3 使用独立 profile 和经批准的只读操作清单；T4 必须明确任务和允许副作用，不拿已经提交岗位练习。</p>
+<p>合成浏览器 trace/HAR/video 可留 CI；真实站点资料默认仅本地临时，必须按 capture policy 脱敏后才能入库。不得把 Playwright trace 的“方便看网络”误当作可以上传所有真实请求。</p>
+<h2 id="03_test_strategy-3-十六层覆盖">3. 十六层覆盖</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>层</th>
+<th>自动化内容与独立判据</th>
+<th>当前缺口/加强方向</th>
+<th>真人参与</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1 deterministic unit</td>
+<td>URL identity、facts precedence、scope、类型、日期/薪资、canonical normalization、按钮策略</td>
+<td>把包含匹配/布尔转换等反例直接 import 实现测试</td>
+<td>无</td>
+</tr>
+<tr>
+<td>2 state-machine</td>
+<td>generated legal/illegal command sequences，pause/cancel/stale/retry/restart/interleave</td>
+<td>从枚举合法到转移、版本、等待来源和不变量；模型与实现独立</td>
+<td>无</td>
+</tr>
+<tr>
+<td>3 browser DOM</td>
+<td>小型标准 native/ARIA 控件正反例，scoped locator、重绘</td>
+<td>保留现有真实 Chromium；添加隐藏/多个按钮/错误label/observer failure</td>
+<td>无</td>
+</tr>
+<tr>
+<td>4 realistic saved-page</td>
+<td>结构保真的脱敏真实页 + 本地 API replacement + 期望结果</td>
+<td>不把小 HTML 视为真实 ATS；fixtures versioned、来源/时间/限制清楚</td>
+<td>公开页无需；私有页只在最终时段授权采集</td>
+</tr>
+<tr>
+<td>5 ATS/site contract</td>
+<td>landing/list/detail/auth/form/save/read-review 的 identity/effect contract</td>
+<td>每个平台独立 contract version 和 drift detector，不是到处公司正则</td>
+<td>公开只读无；登录态最后</td>
+</tr>
+<tr>
+<td>6 synthetic E2E</td>
+<td>实际 UI 输入自然语言→command→daemon→browser→fakeATS→local review</td>
+<td>server 记录真正 draft、attachments、requests；结果与 canonical golden 对比</td>
+<td>无</td>
+</tr>
+<tr>
+<td>7 replay</td>
+<td>脱敏 observation/event/receipt 回放、重复/乱序/丢响应</td>
+<td>重放数据/决策不是重放外部点击；验证旧版本兼容</td>
+<td>无</td>
+</tr>
+<tr>
+<td>8 crash/recovery</td>
+<td>在操作前/发出后/回执前杀 worker/browser/service、丢 tab、重启，验证实际 draft</td>
+<td>不止 lease fake clock；独立进程和持久 fixture server；完整任务恢复</td>
+<td>无；真 Mac sleep/reboot 最后少量</td>
+</tr>
+<tr>
+<td>9 auth/OTP</td>
+<td>active-mode、验证码迟到/早到/多条/过期、SMS outcome unknown、resume/consent</td>
+<td>stateful fake SMS/auth server；禁止错误 attempt 和重复发送</td>
+<td>无；设备权限/真 SMS 最后</td>
+</tr>
+<tr>
+<td>10 privacy leak</td>
+<td>每种秘密/个人数据类型 canary，检查模型请求、queue、日志、HAR、export、Git artifacts</td>
+<td>不是仅搜索“token”字段；新增类型后所有出口自动扫描</td>
+<td>无</td>
+</tr>
+<tr>
+<td>11 update/restart</td>
+<td>构建两个真实 candidate 环境、依赖变化、migration、断网/kill/rollback</td>
+<td>不替换所有 subprocess；真实 loaded SHA 自检与旧版本存活</td>
+<td>自动 Mac；首次本机安装最后</td>
+</tr>
+<tr>
+<td>12 multi-task</td>
+<td>A/B task、多个 UI、late model、pause during claim、human handoff、update race</td>
+<td>one writer 不等于不会跨 task；错误最后标签必须 fail</td>
+<td>无</td>
+</tr>
+<tr>
+<td>13 accessibility/DOM</td>
+<td>labels/role/locales/order/viewport/zoom/open shadow/iframe、dynamic replacement</td>
+<td>行/组件 identity 不依赖固定全局 nth；unsupported 明确</td>
+<td>无</td>
+</tr>
+<tr>
+<td>14 adversarial UI</td>
+<td>“Continue”实际提交、仿冒最终按钮、同名/同URL跨租户、页面提示注入、错误前缀</td>
+<td>危险动作必须拒绝或由已认证 driver证明；不能只 expand regex</td>
+<td>无</td>
+</tr>
+<tr>
+<td>15 production smoke</td>
+<td>低频公开页面/官方列表/身份/只读搜索/contract fingerprint</td>
+<td>监测 drift、网络和解析；不能证明已登录申请端到端成功</td>
+<td>无；外部查询额度必须既有授权</td>
+</tr>
+<tr>
+<td>16 real browser acceptance</td>
+<td>真实 macOS app + Chrome + profile + SMS + 实际准备到 READY + user-click boundary</td>
+<td>不用 mock 替代最后一公里；全部真实差异转为私有/脱敏回归证据</td>
+<td>最后 1–3 个集中时段</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="03_test_strategy-4-独立-oracle判据">4. 独立 oracle（判据）</h2>
+<p>SyntheticATS 维护自己的服务器 draft：job/tenant/account identity；每个 education/work/project record；实际存储值；attachment IDs/hash；validation errors；draft revision；SMS request ledger；submission ledger。测试驱动用户界面，最后直接查询 fixture server 的观测状态，与独立 golden applicant/selection policy 比较。</p>
+<p>核心断言不是 <code>task.stage == READY</code>，而是 <code>actual_draft == expected_true_draft</code>，所有必要区段经过覆盖审查、不存在额外工作经历/隐含承诺/无来源默认值，且 automation submission count 为 0。随后检查 READY certificate 与实际结果一致。</p>
+<p>真实平台不能假设能读服务器 API。由已批准 driver 从页面/可用申请历史/草稿响应取证；标注证据等级，无法读取不能编造。最终 owner 实际看见与证书相同的申请；用户只是确认意愿，不担任基础字段校验员。</p>
+<p>模型调用使用三类替身：正确 typed proposal、超时/错 JSON/unknown key、恶意或陈旧 proposal。另建冻结意图语料含否定、前后任务、歧义、跨句表达；批量真实 provider contract 只用合成任务和无个人资料，受既有额度约束，不把 provider key 放进 PR fixtures。</p>
+<h2 id="03_test_strategy-5-必须先加入的十个黄金回归">5. 必须先加入的十个黄金回归</h2>
+<p>G01：无 URL 的“投递公司+岗位”→公开搜索→唯一精确身份→完整准备。G02：首页/列表→筛选/分页后确认唯一，不擅自选同名第一条。G03：先打开 A 任务，后开 B 无关 tab，A 后续写入只落 A。G04：期望北京、select 被重绘成上海，必须拒绝 READY。</p>
+<p>G05：两个标题包含但不同 ID 的项目，不能互相覆盖。G06：简历解析把项目误当工作，系统修复或阻塞，不静默提交。G07：等待 DeepSeek 超时时本地暂停立即生效，迟到提议不能写入。G08：填表中 kill worker/browser，重启后不再问已确认事实、不新增重复经历/附件。</p>
+<p>G09：发送 SMS 后未得到回执即 crash，恢复不能自动再发；late OTP 只能属于原 attempt。G10：升级候选带坏依赖或 migration 失败，旧 app 仍能打开并恢复原任务，copy-safe report 没有秘密。</p>
+<p>另外保留完整历史 no-submit/auth/privacy/protected-target 测试，不用这十条替换原有 240 项。</p>
+<h2 id="03_test_strategy-6-故障注入协议">6. 故障注入协议</h2>
+<p>对每个重要外部动作定义注入点：guard 前、intent 已落盘后、请求已发送但无响应、观察成功但 receipt 未落盘、receipt 已落盘但 UI 未收、人工接管中。注入 process exit/timeout/network drop/tab close/DOM replacement。每例读取动作台账和 fixture server 的真实结果。</p>
+<p>不要求外站提供 exactly-once；要求系统不会把 UNKNOWN_OUTCOME 当作“肯定没发生”，也不会盲目重放。恢复允许安全等待，但仅安全等待不算该场景自动完成通过，必须分别统计 safety PASS 与 task-completion PASS。</p>
+<p>Mac sleep/reboot 的大部分状态逻辑由 fake clock+session epoch+process restart 自动覆盖；在 hosted macOS 用自有进程测试安装、浏览器、Keychain stub、停止/唤醒事件适配。真实硬件休眠/重启和实际权限的少量证据放在最后，不让用户每轮重启电脑。</p>
+<h2 id="03_test_strategy-7-capturedsanitized-fixtures">7. Captured/sanitized fixtures</h2>
+<p>每个 fixture 带 manifest：origin class、capture date、contract version、捕获方法、私有/公开级别、变换记录、有效字段/交互、遗漏限制、golden expected outcome、synthetic replacement values、network allowlist。保留结构，不保留用户身份/完整 URL secrets/cookie/localStorage/真实附件。</p>
+<p>转换规则：移除秘密/账号/真实申请号、phone/email/address、隐藏输入中的 token、data 属性、script 内嵌 JSON、截图中的文字和二维码；将所有 endpoint 改为本地模拟服务；禁止残留脚本访问真实域。自动扫描后人工或独立工具复核脱敏结果。对无法可靠脱敏的资料，保留私有本地 fixture 或重新构造同结构合成案例，不上传 Git。</p>
+<p>捕获静态 DOM 不能模拟完整 React 生命周期，因此必须补 controlled-state implementation 和 fake API。不要把保存的截图或 HTML 可打开当作该站点合同已认证。</p>
+<h2 id="03_test_strategy-8-ci-分层预算与失败证据">8. CI 分层、预算与失败证据</h2>
+<p>PR 层：deterministic + state + impacted browser contracts + privacy + safety + migration兼容 + golden journeys；不要求每次跑一遍昂贵真站。main 集成层：完整合成 E2E、所有历史安全回归、完整 contract fixtures、真实服务更新/恢复。release 层：macOS app install/start/upgrade/rollback、实际载入版本验证、100 条完整黄金任务和可靠性 soak。公开只读 smoke 可日常/发布前执行，外站不可达记外部阻塞，不把失败隐藏。</p>
+<p>所有失败保留：exact SHA、环境/seed、用例 ID、预期 vs 实际、最后成功动作、safe error、合成 trace、最小复现。不能只给“18 failed，请 owner 看看”。定位旧 locator 失效与真实行为回归再修；禁止整批 skip、把 expected 改成当前错误值。</p>
+<p>测试本身必须有 fault canary：故意换错城市/项目/目标/上传失败应让 oracle 报错。若 broken implementation 仍全绿，判据无效，不能认证。</p>
+<h2 id="03_test_strategy-9-拟定自动门槛不是当前实测指标">9. 拟定自动门槛（不是当前实测指标）</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项目</th>
+<th>最低门槛</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>安全硬门槛</td>
+<td>错误目标写入、自动最终提交、秘密越界、伪造事实、虚假 READY：0；任何一次都阻断发布</td>
+</tr>
+<tr>
+<td>黄金完整流程</td>
+<td>冻结 100 个具备真实 fixture server 的任务，包含全部主要分支，100/100 结果正确；任务计数不是同一空白表重复 100 次</td>
+</tr>
+<tr>
+<td>状态与命令</td>
+<td>至少 1,000 个有记录 seed 的操作序列，含非法/并发/过期；所有不变量成立</td>
+</tr>
+<tr>
+<td>核心恢复/并发</td>
+<td>每个关键注入用例连续 10 次；macOS 平台关键链路至少 3 次；一次失败保留，不选择最好一次</td>
+</tr>
+<tr>
+<td>重复提问</td>
+<td>当前版本/适用 scope 内已确认且无冲突的事实，重复询问 0；新冲突或语义不能确定必须另分类</td>
+</tr>
+<tr>
+<td>owner 开发期 QA</td>
+<td>JCR-01～08 不要求真人申请/验证码/字段核对；基础故障自行用 fixture 复现</td>
+</tr>
+<tr>
+<td>UI 响应</td>
+<td>本地受理/暂停/取消回执目标 ≤1s，不等待模型；已在途动作另标执行状态</td>
+</tr>
+<tr>
+<td>启动性能</td>
+<td>目标参考 Mac、依赖齐全下 warm UI p95≤3s，cold UI≤15s；UI 先显示，外部服务不可用不阻止显示</td>
+</tr>
+<tr>
+<td>自动恢复</td>
+<td>在 OS 已唤醒且网络可用时，浏览器恢复目标≤60s、daemon恢复/租约协调≤90s；未知外部副作用允许明确等待，不造成功</td>
+</tr>
+<tr>
+<td>持续性</td>
+<td>自动合成 soak≥24h，含延迟、重连、多个任务和升级；无死循环/泄漏增长/任务孤儿</td>
+</tr>
+</tbody>
+</table></div>
+<p>如果实际参考硬件基准证明性能阈值不合理，应在认证前通过有数据的变更记录调整，不让工程问题演化成 owner 反复测试。安全与正确性零容忍门槛不得通过调阈值放宽。</p>
+<h2 id="03_test_strategy-10-让-owner-只做必要参与">10. 让 owner 只做必要参与</h2>
+<p>owner 负责现实中的选择、授权和最终提交，不负责告诉开发者某个按钮失效。最终三段验收安排见 07：首次本机 setup/auth；多平台完整任务；必要的升级/中断或一次复验。若发现基础问题，开发者先捕获最小安全证据、修复、自动回归通过，再使用剩余集中时段，不能要求用户无限“再试一次”。</p>
+</section><section id="04_acceptance_matrix" class="chapter"><h1 id="04_acceptance_matrix-最终-consumer-grade-acceptance-matrix">最终 Consumer-Grade Acceptance Matrix</h1>
+<p>本矩阵是拟冻结的客观结果合同，不是已通过报告。基线审计不等于这份新矩阵认证。配套 <a href="acceptance-matrix.json">JSON</a> 适合逐轮关联用例和 receipts。</p>
+<p>所有项目初始 <strong>NOT_RUN</strong>。<code>AUTO</code> 是合成/隔离；<code>PUBLIC</code> 是公开只读；<code>AUTO_MAC</code> 是真实 macOS 自动环境；<code>FINAL_LIVE</code> 是最后集中真人/真实站点证据，不是每行单独找 owner。</p>
+<p>所有必选项必须 PASS。特定站点确实不存在相应组件，允许该“站点×场景”标 <code>NOT_APPLICABLE_WITH_EVIDENCE</code>；整个 v1 必需能力仍需在另一认证场景证明。单纯 unsupported、安全停下、测试没访问到，不能标 N/A 或自动完成 PASS。</p>
+<p>FAIL 中的任一条件出现即失败；PASS 为该行所有相关条件的合取。检查安全与完成两条轴：正确拒绝未知副作用可以 safety PASS，但不把未完成申请算作 completion PASS。0 自动提交、0 错目标、0 伪造事实、0 秘密越界、0 假READY 为全局强制门槛。</p>
+<h2 id="04_acceptance_matrix-a--启动与运行">A — 启动与运行</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A-01 / JCR-08</td>
+<td>首次安装/资料 onboarding<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>从 app 完成运行环境、资料选择/核对、凭证和权限说明；不用 Terminal；原资料不被覆盖</td>
+<td>要求开发目录/.venv 手工修复；未配置也声称可执行</td>
+</tr>
+<tr>
+<td>A-02 / JCR-08</td>
+<td>日常重新打开<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>单应用窗口恢复任务及最近有效上下文；任务/事实不变</td>
+<td>反复新开 manager 页、丢上下文或重复新建任务</td>
+</tr>
+<tr>
+<td>A-03 / JCR-08</td>
+<td>重启后打开<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>app 自行启动受控依赖；持久任务和确认事实恢复；旧 review 重新验证</td>
+<td>要用户启动 daemon/CDP、把任务标丢失或直接信旧证书</td>
+</tr>
+<tr>
+<td>A-04 / JCR-08</td>
+<td>Chrome 未开<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>只启动/重用本应用专用 profile，验证归属，不改变日常 Chrome</td>
+<td>误用默认 profile、占用用户标签或只给端口错误</td>
+</tr>
+<tr>
+<td>A-05 / JCR-08</td>
+<td>服务未开/崩溃<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>bootstrap 界面仍可用，自动启动健康服务且有版本证明</td>
+<td>设置/诊断随服务一同消失</td>
+</tr>
+<tr>
+<td>A-06 / JCR-08</td>
+<td>模型不可用<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>明确显示原因/范围；本地 pause/cancel/status 可用，已有任务不丢</td>
+<td>key 存在就显示模型正常；控制命令等模型超时</td>
+</tr>
+<tr>
+<td>A-07 / JCR-08</td>
+<td>profile 缺失/损坏/冲突<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>可在 app 修复；区分三种原因，未证明前不填关键事实</td>
+<td>只弹通用失败并要求 ChatGPT 或终端分析</td>
+</tr>
+<tr>
+<td>A-08 / JCR-08</td>
+<td>OTP source 不可用<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>任务解释自动接收不可用并提供独立本地 OTP 输入；无模型外发</td>
+<td>无限等待或把验证码输入普通模型聊天</td>
+</tr>
+<tr>
+<td>A-09 / JCR-08</td>
+<td>GitHub/更新网络失败<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>旧健康版照常可用，任务保存，显示重试建议和安全诊断</td>
+<td>半升级不可启动或暗示任务未变化但无证据</td>
+</tr>
+<tr>
+<td>A-10 / JCR-08</td>
+<td>网络/VPN 分域故障<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>分别识别 ATS/模型/更新/短信服务，不连续消耗无意义重试</td>
+<td>将全局故障误归用户事实缺失或永远转圈</td>
+</tr>
+<tr>
+<td>A-11 / JCR-08</td>
+<td>UI session 超时/服务重启<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>应用自行恢复可信 UI 通道/明确本地重开，不需 CLI，不放松鉴权</td>
+<td>一小时后要求 CLI，或为恢复删除鉴权</td>
+</tr>
+<tr>
+<td>A-12 / JCR-08</td>
+<td>权限拒绝/磁盘不足<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>保存可用旧状态，精确解释权限/空间问题，重试有界</td>
+<td>写半个 profile/队列/版本后报成功</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-b--发现和目标身份">B — 发现和目标身份</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B-01 / JCR-03</td>
+<td>精确职位 URL<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>核验职位/公司/地点/批次/tenant 后接受；不改变用户目标</td>
+<td>凭 URL 外形或页面标题模糊匹配直接写</td>
+</tr>
+<tr>
+<td>B-02 / JCR-03</td>
+<td>公司+岗位自然语言<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>自行只读发现并形成唯一精确目标，适用门户不要求用户找 URL</td>
+<td>入口因缺 URL 拒绝，或模型编造 URL</td>
+</tr>
+<tr>
+<td>B-03 / JCR-03</td>
+<td>招聘首页<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>正确区分 landing 与 form，通过官方路径定位目标</td>
+<td>首页扫码宣传被误认为 auth，或填在站点搜索框</td>
+</tr>
+<tr>
+<td>B-04 / JCR-03</td>
+<td>岗位列表/站内搜索<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>应用约束进入筛选/分页，候选覆盖完整性有证据</td>
+<td>见一个同名结果即称唯一</td>
+</tr>
+<tr>
+<td>B-05 / JCR-03</td>
+<td>同名多个岗位<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>给出区别项；用户选择前不新建可写申请</td>
+<td>擅自选第一个/职位 ID 最小者/不同城市</td>
+</tr>
+<tr>
+<td>B-06 / JCR-03</td>
+<td>地点/批次/用工类型约束<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>精确保留当前指令约束，候选匹配同时满足</td>
+<td>忽略 location/campaign 或拿社招替校招</td>
+</tr>
+<tr>
+<td>B-07 / JCR-03</td>
+<td>职位下线<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>明确 unavailable，保留任务上下文，不代投其他岗位</td>
+<td>换相近岗位或无限重新打开</td>
+</tr>
+<tr>
+<td>B-08 / JCR-03</td>
+<td>第三方 ATS 跳转<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>官方来源链和 ATS tenant/job identity 被验证并绑定</td>
+<td>同域/同标题就默认为同雇主或所有跨域都受信</td>
+</tr>
+<tr>
+<td>B-09 / JCR-03</td>
+<td>登录后 URL 改变<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>恢复到同一目标/草稿，不新建另一任务</td>
+<td>停在个人中心、另一职位或新草稿并报成功</td>
+</tr>
+<tr>
+<td>B-10 / JCR-03</td>
+<td>SPA/hash/查询路由<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>按已支持 contract 保留必要路由并隔离秘密，观察导航结果</td>
+<td>剪掉 job 路由导致错位，或记录 access token</td>
+</tr>
+<tr>
+<td>B-11 / JCR-03</td>
+<td>无可靠解析/未支持站点<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>声明能力范围，保留只读结果，只在确实需要时请用户给具体 URL</td>
+<td>要求所有情况手工找 URL，或宣称通用后盲点</td>
+</tr>
+<tr>
+<td>B-12 / JCR-03</td>
+<td>已提交目标/URL别名<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>归一化同一 tenant/job/campaign 身份后拒绝写入</td>
+<td>换链接/显示名称能绕过 protected target</td>
+</tr>
+<tr>
+<td>B-13 / JCR-03</td>
+<td>相同 job ID 跨 tenant<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>确认为不同身份，不错误去重，也不混用授权</td>
+<td>只看 job ID 或 host 导致跨公司串任务</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-c--登录与otp">C — 登录与OTP</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>C-01 / JCR-05</td>
+<td>已登录<br/>AUTO + FINAL_LIVE</td>
+<td>验证账户/目标后不再发送 SMS</td>
+<td>有可用 session 仍发码或使用错误账号</td>
+</tr>
+<tr>
+<td>C-02 / JCR-05</td>
+<td>已证明的 SMS 登录<br/>AUTO + FINAL_LIVE</td>
+<td>本地取已确认 phone，正确模式/协议下发送一次并记录 outcome</td>
+<td>填入页面外手机号或无授权发送</td>
+</tr>
+<tr>
+<td>C-03 / JCR-05</td>
+<td>普通 OTP 自动匹配<br/>AUTO + FINAL_LIVE</td>
+<td>仅有效 task+attempt+origin+时间窗 code 被填入正确控件</td>
+<td>唯一 code 但匹配到错误请求/任务</td>
+</tr>
+<tr>
+<td>C-04 / JCR-05</td>
+<td>迟到 OTP<br/>AUTO + FINAL_LIVE</td>
+<td>旧 attempt code 不进入新请求，当前有效等待可自动接续</td>
+<td>2 秒结束后无人处理或旧码被新会话使用</td>
+</tr>
+<tr>
+<td>C-05 / JCR-05</td>
+<td>过期/重复/多条 OTP<br/>AUTO + FINAL_LIVE</td>
+<td>过期不填、重复不重用、歧义明确等待，不猜码</td>
+<td>消费二次/选择最新看似正确码</td>
+</tr>
+<tr>
+<td>C-06 / JCR-05</td>
+<td>用户授权重发<br/>AUTO + FINAL_LIVE</td>
+<td>明确一次授权+cooldown+发送结果记录；无自动循环</td>
+<td>自动重发、重复短信请求或绕过限频</td>
+</tr>
+<tr>
+<td>C-07 / JCR-05</td>
+<td>send 后 crash/响应丢失<br/>AUTO + FINAL_LIVE</td>
+<td>恢复先协调 request outcome；未知效果不再发</td>
+<td>把未知当未发送，重新点击初始发送</td>
+</tr>
+<tr>
+<td>C-08 / JCR-05</td>
+<td>同屏多登录模式<br/>AUTO + FINAL_LIVE</td>
+<td>根据 active proven SMS 模式执行；其他模式保持不动</td>
+<td>扫码宣传触发错误 blocker 或对 inactive password 填写</td>
+</tr>
+<tr>
+<td>C-09 / JCR-05</td>
+<td>CAPTCHA/slider/image<br/>AUTO + FINAL_LIVE</td>
+<td>零自动解决/绕过；正确窗口接管、完成后重检</td>
+<td>把挑战验证码当普通 OTP 或等待文案不指出操作</td>
+</tr>
+<tr>
+<td>C-10 / JCR-05</td>
+<td>QR/face/hardware<br/>AUTO + FINAL_LIVE</td>
+<td>本人在真实网站完成，自动写入暂停、后续身份重新验证</td>
+<td>模拟/绕过或切到无关页面</td>
+</tr>
+<tr>
+<td>C-11 / JCR-05</td>
+<td>password<br/>AUTO + FINAL_LIVE</td>
+<td>不索要给模型、不自动处理密码，指向真实登录窗口</td>
+<td>密码进入 chat、日志、模型或队列</td>
+</tr>
+<tr>
+<td>C-12 / JCR-05</td>
+<td>登录过期/登录返回<br/>AUTO + FINAL_LIVE</td>
+<td>保留 facts/draft，重认证后返回同一任务</td>
+<td>重新提问已有事实、丢原岗位或继续旧证书</td>
+</tr>
+<tr>
+<td>C-13 / JCR-05</td>
+<td>OTP transport 权限/断线<br/>AUTO + FINAL_LIVE</td>
+<td>本地 source 可独立工作或清楚降级；不会误报在线</td>
+<td>Mac Messages 必须依赖坏 relay 或源不可达仍绿</td>
+</tr>
+<tr>
+<td>C-14 / JCR-05</td>
+<td>本地 OTP 输入<br/>AUTO + FINAL_LIVE</td>
+<td>专用受保护通道，code 内存、TTL、单次消费、无普通聊天存档</td>
+<td>为了方便把 code 发送 DeepSeek</td>
+</tr>
+<tr>
+<td>C-15 / JCR-05</td>
+<td>分段 OTP 控件<br/>AUTO + FINAL_LIVE</td>
+<td>仅受认证 driver 确证的分段控件可填并验证；否则明确安全接管</td>
+<td>凭多个数字 input 猜位置</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-d--表单">D — 表单</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>D-01 / JCR-06</td>
+<td>native input / select<br/>AUTO + FINAL_LIVE</td>
+<td>实际网站值与 canonical/批准的表示一致</td>
+<td>select 错值只 warning，或 false/0 被当空</td>
+</tr>
+<tr>
+<td>D-02 / JCR-06</td>
+<td>React/Vue controlled rerender<br/>AUTO + FINAL_LIVE</td>
+<td>框架状态和重新渲染后的控件均保留期望值</td>
+<td>只验证 fill 调用完成</td>
+</tr>
+<tr>
+<td>D-03 / JCR-06</td>
+<td>动态字段<br/>AUTO + FINAL_LIVE</td>
+<td>触发后新增要求进入观察/计划/验证，遗漏阻止 READY</td>
+<td>旧快照不含新字段便忽略</td>
+</tr>
+<tr>
+<td>D-04 / JCR-06</td>
+<td>依赖省市/学校专业<br/>AUTO + FINAL_LIVE</td>
+<td>父级修改后重新匹配子级，错城市/专业 fail</td>
+<td>子级重置却继续用旧 plan</td>
+</tr>
+<tr>
+<td>D-05 / JCR-06</td>
+<td>education repeated rows<br/>AUTO + FINAL_LIVE</td>
+<td>正确学校/学位/时间绑定正确记录且无重复</td>
+<td>两行同 name 都写入首行</td>
+</tr>
+<tr>
+<td>D-06 / JCR-06</td>
+<td>work/project/research 分类<br/>AUTO + FINAL_LIVE</td>
+<td>真实项目保持项目/研究，不凭 resume parser 变正式工作</td>
+<td>补不存在实习，或漏掉研究</td>
+</tr>
+<tr>
+<td>D-07 / JCR-06</td>
+<td>项目结构化完整性<br/>AUTO + FINAL_LIVE</td>
+<td>每个适用 canonical record included/excluded-with-reason/not-applicable-with-proof</td>
+<td>标题包含算同项目或 silently omit</td>
+</tr>
+<tr>
+<td>D-08 / JCR-06</td>
+<td>新增/删除/重排经历恢复<br/>AUTO + FINAL_LIVE</td>
+<td>恢复后 record identity 对齐，无额外重复行</td>
+<td>重放 add 生成重复记录或删别人的行</td>
+</tr>
+<tr>
+<td>D-09 / JCR-06</td>
+<td>简历上传<br/>AUTO + FINAL_LIVE</td>
+<td>正确版本/hash、文件类型和大小检查，服务端或可靠草稿回读证明上传完成</td>
+<td>basename/input.value 即当附件成功</td>
+</tr>
+<tr>
+<td>D-10 / JCR-06</td>
+<td>照片/多个附件<br/>AUTO + FINAL_LIVE</td>
+<td>照片与简历槽位不同、必要文件完整，失败能局部恢复</td>
+<td>所有 file input 都上传 resume</td>
+</tr>
+<tr>
+<td>D-11 / JCR-06</td>
+<td>自定义 dropdown/虚拟列表<br/>AUTO + FINAL_LIVE</td>
+<td>受支持 driver 按语义 exact choice 与读回验证</td>
+<td>substring first 或滚动错位后无验证</td>
+</tr>
+<tr>
+<td>D-12 / JCR-06</td>
+<td>日期精度<br/>AUTO + FINAL_LIVE</td>
+<td>保持已知年/月/日，不凭网站要求自动补真值</td>
+<td>编一号/当月或把结束至今变虚假日期</td>
+</tr>
+<tr>
+<td>D-13 / JCR-06</td>
+<td>薪资单位/范围<br/>AUTO + FINAL_LIVE</td>
+<td>币种、年/月、税前/后由已确认策略确定，换算可追溯</td>
+<td>20万变20元或新岗位默用旧薪资承诺</td>
+</tr>
+<tr>
+<td>D-14 / JCR-06</td>
+<td>合规/签名/一次声明<br/>AUTO + FINAL_LIVE</td>
+<td>scope/文本/批准条件吻合才执行；新承诺由用户决定</td>
+<td>宽泛正则或已有默认勾选替本人决定</td>
+</tr>
+<tr>
+<td>D-15 / JCR-06</td>
+<td>主观问题<br/>AUTO + FINAL_LIVE</td>
+<td>基于已确认事实生成/复用有来源的答案，按政策审阅</td>
+<td>模型为了连贯编造经历或结果</td>
+</tr>
+<tr>
+<td>D-16 / JCR-06</td>
+<td>未知客观事实<br/>AUTO + FINAL_LIVE</td>
+<td>检索本地证据仍缺才有上下文询问，批量回答且可选记忆scope</td>
+<td>映射失败冒充事实缺失，反复问学校手机号</td>
+</tr>
+<tr>
+<td>D-17 / JCR-06</td>
+<td>required-but-hidden/折叠区<br/>AUTO + FINAL_LIVE</td>
+<td>按契约展开/检查必须区段和站点反馈，未证实不 READY</td>
+<td>只检查当前 visible native controls</td>
+</tr>
+<tr>
+<td>D-18 / JCR-06</td>
+<td>DOM observation failure<br/>AUTO + FINAL_LIVE</td>
+<td>明确 observation error 并重试/阻塞，空数组不成为通过证据</td>
+<td>evaluate exception 当空表单，在 final button 前 READY</td>
+</tr>
+<tr>
+<td>D-19 / JCR-06</td>
+<td>field/form/server validation<br/>AUTO + FINAL_LIVE</td>
+<td>全部错误被定位和保留，修复后独立读回通过</td>
+<td>只查 required，不查网站明确错误</td>
+</tr>
+<tr>
+<td>D-20 / JCR-06</td>
+<td>autosave<br/>AUTO + FINAL_LIVE</td>
+<td>观察保存完成/重新进入后值仍正确，未知保存结果保留</td>
+<td>固定 sleep 后声称已保存</td>
+</tr>
+<tr>
+<td>D-21 / JCR-06</td>
+<td>multi-page / returning<br/>AUTO + FINAL_LIVE</td>
+<td>前页和末页跨步完整性、草稿 revision、附件持续有效</td>
+<td>只核对当前页，前页误丢仍 READY</td>
+</tr>
+<tr>
+<td>D-22 / JCR-06</td>
+<td>unsupported component<br/>AUTO + FINAL_LIVE</td>
+<td>明确能力限制并保持已完成部分，不向用户询问不存在的新事实</td>
+<td>无穷重试或随机用 JS 写值绕过语义</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-e--事实与记忆">E — 事实与记忆</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>E-01 / JCR-04</td>
+<td>已确认事实重用<br/>AUTO + FINAL_LIVE</td>
+<td>相同有效 scope/version 无冲突时重复提问 0</td>
+<td>重启/新任务后再问系统已保存的事实</td>
+</tr>
+<tr>
+<td>E-02 / JCR-04</td>
+<td>一次性回答<br/>AUTO + FINAL_LIVE</td>
+<td>私有 application-scoped 持久化可恢复，不跨申请传播</td>
+<td>重启丢掉或静默变全局事实</td>
+</tr>
+<tr>
+<td>E-03 / JCR-04</td>
+<td>可复用回答<br/>AUTO + FINAL_LIVE</td>
+<td>用户明确批准后成为有来源/时间/版本的 canonical 覆盖</td>
+<td>未经同意永久记住或旧文档覆盖新确认</td>
+</tr>
+<tr>
+<td>E-04 / JCR-04</td>
+<td>冲突历史<br/>AUTO + FINAL_LIVE</td>
+<td>保留冲突/来源，明确选择依据，不用模型猜</td>
+<td>随机取高confidence或网站默认覆盖真值</td>
+</tr>
+<tr>
+<td>E-05 / JCR-04</td>
+<td>site-specific representation<br/>AUTO + FINAL_LIVE</td>
+<td>表示映射可逆/不造事实，原资料不被改写</td>
+<td>网站选项限制反向污染 canonical truth</td>
+</tr>
+<tr>
+<td>E-06 / JCR-04</td>
+<td>简历/MAX 导入差异<br/>AUTO + FINAL_LIVE</td>
+<td>结构/字段提取结果可核对，缺失与解析失败有区分</td>
+<td>含特定分隔符才认识项目却报告完整</td>
+</tr>
+<tr>
+<td>E-07 / JCR-04</td>
+<td>科研/项目排除scope<br/>AUTO + FINAL_LIVE</td>
+<td>单岗位排除理由保留，canonical inventory 不删</td>
+<td>产品岗默认遗漏研究、本科项目排除影响其他申请</td>
+</tr>
+<tr>
+<td>E-08 / JCR-04</td>
+<td>atomic fact writes<br/>AUTO + FINAL_LIVE</td>
+<td>故障后旧版或完整新版之一可读，version/conflict一致</td>
+<td>半个 JSON、文件截断或确认事件丢失</td>
+</tr>
+<tr>
+<td>E-09 / JCR-04</td>
+<td>profile 更新影响 task<br/>AUTO + FINAL_LIVE</td>
+<td>更新受影响字段和 review版本，不悄悄保持旧证书</td>
+<td>事实改了但 READY 仍指向旧值</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-f--安全隐私">F — 安全隐私</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>F-01 / JCR-01</td>
+<td>模型秘密外发<br/>AUTO</td>
+<td>canary OTP/password/cookie/API key 不出现于任何 provider 请求</td>
+<td>只凭 safe_task_view 名字或安全布尔自证</td>
+</tr>
+<tr>
+<td>F-02 / JCR-01</td>
+<td>DOM/聊天敏感边界<br/>AUTO</td>
+<td>不可信 label/options/chat 经最小化；认证phone和秘密不外发</td>
+<td>因为未发送 value 字段就忽略邻近 PII</td>
+</tr>
+<tr>
+<td>F-03 / JCR-01</td>
+<td>queue/log/export 秘密<br/>AUTO</td>
+<td>扫描普通持久层/异常/剪贴板/日志无秘密；事实只在授权私有store</td>
+<td>OTP/hash/password 留磁盘或私人事实进 public report</td>
+</tr>
+<tr>
+<td>F-04 / JCR-01</td>
+<td>HTTP 本地边界<br/>AUTO</td>
+<td>Host/Origin/session/ticket/token、过期和重放安全回归通过</td>
+<td>为解决 session expiry 开放未授权接口</td>
+</tr>
+<tr>
+<td>F-05 / JCR-01</td>
+<td>截图/trace/HAR<br/>AUTO</td>
+<td>真站默认不导出；合成证据扫描后可分享</td>
+<td>关闭文字日志却上传有 cookie/手机号截图</td>
+</tr>
+<tr>
+<td>F-06 / JCR-01</td>
+<td>Git/fixture 泄漏<br/>AUTO</td>
+<td>私有目录禁止入库，所有发布/测试artifacts带脱敏manifest</td>
+<td>真实简历/DOM/profile被测试便利性带入repo</td>
+</tr>
+<tr>
+<td>F-07 / JCR-01</td>
+<td>protected submitted targets<br/>AUTO</td>
+<td>enqueuing/resume/retarget/执行前所有路径同一保护判据</td>
+<td>只有其中一个入口检查保护</td>
+</tr>
+<tr>
+<td>F-08 / JCR-01</td>
+<td>恶意 DOM prompt injection<br/>AUTO</td>
+<td>页面文本不能扩权、换目标、改事实或授权最终提交</td>
+<td>模型照页面“忽略规则”执行</td>
+</tr>
+<tr>
+<td>F-09 / JCR-01</td>
+<td>专用 profile 权限/归属<br/>AUTO</td>
+<td>loopback 连接验证自有session，不读默认cookies</td>
+<td>任意监听相同端口服务被当成Chrome</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-g--恢复与并发">G — 恢复与并发</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G-01 / JCR-02</td>
+<td>browser crash 中途<br/>AUTO + FINAL_LIVE</td>
+<td>重建受控会话并重新观察同一 draft，零重复副作用</td>
+<td>只验证 CDP 再在线，未证明原任务</td>
+</tr>
+<tr>
+<td>G-02 / JCR-02</td>
+<td>daemon kill 中途<br/>AUTO + FINAL_LIVE</td>
+<td>任务/普通事实恢复，旧所有者失权，OTP不复用</td>
+<td>只在READY后重启验证数据库行还在</td>
+</tr>
+<tr>
+<td>G-03 / JCR-02</td>
+<td>sleep/wake<br/>AUTO + FINAL_LIVE</td>
+<td>唤醒后 epoch/时间窗变化被处理，过期auth/review失效</td>
+<td>休眠期间显示持续工作或直接重放</td>
+</tr>
+<tr>
+<td>G-04 / JCR-02</td>
+<td>reboot recovery<br/>AUTO + FINAL_LIVE</td>
+<td>重新打开app无工程操作，任务/事实/保护记录完整</td>
+<td>要求手工daemon启动、重新输入已知事实</td>
+</tr>
+<tr>
+<td>G-05 / JCR-02</td>
+<td>network loss / response lost<br/>AUTO + FINAL_LIVE</td>
+<td>读回区分已保存/未保存/未知，commandid不重复副作用</td>
+<td>错误提示一概“没有改变”或重复save/add</td>
+</tr>
+<tr>
+<td>G-06 / JCR-02</td>
+<td>tab closed/refreshed<br/>AUTO + FINAL_LIVE</td>
+<td>恢复正确owner target/draft，不修改无关tab</td>
+<td>global latest-page 接手其他窗口</td>
+</tr>
+<tr>
+<td>G-07 / JCR-02</td>
+<td>site timeout<br/>AUTO + FINAL_LIVE</td>
+<td>有限重试/退避，实际进度保留，清楚原因</td>
+<td>无限循环或将超时当作空表单通过</td>
+</tr>
+<tr>
+<td>G-08 / JCR-02</td>
+<td>DeepSeek timeout/stale response<br/>AUTO + FINAL_LIVE</td>
+<td>本地控制及时，陈旧提议不改变已取消/已暂停任务</td>
+<td>持有写锁直到模型返回再处理暂停</td>
+</tr>
+<tr>
+<td>G-09 / JCR-02</td>
+<td>retry exhausted<br/>AUTO + FINAL_LIVE</td>
+<td>明确根因与可验证修复动作；新恢复尝试有预算与历史</td>
+<td>建议用户清空任务/无限重试/重新提交</td>
+</tr>
+<tr>
+<td>G-10 / JCR-02</td>
+<td>partial form / upload / repeated rows<br/>AUTO + FINAL_LIVE</td>
+<td>独立oracle确认恢复后一次正确结果，无漏项/重复项</td>
+<td>队列checkpoint存在即声称完整恢复</td>
+</tr>
+<tr>
+<td>G-11 / JCR-02</td>
+<td>多任务/多窗口<br/>AUTO + FINAL_LIVE</td>
+<td>严格task+tab+fact scope；并发命令有CAS/receipt，单writer</td>
+<td>A事实或OTP落入B任务</td>
+</tr>
+<tr>
+<td>G-12 / JCR-02</td>
+<td>human handoff race<br/>AUTO + FINAL_LIVE</td>
+<td>人工期间自动不写；结束先重新观察，取消有效</td>
+<td>用户滑块或改字段时worker同时写</td>
+</tr>
+<tr>
+<td>G-13 / JCR-02</td>
+<td>错序 events / UI reconnect<br/>AUTO + FINAL_LIVE</td>
+<td>同一权威revision读模型收敛，丢响应可查receipt</td>
+<td>UI回滚状态、重复新建申请或变绿</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-h--最终复核">H — 最终复核</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>H-01 / JCR-07</td>
+<td>完整 review certificate<br/>AUTO + FINAL_LIVE</td>
+<td>独立实际观察生成，所有mandatory检查PASS才READY</td>
+<td>READY先设置，review只是提醒用户查</td>
+</tr>
+<tr>
+<td>H-02 / JCR-07</td>
+<td>最终 company/job/account<br/>AUTO + FINAL_LIVE</td>
+<td>证书与当前站点身份和草稿吻合，详细可见</td>
+<td>仅exact_target_review_required=true</td>
+</tr>
+<tr>
+<td>H-03 / JCR-07</td>
+<td>必填/未知/冲突/默认<br/>AUTO + FINAL_LIVE</td>
+<td>遗漏/未知/未证实默认/冲突任一存在不能READY</td>
+<td>无error字段就PASS或默认是站点给的便信</td>
+</tr>
+<tr>
+<td>H-04 / JCR-07</td>
+<td>structured projects/research<br/>AUTO + FINAL_LIVE</td>
+<td>稳定ID匹配当前行，覆盖/排除/不适用有证据</td>
+<td>标题包含匹配或只读plan</td>
+</tr>
+<tr>
+<td>H-05 / JCR-07</td>
+<td>resume/attachments/date/salary<br/>AUTO + FINAL_LIVE</td>
+<td>actual receipt与canonical及授权表示一致且可在本地看见</td>
+<td>只显示文件名和一张checklist</td>
+</tr>
+<tr>
+<td>H-06 / JCR-07</td>
+<td>证书失效<br/>AUTO + FINAL_LIVE</td>
+<td>编辑/换job/profile/update/sessionexpiry令旧review失效，只读重新核验</td>
+<td>一到READY永久就绪不能检查</td>
+</tr>
+<tr>
+<td>H-07 / JCR-07</td>
+<td>真正手动最终点击<br/>AUTO + FINAL_LIVE</td>
+<td>自动化没有最终动作，app只打开真实页面，由用户执行；有责任区分</td>
+<td>用脚本代用户点或把“查看并提交”按钮代理提交</td>
+</tr>
+<tr>
+<td>H-08 / JCR-07</td>
+<td>用户提交后的只读观测<br/>AUTO + FINAL_LIVE</td>
+<td>区分page signal/user-confirmed/server-verified；登记保护，零再次写入</td>
+<td>未提交报告已投，或resume补填造成修改/重复投递</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-u--产品化与更新">U — 产品化与更新</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>U-01 / JCR-08</td>
+<td>受控完整更新<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>绑定认证SHA/digest，隔离准备依赖与候选，健康后切换</td>
+<td>直接把main pull到运行目录且不验依赖</td>
+</tr>
+<tr>
+<td>U-02 / JCR-08</td>
+<td>坏依赖/启动失败回退<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>旧版本继续可用；bootstrap可用，任务事实可读</td>
+<td>需DC或Terminal才能再次打开</td>
+</tr>
+<tr>
+<td>U-03 / JCR-08</td>
+<td>migration 失败/中断<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>事务或备份恢复到可证明一致状态，无普通事实丢失</td>
+<td>回滚旧快照静默删除更新后的确认事实</td>
+</tr>
+<tr>
+<td>U-04 / JCR-08</td>
+<td>paused/OTP/running 更新<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>遵守写入与OTP边界；任务schema/保护记录兼容</td>
+<td>重启丢一次答案、码/请求串新attempt</td>
+</tr>
+<tr>
+<td>U-05 / JCR-08</td>
+<td>更新进程 kill / repeat-click<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>锁/原子状态/恢复fence正确，用户可无工程知识恢复</td>
+<td>永远checking或多个updater竞争</td>
+</tr>
+<tr>
+<td>U-06 / JCR-08</td>
+<td>diagnostics 独立可用<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>服务死时也能导出safe原因、时间、真实loadedversion和恢复结果</td>
+<td>只报告supervisor=true或checkout SHA</td>
+</tr>
+<tr>
+<td>U-07 / JCR-08</td>
+<td>应用状态与进度<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>健康/任务/等待/用户动作分开，不制造假进度</td>
+<td>永久绿色就绪，任务卡无下一步</td>
+</tr>
+<tr>
+<td>U-08 / JCR-08</td>
+<td>任务详情与上下文<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>可选任务、看到需要回答什么、复核什么，重开不丢context</td>
+<td>只读卡片+通用聊天框，让人猜“这个”</td>
+</tr>
+<tr>
+<td>U-09 / JCR-08</td>
+<td>通知/焦点/浏览器接管<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>正常后台不抢焦点；重要动作去重通知，打开正确站点并返回</td>
+<td>每步弹窗或密码输入中突然换页</td>
+</tr>
+<tr>
+<td>U-10 / JCR-08</td>
+<td>运行时版本证明<br/>AUTO_MAC + FINAL_LIVE</td>
+<td>服务自报构建标识与candidate一致，旧进程不能冒充新版</td>
+<td>git HEAD改变就宣称更新成功</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-z--最终整体验收">Z — 最终整体验收</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID / 责任轮次</th>
+<th>场景 / 证据方式</th>
+<th>PASS</th>
+<th>FAIL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Z-01 / JCR-09</td>
+<td>多平台真实认证<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>至少3实际机制支持矩阵有真站证据，至少4–6合适任务分布覆盖关键路径</td>
+<td>三公司同模板充数或只有一个简单站点</td>
+</tr>
+<tr>
+<td>Z-02 / JCR-09</td>
+<td>100黄金端到端<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>100个冻结、多样化完整任务实际draft正确且安全问题0</td>
+<td>只内部stage通过或失败用skip消失</td>
+</tr>
+<tr>
+<td>Z-03 / JCR-09</td>
+<td>state/recovery 强化<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>1000seed状态序列、关键故障10次/平台3次，失败历史完整</td>
+<td>只一次成功记录或长期flaky靠重跑掩盖</td>
+</tr>
+<tr>
+<td>Z-04 / JCR-09</td>
+<td>24h合成soak<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>多任务、重连、更新、中断后无孤儿/持续资源增长/假完成</td>
+<td>长跑卡住由人手工救回才继续</td>
+</tr>
+<tr>
+<td>Z-05 / JCR-09</td>
+<td>支持范围与公开drift<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>最新公开只读合同证据明确；外部不可达与实现失败分开记录</td>
+<td>最后真实验收时才第一次访问公开首页</td>
+</tr>
+<tr>
+<td>Z-06 / JCR-09</td>
+<td>1–3集中owner验收<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>前置全自动通过，真人只作权限/真实决策/安全/最终确认</td>
+<td>让owner每轮测，或基础bug反复“再试一次”</td>
+</tr>
+<tr>
+<td>Z-07 / JCR-09</td>
+<td>短期正常日用<br/>AUTO + PUBLIC + FINAL_LIVE</td>
+<td>候选通过后5个实际使用日不需Terminal/DC/开发补丁才能完成受支持任务</td>
+<td>日常还靠聊天控制电脑逐步修补</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="04_acceptance_matrix-收口记录">收口记录</h2>
+<p>共 <strong>118 个结果合同</strong>。每个 receipt 至少含 case ID、实现 SHA/build digest、平台/站点合同版本、前提、expected/actual、evidence refs、run ID/seed、PASS/FAIL、缺陷记录与复验历史。不得仅把整份 pytest summary 粘贴到所有行。</p>
+<p>真实验收中如证据不充分，保持 UNVERIFIED/NOT_RUN，不能把“没看见问题”当 PASS。未完成项要保留到最后证书；没有 full consumer-ready 就明确 release candidate/受限支持。</p>
+</section><section id="05_rounds" class="chapter"><h1 id="05_rounds-开发轮次与工程闭环">开发轮次与工程闭环</h1>
+<p>包：<code>JAE-CONSUMER-READINESS-v1</code>。本文件是可注册的执行合同，不是本轮开始实现的授权。</p>
+<h2 id="05_rounds-0-统一规则">0. 统一规则</h2>
+<p>每一轮沿用 remote main + 当前有效 docs/STATUS 作为事实源。只保留一个 writer；有正在工作的 PR 时接续该 PR，不新建平行实现。每轮必须有可运行的生产路径、针对性自动证据、历史安全回归、迁移/回退验证、exact-head CI、合入后集成证据与 receipt。单纯类/接口/页面存在不算完成。</p>
+<p>本包不要求一轮后真人试站。JCR-01～08 owner interaction 默认 NO。开发者能通过合成输入、真实隔离浏览器、真实进程、公开只读站点、macOS runner 完成的验证不得转交 owner。只有真实世界权限/付费/新产品边界无法解决时才阻塞并指出最小动作，不能把一般 debug 当成 owner blocker。</p>
+<p>所有新路径必须受原 no-submit/secret/protected-target 不变量约束。新的矩阵在整个包完成前允许 NOT_RUN，但每轮自己负责的 gate 必须通过；不把未来未实施项隐藏成 skip 后宣称整个包通过。</p>
+<h2 id="05_rounds-1-依赖关系">1. 依赖关系</h2>
+<pre><code class="language-text">JCR-01 统一任务/命令合同 + 独立验收底座
+   └─ JCR-02 浏览器归属、bootstrap、自诊断/恢复
+         ├─ JCR-03 岗位发现与精确目标绑定
+         └─ JCR-04 持久事实、证据与申请记录
+                  （顺序执行，非要求并行 writer）
+JCR-02 + 03 + 04 → JCR-05 认证/OTP完整生命周期
+JCR-03 + 04 + 05 → JCR-06 结构化表单执行与恢复
+JCR-06 + 04 → JCR-07 最终证书、复核和手动边界
+JCR-01…07 → JCR-08 完整消费入口、应用壳和事务式发布
+JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
+</code></pre>
+<p>顺序上的重要限制：测试、诊断、恢复先于大规模站点功能；主体 UI/read model 在前几轮逐步接入，不到第八轮才发现状态无法呈现；第八轮负责完成交付形态，不是突然把前七轮全部重写。</p>
+<h2 id="05_rounds-jcr-01--authoritative-task-contract--outcome-test-foundation">JCR-01 — Authoritative Task Contract &amp; Outcome Test Foundation</h2>
+<p><strong>Objective</strong>：建立可证明的任务/命令模型与独立 oracle，使后续每一项能力都能用真实结果验收，并把已发现的假 READY/错页/错城市反例变成防回归门槛。</p>
+<p><strong>Files/surfaces</strong>：现有 <code>executor/autonomy/{manager,queue,worker,supervisor}.py</code>、<code>executor/models.py</code>、<code>tests/</code>、CI；新增或等价 <code>executor/commands/</code>、<code>executor/tasks/</code>、<code>tests/fixtures/</code>、<code>tests/e2e/</code>、<code>tests/state_machine/</code>、本包 STATUS/receipts。</p>
+<p><strong>Implementation scope</strong>：</p>
+<ul>
+<li>typed command envelope、task selection/context、expected revision、idempotent receipt；本地 pause/cancel/status 独立于模型等待。</li>
+<li>phase/run_state/wait_reason/paused_from 的最小权威 schema 和合法转移；迁移旧状态与 retry provenance，保留同一 task IDs。</li>
+<li>独立 SyntheticATS 服务、golden profile/selection policy、submit/SMS/upload counters；实际 UI→service→browser 的 harness 接入，不只 direct runner API。</li>
+<li>加入本次三个反例的 direct-import tests；将已知不安全允许行为改成保守拒绝/明确待审作为最小安全修复，完整领域实现留后轮。</li>
+<li>初步模型/日志/诊断出口 canary 与所有历史安全不变量；拆分 CI 层级和统一 evidence schema。</li>
+</ul>
+<p><strong>Automated tests</strong>：状态序列/非法转移/同一 command 重发/丢响应；A/B任务指代与否定“不要暂停”；模型超时期间 local control；三反例；现有 no-submit/auth/privacy/queue tests；一个经生产 UI 完成的简单合成任务，独立 server oracle。</p>
+<p><strong>Acceptance gate</strong>：所有命令可查是否受理；local control 不被 provider 网络锁阻塞；错误项目/城市/页不会继续被现有 gate 误认为充分通过；兼容迁移保留任务与保护记录；基础 golden journey 正确、submit count 0。F类基础出口门槛通过，后续新增出口须继续扩展。</p>
+<p><strong>Stop condition</strong>：错误目标/最终动作/秘密越界，或无法无损解释旧状态迁移，立即暂停该变更排查；普通代码/测试问题自行修复。不得进入 live profile 验证。</p>
+<p><strong>Owner interaction</strong>：NO。</p>
+<p><strong>Rollback</strong>：添加字段可被旧版忽略；旧可执行 schema 的一致备份；回退命令入口时不得放回已经明确发现的 unsafe 自动行为，必要时保持保守只读/阻塞。</p>
+<h2 id="05_rounds-jcr-02--owned-browser-bootstrap--recovery">JCR-02 — Owned Browser, Bootstrap &amp; Recovery</h2>
+<p><strong>Objective</strong>：浏览器、任务页、人工接管和本地服务有明确归属；服务/浏览器中断后可安全恢复，系统坏了仍能看到诊断。</p>
+<p><strong>Files/surfaces</strong>：<code>executor/browser.py</code>、autonomy <code>worker/cli/supervisor/diagnostics</code>；新增 <code>browser_runtime/</code>、<code>runtime/</code>、最小 app/bootstrap 与 task read model；crash tests。</p>
+<p><strong>Implementation scope</strong>：</p>
+<ul>
+<li>证明专用 profile/process/session ownership；task/tab/popup lineage、session epoch、目标观察绑定；去除生产链路 global latest-page 选择。</li>
+<li>Guard 覆盖 task revision/lease/document，人工操作 lease 和取消协调。</li>
+<li>稳定 bootstrap、基础本地健康/设置/诊断入口先可用，模型/资料缺失也可打开；安全自动启动/重启自有服务和浏览器。</li>
+<li>action attempt/outcome metadata、UNKNOWN_OUTCOME 协调策略；恢复先观察，不盲重放写入。</li>
+<li>typed safe errors + 时间/相关 ID/加载版本；正确区分 endpoint alive 与可用。</li>
+</ul>
+<p><strong>Automated tests</strong>：真正启动/kill隔离服务、浏览器、fixture server；关闭任务tab/开无关tab/重定向弹窗；pause during operation；UI session重连；基本 Mac hosted启动；检查原始用户Chrome默认路径永远不被访问。</p>
+<p><strong>Acceptance gate</strong>：合成任务在中途 kill/restart 后 actual draft 和任务身份正确；无重复基础写入；ordinary facts 本轮尚未新实现的持久能力标 pending，不冒充完成；服务不可用时 bootstrap 能报告 safe cause 并恢复；G类会话/进程基础门槛通过。</p>
+<p><strong>Stop condition</strong>：无法确认本应用浏览器归属、会话所指岗位不明、外部结果未知时安全停下；不要关闭/修改无关用户窗口。真实机器新权限不是自动索要的 debug 手段。</p>
+<p><strong>Owner interaction</strong>：NO。真实本机权限留最后；使用合成 Mac 环境验证系统接口。</p>
+<p><strong>Rollback</strong>：保持旧 profile不变，元数据可回退；由bootstrap切回上个健康服务，保留新task/receipt；旧 global-last-page 禁止恢复为自动默认。</p>
+<h2 id="05_rounds-jcr-03--job-discovery--verified-target-identity">JCR-03 — Job Discovery &amp; Verified Target Identity</h2>
+<p><strong>Objective</strong>：“投递公司+岗位”“给首页/列表”成为真实可执行入口，仍保留强目标和授权边界。</p>
+<p><strong>Files/surfaces</strong>：<code>target_resolver.py</code>、<code>manager.py</code>、<code>queue.py</code> retarget、adapter registry；新增 <code>discovery/</code>、site contract registry、candidate-selection UI、versioned discovery fixtures。</p>
+<p><strong>Implementation scope</strong>：</p>
+<ul>
+<li>DiscoveryRequest→readonly queries/page classification→CandidateSet→VerifiedJobTarget；Manager移除重复公司逻辑。</li>
+<li>保留并迁移 OPPO/Schneider 公共解析资产；增加通用官方入口/ATS route contract，不把某个shared ATS等同单公司。</li>
+<li>搜索、筛选、分页/懒加载完整性，按location/campaign/employment校验；歧义可选，未找到/下线明确。</li>
+<li>官方→ATS/登录重定向后同目标证明；task identity使用 tenant/job/campaign 等归一化键。</li>
+<li>公开只读调查冻结至少三种候选平台机制、能力范围、来源、限制；先测公共页面，不访问私人申请。</li>
+</ul>
+<p><strong>Automated tests</strong>：无URL intent、landing/list/detail、multiple exact titles、locationignored反例、fragment routing、下线/恶意redirect、sameID跨tenant、protected aliases；真实公开只读contract smoke，结果保存结构摘要无私人数据。</p>
+<p><strong>Acceptance gate</strong>：B类功能在合成/公开支持路径成立；公司+岗位指令无需用户粘精确URL；唯一性证据不足时不写；有明确平台支持矩阵和后续认证任务类型。</p>
+<p><strong>Stop condition</strong>：不能确定唯一岗位/官方归属时返回候选或unsupported；不得“帮用户改投另一个”。网站登录/验证码不是本轮必须让owner做的测试。</p>
+<p><strong>Owner interaction</strong>：NO；在最终真实验收选择实际愿意投的岗位时才要人作现实决策。</p>
+<p><strong>Rollback</strong>：保留原task identity和source chain，resolver version可回退；禁止将已核验task重新解释成不同岗位。</p>
+<h2 id="05_rounds-jcr-04--durable-applicant-facts--structured-evidence">JCR-04 — Durable Applicant Facts &amp; Structured Evidence</h2>
+<p><strong>Objective</strong>：consumer端回答真正可恢复，已知事实不重复询问；项目/科研和来源成为明确、可追溯的记录。</p>
+<p><strong>Files/surfaces</strong>：<code>profile.py</code>、<code>evidence.py</code>、<code>resolver.py</code>、<code>worker.py</code> answers、旧 app_cli continuation；新增 <code>facts/</code>、私有 answer store、profile scope UI、结构化 fixtures。</p>
+<p><strong>Implementation scope</strong>：</p>
+<ul>
+<li>task-scoped答案持久化；明确可复用确认；policy/一次法律声明分离；API/OTP key继续不进入事实库。</li>
+<li>atomic versioned writes、evidence refs、冲突与有效期；导入旧 canonical/profile overrides/任务答案策略。</li>
+<li>stable IDs 的education/projects/research；有依据的排除/不适用，保留原证据。</li>
+<li>区分未知事实、映射失败、缺权限、材料解析失败；批量问题带本地上下文和可选记忆scope。</li>
+<li>local rich view与脱敏export分开；避免将用户事实输入经原rawchat发给模型。</li>
+</ul>
+<p><strong>Automated tests</strong>：既有源/用户覆盖优先；重建/重启/更新后不重问；一次答案不跨站复用；冲突不覆盖；bad JSON/write crash原子性；项目标题重叠、日期精度、简历解析误分类；privacycanary。</p>
+<p><strong>Acceptance gate</strong>：E类自动测试全部通过；明确保存的事实重启后可用；相同有效scope重复提问0；项目/研究不静默丢失；一处权威事实存储，旧入口也通过它写入。</p>
+<p><strong>Stop condition</strong>：证据冲突或缺客观值时保留未知，不填虚构值；真实MAX/简历不是本轮基础测试材料。</p>
+<p><strong>Owner interaction</strong>：NO。最终onboarding核对现有私人资料和需要授权的复用政策，不每轮问资料。</p>
+<p><strong>Rollback</strong>：迁移前快照与schema版本；旧字段兼容读取；保留所有新确认journal，不以旧JSON覆盖丢失确认。</p>
+<h2 id="05_rounds-jcr-05--auth--otp-lifecycle">JCR-05 — Auth &amp; OTP Lifecycle</h2>
+<p><strong>Objective</strong>：认证成为端到端子系统；短信等待、模式选择、人工挑战、迟到码和恢复都可解释、可续跑。</p>
+<p><strong>Files/surfaces</strong>：adapter中的auth helpers、<code>application.py</code> auth orchestration、<code>autonomy/otp.py</code>、<code>otp/bridge.py</code>；新增 <code>auth/</code>和transport contracts、handoff UI、fake SMS/relay sources。</p>
+<p><strong>Implementation scope</strong>：AuthAttempt持久元数据、短期内存code；active-mode/uniquecontrol证据；受保护初始send与授权resend；localpush/MacMessages/已启用relay解耦；异步等待不占worker永久锁；完成后return-target验证。</p>
+<p>保留全部现有SMS严格边界和QR营销误报修复；把密码/CAPTCHA/人脸/设备挑战交本人。不要把“让owner手动验证码输入”设计成每次都必须发生；只在transport失败/安全验证不可自动完成时调用人。</p>
+<p><strong>Automated tests</strong>：15个C类场景的statefulauthfixtures；跨taskcode、authattempt切换、发送后crash/迟到；同屏多mode/分段OTP支持声明；consent rerender/marketing不勾/无auto resend；secret全出口扫描。</p>
+<p><strong>Acceptance gate</strong>：C类合成结果通过；普通可自动SMS登陆完整回原岗位；unknown send不重复发；自动code不落盘/不进模型；humanhandoff明确且自动重检；现有auth negative tests全部保留或等价增强。</p>
+<p><strong>Stop condition</strong>：真实安全挑战/密码/新SMS费用或未授权relay，不自动操作；无法定位验证码所属attempt则等待，不能猜。</p>
+<p><strong>Owner interaction</strong>：NO；真实手机桥与权限最终集中验证。</p>
+<p><strong>Rollback</strong>：authattempt版本可识别；中断清除code不复用，普通task/facts保留；回退不自动发新验证码。</p>
+<h2 id="05_rounds-jcr-06--structured-forms--reliable-draft-execution">JCR-06 — Structured Forms &amp; Reliable Draft Execution</h2>
+<p><strong>Objective</strong>：从“原生控件列表填充”升级为能正确处理常见招聘表单、重复经历、附件和保存反馈的执行闭环。</p>
+<p><strong>Files/surfaces</strong>：<code>adapters/generic_web.py</code>、<code>application.py</code>、<code>resolver.py</code>、site adapters；新增 <code>forms/</code> drivers、结构图、attachments/save observers、realistic fixtures。</p>
+<p><strong>Implementation scope</strong>：FormObservation与FillPlan分离；sections/rows/fields/dependencies；scoped locator、动态重绘、native/ARIA及已冻结平台的组件drivers；typed salary/location/date；上传完成证据；parser修复；多页完整性/validation/autosave；恢复不新增重复row/附件。</p>
+<p>已有GenericWebAdapter保留为可组合默认driver，不继续把所有站点认证/字段/导航写入一个大文件。复用之前已验证的站点能力；不在本轮引入任意模型执行JS。</p>
+<p><strong>Automated tests</strong>：D类全部结构/组件fixture；实际React/Vue controlled页面与本地API；依赖字段/虚拟选项/iframe/open shadow支持范围；每个重要写入前后kill；结果用独立serverdraft比较。</p>
+<p><strong>Acceptance gate</strong>：认证范围的完整合成任务所有必需记录/值/附件/保存结果正确；错select不只warning；隐藏要求/observation error不假READY；不存在虚构经历或重复副作用；unsupported被明确分类而非借问owner遮盖。</p>
+<p><strong>Stop condition</strong>：新外站动作effect不明/无可靠driver、网站限制不能保持真实事实时安全停；不能以auto-fillJS强行越过页面逻辑。</p>
+<p><strong>Owner interaction</strong>：NO；大量合成与已脱敏公开结构，私人站点最后验收。</p>
+<p><strong>Rollback</strong>：driver按版本切回；新observations保留引用；未证明兼容的draft先只读恢复，不把旧locator重放。</p>
+<h2 id="05_rounds-jcr-07--independent-final-review--human-submit-boundary">JCR-07 — Independent Final Review &amp; Human Submit Boundary</h2>
+<p><strong>Objective</strong>：READY真正意味着“系统已完成可以自动验证的完整性审查，只剩本人意愿确认和最终点击”。</p>
+<p><strong>Files/surfaces</strong>：<code>review.py</code>、<code>application.py</code> READY分支、task readiness、UI复核、protected_targets；新增certificate/observer/post-submit read-only contract。</p>
+<p><strong>Implementation scope</strong>：独立当前draft观察与ReviewCertificate；明确项目/附件/字段/声明/日期/薪酬/目标/保存状态检查；证书依赖版本与失效机制；本地完整值/差异审阅；用户最终点击的人工ownership；提交后只读记录和保护。</p>
+<p>旧“生成checklist”改为“逐项证据+需人做的最后决定”。无private值的diagnostics与本人复核分离。就绪状态可以只读重核，但不得通过新接口实现自动final-click。</p>
+<p><strong>Automated tests</strong>：H类全部；与实际draft故意不一致的计划；隐含默认/未展开要求/附件失败/缺研究；certificate过期；Continue实际提交/Enter默认提交对抗fixture；fake human actor模拟最终点击，automation actor提交计数为0。</p>
+<p><strong>Acceptance gate</strong>：所有false-ready反例被拒绝；expectedreview与actualdraft一致；无必须事项UNKNOWN/FAIL时才READY；任何更改正确使证书失效；用户点击后只读验证分级、保护identity生效。</p>
+<p><strong>Stop condition</strong>：有任何无法证明的mandatory项时保持未就绪；不能用“反正user最后会看”豁免检查。</p>
+<p><strong>Owner interaction</strong>：NO；实际最终点击只在JCR-09由owner自主决定。</p>
+<p><strong>Rollback</strong>：旧证书作废，保留只读review；绝不回到“先READY后review”的批准路径。</p>
+<h2 id="05_rounds-jcr-08--consumer-app--transactional-local-release">JCR-08 — Consumer App &amp; Transactional Local Release</h2>
+<p><strong>Objective</strong>：让正常安装、运行、发现异常、更新与恢复都在app内完成；Desktop Commander不再是运维依赖。</p>
+<p><strong>Files/surfaces</strong>：<code>consumer/cli/preflight/dashboard/supervisor/diagnostics/updater</code>、<code>ui/</code>、<code>app/</code>、<code>runtime/</code>、<code>release/</code>、CI/macOS与installer tests。</p>
+<p><strong>Implementation scope</strong>：</p>
+<ul>
+<li>将已有任务读模型/初期bootstrap完成为薄Mac壳；singlewindow、持久context、taskcard操作、unknownfact/security/finalreview工作台；状态真实、通知去重和focus规则。</li>
+<li>GUI onboarding、本地凭证/权限说明、可选login item；缺外部服务仍可看设置/诊断。</li>
+<li>staged immutable versions、锁定依赖、candidate startup test、source/digest/certification、data migration/backup、atomic activation和known-good rollback；保留现有fences。</li>
+<li>诊断可预览/复制 safe报告，包含真实loadedversion/原因/时间/恢复动作；update失败旧版仍可用。</li>
+<li>完成旧单HTMLdashboard/原地git更新/重复事实入口的退役或只读兼容，明确禁止两套writer。</li>
+</ul>
+<p><strong>Automated tests</strong>：真实macOSapp/服务/Chromefixture交互，键盘/缩放/标签；expiredsession；缺profile/key/daemon端口占用；真实两版本依赖升级/失败/migration/kill/updater并发；A/U类门槛和privacy全部通过。</p>
+<p><strong>Acceptance gate</strong>：app可独立打开和自诊断，不以业务服务健康为前提；没有routine Terminal/DC路径；更新不依赖开发工作树干净才能日用；candidate加载SHA正确；badrelease能回退；本人能在UI看见完整真实review而不是工程枚举。</p>
+<p><strong>Stop condition</strong>：需要新付费承诺/发布签名账号/扩大系统权限且无授权时说明最小必需条件；不得悄悄采购或弱化鉴权。</p>
+<p><strong>Owner interaction</strong>：NO（开发）。本机首次权限/安装确认保留到最后，不能以没有owner日常电脑权限为由不做hostedMac合成验证。</p>
+<p><strong>Rollback</strong>：由独立bootstrap切回known-good；数据journal/schema兼容验证，不删除新确认事实；app入口保持可用。</p>
+<h2 id="05_rounds-jcr-09--integrated-certification--final-personal-acceptance">JCR-09 — Integrated Certification &amp; Final Personal Acceptance</h2>
+<p><strong>Objective</strong>：将上述子系统在真实产品入口串联认证；真人验收只验证成熟系统的最后一公里，而不是初次找基础bug。</p>
+<p><strong>Files/surfaces</strong>：全生产入口/合同与matrix；<code>tests/e2e/</code>、fault/soak/macOS/release jobs、支持平台manifest、<code>07_FINAL_CERTIFICATION.md</code>、receipts和最终STATUS。修复仍按根因回到对应子系统，不临时旁路。</p>
+<p><strong>Implementation scope</strong>：先自动执行100黄金任务、1000状态序列、关键fault重复、24hsoak、privacy和Mac安装/更新/恢复；公开只读再查站点drift；冻结exact candidate build及platformcontracts；安排最后1–3个owner时段，收集真实兼容性证据；最后短期正常日用。</p>
+<p><strong>Automated tests</strong>：完整矩阵所有AUTO/AUTO_MAC/PUBLIC层；不是只跑某个focusedbrowser test。任何fix后跑受影响全链及历史安全门槛，必要时重签candidate。</p>
+<p><strong>Acceptance gate</strong>：所有mandatory矩阵有对应证据；至少3种真实招聘机制、4–6合适真实任务覆盖已声明范围；安全/假READY事故0；真实权限/短信/最终手动边界证据明确；5个正常使用日不需工程救援。不同真实平台出现不可自动化安全挑战不算产品bug，但要正确handoff。</p>
+<p><strong>Stop condition</strong>：自动基础门槛未过不得叫owner验收；真实证据缺失则UNVERIFIED而非COMPLETE；严重外部变化/真实账号安全/权限由owner判断。发现基础bug先fixture复现与自动修复，不无限请求重复真人测试。</p>
+<p><strong>Owner interaction</strong>：YES，最多计划3个集中时段，内容见07。正常日用5日不是额外工程QA作业；不要求为达标额外申请不想投的岗位。</p>
+<p><strong>Rollback</strong>：候选失败恢复前一已知安全版本和原任务；新版本未认证前不改consumer-ready标签。若没有已认证旧版，回到受限/工程Alpha并明确范围，不回报虚假完成。</p>
+<h2 id="05_rounds-2-每轮必须提交的闭环证据">2. 每轮必须提交的闭环证据</h2>
+<p>objective/result；base/head/merged SHA；实际修改文件；旧路径保留/退役清单；对应matrix IDs；actual entrypoints；测试命令与结果/CI链接/seed；最小失败与修复证据；迁移/回退；是否真实访问/写入外站；owner interaction次数及原因；剩余未验证事项；下一轮授权/未启动状态。</p>
+<p>一轮可包含多次实现/诊断/修复和多个commit，不必切成用户每次都要回应的微轮次。执行模型可按本包直接继续本轮普通工程问题；遇到真正权限/付费/产品方向问题才停。不存在“commit了所以需要owner真人验收”的默认协议。</p>
+</section><section id="06_execution_protocol" class="chapter"><h1 id="06_execution_protocol-注册与执行协议">注册与执行协议</h1>
+<h2 id="06_execution_protocol-1-注册仅文档操作">1. 注册（仅文档操作）</h2>
+<p>获得文档注册授权后，把本包放入 <code>docs/consumer-readiness-v1/</code>。先核验 remote main、open PR、README与近期代码变化，必要时更新本包的 audit delta；本包基线不是永久真相。不要改用户私人config/profile/runtime/浏览器。</p>
+<p>注册提交只能包含审计/设计/合同/STATUS与合成证据，不包含个人截图、短信、简历或本机路径。初始状态为 REGISTERED / IMPLEMENTATION_NOT_STARTED。注册不代表 JCR-01 已获执行授权，不自动启动真实网站操作。</p>
+<h2 id="06_execution_protocol-2-产品权威">2. 产品权威</h2>
+<p>当前用户明确目标/安全边界 &gt; 本包已批准scope/architecture/invariants &gt; 本轮contract &gt; implementation convenience。历史文档中与当前scope冲突的产品合同需显式标为superseded，不删除历史。已完成的正确安全工作不可因为新计划而退回。</p>
+<h2 id="06_execution_protocol-3-每轮开始-read_first">3. 每轮开始 READ_FIRST</h2>
+<p>当前 main/branch/HEAD、open PR/activewriter、exact-head CI、注册目录README/STATUS、本轮合同、对应acceptance IDs、上一轮receipt、架构不变量、受影响生产路径。只读检查是否已有正确实现或别的writer，避免重复劳动和并行覆盖。</p>
+<p>轮次执行以“独立验证的用户结果”为单位，不以文件数/commit数为单位。若授权连续执行多轮，仍逐轮合并、生成证据与停止条件检查，不因细小失败结束整个项目，也不越过真人/权限边界。</p>
+<h2 id="06_execution_protocol-4-工程动作授权">4. 工程动作授权</h2>
+<p>在被授权轮次内：可自行定位普通bug、选等价模块结构、维护tests/fixtures、在隔离环境跑浏览器/进程、修复CI、完善文档和PR。不得自行改目标产品、安全不变量、真实投递对象、隐私scope、付费承诺或新增system-level权限。</p>
+<p>真实账户动作必须有准确对象与可见副作用授权。公开只读解析不是发送SMS/登录/上传/草稿写入授权。最终submit始终本人点击；任何 owner “继续开发”都不能覆盖此边界。</p>
+<h2 id="06_execution_protocol-5-test-policy">5. Test policy</h2>
+<p>保留原有效回归；历史bug加directproductionpath regression，不只复制源码片段。UI测试从actualconsumer入口走，oracle读真实fixture结果。所有GitHub证据默认synthetic/copy-safe。</p>
+<p>允许变更已被批准取代的旧产品合同，例如“缺key禁止打开设置UI”“普通事实永不持久”。变更须说明旧断言问题、新契约和安全等价证明。禁止无理由降级、skip历史安全测试、降低真实性要求或通过改expected迎合错误实现。</p>
+<p>未来轮次尚未完成的case必须留NOT_RUN并有责任轮次；只可宣称当前轮次退出条件通过，不能把新包完整矩阵称为全绿。测试flaky要定位，不以多次重跑挑成功掩盖。</p>
+<h2 id="06_execution_protocol-6-completion-gate">6. Completion gate</h2>
+<p>本轮完成 = objective实际成立 + 对应必需自动gate通过 + 历史不变量通过 + 可重复migration/rollback + 同一head CI证据 + remote main集成核验 + receipt/STATUS远端回读。</p>
+<p>若没有合并权限，状态只能 READY_TO_MERGE，不编造已合并。若CI被额度/外部服务阻塞，记录代码已准备和gate未完成，不把发布阻塞混作实现失败；可以按已批准依赖继续不依赖该gate的设计/测试工作，但不得给release签证。</p>
+<h2 id="06_execution_protocol-7-什么情况下停止">7. 什么情况下停止</h2>
+<p>必须停：真实岗位/事实/安全挑战/新法律承诺需要人；权限或付费承诺未授权；另一个writer正在修改同一表面；缺乏旧真实数据迁移安全证明；外部副作用不明；本轮已满足出口且下一轮未授权。</p>
+<p>不应停：普通测试失败、locator过期、类型错误、dependency compatibility可在已有权限内修复、需要多次commit或要再次读CI。先bounded diagnosis并修复，再报告实际原因；不把“怎么停了”变成默认恢复协议。</p>
+<h2 id="06_execution_protocol-8-给执行窗口的最小指令模板尚未执行">8. 给执行窗口的最小指令（模板，尚未执行）</h2>
+<blockquote>
+<p>连接 <code>haohongfei2001-png/Job-Application-Executor</code>，重核验 remote main、open PR、当前writer及CI，读取 <code>docs/consumer-readiness-v1/</code> 的README、STATUS、架构/不变量、JCR-01合同和验收矩阵。本次授权只执行JCR-01，沿生产路径完成实现、独立自动验证、必要修复、PR与合入后核验；普通工程问题自行处理。不得读取私人申请资料、操作真实招聘账号/短信、最终提交、新增付费或扩大权限。不得把owner当逐轮测试员，不得弱化安全/真实性测试。退出条件未成立不宣称完成；成立后更新receipt/STATUS并停在下一轮未授权。</p>
+</blockquote>
+<p>本模板假定包已注册且授权执行JCR-01；当前审计交付并没有执行它。用户可选自己指定的 GPT-5.6 Sol High/Extra High 环境；本包不依赖某一模型名称的可用性或额度承诺。</p>
+</section><section id="07_final_certification" class="chapter"><h1 id="07_final_certification-最终认证与真人验收计划">最终认证与真人验收计划</h1>
+<h2 id="07_final_certification-1-发布标签">1. 发布标签</h2>
+<p>DESIGN_ONLY → IMPLEMENTING → AUTOMATED_CANDIDATE → REAL_ACCEPTANCE_PENDING → PERSONAL_RC → PERSONAL_CONSUMER_READY。</p>
+<p>当前仅 DESIGN_ONLY。main CI通过、docs齐全、9轮提交合并都不自动进入最后状态。对外/对自己都要区分已认证范围和其他通用尝试。</p>
+<h2 id="07_final_certification-2-最后叫-owner-前必须完成">2. 最后叫 owner 前必须完成</h2>
+<p>所有核心AUTO矩阵通过；100完整黄金任务由独立oracle验证；1000状态序列和关键fault重复；Macapp启动、session、更新/回退真实进程认证；24hsoak；privacy/submit/protected invariants通过；公开站点drift已查；exact candidate SHA/builddigest锁定；具体3种平台机制与真实目标候选范围准备好；脱敏诊断/安全停止/回退已经可用。</p>
+<p>严禁先让owner投一个岗位看看，再以“真实反馈”替代这些门槛。可用的公共网页、旧已脱敏案例、合成framework fixtures应先用尽。</p>
+<h2 id="07_final_certification-3-计划中的13个集中时段">3. 计划中的1–3个集中时段</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>时段</th>
+<th>owner真正需要做什么</th>
+<th>开发/产品自动负责什么</th>
+<th>出口</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1：本机启用与首个平台</td>
+<td>从app完成首次权限/凭证/私人资料核对；选择一个确实要投的岗位；必要SMS或安全动作；查看最终review</td>
+<td>导入校验、服务和专用浏览器自启、实际模型契约、普通OTP接收、表单与review、真实证据私有存储</td>
+<td>不需要Terminal/DC；一个完整realjourney；不能自动处理的挑战说明准确</td>
+</tr>
+<tr>
+<td>2：跨平台与日常流</td>
+<td>使用其他认证机制的3–5个合适任务；在同名/新事实/声明处作真实决定；自主选择是否最终提交</td>
+<td>公司+role/landing/list/search、已有登录/SMS、dynamicrepeat/附件/未知事实记忆、A/B任务恢复</td>
+<td>至少3种机制、总计4–6任务有证据；无基础填表遗漏、错目标、重复问已知事实</td>
+</tr>
+<tr>
+<td>3：保留的恢复/更新或一次复验</td>
+<td>在合适非敏感时机同意一次sleep/reboot/更新演示；或核验上一时段发现的真实站点特例</td>
+<td>自动恢复原任务与事实、证书重新核验、失败回滚、把特例转成回归</td>
+<td>无工程救援；剩余真实边界闭环</td>
+</tr>
+</tbody>
+</table></div>
+<p>这些是合并的验收时段，不是保证网站永远只让用户验证三次。不可自动化的挑战将来仍可能出现。实际时长取决于站点和用户目标，不为了压缩时长跳过必要review。</p>
+<p>没有真实愿意投的合适岗位时不虚假申请、不占用志愿、不创建不需要的账号。最终提交绝不为测试强迫用户；用户未选择实际提交时，post-submit真实观测保持未验证，并在证书中明确范围，不能伪造服务器回执。</p>
+<h2 id="07_final_certification-4-真实异常处理">4. 真实异常处理</h2>
+<p>先判断是平台安全挑战、缺真实事实、外部站点变更，还是基础产品bug。前三者按既定handoff处理；基础bug立即停止该任务的自动写入，保留已完成工作，用脱敏最小证据做fixture并修复。修好并完整自动回归前不要求owner继续试。</p>
+<p>计划保留一个复验时段而非假装一定一次过。若超过三个时段仍需owner反复找基础bug，说明前置测试/架构门槛失败，应重新进入工程闭环，不再把产品称为“即将完成”。这不是机械限制安全验证码次数。</p>
+<h2 id="07_final_certification-5-短期真实日用">5. 短期真实日用</h2>
+<p>realacceptance后形成PERSONAL_RC，随后5个实际使用日按本人正常投递需求使用，不安排额外工程QA。任务不必每天提交，但有正常打开/暂停/恢复/资料重用和队列使用证据。无需Terminal、DesktopCommander或临时开发补丁才可完成已认证范围任务；无错目标/虚构事实/秘密外发/假READY；外部CAPTCHA和新决定按设计处理。</p>
+<p>若期间需要工程救援，记录根因、修复与回归，再对受影响范围重新验证。5日观察不是99.9%可用性统计证明，只是个人长期使用前最低现实检验。未完成观察时保持PERSONAL_RC。</p>
+<h2 id="07_final_certification-6-最终证书必须包含">6. 最终证书必须包含</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项目</th>
+<th>必需内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>构建</td>
+<td>remote main commit、artifact digest、依赖锁版本、Macapp/bootstrap/worker版本</td>
+</tr>
+<tr>
+<td>环境</td>
+<td>macOS/架构、Chrome版本、专用profile来源与所有权证明、外部provider contract版本</td>
+</tr>
+<tr>
+<td>支持矩阵</td>
+<td>三种实际机制、公司/ATS/查询/认证/表单特性、限制；证据不含秘密</td>
+</tr>
+<tr>
+<td>自动证据</td>
+<td>对应run/seed、case expected/actual、fault ledger、privacy/no-submit counts、migration/rollback</td>
+</tr>
+<tr>
+<td>真实证据</td>
+<td>验收时段、真实任务的脱敏身份和结果、需要人工的类型、未验证事项</td>
+</tr>
+<tr>
+<td>完整性</td>
+<td>所有mandatory case状态，不适用的证据，未知不作PASS</td>
+</tr>
+<tr>
+<td>隐私/安全</td>
+<td>数据外发范围、权限、无法防护的威胁、无越界证据；非仅布尔自证</td>
+</tr>
+<tr>
+<td>更新/运维</td>
+<td>用户入口可自诊断/回退；DC/Terminal非routine dependency</td>
+</tr>
+<tr>
+<td>决议</td>
+<td>consumer-ready / limited RC / blocked；决定理由、剩余风险、复验触发条件</td>
+</tr>
+</tbody>
+</table></div>
+<p>发布后浏览器/站点/模型合同有重大变化，不自动继承旧认证。运行中发现关键身份/表单合同漂移应降级为安全等待/不支持，保留其他认证范围；不要静默相信过时selector。</p>
+<h2 id="07_final_certification-7-到那时实际日常使用">7. 到那时实际日常使用</h2>
+<p>打开“AI投递经理”，说“投递OPPO AI产品经理”或贴URL。系统先证明目标，显示具体岗位；唯一匹配可以继续，有真实歧义才让用户选。系统自行处理已有登录/可支持的SMS、资料、附件与表单，并给出实际完成/等待结果。</p>
+<p>用户只在新客观事实、主观选择、未授权新声明、无法自动化安全挑战，以及最终意愿/点击时出现。普通已确认资料不重问，正常重启/断网/更新不变成技术任务。最终review展示具体值、附件、项目覆盖和必要例外，用户点击真实网站最终按钮，系统只读记录结果。</p>
+<p>不能承诺覆盖全互联网、消除所有安全验证、睡眠/关机中继续执行，或取消本人责任。可以合理承诺的是：<strong>在已认证支持范围内，不需要本人承担开发、诊断和重复资料工作；系统不确定时说清楚、不造假、不越界。</strong></p>
+</section><section id="08_evidence_index" class="chapter"><h1 id="08_evidence_index-证据索引与审计边界">证据索引与审计边界</h1>
+<p>本包使用 E00–E25 引用对应固定版本实现、测试或历史说明。代码证据均绑定 <code>72dd892c144699f8a9e9988265bfb20f50b3db4e</code>，不能因未来 main 改变自动转为新版本证据。</p>
+<h2 id="08_evidence_index-已执行未执行">已执行、未执行</h2>
+<p>已执行：GitHub 授权只读读取；核验 exact-head CI 和实际日志；读取关键执行/安全/恢复/UI/更新实现及测试；在本工作容器运行 3 个有合成替身的源码片段探针。</p>
+<p>未执行：完整仓库 pytest 重跑；用户 Mac 进程/浏览器检查；真实短信或登录；真站填表/附件上传/最终点击；实际 crash/sleep/reboot 注入；用户私人资料内容审核；任何 GitHub 写入或代码部署。下文故障表为代码级路径推演，不冒充上述未执行实验。</p>
+<p>审计是按用户结果覆盖面的产品/可靠性评估，不是对每一行或所有可能网站行为的数学证明。长文件的阅读范围在各条明确；重要结论由直接实现和测试分支支持，而非仅由文件名推断。</p>
+<h2 id="08_evidence_index-e00">E00</h2>
+<h3 id="08_evidence_index-远端基线提交开放-prci">远端基线、提交、开放 PR、CI</h3>
+<p>开始和收口阶段重新核验 main；SHA 未变。开放 PR 查询返回空数组。实际读取 Actions job 日志：240 passed in 56.33s；此数字是远端 CI，不是本次容器重跑。</p>
+<ul>
+<li><a href="https://api.github.com/repos/haohongfei2001-png/Job-Application-Executor/branches/main" rel="noopener noreferrer">main</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/commit/72dd892c144699f8a9e9988265bfb20f50b3db4e" rel="noopener noreferrer">72dd892c144699f8a9e9988265bfb20f50b3db4e</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/35848476087" rel="noopener noreferrer">35848476087</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/35848476087/job/107140245000" rel="noopener noreferrer">107140245000</a></li>
+</ul>
+<h2 id="08_evidence_index-e01">E01</h2>
+<h3 id="08_evidence_index-readme-与产品边界">README 与产品边界</h3>
+<p>读取 README 与完整 review playbook。后者要求审查实际表单/服务器草稿、项目清单及提交后只读验证；不能把文档要求当作运行时实现。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/README.md" rel="noopener noreferrer">README.md</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/docs/APPLICATION_REVIEW_PLAYBOOK.md" rel="noopener noreferrer">docs/APPLICATION_REVIEW_PLAYBOOK.md</a></li>
+</ul>
+<h2 id="08_evidence_index-e02">E02</h2>
+<h3 id="08_evidence_index-消费端意图与控制">消费端意图与控制</h3>
+<p>读取 manager 核心路径与后半执行逻辑、完整设计说明；CREATE_TASK 精确 URL 条件、单 NEEDS_USER_ACTION 快捷恢复、模型上下文/提议/策略拒绝。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/manager.py" rel="noopener noreferrer">executor/autonomy/manager.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/docs/DEEPSEEK_APPLICATION_AGENT.md" rel="noopener noreferrer">docs/DEEPSEEK_APPLICATION_AGENT.md</a></li>
+</ul>
+<h2 id="08_evidence_index-e03">E03</h2>
+<h3 id="08_evidence_index-执行器和-ready-转换">执行器和 READY 转换</h3>
+<p>读取构造/运行/认证/填表及末段 READY 分支。READY 在 build_final_review 前设置；最终审查结果没有成为该转换的充分门槛。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/application.py" rel="noopener noreferrer">executor/application.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e04">E04</h2>
+<h3 id="08_evidence_index-最终-review-与项目覆盖">最终 review 与项目覆盖</h3>
+<p>完整读取。coverage 基于 plan 字段和标题子串；review 构造输出不是对网站草稿的独立认证。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/review.py" rel="noopener noreferrer">executor/review.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/tests/test_review_v1.py" rel="noopener noreferrer">tests/test_review_v1.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e05">E05</h2>
+<h3 id="08_evidence_index-通用浏览器适配器">通用浏览器适配器</h3>
+<p>分段读取完整核心实现：原生控件快照、填充、验证、认证、导航、截图。对 select 不同值仅产生 warning；默认范围不等于全部动态控件。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/adapters/generic_web.py" rel="noopener noreferrer">executor/adapters/generic_web.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e06">E06</h2>
+<h3 id="08_evidence_index-浏览器会话与标签页">浏览器会话与标签页</h3>
+<p>完整读取 browser.py；测试文件主要由目录和现有 CI 确认，未据文件名推断逐条覆盖。latest_page 使用全局最后标签；connect 按精确 URL 找页。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/browser.py" rel="noopener noreferrer">executor/browser.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/tests/test_browser_runtime_v1.py" rel="noopener noreferrer">tests/test_browser_runtime_v1.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e07">E07</h2>
+<h3 id="08_evidence_index-队列持久化与恢复">队列持久化与恢复</h3>
+<p>分段读取队列和完整说明：SQLite claim、lease、owner fencing、safe checkpoint、pause provenance 与预算。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/queue.py" rel="noopener noreferrer">executor/autonomy/queue.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/docs/LOCAL_AUTONOMY.md" rel="noopener noreferrer">docs/LOCAL_AUTONOMY.md</a></li>
+</ul>
+<h2 id="08_evidence_index-e08">E08</h2>
+<h3 id="08_evidence_index-worker--operational-audit">Worker / operational audit</h3>
+<p>读取 Worker、运行/返回态/异常与 OperationalAudit：单 worker、内存答案、守卫、阻塞映射；普通答案持久化与消费者工作流断开。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/worker.py" rel="noopener noreferrer">executor/autonomy/worker.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e09">E09</h2>
+<h3 id="08_evidence_index-supervisor-安全与-ui-session">Supervisor 安全与 UI session</h3>
+<p>分两段完整读取：Host/Origin/token、ticket/session、route、mutation lock；UI session 为一小时内存态，过期页面要求 CLI 重开。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/supervisor.py" rel="noopener noreferrer">executor/autonomy/supervisor.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e10">E10</h2>
+<h3 id="08_evidence_index-界面与卡片">界面与卡片</h3>
+<p>读取 HTML/CSS/JS，结合用户提供截图。静态任务卡、非持久对话、固定 readiness 文案，没有完整本地最终复核工作台。截图不能证明本机加载 SHA。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/dashboard.py" rel="noopener noreferrer">executor/autonomy/dashboard.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e11">E11</h2>
+<h3 id="08_evidence_index-启动与-onboarding">启动与 onboarding</h3>
+<p>完整读取。app 为引用 repo/.venv 的 launcher；预检失败不打开 UI；启动与业务执行准备度被耦合。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/consumer.py" rel="noopener noreferrer">executor/autonomy/consumer.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/cli.py" rel="noopener noreferrer">executor/autonomy/cli.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/preflight.py" rel="noopener noreferrer">executor/autonomy/preflight.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/docs/CONSUMER_ENTRY.md" rel="noopener noreferrer">docs/CONSUMER_ENTRY.md</a></li>
+</ul>
+<h2 id="08_evidence_index-e12">E12</h2>
+<h3 id="08_evidence_index-本地诊断">本地诊断</h3>
+<p>读取完整。诊断为允许字段摘要；缺失故障时间线/归因；available 不是在线探测，版本为 checkout 而非加载进程证明。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/diagnostics.py" rel="noopener noreferrer">executor/autonomy/diagnostics.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/docs/LOCAL_DIAGNOSTICS_UPDATER.md" rel="noopener noreferrer">docs/LOCAL_DIAGNOSTICS_UPDATER.md</a></li>
+</ul>
+<h2 id="08_evidence_index-e13">E13</h2>
+<h3 id="08_evidence_index-更新器">更新器</h3>
+<p>分段读取。保留锁、原子状态、ff-only、OTP 与 mutation fence；当前不是独立候选部署/依赖升级/自动回滚器。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/updater.py" rel="noopener noreferrer">executor/autonomy/updater.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e14">E14</h2>
+<h3 id="08_evidence_index-otp-broker-与-transport">OTP broker 与 transport</h3>
+<p>完整读取。broker 内存 TTL/单次消费有保护；relay 的短时 request/claim/cancel 与 Mac Messages fallback 的依赖不构成持续登录闭环。未读取实际私密 relay 配置。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/autonomy/otp.py" rel="noopener noreferrer">executor/autonomy/otp.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/otp/bridge.py" rel="noopener noreferrer">executor/otp/bridge.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/docs/LOCAL_AUTONOMY.md" rel="noopener noreferrer">docs/LOCAL_AUTONOMY.md</a></li>
+</ul>
+<h2 id="08_evidence_index-e15">E15</h2>
+<h3 id="08_evidence_index-字段映射与事实获取">字段映射与事实获取</h3>
+<p>读取规则/alias、mapper 请求、完整 FieldResolver 及 profile。模型输出受 allowed_keys 限制，但结构上下文/重复行不足，已有值并非真值证明。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/resolver.py" rel="noopener noreferrer">executor/resolver.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/profile.py" rel="noopener noreferrer">executor/profile.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e16">E16</h2>
+<h3 id="08_evidence_index-资料证据项目和用户覆盖">资料证据、项目和用户覆盖</h3>
+<p>读取导入标签/项目解析与后半历史/override/写入部分；未对用户私人 MAX/简历内容逐项重新审计。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/evidence.py" rel="noopener noreferrer">executor/evidence.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/docs/MIGRATION_AUDIT_2026-09-18.md" rel="noopener noreferrer">docs/MIGRATION_AUDIT_2026-09-18.md</a></li>
+</ul>
+<h2 id="08_evidence_index-e17">E17</h2>
+<h3 id="08_evidence_index-岗位-resolver">岗位 resolver</h3>
+<p>完整读取。现有公司 resolver 只覆盖 Schneider、OPPO；存在提前返回 exact title、位置过滤不足和 Manager 内重复落地逻辑。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/target_resolver.py" rel="noopener noreferrer">executor/target_resolver.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e18">E18</h2>
+<h3 id="08_evidence_index-按钮语义与旧规则">按钮语义与旧规则</h3>
+<p>完整读取。按钮正则与新 resolver/adapter 各有职责和重复；不存在 submit 方法不代表所有 next/apply 控件都天然无提交副作用。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/executor/field_classifier.py" rel="noopener noreferrer">executor/field_classifier.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e19">E19</h2>
+<h3 id="08_evidence_index-隔离-browser-与-subprocess-e2e">隔离 browser 与 subprocess E2E</h3>
+<p>分段读取完整测试核心及尾部：真实 Chromium、小型 HTML、独立 daemon、OTP HTTP 和 submit 计数；重启在 READY 后。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/tests/test_autonomy_v1.py" rel="noopener noreferrer">tests/test_autonomy_v1.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/tests/test_generic_browser_v1.py" rel="noopener noreferrer">tests/test_generic_browser_v1.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e20">E20</h2>
+<h3 id="08_evidence_index-consumer-测试">Consumer 测试</h3>
+<p>完整读取 consumer_entry 测试，结合 CI 与预检实现；大量 launch 依赖替换，dashboard 以字符串断言为主。不能称为实际 Mac 应用验收。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/tests/test_consumer_entry_v1.py" rel="noopener noreferrer">tests/test_consumer_entry_v1.py</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/tests/test_live_preflight_v1.py" rel="noopener noreferrer">tests/test_live_preflight_v1.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e21">E21</h2>
+<h3 id="08_evidence_index-更新和诊断测试">更新和诊断测试</h3>
+<p>读取主要段落 1–850；真实临时 Git/锁/HTTP 测试存在，完整更新成功路径替换 Git 与进程调用。未声称所有尾部逐行审计。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/tests/test_local_operations_v1.py" rel="noopener noreferrer">tests/test_local_operations_v1.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e22">E22</h2>
+<h3 id="08_evidence_index-manager-policy-测试">Manager policy 测试</h3>
+<p>阅读显式意图、exact URL、待答字段与 fake provider 等关键段落；覆盖策略合同，不等于真人自然语言和真实网站闭环。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/tests/test_manager_v1.py" rel="noopener noreferrer">tests/test_manager_v1.py</a></li>
+</ul>
+<h2 id="08_evidence_index-e23">E23</h2>
+<h3 id="08_evidence_index-ci-定义">CI 定义</h3>
+<p>读取 workflow；依赖入口由 workflow/目录确认。当前 Ubuntu/Python3.12/Chromium 单 job，未见消费级 macOS 发布/安装全链路认证。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/.github/workflows/application-executor-ci.yml" rel="noopener noreferrer">.github/workflows/application-executor-ci.yml</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/requirements.txt" rel="noopener noreferrer">requirements.txt</a></li>
+</ul>
+<h2 id="08_evidence_index-e24">E24</h2>
+<h3 id="08_evidence_index-历史验收记录">历史验收记录</h3>
+<p>完整读取。历史 116 测试通过和真实机空队列保护不能替代当前多平台产品认证。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/docs/AUTONOMY_VALIDATION.md" rel="noopener noreferrer">docs/AUTONOMY_VALIDATION.md</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/blob/72dd892c144699f8a9e9988265bfb20f50b3db4e/docs/LIVE_E2E_ACCEPTANCE.md" rel="noopener noreferrer">docs/LIVE_E2E_ACCEPTANCE.md</a></li>
+</ul>
+<h2 id="08_evidence_index-e25">E25</h2>
+<h3 id="08_evidence_index-近期-pr提交历史">近期 PR/提交历史</h3>
+<p>阅读近期 8 个 PR 的状态/标题/描述和提交历史；并非逐个完整 diff 的二次审计。当前实现判断仍以 pinned main 为准。</p>
+<ul>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/pull/1" rel="noopener noreferrer">1</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/pull/2" rel="noopener noreferrer">2</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/pull/3" rel="noopener noreferrer">3</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/pull/4" rel="noopener noreferrer">4</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/pull/5" rel="noopener noreferrer">5</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/pull/6" rel="noopener noreferrer">6</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/pull/7" rel="noopener noreferrer">7</a></li>
+<li><a href="https://github.com/haohongfei2001-png/Job-Application-Executor/pull/8" rel="noopener noreferrer">8</a></li>
+</ul>
+<h2 id="08_evidence_index-本次隔离片段实验-p01p03">本次隔离片段实验 P01–P03</h2>
+<p><a href="evidence/source_excerpt_probes.py">evidence/source_excerpt_probes.py</a> 中只复制 <code>review._norm/_covered</code>、<code>GenericWebAdapter.validate</code> 与 <code>browser.latest_page</code> 的实际片段；用最小合成类型/页面替身驱动相关分支。结果位于 <a href="evidence/source_excerpt_probes.json">JSON</a>。</p>
+<p>P01：两个明确不同而标题包含的项目被 <code>_covered</code> 判为已覆盖。P02：期望北京、实际上海的 select 结果仍 <code>ok=true</code>，只有 warning。P03：最后打开的无关标签被选中，而非传入的任务页。</p>
+<p>这些反例证明局部判据不足；没有证明真实网站已经发生错填，也没有执行真实浏览器崩溃实验。注册后必须把反例转为直接 import 产品实现的集成/浏览器测试，不能永久以复制函数的测试替代。</p>
+<h2 id="08_evidence_index-技术设计参考不是当前产品已具备的能力">技术设计参考（不是当前产品已具备的能力）</h2>
+<ul>
+<li><a href="https://developer.chrome.com/blog/remote-debugging-port" rel="noopener noreferrer">Chrome 官方：remote debugging 安全变更</a>：支持保留专用非默认 profile 的方向，不应让自动化接管日常默认 profile。</li>
+<li><a href="https://playwright.dev/python/docs/locators" rel="noopener noreferrer">Playwright 官方：Locators</a>：可用 role/label/作用域定位与每次行动重新解析，减少全局 nth 依赖；不保证任意控件都可安全处理。</li>
+<li><a href="https://playwright.dev/python/docs/trace-viewer" rel="noopener noreferrer">Playwright 官方：Trace viewer</a>：为合成环境保留 DOM/网络/截图调试证据；真实私人申请默认不上传原始 trace。</li>
+<li><a href="https://developer.apple.com/documentation/webkit/wkwebview" rel="noopener noreferrer">Apple：WKWebView</a> 与 <a href="https://developer.apple.com/documentation/servicemanagement/smappservice" rel="noopener noreferrer">SMAppService</a>：薄壳/受控本地服务设计参考。具体安装、签名和权限行为必须在目标 macOS 认证；本审计未验证 Apple API 在用户电脑上的运行状态。</li>
+</ul>
+<h2 id="08_evidence_index-github-发布证据注意事项">GitHub 发布证据注意事项</h2>
+<p>基线分支信息返回 <code>protected=false</code>。计划可以要求新的 required checks / release manifest，但不能假称本次已设置分支保护。任何额外付费、签名账号或安装权限应先报告实际必要性；个人本机 v1 不以购买企业级发布设施为前提。</p>
+</section><section id="09_traceability" class="chapter"><h1 id="09_traceability-findings--design--acceptance-追踪表">Findings → Design → Acceptance 追踪表</h1>
+<p>本表不是新缺陷计数的统计推断；它把已发现的系统性问题对应到修法与结果门槛。源码片段 P01–P03 的验证范围见证据文件。后续实现 receipt 必须记录具体case而非仅引用本表。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Finding</th>
+<th>问题</th>
+<th>证据</th>
+<th>结构性修法</th>
+<th>责任轮次</th>
+<th>验收关联</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GAP01</td>
+<td>用户必须提供exact URL</td>
+<td>E02/E17</td>
+<td>DiscoveryRequest→VerifiedJobTarget</td>
+<td>JCR-03</td>
+<td>B-01～B-13</td>
+</tr>
+<tr>
+<td>GAP02</td>
+<td>READY先于完整review</td>
+<td>E03/E04</td>
+<td>独立ReviewCertificate + invalidation</td>
+<td>JCR-07</td>
+<td>H-01～H-06</td>
+</tr>
+<tr>
+<td>GAP03</td>
+<td>select错值warning-only</td>
+<td>E05/P02</td>
+<td>typed normalization + actual readback</td>
+<td>JCR-01/06</td>
+<td>D-01/D-04/H-03</td>
+</tr>
+<tr>
+<td>GAP04</td>
+<td>项目substring误覆盖</td>
+<td>E04/P01</td>
+<td>stable record ID + row observation</td>
+<td>JCR-01/04/07</td>
+<td>D-07/E-07/H-04</td>
+</tr>
+<tr>
+<td>GAP05</td>
+<td>全局最后tab和弱归属</td>
+<td>E06/P03</td>
+<td>owned browser/tab/session epoch</td>
+<td>JCR-02</td>
+<td>B-09/G-01/G-06/G-11</td>
+</tr>
+<tr>
+<td>GAP06</td>
+<td>消费者普通答案memory-only</td>
+<td>E08/E16</td>
+<td>scoped private fact journal</td>
+<td>JCR-04</td>
+<td>E-01～E-04/E-08/E-09</td>
+</tr>
+<tr>
+<td>GAP07</td>
+<td>mode/late OTP/relay生命周期</td>
+<td>E05/E14</td>
+<td>AuthAttempt + independent transports</td>
+<td>JCR-05</td>
+<td>C-01～C-15</td>
+</tr>
+<tr>
+<td>GAP08</td>
+<td>恢复只证明queue不证明draft</td>
+<td>E07/E08/E19</td>
+<td>action outcome + actual draft reconciliation</td>
+<td>JCR-02/06</td>
+<td>G-01～G-10</td>
+</tr>
+<tr>
+<td>GAP09</td>
+<td>无限大native-field snapshot责任</td>
+<td>E05/E15</td>
+<td>form graph + component/site drivers</td>
+<td>JCR-06</td>
+<td>D-01～D-22</td>
+</tr>
+<tr>
+<td>GAP10</td>
+<td>命令选错task/模型阻塞控制</td>
+<td>E02/E09</td>
+<td>bound command + local priority + receipt</td>
+<td>JCR-01</td>
+<td>G-08/G-11/G-13</td>
+</tr>
+<tr>
+<td>GAP11</td>
+<td>启动失败无法进入产品修复</td>
+<td>E11/E20</td>
+<td>always-available bootstrap UI</td>
+<td>JCR-02/08</td>
+<td>A-01～A-12</td>
+</tr>
+<tr>
+<td>GAP12</td>
+<td>诊断失去cause/loadedversion</td>
+<td>E12/E21</td>
+<td>safe structured error timeline</td>
+<td>JCR-02/08</td>
+<td>U-06/U-10</td>
+</tr>
+<tr>
+<td>GAP13</td>
+<td>生产原地git更新无完整回退</td>
+<td>E13/E21</td>
+<td>staged candidate + locked deps + rollback</td>
+<td>JCR-08</td>
+<td>U-01～U-05</td>
+</tr>
+<tr>
+<td>GAP14</td>
+<td>安全标记冒充健康/复核</td>
+<td>E09/E10</td>
+<td>task/readiness/health separated read model</td>
+<td>JCR-01/07/08</td>
+<td>H-01/U-07/U-08</td>
+</tr>
+<tr>
+<td>GAP15</td>
+<td>next/apply词义≠动作无副作用</td>
+<td>E05/E18</td>
+<td>certified effect contract + unknown拒绝</td>
+<td>JCR-01/06/07</td>
+<td>F-08/H-07</td>
+</tr>
+<tr>
+<td>GAP16</td>
+<td>模型和artifact出口不是全信息流证明</td>
+<td>E02/E05/E12/E14/E15</td>
+<td>explicit egress schemas + canary scanning</td>
+<td>JCR-01/04/05/08</td>
+<td>F-01～F-09</td>
+</tr>
+<tr>
+<td>GAP17</td>
+<td>测试合同与用户结果错位</td>
+<td>E19～E24</td>
+<td>independent server oracle + actual UI/Mac</td>
+<td>JCR-01～09</td>
+<td>Z-01～Z-07</td>
+</tr>
+<tr>
+<td>GAP18</td>
+<td>用户提交后的证据闭环不完整</td>
+<td>E01/E08/E10</td>
+<td>readonly submission observer + protected IDs</td>
+<td>JCR-07</td>
+<td>H-08/B-12/F-07</td>
+</tr>
+</tbody>
+</table></div>
+</section><footer>JAE-CONSUMER-READINESS-v1 · 私有项目审计交付。证据绑定固定版本；后续执行必须重新读取远端事实。此页面无外部脚本、字体、遥测或自动网络请求。</footer></main></body></html>
