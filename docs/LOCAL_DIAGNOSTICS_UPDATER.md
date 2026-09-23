@@ -41,7 +41,10 @@ until it exits. Update-state JSON is written to a private temporary file and
 atomically replaced, so the supervisor's mutation fence never disappears during
 a partial write. If the machine or updater process dies while a busy state is
 persisted, the next supervisor read reconciles that state against the actual
-file lock and recovers the stale fence instead of permanently disabling the UI.
+file lock. A stale `checking` state is released as a failed check because Git
+has not entered its mutation phase. A stale `updating` or `restarting` state
+becomes `restart_required`, keeping application mutations fenced until the
+user retries update/restart and proves the loaded service matches the checkout.
 
 All admitted state-changing requests share one local mutation lock with update
 startup. An update waits for an already-running manager/chat mutation to finish,
