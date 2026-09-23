@@ -56,7 +56,7 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
         )
 
     events = []
-    for event in supervisor.queue.events()[-12:]:
+    for event in supervisor.queue.recent_events(12):
         task_id = str(event.get("task_id") or "")
         kind = str(event.get("kind") or "")
         stage = str(event.get("stage") or "")
