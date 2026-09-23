@@ -10,7 +10,8 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from .models import FieldResolution, ResolutionStatus, WebField
-from .profile import aliases_for, get_field, is_sensitive_key, profile_keys
+from .profile import (aliases_for, field_is_current, get_field, has_unresolved_conflict,
+                      is_sensitive_key, profile_keys)
 from .facts.representation import represent_choice
 
 
@@ -384,6 +385,17 @@ class FieldResolver:
         if key:
             profile_field = get_field(self.profile, key)
             if profile_field and _nonempty(profile_field.value):
+                if has_unresolved_conflict(self.profile, key) or not field_is_current(profile_field):
+                    return FieldResolution(
+                        field_id=field.field_id, selector=field.selector,
+                        label=field.label, canonical_key=key,
+                        status=ResolutionStatus.UNRESOLVED,
+                        reason=("conflicting sources require explicit local confirmation"
+                                if has_unresolved_conflict(self.profile, key)
+                                else "canonical fact validity expired or unproven"),
+                        required=field.required,
+                        sensitive=profile_field.sensitive or is_sensitive_key(key),
+                    )
                 source = "user_confirmed_profile" if profile_field.user_confirmed else "evidence_profile"
                 represented = profile_field.value
                 if field.input_type == "select" and field.options:
@@ -444,7 +456,7 @@ class FieldResolver:
                 ai_key, ai_conf, ai_reason = self.ai.map_field(field, profile_keys(self.profile))
                 if ai_key and ai_conf >= 0.80:
                     mapped = get_field(self.profile, ai_key)
-                    if mapped and _nonempty(mapped.value):
+                    if mapped and _nonempty(mapped.value) and field_is_current(mapped) and not has_unresolved_conflict(self.profile, ai_key):
                         return FieldResolution(
                             field_id=field.field_id, selector=field.selector, label=field.label,
                             canonical_key=ai_key, status=ResolutionStatus.RESOLVED,
@@ -492,7 +504,7 @@ class FieldResolver:
         ai_key, ai_conf, ai_reason = self.ai.map_field(field, profile_keys(self.profile))
         if ai_key and ai_conf >= 0.80:
             profile_field = get_field(self.profile, ai_key)
-            if profile_field and _nonempty(profile_field.value):
+            if profile_field and _nonempty(profile_field.value) and field_is_current(profile_field) and not has_unresolved_conflict(self.profile, ai_key):
                 return FieldResolution(
                     field_id=field.field_id, selector=field.selector, label=field.label,
                     canonical_key=ai_key, status=ResolutionStatus.RESOLVED,

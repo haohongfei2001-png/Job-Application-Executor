@@ -57,6 +57,8 @@ def project_coverage_review(
     profile: dict[str, Any],
     plan: ApplicationPlan,
 ) -> dict[str, Any]:
+    records = [item for item in ((profile.get("collections") or {}).get("projects") or [])
+               if isinstance(item, dict) and str(item.get("title") or "").strip()]
     canonical = canonical_project_titles(profile)
     structured = structured_project_names(plan.fields)
     exclusions = [
@@ -64,9 +66,30 @@ def project_coverage_review(
         for x in (plan.metadata.get("project_exclusions") or [])
         if str(x).strip()
     ]
+    scoped = ((profile.get("collections") or {}).get("fact_exclusions") or {}).get(
+        plan.execution_id, {})
+    scoped_ids = set()
+    if isinstance(scoped, dict):
+        for record in records:
+            decision = scoped.get(record.get("id"))
+            if (isinstance(decision, dict) and decision.get("source") == "user_explicit_task"
+                    and str(decision.get("reason") or "").strip()):
+                scoped_ids.add(record.get("id"))
+                title = str(record["title"]).strip()
+                if title not in exclusions:
+                    exclusions.append(title)
+
+    def fully_excluded_duplicate(title: str) -> bool:
+        matches = [record for record in records if _norm(record["title"]) == _norm(title)]
+        return len(matches) > 1 and all(record.get("id") in scoped_ids for record in matches)
+
     uncovered = [
         title for title in canonical
-        if not _covered(title, structured) and not _covered(title, exclusions)
+        if (
+            (sum(_norm(record["title"]) == _norm(title) for record in records) > 1
+             and not fully_excluded_duplicate(title))
+            or (not _covered(title, structured) and not _covered(title, exclusions))
+        )
     ]
     return {
         "canonical_projects": canonical,

@@ -103,6 +103,8 @@ LABEL_MAP = {
 BOOL_KEYS = {
     "preferences.accept_location_adjustment",
     "preferences.accept_role_adjustment",
+    "preferences.accept_travel",
+    "preferences.accept_long_term_assignment",
     "identity.foreign_residency_status",
     "compliance.coamc_employee_recusal_requirements_met",
     "policy.auto_accept_privacy_terms",
@@ -123,11 +125,12 @@ def _project_title(text: str) -> bool:
 
 
 def _parse_project_lines(lines: list[str], source_kind: str,
-                         *, category: str = "unspecified") -> list[dict[str, Any]]:
+                         *, category: str = "unspecified",
+                         locators: list[str] | None = None) -> list[dict[str, Any]]:
     projects: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     last_bullet = False
-    for raw in lines:
+    for index, raw in enumerate(lines):
         line = " ".join(str(raw or "").split()).strip()
         if not line:
             continue
@@ -141,6 +144,8 @@ def _parse_project_lines(lines: list[str], source_kind: str,
                 "bullets": [],
                 "source_kind": source_kind,
                 "category": category,
+                "source_refs": [{"kind": source_kind,
+                                 "locator": locators[index] if locators else f"line:{index}"}],
             }
             last_bullet = False
             continue
@@ -199,7 +204,42 @@ def _merge_projects(existing: list[dict[str, Any]], incoming: list[dict[str, Any
         sources = set(old.get("sources") or [old.get("source_kind")])
         sources.add(item.get("source_kind"))
         old["sources"] = sorted(x for x in sources if x)
+        refs = list(old.get("source_refs") or [])
+        for ref in item.get("source_refs") or []:
+            if ref not in refs:
+                refs.append(ref)
+        old["source_refs"] = refs
     return out
+
+
+def _education_records(profile: ApplicantProfile) -> list[dict[str, Any]]:
+    """Structured education inventory derived only from sourced canonical fields."""
+    records: list[dict[str, Any]] = []
+    previous = {item.get("scope"): item.get("id")
+                for item in (profile.collections.get("education_records") or [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)}
+    for scope in ("highest", "bachelor"):
+        prefix = f"education.{scope}."
+        fields = {key.removeprefix(prefix): field
+                  for key, field in profile.fields.items() if key.startswith(prefix)}
+        if not fields:
+            continue
+        identity = [fields.get(name).value if fields.get(name) else ""
+                    for name in ("school", "degree", "major", "start_date", "graduation_date")]
+        # Do not merge two partially described schools merely because one title overlaps.
+        digest = hashlib.sha256(json.dumps([scope, identity], ensure_ascii=False,
+                                           sort_keys=True, default=str).encode()).hexdigest()[:16]
+        records.append({
+            "id": previous.get(scope) or "education-" + digest,
+            "scope": scope,
+            "status": "PARTIAL" if any(value in (None, "") for value in identity) else "SOURCED",
+            "fields": {name: {
+                "value": field.value,
+                "sources": [source.model_dump(mode="json") for source in field.sources],
+                "last_verified": field.last_verified,
+            } for name, field in fields.items()},
+        })
+    return records
 
 
 def _resume_projects(text: str, source_kind: str) -> tuple[list[dict[str, Any]], str]:
@@ -249,10 +289,11 @@ def _clean_value(key: str, raw: str):
     if any(marker in text for marker in PENDING_MARKERS):
         return None
     if key in BOOL_KEYS:
-        if text.startswith("是"):
+        if text.startswith(("是", "同意")):
             return True
-        if text.startswith("否"):
+        if text.startswith(("否", "不同意")):
             return False
+        return None
     text = ANNOTATION_RE.sub("", text).strip()
     if key == "identity.driver_license":
         match = re.search(r"C[12]", text, re.I)
@@ -386,7 +427,8 @@ class ProfileBuilder:
 
         self.profile.collections["projects_from_max"] = project_lines
         parsed_max = _parse_project_lines([x["text"] for x in project_lines], "max_docx",
-                                          category="project_or_research")
+                                          category="project_or_research",
+                                          locators=[x["source"] for x in project_lines])
         self.profile.collections["max_project_parse_status"] = (
             "PARSED" if parsed_max else "UNPARSED_SECTION" if project_lines else "EMPTY_SECTION"
         )
@@ -584,6 +626,7 @@ class ProfileBuilder:
     def build(self) -> ApplicantProfile:
         if self.conflicts:
             self.profile.collections["conflicts"] = self.conflicts
+        self.profile.collections["education_records"] = _education_records(self.profile)
         return self.profile
 
 
@@ -632,6 +675,10 @@ def _set_user_confirmed_field_locked(profile_path: Path, key: str, value: Any,
     if not isinstance(original, dict) or (original and "fields" not in original):
         raise ValueError("reusable fact requires a canonical profile")
     profile = ApplicantProfile.model_validate(original)
+    if note and any(item.get("note") == note for item in
+                    (profile.collections.get("profile_revisions") or [])
+                    if isinstance(item, dict)):
+        return profile_path
     previous = profile.fields.get(key)
     verified_at = _now()
     revisions = profile.collections.setdefault("profile_revisions", [])
@@ -662,6 +709,8 @@ def _set_user_confirmed_field_locked(profile_path: Path, key: str, value: Any,
         user_confirmed=True,
         sensitive=is_sensitive_key(key),
     )
+    if key.startswith("education."):
+        profile.collections["education_records"] = _education_records(profile)
     return _write_profile_locked(profile, profile_path)
 
 

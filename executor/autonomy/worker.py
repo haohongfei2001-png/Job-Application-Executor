@@ -13,7 +13,7 @@ from ..application import ApplicationExecutor
 from ..models import ApplicationStage
 from ..protected_targets import assert_target_not_protected
 from ..settings import load_settings
-from ..evidence import set_user_confirmed_field
+from ..evidence import BOOL_KEYS, set_user_confirmed_field
 from ..profile import DEFAULT_ALIASES
 from ..facts.answers import TaskAnswerStore
 from .otp import BrokerBridge, OtpBroker
@@ -121,6 +121,20 @@ class Worker:
             settings.setdefault("deepseek", {})["enabled"] = False
         return settings
 
+    def _promote_pending_facts(self, tid: str, profile_ref: str) -> bool:
+        try:
+            for pending in self.answer_store.pending_reuse(tid):
+                note = f"task-answer:{tid}:{pending['key']}:{pending['version']}"
+                set_user_confirmed_field(profile_ref, pending["key"], pending["value"],
+                                         note=note)
+                self.queue.invalidate_profile_reviews(profile_ref)
+                self.answer_store.mark_reuse_applied(pending["sequence"])
+            return True
+        except (OSError, ValueError, RuntimeError):
+            # The answer remains task-scoped and the consent stays pending;
+            # retrying never replays an unconfirmed website write.
+            return False
+
     def user_input(self, tid, answers, *, expected_revision=None, remember=False):
         task = self.queue.get(tid)
         if expected_revision is None:
@@ -144,20 +158,48 @@ class Worker:
             raise ValueError("one-time declarations cannot become reusable facts")
         if remember and any(key not in DEFAULT_ALIASES for key in answers):
             raise ValueError("reusable fact requires a known canonical key")
-        # Save before making the task runnable. A crash at either boundary
-        # leaves a private task-scoped answer available on the next process.
-        self.answer_store.save(tid, answers, expected_revision=expected_revision)
+        normalized = dict(answers)
+        for key, value in answers.items():
+            if key not in BOOL_KEYS:
+                continue
+            if type(value) is bool:
+                normalized[key] = value
+            elif isinstance(value, str):
+                chosen = value.strip().casefold()
+                if chosen in {"true", "yes", "是", "同意", "1"}:
+                    normalized[key] = True
+                elif chosen in {"false", "no", "否", "不同意", "0"}:
+                    normalized[key] = False
+                else:
+                    raise ValueError("boolean fact requires explicit yes or no")
+            else:
+                raise ValueError("boolean fact requires explicit yes or no")
         if remember:
-            for key, value in answers.items():
-                set_user_confirmed_field(task["spec"]["profile_ref"], key, value,
-                                         note="explicit local reusable-fact consent")
-            self.queue.invalidate_profile_reviews(task["spec"]["profile_ref"])
-        resumed = self.queue.resume(tid, expected_revision=expected_revision)
+            profile_path = Path(task["spec"]["profile_ref"]).expanduser().resolve()
+            profile_data = json.loads(profile_path.read_text(encoding="utf-8"))
+            if not isinstance(profile_data, dict) or (profile_data and "fields" not in profile_data):
+                raise ValueError("reusable fact requires a canonical profile")
+        # Answer and transition share one SQLite transaction: rejected input
+        # cannot be applied later by a restarted worker.
+        resumed = self.answer_store.save_and_resume(
+            tid, normalized, expected_revision=expected_revision, remember=remember)
         with self.answers_lock:
-            self.answers.setdefault(tid, {}).update(answers)
+            self.answers.setdefault(tid, {}).update(normalized)
+        if remember:
+            resumed["fact_reuse_status"] = (
+                "SAVED" if self._promote_pending_facts(tid, task["spec"]["profile_ref"])
+                else "PENDING"
+            )
         return resumed
 
     def run_once(self):
+        for pending_tid in self.answer_store.pending_tasks():
+            try:
+                pending_task = self.queue.get(pending_tid)
+                self._promote_pending_facts(
+                    pending_tid, pending_task["spec"]["profile_ref"])
+            except (KeyError, ValueError):
+                pass
         task = self.queue.claim("worker-" + str(os.getpid()))
         if not task:
             self.broker.expire()

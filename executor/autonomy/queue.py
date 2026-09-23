@@ -539,73 +539,78 @@ class TaskQueue:
             db.execute("UPDATE tasks SET stage=?,checkpoint=?,blocker=?,details=?,owner=?,lease_until=?,next_run=?,updated=? WHERE task_id=?", (stage, cp, blocker, json.dumps(safe), None if release else owner, None if release else row["lease_until"], self.clock()+delay, self.clock(), tid))
             self._event(db, tid, "checkpoint", stage)
 
+    def _resume_in_tx(self, db, tid, *, command_id=None, expected_revision=None):
+        prior = self._command_before(db, tid, "RESUME", command_id, expected_revision)
+        if prior is not None:
+            return prior
+        row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
+        self._view(row)
+        if (row["owner"] and row["lease_until"] > self.clock()) or row["stage"] in STOPPED:
+            raise ValueError("task active or at immutable human boundary")
+        if row["attempts"] >= json.loads(row["spec"])["max_attempts"] and row["stage"] == "ERROR":
+            raise ValueError("retry budget exhausted")
+        if row["blocker"] in {"browser_ownership_unknown", "user_paused_from_browser_ownership_unknown", "unknown_outcome", "user_paused_from_unknown_outcome"}:
+            raise ValueError("browser outcome requires read-only reconciliation")
+        if db.execute(
+            "SELECT 1 FROM run_attempts WHERE task_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
+            (tid,),
+        ).fetchone():
+            raise ValueError("external outcome requires read-only reconciliation")
+        current_spec = json.loads(row["spec"])
+        if current_spec.get("tenant") and current_spec.get("job_id"):
+            assert_target_not_protected(current_spec["target_url"],
+                                        tenant=current_spec["tenant"],
+                                        job_id=current_spec["job_id"],
+                                        campaign=current_spec.get("campaign", ""))
+        else:
+            assert_target_not_protected(current_spec["target_url"])
+        # Human input/action waits do not consume retry budget. If such a
+        # wait was paused, pause() records that origin in the blocker so the
+        # same reset semantics survive the BLOCKED intermediary state.
+        legacy_human_wait = False
+        if row["stage"] == "BLOCKED" and row["blocker"] == "user_paused":
+            # Compatibility with pre-marker rows: old pause() overwrote the
+            # blocker, but the preceding checkpoint event still records
+            # whether the task was waiting for facts or a human action.
+            previous_wait = db.execute(
+                "SELECT kind,stage FROM events WHERE task_id=? AND kind!='paused' "
+                "ORDER BY seq DESC LIMIT 1",
+                (tid,),
+            ).fetchone()
+            legacy_human_wait = bool(
+                previous_wait
+                and previous_wait["kind"] == "checkpoint"
+                and previous_wait["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"}
+            )
+        human_wait = row["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"} or (
+            row["stage"] == "BLOCKED"
+            and row["blocker"] in {
+                "user_paused_from_input",
+                "user_paused_from_action",
+                "user_paused_from_otp_waiting",
+                "user_paused_from_otp_ambiguous",
+            }
+        ) or legacy_human_wait
+        recoverable_block = (
+            row["stage"] == "BLOCKED"
+            and row["blocker"] in {
+                "session_unavailable",
+                "validation",
+                "user_paused_from_session_unavailable",
+                "user_paused_from_validation",
+                "profile_changed",
+            }
+        )
+        attempts = 0 if (human_wait or recoverable_block) else row["attempts"]
+        db.execute("UPDATE tasks SET stage=checkpoint,blocker=NULL,next_run=0,attempts=?,owner=NULL,lease_until=NULL,paused_from=NULL,updated=? WHERE task_id=?", (attempts, self.clock(), tid))
+        self._event(db, tid, "resumed", row["checkpoint"])
+        receipt = self._command_after(db, tid, "RESUME", command_id)
+        return receipt
+
     def resume(self, tid, *, command_id=None, expected_revision=None):
         with self.tx() as db:
-            prior = self._command_before(db, tid, "RESUME", command_id, expected_revision)
-            if prior is not None:
-                return prior
-            row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
-            self._view(row)
-            if (row["owner"] and row["lease_until"] > self.clock()) or row["stage"] in STOPPED:
-                raise ValueError("task active or at immutable human boundary")
-            if row["attempts"] >= json.loads(row["spec"])["max_attempts"] and row["stage"] == "ERROR":
-                raise ValueError("retry budget exhausted")
-            if row["blocker"] in {"browser_ownership_unknown", "user_paused_from_browser_ownership_unknown", "unknown_outcome", "user_paused_from_unknown_outcome"}:
-                raise ValueError("browser outcome requires read-only reconciliation")
-            if db.execute(
-                "SELECT 1 FROM run_attempts WHERE task_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
-                (tid,),
-            ).fetchone():
-                raise ValueError("external outcome requires read-only reconciliation")
-            current_spec = json.loads(row["spec"])
-            if current_spec.get("tenant") and current_spec.get("job_id"):
-                assert_target_not_protected(current_spec["target_url"],
-                                            tenant=current_spec["tenant"],
-                                            job_id=current_spec["job_id"],
-                                            campaign=current_spec.get("campaign", ""))
-            else:
-                assert_target_not_protected(current_spec["target_url"])
-            # Human input/action waits do not consume retry budget. If such a
-            # wait was paused, pause() records that origin in the blocker so the
-            # same reset semantics survive the BLOCKED intermediary state.
-            legacy_human_wait = False
-            if row["stage"] == "BLOCKED" and row["blocker"] == "user_paused":
-                # Compatibility with pre-marker rows: old pause() overwrote the
-                # blocker, but the preceding checkpoint event still records
-                # whether the task was waiting for facts or a human action.
-                previous_wait = db.execute(
-                    "SELECT kind,stage FROM events WHERE task_id=? AND kind!='paused' "
-                    "ORDER BY seq DESC LIMIT 1",
-                    (tid,),
-                ).fetchone()
-                legacy_human_wait = bool(
-                    previous_wait
-                    and previous_wait["kind"] == "checkpoint"
-                    and previous_wait["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"}
-                )
-            human_wait = row["stage"] in {"NEEDS_USER_INPUT", "NEEDS_USER_ACTION"} or (
-                row["stage"] == "BLOCKED"
-                and row["blocker"] in {
-                    "user_paused_from_input",
-                    "user_paused_from_action",
-                    "user_paused_from_otp_waiting",
-                    "user_paused_from_otp_ambiguous",
-                }
-            ) or legacy_human_wait
-            recoverable_block = (
-                row["stage"] == "BLOCKED"
-                and row["blocker"] in {
-                    "session_unavailable",
-                    "validation",
-                    "user_paused_from_session_unavailable",
-                    "user_paused_from_validation",
-                    "profile_changed",
-                }
-            )
-            attempts = 0 if (human_wait or recoverable_block) else row["attempts"]
-            db.execute("UPDATE tasks SET stage=checkpoint,blocker=NULL,next_run=0,attempts=?,owner=NULL,lease_until=NULL,paused_from=NULL,updated=? WHERE task_id=?", (attempts, self.clock(), tid))
-            self._event(db, tid, "resumed", row["checkpoint"])
-            receipt = self._command_after(db, tid, "RESUME", command_id)
+            receipt = self._resume_in_tx(
+                db, tid, command_id=command_id, expected_revision=expected_revision)
         if command_id:
             return receipt
         return self.get(tid)

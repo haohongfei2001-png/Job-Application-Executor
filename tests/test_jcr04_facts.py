@@ -5,10 +5,10 @@ import pytest
 
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.worker import Worker
-from executor.evidence import (projects_for_task, set_project_exclusion,
+from executor.evidence import (ProfileBuilder, projects_for_task, set_project_exclusion,
                                set_user_confirmed_field, write_profile)
 from executor.models import (ApplicantProfile, ApplicationPlan, ApplicationStage,
-                             ProfileField, ResolutionStatus, WebField)
+                             EvidenceRef, ProfileField, ResolutionStatus, WebField)
 
 
 def _task(queue, tmp_path, suffix="1"):
@@ -64,6 +64,41 @@ def test_task_answer_survives_worker_restart_without_cross_task_reuse(tmp_path):
     restarted.runner_factory = FakeRunner
     assert restarted.run_once()
     assert queue.get(first)["stage"] == "READY_TO_SUBMIT"
+
+
+def test_rejected_resume_rolls_back_answer_and_racing_input(tmp_path, monkeypatch):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = _task(queue, tmp_path)
+    _wait_for_fact(queue, tid)
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    revision = queue.get(tid)["revision"]
+    original = queue._resume_in_tx
+
+    def fail_after_answer(*args, **kwargs):
+        raise RuntimeError("synthetic resume failure")
+
+    monkeypatch.setattr(queue, "_resume_in_tx", fail_after_answer)
+    with pytest.raises(RuntimeError, match="synthetic resume failure"):
+        worker.user_input(tid, {"family.primary.role": "A"},
+                          expected_revision=revision)
+    assert worker.answer_store.load(tid) == {}
+    assert queue.get(tid)["stage"] == "NEEDS_USER_INPUT"
+    monkeypatch.setattr(queue, "_resume_in_tx", original)
+
+    def submit(value):
+        try:
+            worker.user_input(tid, {"family.primary.role": value},
+                              expected_revision=revision)
+            return "accepted", value
+        except RuntimeError:
+            return "stale", value
+
+    with ThreadPoolExecutor(2) as pool:
+        outcomes = list(pool.map(submit, ("A", "B")))
+    assert {result for result, _ in outcomes} == {"accepted", "stale"}
+    accepted = next(value for result, value in outcomes if result == "accepted")
+    assert worker.answer_store.load(tid) == {"family.primary.role": accepted}
+    assert len(worker.answer_store.metadata(tid)) == 1
 
 
 def test_profile_write_crash_preserves_old_version_and_explicit_history(tmp_path, monkeypatch):
@@ -135,6 +170,45 @@ def test_explicit_reuse_updates_canonical_and_revokes_prior_ready_review(tmp_pat
     assert worker.answer_store.load(ready) == {}
 
 
+def test_boolean_fact_is_typed_before_task_save_and_reuse(tmp_path):
+    profile = tmp_path / "synthetic-profile.json"
+    write_profile(ApplicantProfile(), profile)
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = _task(queue, tmp_path)
+    _wait_for_fact(queue, tid, "preferences.accept_travel")
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    with pytest.raises(ValueError, match="yes or no"):
+        worker.user_input(tid, {"preferences.accept_travel": "maybe"}, remember=True)
+    worker.user_input(tid, {"preferences.accept_travel": "false"}, remember=True)
+    assert worker.answer_store.load(tid) == {"preferences.accept_travel": False}
+    saved = ApplicantProfile.model_validate_json(profile.read_text())
+    assert saved.fields["preferences.accept_travel"].value is False
+
+
+def test_reusable_fact_promotion_retries_without_duplicate_revision(tmp_path, monkeypatch):
+    profile = tmp_path / "synthetic-profile.json"
+    write_profile(ApplicantProfile(), profile)
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = _task(queue, tmp_path)
+    _wait_for_fact(queue, tid, "identity.current_city")
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    real_mark = worker.answer_store.mark_reuse_applied
+
+    def crash_after_profile_write(sequence):
+        raise RuntimeError("synthetic crash after canonical replace")
+
+    monkeypatch.setattr(worker.answer_store, "mark_reuse_applied", crash_after_profile_write)
+    result = worker.user_input(tid, {"identity.current_city": "Synthetic City"}, remember=True)
+    assert result["fact_reuse_status"] == "PENDING"
+    assert queue.get(tid)["stage"] == "DISCOVERED"
+    version = ApplicantProfile.model_validate_json(profile.read_text()).collections["profile_write_version"]
+    monkeypatch.setattr(worker.answer_store, "mark_reuse_applied", real_mark)
+    restarted = Worker(TaskQueue(queue.root), settings={"deepseek": {"enabled": False}})
+    assert restarted._promote_pending_facts(tid, str(profile))
+    assert restarted.answer_store.pending_reuse(tid) == []
+    assert ApplicantProfile.model_validate_json(profile.read_text()).collections["profile_write_version"] == version
+
+
 def test_project_same_title_different_context_keeps_stable_distinct_ids():
     from executor.evidence import _merge_projects, _parse_project_lines
 
@@ -145,6 +219,7 @@ def test_project_same_title_different_context_keeps_stable_distinct_ids():
     merged = _merge_projects([], records)
     assert len(merged) == 2
     assert len({item["id"] for item in merged}) == 2
+    assert merged[0]["source_refs"] == [{"kind": "synthetic", "locator": "line:0"}]
     assert _merge_projects([], records) == merged
 
 
@@ -169,6 +244,29 @@ def test_project_exclusion_is_explicit_and_single_task_only(tmp_path):
     assert projects_for_task(saved, task_a) == []
     assert projects_for_task(saved, task_b) == saved.collections["projects"]
     assert saved.collections["fact_exclusions"][task_a][item["id"]]["source"] == "user_explicit_task"
+    from executor.review import project_coverage_review
+    for task_id, expected in ((task_a, []), (task_b, ["Synthetic research"])):
+        plan = ApplicationPlan(execution_id=task_id,
+                               target_url="https://example.test/jobs/1", site_id="synthetic")
+        assert project_coverage_review(saved.model_dump(), plan)["uncovered_projects"] == expected
+
+
+def test_one_same_title_exclusion_cannot_hide_another_project():
+    from executor.review import project_coverage_review
+    profile = ApplicantProfile()
+    profile.collections["projects"] = [
+        {"id": "project-a", "title": "Shared title", "metadata": ["2024"]},
+        {"id": "project-b", "title": "Shared title", "metadata": ["2025"]},
+    ]
+    task_id = "a" * 32
+    profile.collections["fact_exclusions"] = {task_id: {
+        "project-a": {"reason": "Not relevant to this role", "source": "user_explicit_task"}}}
+    plan = ApplicationPlan(execution_id=task_id,
+                           target_url="https://example.test/jobs/1", site_id="synthetic")
+    assert project_coverage_review(profile.model_dump(), plan)["uncovered_projects"] == ["Shared title"]
+    profile.collections["fact_exclusions"][task_id]["project-b"] = {
+        "reason": "No project section on form", "source": "user_explicit_task"}
+    assert project_coverage_review(profile.model_dump(), plan)["uncovered_projects"] == []
 
 
 def test_resume_sections_distinguish_research_from_unparsed_or_absent_projects():
@@ -266,3 +364,97 @@ def test_local_browser_requires_explicit_checkbox_for_reusable_fact(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_local_boolean_control_persists_false_as_boolean(tmp_path):
+    import threading
+    from playwright.sync_api import sync_playwright
+    from executor.autonomy.supervisor import Supervisor, create_server
+
+    profile = tmp_path / "synthetic-profile.json"
+    write_profile(ApplicantProfile(), profile)
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = _task(queue, tmp_path)
+    _wait_for_fact(queue, tid, "preferences.accept_travel")
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    supervisor = Supervisor(queue, worker=worker)
+    server = create_server(supervisor, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                page.goto(f"http://127.0.0.1:{server.server_port}/ui-login?ticket="
+                          + supervisor.issue_ui_ticket())
+                page.get_by_label("preferences.accept_travel").select_option(label="否")
+                page.get_by_role("checkbox", name="保存为可复用事实").check()
+                page.get_by_role("button", name="本地填写").click()
+                page.locator("button[data-answer]").wait_for(state="detached")
+            finally:
+                browser.close()
+        assert worker.answer_store.load(tid)["preferences.accept_travel"] is False
+        assert ApplicantProfile.model_validate_json(profile.read_text()).fields[
+            "preferences.accept_travel"].value is False
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_structured_education_record_keeps_id_and_field_evidence_on_correction(tmp_path):
+    builder = ProfileBuilder()
+    source = EvidenceRef(kind="synthetic_resume", locator="education:1")
+    builder.add_field("education.highest.school", "Synthetic University", source)
+    builder.add_field("education.highest.degree", "Master", source)
+    builder.add_field("education.bachelor.school", "Synthetic College", source)
+    profile = builder.build()
+    records = profile.collections["education_records"]
+    assert {item["scope"] for item in records} == {"highest", "bachelor"}
+    assert all(item["status"] == "PARTIAL" for item in records)
+    highest = next(item for item in records if item["scope"] == "highest")
+    assert highest["fields"]["school"]["sources"][0]["locator"] == "education:1"
+    path = tmp_path / "canonical.json"
+    write_profile(profile, path)
+    set_user_confirmed_field(path, "education.highest.school", "Corrected University")
+    updated = ApplicantProfile.model_validate_json(path.read_text())
+    corrected = next(item for item in updated.collections["education_records"]
+                     if item["scope"] == "highest")
+    assert corrected["id"] == highest["id"]
+    assert corrected["fields"]["school"]["value"] == "Corrected University"
+
+
+def test_conflicting_source_values_stay_unknown_until_explicit_confirmation(tmp_path):
+    from executor.resolver import FieldResolver
+    builder = ProfileBuilder()
+    builder.add_field("identity.current_city", "City A",
+                      EvidenceRef(kind="resume_docx", locator="line:1"))
+    builder.add_field("identity.current_city", "City B",
+                      EvidenceRef(kind="legacy_profile", locator="identity.city"))
+    profile = builder.build()
+    selected_before_confirmation = profile.fields["identity.current_city"].value
+    field = WebField(field_id="city", selector="#city", label="现居城市", required=True)
+    before = FieldResolver(profile.model_dump(), {"deepseek": {"enabled": False}}).resolve(field)
+    assert before.status == ResolutionStatus.UNRESOLVED
+    assert "conflicting sources" in before.reason
+    path = tmp_path / "canonical.json"
+    write_profile(profile, path)
+    set_user_confirmed_field(path, "identity.current_city", "City B")
+    confirmed = ApplicantProfile.model_validate_json(path.read_text())
+    after = FieldResolver(confirmed.model_dump(), {"deepseek": {"enabled": False}}).resolve(field)
+    assert after.status == ResolutionStatus.RESOLVED
+    assert after.value == "City B"
+    assert confirmed.collections["profile_revisions"][-1]["previous_value"] == selected_before_confirmation
+    assert {profile.collections["conflicts"][0]["existing_value"],
+            profile.collections["conflicts"][0]["incoming_value"]} == {"City A", "City B"}
+
+
+def test_expired_fact_is_not_reused_or_sent_to_site():
+    from executor.resolver import FieldResolver
+    profile = ApplicantProfile(fields={"identity.current_city": ProfileField(
+        value="Old City", user_confirmed=True,
+        normalization={"valid_until": "2000-01-01"})})
+    field = WebField(field_id="city", selector="#city", label="现居城市", required=True)
+    result = FieldResolver(profile.model_dump(), {"deepseek": {"enabled": False}}).resolve(field)
+    assert result.status == ResolutionStatus.UNRESOLVED
+    assert result.value is None
+    assert "validity" in result.reason

@@ -67,12 +67,20 @@ class TaskAnswerStore:
                 answer_version INTEGER NOT NULL,
                 source TEXT NOT NULL,
                 task_revision INTEGER NOT NULL,
-                created REAL NOT NULL
+                created REAL NOT NULL,
+                reuse_requested INTEGER NOT NULL DEFAULT 0,
+                reuse_applied INTEGER NOT NULL DEFAULT 0
             )""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(task_answer_events)")}
+            if "reuse_requested" not in columns:
+                db.execute("ALTER TABLE task_answer_events ADD COLUMN reuse_requested INTEGER NOT NULL DEFAULT 0")
+            if "reuse_applied" not in columns:
+                db.execute("ALTER TABLE task_answer_events ADD COLUMN reuse_applied INTEGER NOT NULL DEFAULT 0")
             db.execute("""CREATE INDEX IF NOT EXISTS task_answer_latest
                 ON task_answer_events(task_id,field_key,sequence)""")
 
-    def save(self, task_id: str, answers: dict, *, expected_revision: int) -> None:
+    @staticmethod
+    def _validate(answers: dict) -> None:
         if not isinstance(answers, dict) or not answers or len(answers) > 100:
             raise ValueError("answers must be a canonical-key mapping")
         if any(not isinstance(key, str) or not IDENTIFIER.fullmatch(key)
@@ -83,29 +91,46 @@ class TaskAnswerStore:
             raise ValueError("invalid answer value")
         for key, value in answers.items():
             _validate_applicant_answer(key, value)
+
+    def _save_in_tx(self, db, task_id: str, answers: dict,
+                    expected_revision: int, *, remember: bool = False) -> None:
+        task = db.execute("SELECT revision,stage,owner,details FROM tasks WHERE task_id=?",
+                          (task_id,)).fetchone()
+        if task is None:
+            raise KeyError("task not found")
+        if task["revision"] != expected_revision:
+            raise RuntimeError("stale task revision")
+        if task["owner"] or task["stage"] != "NEEDS_USER_INPUT":
+            raise ValueError("task is not waiting for facts")
+        pending = set(json.loads(task["details"]).get("unresolved_keys", []))
+        if not set(answers).issubset(pending):
+            raise ValueError("answer keys must match pending facts")
+        for key, value in answers.items():
+            previous = db.execute("""SELECT answer_version FROM task_answer_events
+                WHERE task_id=? AND field_key=? ORDER BY sequence DESC LIMIT 1""",
+                (task_id, key)).fetchone()
+            version = previous["answer_version"] + 1 if previous else 1
+            ciphertext = self.cipher.encrypt(json.dumps(value, ensure_ascii=False).encode())
+            db.execute("""INSERT INTO task_answer_events
+                (task_id,field_key,ciphertext,answer_version,source,task_revision,created,
+                 reuse_requested)
+                VALUES(?,?,?,?,?,?,?,?)""",
+                (task_id, key, ciphertext, version, "user_explicit_task", expected_revision,
+                 self.queue.clock(), int(remember)))
+
+    def save(self, task_id: str, answers: dict, *, expected_revision: int) -> None:
+        self._validate(answers)
         with self.queue.tx() as db:
-            task = db.execute("SELECT revision,stage,owner,details FROM tasks WHERE task_id=?",
-                              (task_id,)).fetchone()
-            if task is None:
-                raise KeyError("task not found")
-            if task["revision"] != expected_revision:
-                raise RuntimeError("stale task revision")
-            if task["owner"] or task["stage"] != "NEEDS_USER_INPUT":
-                raise ValueError("task is not waiting for facts")
-            pending = set(json.loads(task["details"]).get("unresolved_keys", []))
-            if not set(answers).issubset(pending):
-                raise ValueError("answer keys must match pending facts")
-            for key, value in answers.items():
-                previous = db.execute("""SELECT answer_version FROM task_answer_events
-                    WHERE task_id=? AND field_key=? ORDER BY sequence DESC LIMIT 1""",
-                    (task_id, key)).fetchone()
-                version = previous["answer_version"] + 1 if previous else 1
-                ciphertext = self.cipher.encrypt(json.dumps(value, ensure_ascii=False).encode())
-                db.execute("""INSERT INTO task_answer_events
-                    (task_id,field_key,ciphertext,answer_version,source,task_revision,created)
-                    VALUES(?,?,?,?,?,?,?)""",
-                    (task_id, key, ciphertext, version, "user_explicit_task", expected_revision,
-                     self.queue.clock()))
+            self._save_in_tx(db, task_id, answers, expected_revision)
+
+    def save_and_resume(self, task_id: str, answers: dict,
+                        *, expected_revision: int, remember: bool = False) -> dict:
+        """Rejected/stale input leaves neither an answer nor a transition."""
+        self._validate(answers)
+        with self.queue.tx() as db:
+            self._save_in_tx(db, task_id, answers, expected_revision, remember=remember)
+            self.queue._resume_in_tx(db, task_id, expected_revision=expected_revision)
+        return self.queue.get(task_id)
 
     def load(self, task_id: str) -> dict:
         with self.queue.tx() as db:
@@ -122,8 +147,33 @@ class TaskAnswerStore:
     def metadata(self, task_id: str) -> list[dict]:
         with self.queue.tx() as db:
             return [dict(row) for row in db.execute("""SELECT field_key,answer_version,
-                source,task_revision,created FROM task_answer_events
+                source,task_revision,created,reuse_requested,reuse_applied FROM task_answer_events
                 WHERE task_id=? ORDER BY sequence""", (task_id,))]
+
+    def pending_reuse(self, task_id: str) -> list[dict]:
+        with self.queue.tx() as db:
+            rows = db.execute("""SELECT sequence,field_key,ciphertext,answer_version
+                FROM task_answer_events WHERE task_id=? AND reuse_requested=1
+                AND reuse_applied=0 ORDER BY sequence""", (task_id,)).fetchall()
+        pending = []
+        for row in rows:
+            try:
+                value = json.loads(self.cipher.decrypt(row["ciphertext"]))
+            except (InvalidToken, ValueError) as exc:
+                raise RuntimeError("private reusable fact unreadable; do not guess") from exc
+            pending.append({"sequence": row["sequence"], "key": row["field_key"],
+                            "value": value, "version": row["answer_version"]})
+        return pending
+
+    def pending_tasks(self) -> list[str]:
+        with self.queue.tx() as db:
+            return [row[0] for row in db.execute("""SELECT DISTINCT task_id
+                FROM task_answer_events WHERE reuse_requested=1 AND reuse_applied=0""")]
+
+    def mark_reuse_applied(self, sequence: int) -> None:
+        with self.queue.tx() as db:
+            db.execute("UPDATE task_answer_events SET reuse_applied=1 WHERE sequence=?",
+                       (sequence,))
 
 
 class ExecutionAnswerStore:
