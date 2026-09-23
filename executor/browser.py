@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 import urllib.request
@@ -28,10 +29,47 @@ def _alive() -> bool:
         return False
 
 
+def owned_cdp_session() -> bool:
+    """Fail closed unless the listener is our dedicated Chrome process/profile."""
+    if not _alive() or PROFILE.is_symlink() or not PROFILE.is_dir():
+        return False
+    try:
+        if PROFILE.stat().st_mode & 0o077:
+            return False
+        listeners = subprocess.run(
+            ["lsof", "-nP", "-t", "-iTCP:9333", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=3, check=True,
+        ).stdout.splitlines()
+        pids = {line.strip() for line in listeners if line.strip().isdigit()}
+        if len(pids) != 1:
+            return False
+        pid = pids.pop()
+        info = subprocess.run(
+            ["ps", "-ww", "-p", pid, "-o", "uid=", "-o", "command="],
+            capture_output=True, text=True, timeout=3, check=True,
+        ).stdout.strip()
+        uid, _, command = info.partition(" ")
+        required = (
+            CHROME in command
+            and uid.strip() == str(os.getuid())
+            and re.search(r"(?:^|\s)--user-data-dir=" + re.escape(str(PROFILE)) + r"(?:\s|$)", command)
+            and re.search(r"(?:^|\s)--remote-debugging-port=9333(?:\s|$)", command)
+            and re.search(r"(?:^|\s)--remote-debugging-address=127\.0\.0\.1(?:\s|$)", command)
+        )
+        return bool(required)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
 def ensure_chrome(start_url: str = "about:blank") -> None:
-    PROFILE.mkdir(parents=True, exist_ok=True)
+    if PROFILE.is_symlink():
+        raise RuntimeError("application Chrome profile is not owned")
+    PROFILE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    PROFILE.chmod(0o700)
     if _alive():
-        return
+        if owned_cdp_session():
+            return
+        raise RuntimeError("CDP listener does not belong to the dedicated application profile")
     subprocess.Popen(
         [
             CHROME,
@@ -47,7 +85,7 @@ def ensure_chrome(start_url: str = "about:blank") -> None:
         start_new_session=True,
     )
     for _ in range(40):
-        if _alive():
+        if owned_cdp_session():
             return
         time.sleep(0.5)
     raise RuntimeError("application Chrome did not expose CDP on 9333")
@@ -118,11 +156,8 @@ def _connect_isolated(target_url: str | None = None):
                 "--no-default-browser-check",
             ],
         }
-        # macOS live applications use the user's installed Google Chrome. Isolated
-        # tests must also run on CI/Linux, where that path does not exist; in that
-        # case use Playwright's bundled Chromium without touching the live profile.
-        if Path(CHROME).exists():
-            launch_kwargs["executable_path"] = CHROME
+        # Test runs always use the bundled headless browser. The installed Chrome
+        # belongs to the live CDP path and may carry user policy or permissions.
         browser = pw.chromium.launch(**launch_kwargs)
         ctx = browser.new_context()
         page = ctx.new_page()
@@ -140,8 +175,8 @@ def connect(target_url: str | None = None, *, existing_only: bool = False):
         return _connect_isolated(target_url)
 
     if existing_only:
-        if not _alive():
-            raise RuntimeError("existing CDP session unavailable")
+        if not owned_cdp_session():
+            raise RuntimeError("owned CDP session unavailable")
     else:
         ensure_chrome("about:blank")
     pw = sync_playwright().start()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .application import ApplicationExecutor
 from .audit import AuditStore
@@ -14,6 +15,16 @@ from .recovery import recover_execution
 
 ROOT = Path.home() / "Job-Application-Executor"
 DEFAULT_PROFILE = ROOT / "config" / "applicant-profile.json"
+
+
+def _require_isolated_fixture(url: str) -> None:
+    parsed = urlsplit(url)
+    if parsed.scheme == "file" or (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname in {"127.0.0.1", "localhost"}
+    ):
+        return
+    raise RuntimeError("legacy CLI execution supports isolated local fixtures only")
 
 
 def _profile_path(explicit: str | None) -> Path:
@@ -69,6 +80,7 @@ def _build_profile(args) -> int:
     return 0
 
 def _execute(args) -> int:
+    _require_isolated_fixture(args.url)
     settings = load_settings()
     executor = ApplicationExecutor(
         args.url,
@@ -91,6 +103,9 @@ def _execute(args) -> int:
     return 0
 
 def _recover(args) -> int:
+    previous = AuditStore(args.execution_id).load_plan()
+    if previous.stage not in {ApplicationStage.SUBMITTED, ApplicationStage.VERIFIED}:
+        _require_isolated_fixture(previous.target_url)
     plan = recover_execution(
         args.execution_id,
         _profile_path(args.profile),

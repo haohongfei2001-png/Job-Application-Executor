@@ -136,6 +136,28 @@ def test_ready_to_submit_does_not_submit_without_authorization(tmp_path, monkeyp
     assert fake.submit_calls == 0
 
 
+def test_uncovered_project_blocks_false_ready(tmp_path, monkeypatch):
+    profile = tmp_path / "project-profile.json"
+    profile.write_text(json.dumps({"fields": {"identity.full_name": {
+        "value": "Synthetic Applicant", "confidence": 1.0,
+    }}, "collections": {"projects": [{"title": "AI Product Research"}]}}))
+    fake = FakeAdapter([
+        WebField(field_id="name", selector="#name", label="姓名", required=True),
+        WebField(field_id="project", selector="#project", label="项目名称", required=True,
+                 current_value="AI Product"),
+    ], final="Submit application")
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: fake)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    runner = ApplicationExecutor("https://example.test/apply", profile,
+                                 {"deepseek": {"enabled": False}})
+    # The existing site value is retained, but a prefix title cannot certify
+    # the distinct canonical project.
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["final_review"]["project_coverage"]["uncovered_projects"] == ["AI Product Research"]
+    assert fake.submit_calls == 0
+
+
 def test_submit_authorized_still_requires_manual_final_click(tmp_path, monkeypatch):
     fake = FakeAdapter([
         WebField(field_id="name", selector="#name", label="姓名", required=True),
@@ -187,6 +209,16 @@ def test_audit_redacts_sensitive_payloads(tmp_path, monkeypatch):
     assert "123456789012345678" not in store.actions_path.read_text(encoding="utf-8")
     assert "462810" not in store.actions_path.read_text(encoding="utf-8")
     assert "secret-token" not in (store.root / "submit-receipt.json").read_text(encoding="utf-8")
+    with pytest.raises(RuntimeError, match="screenshots are disabled"):
+        store.screenshot_path("ready-to-submit")
+
+
+def test_legacy_application_cli_rejects_external_execution():
+    from executor.app_cli import _require_isolated_fixture
+
+    with pytest.raises(RuntimeError, match="isolated local fixtures only"):
+        _require_isolated_fixture("https://careers.example.test/jobs/1")
+    _require_isolated_fixture("http://127.0.0.1:8123/apply")
 
 
 def test_optional_legal_or_subjective_question_still_blocks(tmp_path, monkeypatch):

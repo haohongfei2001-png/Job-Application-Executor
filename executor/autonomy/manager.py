@@ -4,6 +4,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+import uuid
 from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit
@@ -73,11 +74,45 @@ def safe_task_view(task: dict[str, Any]) -> dict[str, Any]:
         "job_id": str(spec.get("job_id") or "")[:150],
         "campaign": str(spec.get("campaign") or "")[:150],
         "stage": str(task.get("stage") or ""),
+        "revision": int(task.get("revision") or 0),
+        "run_state": str(task.get("run_state") or ""),
         "checkpoint": str(task.get("checkpoint") or ""),
         "blocker": str(task.get("blocker") or ""),
         "unresolved_keys": unresolved,
         "attempts": int(task.get("attempts") or 0),
     }
+
+
+def _provider_context(message: str, task_rows: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """Send only local intent flags and bounded queue state to the provider.
+
+    Arbitrary chat text, URLs, applicant facts, and externally sourced task
+    descriptions have no safe general-purpose redactor. Never put them in a
+    provider request, even if a known-pattern scanner found no secret.
+    """
+    context = {
+        "intent": {
+            "status": True,
+            "pause": _explicit_control(message, _PAUSE_RE),
+            "resume": _explicit_control(message, _RESUME_RE),
+            "cancel": _explicit_control(message, _CANCEL_RE),
+            "apply": bool(_APPLY_RE.search(message)),
+            "target_url_supplied": bool(re.search(r"https?://\S+", message, re.I)),
+        },
+        "referenced_task_ids": [
+            str(task["task_id"])
+            for task in task_rows
+            if _selected_task_is_explicit(message, task, task_rows)
+        ],
+        "private_answer_pending": any(
+            task.get("stage") == "NEEDS_USER_INPUT" for task in task_rows
+        ),
+    }
+    tasks = [
+        {key: view[key] for key in ("task_id", "stage", "revision", "run_state")}
+        for view in (safe_task_view(task) for task in task_rows)
+    ]
+    return json.dumps(context, ensure_ascii=False, sort_keys=True), tasks
 
 
 class DeepSeekManagerProvider:
@@ -107,8 +142,9 @@ class DeepSeekManagerProvider:
             '{"reply":"...", "decisions":[{"action":"REPORT|RESUME|PAUSE|CANCEL|ANSWER_PENDING|CREATE_TASK",'
             '"task_id":"","field_key":"","value":null,"company":"","role":"","target_url":"","reason":""}]}. '
             "Use REPORT when no state change is justified. CREATE_TASK is allowed only "
-            "when the user's message itself contains the exact target URL. ANSWER_PENDING "
-            "may only use a value explicitly present in the user's current message. "
+            "when the user's message itself contains the exact target URL. The provider "
+            "does not receive raw URLs or applicant answers, so do not propose CREATE_TASK "
+            "or ANSWER_PENDING from this minimized context. Those values use local inputs. "
             "Do not claim that a state-changing action has already succeeded; describe intent only. "
             "The deterministic controller will append the actual execution result."
         )
@@ -186,6 +222,40 @@ _RESUME_RE = re.compile(r"(?:继续|恢复|接着|resume|continue|retry)", re.I)
 _PAUSE_RE = re.compile(r"(?:暂停|先别|等一下|pause|hold)", re.I)
 _CANCEL_RE = re.compile(r"(?:取消|停止|不投|放弃|cancel|stop|drop)", re.I)
 _APPLY_RE = re.compile(r"(?:投递|申请|开始投|apply|application)", re.I)
+_NEGATED_CONTROL = re.compile(r"(?:不(?:要|想|用|必|需)?|别|请勿|无须|无需|don't|do not|not|never)\s*$", re.I)
+
+
+def _explicit_control(message: str, pattern: re.Pattern[str]) -> bool:
+    return any(not _NEGATED_CONTROL.search(message[max(0, match.start() - 12):match.start()])
+               for match in pattern.finditer(message))
+
+
+def _selected_task_is_explicit(message: str, selected: dict[str, Any], tasks: list[dict[str, Any]]) -> bool:
+    active = [task for task in tasks if task.get("stage") not in {"CANCELLED", "SUBMITTED", "VERIFIED"}]
+    if len(active) <= 1:
+        return True
+    text = message.casefold()
+    identifiers = [str(selected.get("task_id") or "")[:8]]
+    spec = selected.get("spec") or {}
+    for key in ("company", "role"):
+        value = str(spec.get(key) or "").casefold().strip()
+        if len(value) >= 3:
+            identifiers.append(value)
+        identifiers.extend(token for token in re.findall(r"[a-z0-9\u4e00-\u9fff]+", value)
+                           if len(token) >= 3)
+    for identifier in identifiers:
+        if not identifier or identifier not in text:
+            continue
+        competing = 0
+        for task in active:
+            other = task.get("spec") or {}
+            if (identifier in str(task.get("task_id") or "")
+                    or identifier in str(other.get("company") or "").casefold()
+                    or identifier in str(other.get("role") or "").casefold()):
+                competing += 1
+        if competing == 1:
+            return True
+    return False
 _URL_LEFT_BOUNDARIES = set(" \t\r\n([{<\"'：，。；！？、")
 _URL_RIGHT_BOUNDARIES = set(" \t\r\n>\"'")
 
@@ -273,6 +343,12 @@ _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN (?:[A-Z0-9][A-Z0-9 -]* )?PRIVATE KEY(?: BLOCK)?-----",
     re.I,
 )
+_PRIVATE_FACT_RE = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|"
+    r"(?<!\d)1[3-9]\d{9}(?!\d)|"
+    r"(?<!\d)\d{15,18}[0-9Xx]?(?!\d)|"
+    r"CANARY_PRIVATE", re.I,
+)
 
 
 def _contains_sensitive_credential(message: str) -> bool:
@@ -352,13 +428,28 @@ class ManagerController:
             raise ValueError("profile_path is not configured")
         return value
 
-    def _apply(self, decision: ManagerDecision, message: str) -> dict[str, Any]:
+    def create_from_local_form(self, company: str, role: str, target_url: str) -> dict[str, Any]:
+        """Structured UI entry keeps target values out of the model request."""
+        if not all(isinstance(value, str) for value in (company, role, target_url)):
+            raise ValueError("invalid task fields")
+        spec = TaskSpec(
+            company=company.strip(),
+            role=role.strip(),
+            target_url=target_url.strip(),
+            profile_ref=self._profile_ref(),
+            # JCR-03 owns verified target identity. A user-supplied URL alone
+            # is not yet sufficient evidence for automatic external writes.
+            live_authorized=False,
+        )
+        return self.queue.enqueue(spec)
+
+    def _apply(self, decision: ManagerDecision, message: str, *, expected_revision: int | None = None) -> dict[str, Any]:
         action = decision.action
         if action == ManagerAction.REPORT:
             return {"action": str(action), "status": "observed"}
 
         if action == ManagerAction.RESUME:
-            if not _RESUME_RE.search(message):
+            if not _explicit_control(message, _RESUME_RE):
                 return {"action": str(action), "status": "denied", "reason": "explicit_resume_required"}
             task = self.queue.get(decision.task_id)
             if task["stage"] == "READY_TO_SUBMIT":
@@ -390,22 +481,28 @@ class ManagerController:
                     "task_id": decision.task_id,
                     "resolved_target": True,
                 }
-            self.queue.resume(decision.task_id)
+            self.queue.control("RESUME", decision.task_id,
+                command_id="manager-" + uuid.uuid4().hex,
+                expected_revision=expected_revision)
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
         if action == ManagerAction.PAUSE:
-            if not _PAUSE_RE.search(message):
+            if not _explicit_control(message, _PAUSE_RE):
                 return {"action": str(action), "status": "denied", "reason": "explicit_pause_required"}
-            self.queue.pause(decision.task_id)
+            self.queue.control("PAUSE", decision.task_id,
+                command_id="manager-" + uuid.uuid4().hex,
+                expected_revision=expected_revision)
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
         if action == ManagerAction.CANCEL:
-            if not _CANCEL_RE.search(message):
+            if not _explicit_control(message, _CANCEL_RE):
                 return {"action": str(action), "status": "denied", "reason": "explicit_cancel_required"}
+            self.queue.control("CANCEL", decision.task_id,
+                command_id="manager-" + uuid.uuid4().hex,
+                expected_revision=expected_revision)
             self.worker.broker.discard(decision.task_id)
             with self.worker.answers_lock:
                 self.worker.answers.pop(decision.task_id, None)
-            self.queue.cancel(decision.task_id)
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
         if action == ManagerAction.ANSWER_PENDING:
@@ -418,6 +515,7 @@ class ManagerController:
             self.worker.user_input(
                 decision.task_id,
                 {decision.field_key: decision.value},
+                expected_revision=expected_revision,
             )
             return {
                 "action": str(action),
@@ -465,7 +563,7 @@ class ManagerController:
                 target_url=target_url,
                 job_id=job_id,
                 profile_ref=self._profile_ref(),
-                live_authorized=True,
+                live_authorized=False,
             )
             task = self.queue.enqueue(spec)
             result = {"action": str(action), "status": "accepted", "task_id": task["task_id"]}
@@ -499,13 +597,13 @@ class ManagerController:
         )
         # Stop credentials locally before a provider payload can be built.
         # OTP has a dedicated local broker and must never be forwarded to DeepSeek.
-        if _contains_sensitive_credential(message) or (
+        if _contains_sensitive_credential(message) or _PRIVATE_FACT_RE.search(message) or (
             otp_waiting and _RAW_OTP_RE.fullmatch(message)
         ):
             return {
                 "reply": (
                     "检测到验证码或登录凭据。为避免发送给 DeepSeek，此消息已在本地拦截；"
-                    "验证码请使用本地 OTP 流程，密码、Cookie、Token 或密钥不要粘贴到聊天中。"
+                    "验证码请使用本地 OTP 流程；请不要在聊天中粘贴私人资料。"
                 ),
                 "actions": [],
                 **self.state(),
@@ -515,10 +613,10 @@ class ManagerController:
         # the model cannot downgrade "继续这个岗位" into a read-only REPORT.
         # The executor still re-checks the current page and will immediately
         # block again for a real CAPTCHA/password/ambiguous challenge.
-        explicit_resume = bool(_RESUME_RE.search(message))
+        explicit_resume = _explicit_control(message, _RESUME_RE)
         conflicting_control = bool(
-            _PAUSE_RE.search(message)
-            or _CANCEL_RE.search(message)
+            _explicit_control(message, _PAUSE_RE)
+            or _explicit_control(message, _CANCEL_RE)
             or _APPLY_RE.search(message)
         )
         if explicit_resume and not conflicting_control:
@@ -526,7 +624,7 @@ class ManagerController:
                 task for task in task_rows
                 if task.get("stage") == "NEEDS_USER_ACTION"
             ]
-            if len(waiting) == 1:
+            if len(waiting) == 1 and _selected_task_is_explicit(message, waiting[0], task_rows):
                 task = waiting[0]
                 tid = task["task_id"]
                 spec = task.get("spec") or {}
@@ -601,9 +699,12 @@ class ManagerController:
                     "actions": [action_result],
                     **self.state(),
                 }
-        tasks = [safe_task_view(task) for task in task_rows]
+        # No arbitrary chat or task description crosses the model boundary.
+        # The model receives local intent flags only. Structured task creation
+        # and applicant answers remain local until later product rounds.
+        provider_message, tasks = _provider_context(message, task_rows)
         try:
-            turn = self.provider.decide(message, tasks)
+            turn = self.provider.decide(provider_message, tasks)
         except RuntimeError:
             return {
                 "reply": "DeepSeek manager is unavailable. Existing queued tasks are unchanged.",
@@ -611,9 +712,28 @@ class ManagerController:
                 **self.state(),
             }
         actions = []
+        observed_revisions = {task["task_id"]: task["revision"] for task in task_rows}
         for decision in turn.decisions:
             try:
-                actions.append(self._apply(decision, message))
+                if decision.action not in {ManagerAction.REPORT, ManagerAction.CREATE_TASK}:
+                    observed = observed_revisions.get(decision.task_id)
+                    if observed is None or self.queue.get(decision.task_id)["revision"] != observed:
+                        actions.append({"action": str(decision.action), "status": "denied",
+                                        "reason": "stale_task_revision"})
+                        continue
+                    selected = next(task for task in task_rows if task["task_id"] == decision.task_id)
+                    if not _selected_task_is_explicit(message, selected, task_rows):
+                        actions.append({"action": str(decision.action), "status": "denied",
+                                        "reason": "ambiguous_task_reference"})
+                        continue
+                if decision.action == ManagerAction.CREATE_TASK:
+                    current = {task["task_id"]: task["revision"] for task in self.queue.tasks()}
+                    if current != observed_revisions:
+                        actions.append({"action": str(decision.action), "status": "denied",
+                                        "reason": "stale_task_context"})
+                        continue
+                actions.append(self._apply(decision, message,
+                    expected_revision=observed_revisions.get(decision.task_id)))
             except (KeyError, ValueError, RuntimeError):
                 actions.append(
                     {
@@ -623,16 +743,19 @@ class ManagerController:
                     }
                 )
         reply = turn.reply
-        if actions:
-            accepted = [item["action"] for item in actions if item.get("status") in {"accepted", "observed"}]
-            denied = [item["action"] for item in actions if item.get("status") == "denied"]
-            summary = []
-            if accepted:
-                summary.append("已执行/确认：" + "、".join(accepted))
-            if denied:
-                summary.append("被系统门禁拒绝：" + "、".join(denied))
-            if summary:
-                reply = reply.rstrip() + "\n\n系统执行结果：" + "；".join(summary) + "。"
+        if any(item["action"] != "REPORT" for item in actions):
+            # A model's conversational claim is not a command receipt. Build
+            # the user-visible result only from deterministic controller output.
+            reply = "系统执行结果：" + "；".join(
+                f"{item['action']} {item['status']}"
+                + (f"（{item['reason']}）" if item.get("reason") else "")
+                for item in actions
+            ) + "。"
+        if _APPLY_RE.search(message) and not any(
+            item["action"] == "CREATE_TASK" and item["status"] == "accepted"
+            for item in actions
+        ):
+            reply = "系统未创建任务。请在左侧填写公司、岗位和完整岗位链接；目标核验前不会自动写入招聘网站。"
         return {
             "reply": reply,
             "actions": actions,

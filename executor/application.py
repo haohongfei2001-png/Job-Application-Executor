@@ -403,6 +403,7 @@ class ApplicationExecutor:
                     self.audit.record_action({"type": "start_application", "page_index": page_index})
                     continue
                 resolutions = self._resolve_page(fields)
+                self.plan.metadata["current_page_selectors"] = [item.selector for item in resolutions]
                 self.plan.fields.extend(resolutions)
                 self.plan.unresolved_fields.extend([
                     item for item in resolutions
@@ -471,16 +472,18 @@ class ApplicationExecutor:
                 self.plan.stage = ApplicationStage.VALIDATED
                 final_control = adapter.final_submit_control()
                 if final_control:
+                    review = build_final_review(self.profile, self.plan, final_control)
+                    self.plan.metadata["final_review"] = review
+                    if review["project_coverage"]["uncovered_projects"]:
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "structured project coverage unproven"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
                     self.plan.stage = ApplicationStage.READY_TO_SUBMIT
                     self.plan.metadata["final_submit_control"] = final_control
                     self.plan.metadata["manual_final_click_required"] = True
                     self.plan.metadata["submit_authorized_does_not_allow_final_click"] = bool(
                         self.plan.submit_authorized
-                    )
-                    self.plan.metadata["final_review"] = build_final_review(
-                        self.profile,
-                        self.plan,
-                        final_control,
                     )
                     self.audit.save_plan(self.plan)
                     try:

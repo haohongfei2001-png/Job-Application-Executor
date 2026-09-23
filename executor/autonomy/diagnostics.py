@@ -46,11 +46,9 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
         tasks.append(
             {
                 "task": safe["task_id"][:8],
-                "company": safe["company"],
-                "role": safe["role"],
-                "target_host": safe["target_host"],
+                # Company/role/host are user-supplied strings and can contain
+                # arbitrary applicant facts. Diagnostics are meant to be copied.
                 "stage": safe["stage"],
-                "blocker": safe["blocker"],
                 "attempts": safe["attempts"],
             }
         )

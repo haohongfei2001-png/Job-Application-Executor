@@ -6,6 +6,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .. import browser
 from ..application import ApplicationExecutor
@@ -116,8 +117,12 @@ class Worker:
             settings.setdefault("deepseek", {})["enabled"] = False
         return settings
 
-    def user_input(self, tid, answers):
+    def user_input(self, tid, answers, *, expected_revision=None):
         task = self.queue.get(tid)
+        if expected_revision is None:
+            expected_revision = task["revision"]
+        if expected_revision is not None and task["revision"] != expected_revision:
+            raise RuntimeError("stale task revision")
         if task["owner"] or task["stage"] != "NEEDS_USER_INPUT":
             raise ValueError("task is not waiting for facts")
         if not isinstance(answers, dict) or not answers or len(answers) > 100:
@@ -130,8 +135,16 @@ class Worker:
         if any(any(x in k.lower() for x in ("password", "cookie", "token", "otp", "secret")) for k in answers):
             raise ValueError("use OTP ingestion for authentication")
         with self.answers_lock:
+            previous = dict(self.answers.get(tid, {}))
             self.answers.setdefault(tid, {}).update(answers)
-        return self.queue.resume(tid)
+            try:
+                return self.queue.resume(tid, expected_revision=expected_revision)
+            except BaseException:
+                if previous:
+                    self.answers[tid] = previous
+                else:
+                    self.answers.pop(tid, None)
+                raise
 
     def run_once(self):
         task = self.queue.claim("worker-" + str(os.getpid()))
@@ -167,11 +180,19 @@ class Worker:
             except RuntimeError:
                 checkpoint("BLOCKED", blocker="protected_target", release=True)
                 return True
+            if browser.browser_mode() in {"isolated", "test", "headless"} and self.runner_factory is ApplicationExecutor:
+                target = urlsplit(spec["target_url"])
+                if not (target.scheme == "file" or (
+                    target.scheme in {"http", "https"}
+                    and target.hostname in {"127.0.0.1", "localhost"}
+                )):
+                    checkpoint("BLOCKED", blocker="isolated_external_target", release=True)
+                    return True
             if browser.browser_mode() not in {"isolated", "test", "headless"}:
                 if not spec["live_authorized"]:
                     checkpoint("BLOCKED", blocker="live_not_authorized", release=True)
                     return True
-                if not browser._alive():
+                if not browser.owned_cdp_session():
                     checkpoint("BLOCKED", blocker="session_unavailable", release=True)
                     return True
             audit = OperationalAudit(self.queue.root, tid, checkpoint, guard)

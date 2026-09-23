@@ -34,6 +34,14 @@ def _norm_title(value: str) -> str:
     return re.sub(r"[\s·・_/（）()【】\[\]—–-]+", "", (value or "").casefold())
 
 
+def _location_matches(requested: str, observed: str) -> bool:
+    requested = (requested or "").strip().casefold().removesuffix("市")
+    if requested in {"", "china", "中国"}:
+        return True
+    parts = re.split(r"[/|,，、]", (observed or "").casefold())
+    return any(part.strip().removesuffix("市") == requested for part in parts)
+
+
 def is_oppo_campus_landing(url: str) -> bool:
     try:
         parsed = urlsplit(url)
@@ -240,7 +248,7 @@ def resolve_oppo(title: str, location: str = "", max_scrolls: int = 6):
 
             for item in _collect_oppo_candidates(page, title):
                 aggregate[item.job_id] = item
-            exact = [item for item in aggregate.values() if item.exact_title]
+            exact = [item for item in aggregate.values() if item.exact_title and _location_matches(location, item.location)]
             if exact:
                 exact.sort(key=lambda item: (item.location.casefold(), item.job_id))
                 rest = [item for item in aggregate.values() if not item.exact_title]
@@ -256,7 +264,7 @@ def resolve_oppo(title: str, location: str = "", max_scrolls: int = 6):
                     pass
                 for item in _collect_oppo_candidates(page, title):
                     aggregate[item.job_id] = item
-                exact = [item for item in aggregate.values() if item.exact_title]
+                exact = [item for item in aggregate.values() if item.exact_title and _location_matches(location, item.location)]
                 if exact:
                     exact.sort(key=lambda item: (item.location.casefold(), item.job_id))
                     rest = [item for item in aggregate.values() if not item.exact_title]
@@ -270,14 +278,14 @@ def resolve_oppo(title: str, location: str = "", max_scrolls: int = 6):
                     break
                 for item in _collect_oppo_candidates(page, title):
                     aggregate[item.job_id] = item
-                exact = [item for item in aggregate.values() if item.exact_title]
+                exact = [item for item in aggregate.values() if item.exact_title and _location_matches(location, item.location)]
                 if exact:
                     exact.sort(key=lambda item: (item.location.casefold(), item.job_id))
                     rest = [item for item in aggregate.values() if not item.exact_title]
                     return exact + sorted(rest, key=lambda item: (item.title.casefold(), item.job_id))
 
         return sorted(
-            aggregate.values(),
+            (item for item in aggregate.values() if _location_matches(location, item.location)),
             key=lambda item: (
                 not item.exact_title,
                 item.title.casefold(),
