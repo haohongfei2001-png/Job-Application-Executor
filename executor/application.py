@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from .adapters.registry import adapter_for_url, site_id_for_url
 from .browser import BrowserOwnershipError, browser_mode
 from .audit import AuditStore
+from .forms import FillPlan
 from .models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus, WebField
 from .otp.bridge import OtpBridge, OtpBridgeError
 from .profile import get_field, is_sensitive_key, load_profile
@@ -477,11 +478,23 @@ class ApplicationExecutor:
                             page_index, "account_identity_unverified",
                             "active account identity is unverified")
 
-                fields = adapter.discover_fields()
+                observe_form = getattr(adapter, "observe_form", None)
+                observation = observe_form() if callable(observe_form) else None
+                fields = list(observation.fields) if observation else adapter.discover_fields()
+                if observation:
+                    self.plan.metadata["form_observation"] = observation.safe_summary()
                 if not fields and adapter.start_application():
                     self.audit.record_action({"type": "start_application", "page_index": page_index})
                     continue
+                if observation and (observation.unsafe_structure or (
+                        not fields and adapter.final_submit_control())):
+                    self.plan.stage = ApplicationStage.BLOCKED
+                    self.plan.metadata["block_reason"] = "form structure unsupported or incomplete"
+                    self.audit.save_plan(self.plan)
+                    return self.plan
                 resolutions = self._resolve_page(fields)
+                if observation:
+                    FillPlan.bind(observation, resolutions)
                 self.plan.metadata["current_page_selectors"] = [item.selector for item in resolutions]
                 self.plan.fields.extend(resolutions)
                 self.plan.unresolved_fields.extend([

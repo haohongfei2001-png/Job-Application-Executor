@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
@@ -8,6 +9,7 @@ from urllib.parse import urlparse
 from .base import SiteAdapter
 from ..browser import BrowserOwnershipError, connect, owned_page_after_action, page_document_epoch, page_target_id
 from ..field_classifier import is_final_submit, is_initial_apply, is_next
+from ..forms import FormObservation
 from ..models import (
     ApplicationPlan,
     FieldResolution,
@@ -148,12 +150,12 @@ class GenericWebAdapter(SiteAdapter):
             return self.page.locator(VISIBLE_FIELD_SELECTOR).nth(index)
         loc = self.page.locator(selector)
         if loc.count():
-            return loc.first
+            return loc
         if label:
             by_label = self.page.get_by_label(label, exact=False)
             if by_label.count():
-                return by_label.first
-        return loc.first
+                return by_label
+        return loc
 
     def discover_fields(self) -> list[WebField]:
         """Snapshot the whole form in one browser round-trip.
@@ -268,6 +270,45 @@ class GenericWebAdapter(SiteAdapter):
             for item in snapshot
         ]
 
+    def observe_form(self) -> FormObservation:
+        """Read form structure separately from any intended fill actions."""
+        fields = self.discover_fields()
+        try:
+            signals = self.page.evaluate(r"""() => {
+              const visible = e => {
+                const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden'
+                  && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+                  && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+              };
+              const required = [...document.querySelectorAll(
+                'input:not([type="hidden"]), textarea, select')].filter(e =>
+                  e.required || e.getAttribute('aria-required') === 'true');
+              const unsupported = [...document.querySelectorAll(
+                '[role="combobox"], [role="listbox"], [contenteditable="true"], iframe')]
+                .filter(visible);
+              const errors = [...document.querySelectorAll(
+                '[aria-invalid="true"], [role="alert"], .error-message, [data-error]')]
+                .filter(visible);
+              return {
+                hiddenRequired: required.filter(e => !visible(e)).length,
+                unsupported: unsupported.length,
+                validationErrors: errors.length,
+              };
+            }""") or {}
+            epoch = page_document_epoch(self.page)
+        except Exception:
+            raise BrowserOwnershipError("form structure observation unavailable") from None
+        selector_counts = Counter(item.selector for item in fields)
+        ambiguous = sum(count - 1 for count in selector_counts.values() if count > 1)
+        return FormObservation.from_fields(
+            self.page.url, epoch, fields,
+            hidden_required_count=int(signals.get("hiddenRequired") or 0),
+            unsupported_component_count=int(signals.get("unsupported") or 0),
+            ambiguous_selector_count=ambiguous,
+            validation_error_count=int(signals.get("validationErrors") or 0),
+        )
+
     @staticmethod
     def _control_text(value, input_type: str = "text", label: str = "") -> str:
         if isinstance(value, list):
@@ -319,6 +360,10 @@ class GenericWebAdapter(SiteAdapter):
             if resolution.status != ResolutionStatus.RESOLVED:
                 continue
             element = self._locate(resolution.selector, resolution.label)
+            if element.count() != 1:
+                actions.append({"field_id": resolution.field_id, "ok": False,
+                                "reason": "ambiguous_or_missing_locator"})
+                continue
             if not self._visible(element):
                 actions.append({"field_id": resolution.field_id, "ok": False, "reason": "not visible"})
                 continue

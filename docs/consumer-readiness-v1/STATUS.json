@@ -64,7 +64,7 @@
     },
     {
       "id": "JCR-06",
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-05 sole writer PR #15 completed synthetic auth/OTP engineering with local isolated/headless 384 passing tests. Three automated review findings on hash-routed return identity, expired wait recovery and live late-code browser continuity were fixed with direct regressions; their final PR-head CI and review thread closure remain the immediate merge gates. Then merge, verify exact-main CI and remote STATUS readback, and begin JCR-06 structured forms. DFG-006 keeps real account/SMS/device/security and real job-return evidence FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
+  "next_action": "JCR-05 PR #15 merged as remote main 476d19de4f4c6750cd1a46beeda20cbbd556579e; exact-head CI 35931676896 and exact-main CI 35931971776 both passed, three review findings were resolved, and the remote STATUS readback confirmed JCR-06 READY. The sole JCR-06 writer feat/jcr06-structured-forms is implementing FormObservation/FillPlan, structured rows/components, attachment and save proof, negative oracles and safe recovery under D-01 through D-22. Continue all independent engineering through later rounds. DFG-006 final-live remains NOT_RUN; consumer certification remains NOT_CERTIFIED and final submit user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,
