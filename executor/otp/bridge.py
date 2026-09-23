@@ -42,7 +42,7 @@ class OtpBridge:
     @property
     def local_messages_enabled(self) -> bool:
         return bool(self.config.get("mac_messages_enabled") or
-                    (self.relay_enabled and self.config.get("mac_messages_fallback", True)))
+                    (self.relay_enabled and self.config.get("mac_messages_fallback", False)))
 
     def _post(self, action: str, **payload):
         if not self.relay_enabled:
@@ -105,7 +105,7 @@ class OtpBridge:
             except OtpBridgeError:
                 if not self.local_messages_enabled:
                     raise
-        rule = self._rule_for(site)
+        rule = self._rule_for(site) if self.local_messages_enabled else {}
 
         try:
             while time.time() - start < timeout:
@@ -127,10 +127,10 @@ class OtpBridge:
                         return result
                     if response.get("status") in {"expired", "missing", "consumed"}:
                         return None
-                # A timestamp alone cannot attribute an SMS to this site. A
-                # private, site-specific sender rule is required before the
-                # local Messages source may supply an authentication code.
-                if self.local_messages_enabled and rule.get("sender_hint"):
+                # A timestamp or sender alone cannot attribute an SMS to this
+                # site. Require both site-specific sender and body evidence.
+                if (self.local_messages_enabled and rule.get("sender_hint")
+                        and rule.get("body_keyword")):
                     try:
                         hit = self.messages_finder(
                             window_seconds=min(timeout, 300),

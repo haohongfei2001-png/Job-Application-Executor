@@ -80,6 +80,11 @@ class AuthAttemptStore:
                 if current["origin"] != host or current["return_target_digest"] != digest:
                     raise RuntimeError("authentication attempt target changed")
                 return self._view(current)
+            previous = db.execute("""SELECT send_outcome,requested_at FROM auth_attempts
+                WHERE task_id=? ORDER BY created DESC LIMIT 1""", (task_id,)).fetchone()
+            if (previous and previous["requested_at"] is not None
+                    and previous["send_outcome"] != "AUTHENTICATED"):
+                raise RuntimeError("previous SMS send outcome requires explicit reconciliation")
             now = self.queue.clock()
             attempt_id = uuid.uuid4().hex
             db.execute("""INSERT INTO auth_attempts

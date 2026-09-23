@@ -101,6 +101,7 @@ const blockerText={
   security_challenge:'需要安全验证',
   otp_waiting:'正在等待验证码',
   otp_ambiguous:'验证码需要确认',
+  auth_return_unverified:'登录后未回到原岗位，已安全暂停',
   sms_setup:'正在准备短信验证',
   unknown_facts:'需要补充信息',
   session_unavailable:'浏览器连接中断',
@@ -146,10 +147,11 @@ function render(state){
         ${t.resend_eligible?(t.resend_wait_seconds===0?`<button class="headerbtn" type="button" data-otp-resend="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">授权重发一次</button>`:`<div class="otpnote">重发冷却中：约 ${Number(t.resend_wait_seconds)||0} 秒</div>`):''}
       `:t.blocker==='otp_waiting'?'<div class="otpnote">本次验证码等待已过期或身份不明；请在专用浏览器核对后继续。</div>':''}
       ${t.blocker==='security_challenge'?'<div class="otpnote">请在任务专用浏览器由本人完成安全验证；完成后继续，系统会重新核对目标。</div>':''}
+      ${t.blocker==='auth_return_unverified'?'<div class="otpnote">系统无法证明登录后仍在原岗位。请核对页面；此任务不会自动重发短信或继续写入。</div>':''}
       <div class="taskcontrols">
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
         ${['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="OBSERVE" data-task="${esc(t.task_id)}">只读核对</button>`:''}
-        ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
+        ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown','auth_return_unverified'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
         ${!['SUBMITTED','VERIFIED','CANCELLED','READY_TO_SUBMIT'].includes(t.stage)?`<button type="button" data-action="CANCEL" data-task="${esc(t.task_id)}" data-revision="${t.revision}">取消</button>`:''}
       </div>
     </div>`).join('');

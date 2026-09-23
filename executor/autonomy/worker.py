@@ -48,6 +48,8 @@ class ProcessLock:
 def outcome(plan):
     if plan.stage == ApplicationStage.BLOCKED:
         if plan.metadata.get("auth_kind"):
+            if plan.metadata["auth_kind"] == "return_target_unverified":
+                return "BLOCKED", "auth_return_unverified"
             return "NEEDS_USER_ACTION", "otp_waiting" if plan.metadata["auth_kind"] == "one_time_code" else "security_challenge"
         if plan.unresolved_fields:
             return "NEEDS_USER_INPUT", "unknown_facts"
@@ -122,6 +124,11 @@ class Worker:
         """Listen after the short browser wait without holding a task lease."""
         if not self.relay or not self.relay.enabled:
             return
+        with self._otp_watch_lock:
+            now = time.monotonic()
+            self._otp_watch_retry_after = {
+                aid: retry_at for aid, retry_at in self._otp_watch_retry_after.items()
+                if retry_at > now or aid in self._otp_watchers}
         for task in self.queue.tasks():
             if task["stage"] != "NEEDS_USER_ACTION" or task["blocker"] != "otp_waiting":
                 continue

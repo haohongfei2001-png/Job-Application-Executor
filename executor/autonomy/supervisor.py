@@ -111,8 +111,9 @@ class Supervisor:
                 0, int((attempt.get("cooldown_until") or self.queue.clock()) - self.queue.clock()))
             relay = self.worker.relay
             local_ready = bool(relay and getattr(relay, "local_messages_enabled", False)
-                               and getattr(relay, "_rule_for", lambda _site: {})(
-                                   attempt["origin"]).get("sender_hint"))
+                               and all(getattr(relay, "_rule_for", lambda _site: {})(
+                                   attempt["origin"]).get(key)
+                                       for key in ("sender_hint", "body_keyword")))
             task["otp_source"] = (
                 "configured_unverified" if relay and (
                     getattr(relay, "relay_enabled", False) or local_ready)

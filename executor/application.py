@@ -207,7 +207,7 @@ class ApplicationExecutor:
         if post_prepare_kind is None:
             if attempt:
                 if not self._auth_return_target_verified(adapter):
-                    self._block_auth(page_index, "one_time_code", "return target after authentication unverified")
+                    self._block_auth(page_index, "return_target_unverified", "return target after authentication unverified")
                     return False
                 self.otp_bridge.complete_attempt()
             return True
@@ -309,7 +309,7 @@ class ApplicationExecutor:
 
         if attempt:
             if not self._auth_return_target_verified(adapter):
-                self._block_auth(page_index, "one_time_code", "return target after authentication unverified")
+                self._block_auth(page_index, "return_target_unverified", "return target after authentication unverified")
                 return False
             self.otp_bridge.complete_attempt()
         self.audit.record_action({

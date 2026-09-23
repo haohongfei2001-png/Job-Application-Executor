@@ -56,6 +56,30 @@ def test_unknown_send_survives_restart_and_cannot_click_again(tmp_path):
     assert b"48291357" not in raw
 
 
+def test_auth_attempt_metadata_migration_keeps_old_wait_and_task(tmp_path):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid, spec = _task(tmp_path, queue)
+    with queue.tx() as db:
+        db.execute("""CREATE TABLE auth_attempts (
+            attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, origin TEXT NOT NULL,
+            return_target_digest TEXT NOT NULL, mode TEXT NOT NULL,
+            phone_fact_ref TEXT NOT NULL, send_outcome TEXT NOT NULL,
+            requested_at REAL, deadline REAL, cooldown_until REAL,
+            current INTEGER NOT NULL, created REAL NOT NULL, updated REAL NOT NULL)""")
+        db.execute("""INSERT INTO auth_attempts VALUES(
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',?,?,?,'sms','identity.phone',
+            'SEND_UNKNOWN',?,?,?,1,?,?)""",
+            (tid, "auth.example.test", "old-target-digest", queue.clock(),
+             queue.clock()+300, queue.clock()+60, queue.clock(), queue.clock()))
+    migrated = AuthAttemptStore(queue)
+    current = migrated.current(tid)
+    assert current["attempt_id"] == "a" * 32
+    assert current["send_outcome"] == "SEND_UNKNOWN"
+    assert current["resend_parent_id"] is None
+    assert TaskQueue(queue.root).get(tid)["spec"]["target_url"] == spec.target_url
+    assert AuthAttemptStore(TaskQueue(queue.root)).current(tid)["attempt_id"] == "a" * 32
+
+
 def test_code_is_bound_to_task_attempt_origin_and_memory(tmp_path):
     queue = TaskQueue(tmp_path / "runtime")
     tid, spec = _task(tmp_path, queue)
@@ -80,15 +104,20 @@ def test_code_is_bound_to_task_attempt_origin_and_memory(tmp_path):
 
 
 def test_old_attempt_cannot_feed_new_attempt_after_switch(tmp_path):
-    queue = TaskQueue(tmp_path / "runtime")
+    now = [1000.0]
+    queue = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
     tid, spec = _task(tmp_path, queue)
     store, owner, first = _attempt(queue, tid, spec)
     store.record_send_intent(first["attempt_id"], tid, owner)
-    store.close(tid, first["attempt_id"], outcome="EXPIRED")
-    second = store.begin(tid, owner, "auth.example.test", spec.target_url)
-    assert second["attempt_id"] != first["attempt_id"]
-    store.record_send_intent(second["attempt_id"], tid, owner)
     queue.checkpoint(tid, owner, "NEEDS_USER_ACTION", blocker="otp_waiting", release=True)
+    now[0] += 61
+    second = store.authorize_resend(
+        tid, command_id="switch-attempt", expected_revision=queue.get(tid)["revision"])
+    assert second["attempt_id"] != first["attempt_id"]
+    claimed = queue.claim("synthetic-resend-worker")
+    assert claimed["task_id"] == tid
+    store.record_send_intent(second["attempt_id"], tid, claimed["owner"])
+    queue.checkpoint(tid, claimed["owner"], "NEEDS_USER_ACTION", blocker="otp_waiting", release=True)
     broker = OtpBroker(queue)
     assert not broker.push(task_id=tid, attempt_id=first["attempt_id"],
                            message="OTP 48291357")["accepted"]
@@ -96,6 +125,16 @@ def test_old_attempt_cannot_feed_new_attempt_after_switch(tmp_path):
                        message="OTP 72941836")["accepted"]
     assert broker.consume(tid, attempt_id=second["attempt_id"],
                           origin="auth.example.test") == "72941836"
+
+
+def test_closed_unknown_send_cannot_silently_start_fresh_sms(tmp_path):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid, spec = _task(tmp_path, queue)
+    store, owner, first = _attempt(queue, tid, spec)
+    store.record_send_intent(first["attempt_id"], tid, owner)
+    store.close(tid, first["attempt_id"], outcome="EXPIRED")
+    with pytest.raises(RuntimeError, match="explicit reconciliation"):
+        store.begin(tid, owner, "auth.example.test", spec.target_url)
 
 
 def test_resend_requires_explicit_command_cooldown_and_one_new_attempt(tmp_path):
@@ -274,8 +313,49 @@ def test_headless_local_task_card_delivers_otp_without_chat(tmp_path):
         thread.join()
 
 
-@pytest.mark.parametrize("authorized_resend", [False, True])
-def test_isolated_worker_sms_send_once_then_returns_to_exact_task(tmp_path, authorized_resend):
+def test_already_authenticated_task_never_requests_sms(tmp_path):
+    state = {"sms_requests": 0, "submits": 0}
+
+    class Fixture(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            body = ("<meta charset='utf-8'><label>Unknown objective fact "
+                    "<input id='unknown_fact' required></label>"
+                    "<button type='button' onclick=\"fetch('/submit',{method:'POST'})\">确认提交</button>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def do_POST(self):
+            state["sms_requests" if self.path == "/sms" else "submits"] += 1
+            self.send_response(200)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        profile = tmp_path / "synthetic-profile.json"
+        write_profile(ApplicantProfile(), profile)
+        queue = TaskQueue(tmp_path / "runtime")
+        target = f"http://127.0.0.1:{server.server_port}/apply"
+        tid = queue.enqueue(TaskSpec(company="Synthetic", role="Tester",
+                                     target_url=target, profile_ref=str(profile)))["task_id"]
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        assert worker.run_once()
+        assert queue.get(tid)["stage"] == "NEEDS_USER_INPUT"
+        assert worker.broker.attempts.current(tid) is None
+        assert state == {"sms_requests": 0, "submits": 0}
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize(("authorized_resend", "wrong_return"),
+                         [(False, False), (True, False), (False, True)])
+def test_isolated_worker_sms_send_once_then_returns_to_exact_task(
+        tmp_path, authorized_resend, wrong_return):
     state = {"sms_requests": 0, "authenticated": False, "submits": 0}
 
     class Fixture(BaseHTTPRequestHandler):
@@ -291,10 +371,11 @@ def test_isolated_worker_sms_send_once_then_returns_to_exact_task(tmp_path, auth
                         "<button type='button' onclick=\"fetch('/submit',{method:'POST'})\">确认提交</button>")
             else:
                 send_label = "重新发送" if state["sms_requests"] else "发送验证码"
+                after_auth = "location.href='/wrong'" if wrong_return else "location.reload()"
                 body = ("<meta charset='utf-8'><form id='login'><h2>登录</h2>"
                         "<label>手机号<input id='phone' type='tel'></label>"
                         "<label>验证码<input id='otp' autocomplete='one-time-code' "
-                        "oninput=\"if(this.value==='482913')fetch('/authenticated').then(()=>location.reload())\"></label>"
+                        f"oninput=\"if(this.value==='482913')fetch('/authenticated').then(()=>{after_auth})\"></label>"
                         "<button id='send' type='button' "
                         "onclick=\"fetch('/sms',{method:'POST'}).then(()=>this.textContent='重新发送')\">"
                         f"{send_label}</button></form>")
@@ -344,10 +425,18 @@ def test_isolated_worker_sms_send_once_then_returns_to_exact_task(tmp_path, auth
             "message": "验证码 482913",
         })["accepted"]
         assert worker.run_once()
-        assert queue.get(tid)["stage"] == "NEEDS_USER_INPUT"
+        if wrong_return:
+            assert queue.get(tid)["stage"] == "BLOCKED"
+            assert queue.get(tid)["blocker"] == "auth_return_unverified"
+            assert worker.broker.attempts.current(tid) is not None
+            with pytest.raises(ValueError, match="read-only reconciliation"):
+                queue.resume(tid)
+        else:
+            assert queue.get(tid)["stage"] == "NEEDS_USER_INPUT"
         assert state == {"sms_requests": 2 if authorized_resend else 1,
                          "authenticated": True, "submits": 0}
-        assert worker.broker.attempts.current(tid) is None
+        if not wrong_return:
+            assert worker.broker.attempts.current(tid) is None
         assert b"482913" not in queue.path.read_bytes()
         assert "482913" not in json.dumps(supervisor.diagnostics(), ensure_ascii=False)
         assert "482913" not in json.dumps(supervisor.ui_state(), ensure_ascii=False)
