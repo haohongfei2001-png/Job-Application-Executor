@@ -110,57 +110,42 @@ def launch_consumer(root, port):
     from .consumer import humanize_preflight
     from .preflight import collect_live_preflight
 
-    if browser_mode() in {"test", "isolated", "headless"}:
-        result = collect_live_preflight(
-            supervisor_running=False,
-            browser_mode_value=browser_mode(),
-            chrome_exists=False,
-            cdp_alive=False,
-            deepseek_available=False,
-            profile_exists=False,
-            profile_loadable=False,
-        )
-        return {
-            **result,
-            "message": humanize_preflight(result),
-            "opened": False,
-        }
-
-    try:
-        ensure_chrome()
-    except Exception:
-        result = {
-            "ok": False,
-            "ready_for_live_e2e": False,
-            "checks": {"existing_cdp_session": False},
-            "remediation": ["start_dedicated_chrome_cdp"],
-            "final_click_actor": "user",
-            "submit_capability": False,
-        }
-        return {
-            **result,
-            "message": humanize_preflight(result),
-            "opened": False,
-        }
-
     started = lifecycle("start", root, port)
     health = lifecycle("health", root, port)
+    live_mode = browser_mode() not in {"test", "isolated", "headless"}
+    if live_mode and started.get("ok") and health.get("ok"):
+        try:
+            # Browser startup is a repair attempt, not a gate to the local UI.
+            ensure_chrome()
+        except Exception:
+            pass
     result = collect_live_preflight(
         supervisor_running=bool(started.get("ok") and health.get("ok")),
     )
-    if not result.get("ready_for_live_e2e"):
+    if not health.get("ok"):
+        from .bootstrap import open_bootstrap
+
+        bootstrap = open_bootstrap(root, port, str(started.get("reason") or "service_unavailable"))
         return {
             **result,
             "message": humanize_preflight(result),
-            "opened": False,
+            "ok": bool(bootstrap.get("ok")),
+            "opened": bool(bootstrap.get("opened")),
+            "bootstrap_reason": started.get("reason") or "service_unavailable",
         }
 
-    ui = open_ui(root, port)
+    try:
+        ui = open_ui(root, port)
+    except Exception:
+        ui = {"ok": False, "opened": False}
     return {
         **result,
         "ok": bool(ui.get("ok")),
         "opened": bool(ui.get("opened")),
-        "message": "已就绪" if ui.get("opened") else "本地服务已就绪，但没有成功打开面板。",
+        "message": (
+            humanize_preflight(result) if ui.get("opened")
+            else "本地服务已启动，但没有成功打开面板。"
+        ),
     }
 
 
@@ -171,6 +156,8 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch", "install-app"):
         commands.add_parser(name)
+    bootstrap = commands.add_parser("bootstrap-serve")
+    bootstrap.add_argument("--reason", default="service_unavailable")
     preflight = commands.add_parser("preflight")
     preflight.add_argument("--start", action="store_true")
     commands.add_parser("chat")
@@ -190,6 +177,11 @@ def main(argv=None):
     try:
         if args.command == "serve":
             serve(args.runtime, args.port)
+            return 0
+        if args.command == "bootstrap-serve":
+            from .bootstrap import serve_bootstrap
+
+            serve_bootstrap(args.runtime, args.port, args.reason)
             return 0
         if args.command in {"start", "stop", "restart", "status", "health"}:
             result = lifecycle(args.command, args.runtime, args.port)

@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
+import socket
 import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
 
-from executor.autonomy import cli, preflight
+import pytest
+
+from executor.autonomy import bootstrap, cli, preflight
 from executor.autonomy.consumer import install_macos_app
 from executor.autonomy.dashboard import DASHBOARD_HTML
 
@@ -58,11 +67,11 @@ def test_consumer_launch_repairs_reversible_runtime_and_opens_ui(
     assert result["opened"] is True
     assert result["message"] == "已就绪"
     assert result["submit_capability"] is False
-    assert calls == ["chrome", "start", "health"]
+    assert calls == ["start", "health", "chrome"]
     assert opened == [(tmp_path / "runtime", 9344)]
 
 
-def test_consumer_launch_fails_closed_before_ui_when_preflight_is_not_ready(
+def test_consumer_launch_opens_bootstrap_when_model_is_not_ready(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(cli, "browser_mode", lambda: "live")
@@ -81,14 +90,14 @@ def test_consumer_launch_fails_closed_before_ui_when_preflight_is_not_ready(
         },
     )
 
-    def forbidden_open(*_):
-        raise AssertionError("UI must not open before consumer readiness passes")
-
-    monkeypatch.setattr(cli, "open_ui", forbidden_open)
+    opened = []
+    monkeypatch.setattr(cli, "open_ui", lambda *args: opened.append(True) or {"ok": True, "opened": True})
     result = cli.launch_consumer(tmp_path / "runtime", 9344)
 
-    assert result["ok"] is False
-    assert result["opened"] is False
+    assert result["ok"] is True
+    assert result["ready_for_live_e2e"] is False
+    assert result["opened"] is True
+    assert opened == [True]
     assert result["submit_capability"] is False
     assert "DeepSeek" in result["message"]
 
@@ -102,12 +111,94 @@ def test_consumer_launch_does_not_start_live_browser_in_isolated_mode(
         raise AssertionError("isolated/test launch must not start live Chrome")
 
     monkeypatch.setattr(cli, "ensure_chrome", forbidden)
+    monkeypatch.setattr(cli, "lifecycle", lambda action, root, port: {"ok": True})
+    monkeypatch.setattr(cli, "open_ui", lambda *args: {"ok": True, "opened": True})
     result = cli.launch_consumer(tmp_path / "runtime", 9344)
 
-    assert result["ok"] is False
-    assert result["opened"] is False
+    assert result["ok"] is True
+    assert result["opened"] is True
+    assert result["ready_for_live_e2e"] is False
     assert result["submit_capability"] is False
     assert "use_live_browser_mode" in result["remediation"]
+
+
+def test_consumer_launch_reports_service_failure_without_opening_ui(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(cli, "lifecycle", lambda action, root, port: {"ok": False, "reason": "service_start_failed"})
+    monkeypatch.setattr(cli, "open_ui", lambda *args: (_ for _ in ()).throw(AssertionError("no service")))
+    monkeypatch.setattr(bootstrap, "open_bootstrap", lambda *args: {"ok": True, "opened": True})
+
+    result = cli.launch_consumer(tmp_path / "runtime", 9344)
+
+    assert result["opened"] is True
+    assert result["ok"] is True
+    assert result["bootstrap_reason"] == "service_start_failed"
+    assert result["ready_for_live_e2e"] is False
+    assert result["submit_capability"] is False
+
+
+def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        service_port = reservation.getsockname()[1]
+    env = {**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"}
+    process = subprocess.Popen(
+        [sys.executable, "-m", "executor.autonomy.cli", "--runtime", str(runtime),
+         "--port", str(service_port), "bootstrap-serve", "--reason", "service_start_failed"],
+        env=env, cwd=os.getcwd(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        state_path = runtime / "bootstrap.json"
+        for _ in range(100):
+            if state_path.exists():
+                break
+            assert process.poll() is None
+            time.sleep(0.05)
+        record = json.loads(state_path.read_text())
+        assert record["pid"] == process.pid
+        assert state_path.stat().st_mode & 0o077 == 0
+        base = f"http://127.0.0.1:{record['port']}"
+        url = base + "/?token=" + record["token"]
+        with urllib.request.urlopen(url) as response:
+            body = response.read().decode()
+        assert "重试并打开面板" in body
+        assert "提交申请" in body
+        assert "本地服务启动失败" in body
+        assert "本地版本：" in body
+        opened = []
+        monkeypatch.setattr(bootstrap.webbrowser, "open", lambda value, **kwargs: opened.append(value) or True)
+        assert bootstrap.open_bootstrap(runtime, service_port)["opened"] is True
+        assert opened == [url]
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(base + "/")
+        assert denied.value.code == 403
+        without_origin = urllib.request.Request(
+            base + "/retry?token=" + record["token"], data=b"", method="POST"
+        )
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(without_origin)
+        assert denied.value.code == 403
+        retry = urllib.request.Request(
+            base + "/retry?token=" + record["token"], data=b"",
+            headers={"Origin": base}, method="POST",
+        )
+        no_redirect = urllib.request.build_opener(
+            type("NoRedirect", (urllib.request.HTTPRedirectHandler,),
+                 {"redirect_request": lambda self, *args: None})()
+        )
+        with pytest.raises(urllib.error.HTTPError) as redirected:
+            no_redirect.open(retry, timeout=10)
+        assert redirected.value.code == 303
+        assert redirected.value.headers["Location"].startswith(
+            f"http://127.0.0.1:{service_port}/ui-login?ticket="
+        )
+        assert cli.lifecycle("health", runtime, service_port)["ok"] is True
+    finally:
+        cli.lifecycle("stop", runtime, service_port)
+        process.terminate()
+        process.wait(timeout=5)
 
 
 def test_macos_consumer_app_installs_idempotently(tmp_path):
@@ -164,6 +255,7 @@ def test_dashboard_uses_consumer_facing_status_language():
     assert "正在等待验证码" in DASHBOARD_HTML
     assert "需要安全验证" in DASHBOARD_HTML
     assert "已就绪 · 最终提交由你确认" in DASHBOARD_HTML
+    assert "/ui/api/readiness" in DASHBOARD_HTML
     assert '<form id="newtask"' in DASHBOARD_HTML
     assert '添加岗位请使用左侧表单' in DASHBOARD_HTML
     assert "复制诊断" in DASHBOARD_HTML

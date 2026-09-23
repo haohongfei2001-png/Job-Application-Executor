@@ -108,6 +108,13 @@ class Supervisor:
             repo_root=Path(__file__).resolve().parents[2],
         )
 
+    def readiness(self):
+        from .consumer import humanize_preflight
+        from .preflight import collect_live_preflight
+
+        result = collect_live_preflight(supervisor_running=True)
+        return {**result, "message": humanize_preflight(result)}
+
     def update_state(self):
         return reconciled_update_state(self.queue.root)
 
@@ -344,6 +351,9 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/state":
                         self._send_json(200, supervisor.ui_state())
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/readiness":
+                        self._send_json(200, supervisor.readiness())
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/diagnostics":
                         self._send_json(200, supervisor.diagnostics())

@@ -762,6 +762,17 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
     q, worker, supervisor = _supervisor(tmp_path)
     monkeypatch.setattr(
         supervisor,
+        "readiness",
+        lambda: {
+            "ok": False,
+            "ready_for_live_e2e": False,
+            "message": "个人资料尚未配置。",
+            "remediation": ["configure_profile_path"],
+            "submit_capability": False,
+        },
+    )
+    monkeypatch.setattr(
+        supervisor,
         "diagnostics",
         lambda: {
             "format": "application-executor-diagnostics-v1",
@@ -803,6 +814,12 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
         assert report["format"] == "application-executor-diagnostics-v1"
         assert report["safety"]["submit_capability"] is False
 
+        with opener.open(base + "/ui/api/readiness") as response:
+            readiness = json.load(response)
+        assert readiness["ready_for_live_e2e"] is False
+        assert readiness["submit_capability"] is False
+        assert readiness["remediation"] == ["configure_profile_path"]
+
         update_request = urllib.request.Request(
             base + "/ui/api/update",
             data=b"{}",
@@ -819,6 +836,9 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
         unauthenticated = urllib.request.Request(base + "/ui/api/diagnostics")
         with pytest.raises(Exception):
             urllib.request.urlopen(unauthenticated)
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(base + "/ui/api/readiness")
+        assert denied.value.code == 401
     finally:
         server.shutdown()
         server.server_close()
