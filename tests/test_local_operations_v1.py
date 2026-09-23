@@ -378,6 +378,47 @@ def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
     assert state["reason"] == "tracked_changes_present"
 
 
+def test_spawn_update_preserves_restart_retry_intent(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    old = "a" * 40
+    captured = []
+
+    updater.write_update_state(
+        runtime,
+        "restart_required",
+        old_version=old,
+        new_version=old,
+        reason="service_start_failed",
+    )
+    monkeypatch.setattr(
+        updater,
+        "repository_update_preconditions",
+        lambda path: {"ok": True, "head": old},
+    )
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            captured.append((args, kwargs))
+
+    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
+
+    result = updater.spawn_update(
+        repo_root=repo,
+        runtime=runtime,
+        port=9344,
+        python_executable="/private/python",
+    )
+
+    assert result["status"] == "started"
+    args, kwargs = captured[0]
+    assert "--restart-only" in args
+    assert "--lock-fd" in args
+    assert kwargs["pass_fds"]
+    state = updater.read_update_state(runtime)
+    assert state["status"] == "restarting"
+
+
 def test_restart_required_can_be_retried_when_code_is_already_current(
     tmp_path, monkeypatch
 ):
