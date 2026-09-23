@@ -227,6 +227,20 @@ def test_attachment_slots_require_distinct_type_and_canonical_hash(tmp_path, mon
     assert runner._attachment_resolution(photo_field).status == ResolutionStatus.UNRESOLVED
 
 
+def test_existing_checked_declaration_is_not_new_scoped_consent(tmp_path, monkeypatch):
+    runner, _html = _runner(tmp_path, monkeypatch, """
+      <label>姓名<input id='name' name='full_name' required></label>
+      <label>本人承诺以上信息真实有效<input id='declaration' type='checkbox' checked required></label>
+      <button type='button'>Submit application</button>
+    """, {"policy.auto_accept_truth_submission_declarations": {
+        "value": True, "confidence": 1.0, "user_confirmed": True}})
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "unresolved fields require user input"
+    declaration = next(item for item in plan.fields if item.field_id == "declaration")
+    assert declaration.status == ResolutionStatus.USER_CONFIRMATION
+
+
 def test_form_observation_and_fill_plan_do_not_expose_values_in_receipts():
     field = WebField(field_id="name", selector="#name", label="Private Label",
                      current_value="CANARY_PRIVATE_PERSON", required=True)

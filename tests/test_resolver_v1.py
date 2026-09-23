@@ -1,3 +1,5 @@
+import hashlib
+
 from executor.models import ResolutionStatus, WebField
 from executor.resolver import FieldResolver
 from executor.adapters.registry import adapter_for_url, site_id_for_url
@@ -32,6 +34,15 @@ def _profile():
 
 def _resolver():
     return FieldResolver(_profile(), {"deepseek": {"enabled": False}})
+
+
+def _scoped_resolver(policy_key, label, target="https://synthetic.example.test/apply/role-1"):
+    profile = _profile()
+    profile["fields"][policy_key]["normalization"] = {
+        "approved_text_sha256": hashlib.sha256(" ".join(label.split()).casefold().encode()).hexdigest(),
+        "approved_target_sha256": hashlib.sha256(target.encode()).hexdigest(),
+    }
+    return FieldResolver(profile, {"deepseek": {"enabled": False}}), target
 
 
 def test_explicit_bachelor_does_not_use_highest_education():
@@ -149,19 +160,38 @@ def test_family_section_context_disambiguates_name_and_related_fields():
         assert item.value == value
 
 def test_privacy_and_truth_declarations_follow_standing_user_policy():
-    resolver = _resolver()
     for label, key in [
         ("我已阅读并同意隐私政策", "policy.auto_accept_privacy_terms"),
         ("本人承诺以上信息真实有效", "policy.auto_accept_truth_submission_declarations"),
         ("简历一经投递不可修改", "policy.auto_accept_truth_submission_declarations"),
     ]:
+        resolver, target = _scoped_resolver(key, label)
         item = resolver.resolve(WebField(
-            field_id="decl", selector="#decl", label=label, required=True
+            field_id="decl", selector="#decl", label=label, required=True,
+            page_url=target,
         ))
         assert item.status == ResolutionStatus.RESOLVED
         assert item.canonical_key == key
         assert item.value is True
         assert item.source == "standing_user_policy"
+
+
+def test_policy_approval_does_not_cross_text_or_target_scope():
+    label = "本人承诺以上信息真实有效"
+    key = "policy.auto_accept_truth_submission_declarations"
+    resolver, target = _scoped_resolver(key, label)
+    for changed_label, changed_target in [
+        (label + "并授权背景调查", target),
+        (label, "https://synthetic.example.test/apply/role-2"),
+    ]:
+        item = resolver.resolve(WebField(field_id="decl", selector="#decl",
+                                         label=changed_label, required=True,
+                                         page_url=changed_target))
+        assert item.status == ResolutionStatus.USER_CONFIRMATION
+    legacy = _resolver().resolve(WebField(
+        field_id="legacy", selector="#legacy", label=label, required=True,
+        page_url=target, current_value=True))
+    assert legacy.status == ResolutionStatus.USER_CONFIRMATION
 
 
 def test_unknown_company_compliance_is_not_reconfirmed_but_needs_fact_basis():
@@ -199,11 +229,12 @@ def test_certificate_field_is_not_treated_as_truth_declaration():
     assert item.source != "standing_user_policy"
 
 def test_company_legal_assent_is_auto_accepted_by_standing_policy():
-    resolver = _resolver()
+    label = "本人同意遵守本公司合规政策与行为准则"
+    resolver, target = _scoped_resolver("policy.auto_decide_company_legal_compliance", label)
     item = resolver.resolve(WebField(
         field_id="compliance-assent",
         selector="#compliance-assent",
-        label="本人同意遵守本公司合规政策与行为准则",
+        label=label, page_url=target,
         required=True,
     ))
     assert item.status == ResolutionStatus.RESOLVED
@@ -228,7 +259,9 @@ def test_standing_policy_select_and_ai_mapping_require_observed_representation(m
     assert resolved.status == ResolutionStatus.RESOLVED
     assert resolved.value == "True"
 
+    assent_label = "本人同意遵守本公司合规政策与行为准则"
+    scoped, target = _scoped_resolver("policy.auto_decide_company_legal_compliance", assent_label)
     assent = WebField(field_id="assent", selector="#assent",
-                       label="本人同意遵守本公司合规政策与行为准则",
+                       label=assent_label, page_url=target,
                        input_type="select", options=["是", "否"], required=True)
-    assert resolver.resolve(assent).status == ResolutionStatus.UNRESOLVED
+    assert scoped.resolve(assent).status == ResolutionStatus.UNRESOLVED
