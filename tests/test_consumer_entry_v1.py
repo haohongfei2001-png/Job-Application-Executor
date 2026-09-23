@@ -165,3 +165,8 @@ def test_dashboard_uses_consumer_facing_status_language():
     assert "需要安全验证" in DASHBOARD_HTML
     assert "已就绪 · 最终提交由你确认" in DASHBOARD_HTML
     assert "placeholder=\"告诉我你想投哪个岗位" in DASHBOARD_HTML
+    assert "复制诊断" in DASHBOARD_HTML
+    assert "检查并更新" in DASHBOARD_HTML
+    assert "/ui/api/diagnostics" in DASHBOARD_HTML
+    assert "/ui/api/update" in DASHBOARD_HTML
+    assert "otp_in_flight" in DASHBOARD_HTML
