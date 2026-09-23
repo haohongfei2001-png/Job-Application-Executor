@@ -1,7 +1,8 @@
 <!-- Pro audit text preserved; STATUS.json is authoritative for current execution state. -->
 <section id="04_acceptance_matrix" class="chapter"><h1 id="04_acceptance_matrix-最终-consumer-grade-acceptance-matrix">最终 Consumer-Grade Acceptance Matrix</h1>
 <p>本矩阵是拟冻结的客观结果合同，不是已通过报告。基线审计不等于这份新矩阵认证。配套 <a href="acceptance-matrix.json">JSON</a> 适合逐轮关联用例和 receipts。</p>
-<p>所有项目初始 <strong>NOT_RUN</strong>。<code>AUTO</code> 是合成/隔离；<code>PUBLIC</code> 是公开只读；<code>AUTO_MAC</code> 是真实 macOS 自动环境；<code>FINAL_LIVE</code> 是最后集中真人/真实站点证据，不是每行单独找 owner。</p>\n<p><strong>连续执行修订：</strong>表格中的“责任轮次”表示工程实现责任，不表示该轮必须收集 FINAL_LIVE 才能继续。所有 <code>FINAL_LIVE</code> 子证据统一由 JCR-09 final convergence 收集；JCR-01～08 只需完成各自 AUTO/PUBLIC/AUTO_MAC 和生产实现。缺 FINAL_LIVE 时保持 NOT_RUN/UNVERIFIED，并写入 deferred ledger，不阻塞后续独立开发，也不得伪造 PASS。</p>
+<p>所有项目初始 <strong>NOT_RUN</strong>。<code>AUTO</code> 是合成/隔离；<code>PUBLIC</code> 是公开只读；<code>AUTO_MAC</code> 是真实 macOS 自动环境；<code>FINAL_LIVE</code> 是最后集中真人/真实站点证据，不是每行单独找 owner。</p>
+<p><strong>连续执行修订：</strong>表格中的“责任轮次”表示工程实现责任，不表示该轮必须收集 FINAL_LIVE 才能继续。所有 <code>FINAL_LIVE</code> 子证据统一由 JCR-09 final convergence 收集；JCR-01～08 只需完成各自 AUTO/PUBLIC/AUTO_MAC 和生产实现。缺 FINAL_LIVE 时保持 NOT_RUN/UNVERIFIED，并写入 deferred ledger，不阻塞后续独立开发，也不得伪造 PASS。</p>
 <p>所有必选项必须 PASS。特定站点确实不存在相应组件，允许该“站点×场景”标 <code>NOT_APPLICABLE_WITH_EVIDENCE</code>；整个 v1 必需能力仍需在另一认证场景证明。单纯 unsupported、安全停下、测试没访问到，不能标 N/A 或自动完成 PASS。</p>
 <p>FAIL 中的任一条件出现即失败；PASS 为该行所有相关条件的合取。检查安全与完成两条轴：正确拒绝未知副作用可以 safety PASS，但不把未完成申请算作 completion PASS。0 自动提交、0 错目标、0 伪造事实、0 秘密越界、0 假READY 为全局强制门槛。</p>
 <h2 id="04_acceptance_matrix-a--启动与运行">A — 启动与运行</h2>
