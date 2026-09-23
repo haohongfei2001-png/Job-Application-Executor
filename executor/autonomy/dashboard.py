@@ -95,6 +95,7 @@ const blockerText={
   unknown_facts:'需要补充信息',
   session_unavailable:'浏览器连接中断',
   live_not_authorized:'尚未授权实时执行',
+  isolated_external_target:'隔离测试模式只支持本地合成站',
   validation:'需要检查表单',
   retry_pending:'正在重试',
   retry_exhausted:'需要处理后再继续',

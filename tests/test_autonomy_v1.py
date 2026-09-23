@@ -372,6 +372,19 @@ def test_url_secrets_rejected_and_cancel_fences_worker(tmp_path):
     with pytest.raises(ValueError):
         q.checkpoint(tid, task['owner'], 'SUBMITTED')
 
+
+def test_isolated_worker_refuses_external_target_before_browser(tmp_path, monkeypatch):
+    monkeypatch.setenv('APPLICATION_EXECUTOR_BROWSER_MODE', 'isolated')
+    monkeypatch.setattr('executor.autonomy.worker.browser.connect', lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError('external browser connection attempted')))
+    q = TaskQueue(tmp_path / 'runtime')
+    created = q.enqueue(spec(tmp_path))
+    worker = Worker(q, settings={'deepseek': {'enabled': False}})
+    assert worker.run_once()
+    blocked = q.get(created['task_id'])
+    assert blocked['stage'] == 'BLOCKED'
+    assert blocked['blocker'] == 'isolated_external_target'
+
 def test_stale_paused_owner_is_resumable(tmp_path):
     now = [10.]
     q = TaskQueue(tmp_path / 'runtime', clock=lambda: now[0])

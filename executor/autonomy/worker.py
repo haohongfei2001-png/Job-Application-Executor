@@ -6,6 +6,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .. import browser
 from ..application import ApplicationExecutor
@@ -179,6 +180,14 @@ class Worker:
             except RuntimeError:
                 checkpoint("BLOCKED", blocker="protected_target", release=True)
                 return True
+            if browser.browser_mode() in {"isolated", "test", "headless"} and self.runner_factory is ApplicationExecutor:
+                target = urlsplit(spec["target_url"])
+                if not (target.scheme == "file" or (
+                    target.scheme in {"http", "https"}
+                    and target.hostname in {"127.0.0.1", "localhost"}
+                )):
+                    checkpoint("BLOCKED", blocker="isolated_external_target", release=True)
+                    return True
             if browser.browser_mode() not in {"isolated", "test", "headless"}:
                 if not spec["live_authorized"]:
                     checkpoint("BLOCKED", blocker="live_not_authorized", release=True)
