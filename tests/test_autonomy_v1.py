@@ -478,7 +478,7 @@ def test_isolated_launch_failure_stops_playwright(monkeypatch):
         browser.connect('file:///synthetic')
     assert pw.stopped
 
-@pytest.mark.parametrize('body', ['请拖动滑块完成验证', '图形验证码', 'Slide to verify', '请扫码登录'])
+@pytest.mark.parametrize('body', ['请拖动滑块完成验证', '图形验证码', 'Slide to verify'])
 def test_real_dom_security_controls_do_not_become_ordinary_otp(tmp_path, body):
     from executor.adapters.generic_web import GenericWebAdapter
     html = tmp_path / 'security.html'
@@ -486,6 +486,16 @@ def test_real_dom_security_controls_do_not_become_ordinary_otp(tmp_path, body):
     with GenericWebAdapter(html.as_uri()) as adapter:
         assert adapter.auth_challenge_kind() in {'captcha','other'}
         assert adapter.page.locator('#otp').input_value() == ''
+
+
+def test_visible_qr_login_dialog_remains_a_human_security_challenge(tmp_path):
+    from executor.adapters.generic_web import GenericWebAdapter
+    html = tmp_path / 'qr-login.html'
+    html.write_text(
+        '<meta charset="utf-8"><div role="dialog"><h2>登录</h2><p>请扫码登录</p></div>'
+    )
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.auth_challenge_kind() == 'other'
 
 
 def test_daemon_subprocess_api_otp_input_restart_end_to_end(tmp_path):
