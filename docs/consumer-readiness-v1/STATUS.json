@@ -5,16 +5,22 @@
   "audit_baseline_sha": "72dd892c144699f8a9e9988265bfb20f50b3db4e",
   "registration_base_sha": "72dd892c144699f8a9e9988265bfb20f50b3db4e",
   "registration_status": "REGISTERED",
-  "implementation_status": "NOT_STARTED",
+  "implementation_status": "AUTHORIZED_NOT_STARTED",
   "consumer_certification": "NOT_CERTIFIED",
   "runtime_modified_by_registration": false,
   "private_runtime_accessed_by_registration": false,
   "real_application_actions_performed_by_registration": false,
   "authorization": {
     "documentation_registration": true,
-    "JCR_01_execution": false,
-    "later_round_execution": false,
+    "whole_package_engineering_execution": true,
+    "unattended_continuous_execution": true,
+    "JCR_01_execution": true,
+    "later_round_execution": true,
+    "JCR_01_through_JCR_09_engineering": true,
     "live_account_testing": false,
+    "real_application_side_effects": false,
+    "new_paid_commitments": false,
+    "new_system_permissions": false,
     "final_submit_automation": "PERMANENTLY_FORBIDDEN"
   },
   "observed_baseline_ci": {
@@ -34,48 +40,58 @@
     {
       "id": "JCR-01",
       "status": "READY",
-      "authorized": false
+      "authorized": true
     },
     {
       "id": "JCR-02",
       "status": "NOT_STARTED",
-      "authorized": false
+      "authorized": true
     },
     {
       "id": "JCR-03",
       "status": "NOT_STARTED",
-      "authorized": false
+      "authorized": true
     },
     {
       "id": "JCR-04",
       "status": "NOT_STARTED",
-      "authorized": false
+      "authorized": true
     },
     {
       "id": "JCR-05",
       "status": "NOT_STARTED",
-      "authorized": false
+      "authorized": true
     },
     {
       "id": "JCR-06",
       "status": "NOT_STARTED",
-      "authorized": false
+      "authorized": true
     },
     {
       "id": "JCR-07",
       "status": "NOT_STARTED",
-      "authorized": false
+      "authorized": true
     },
     {
       "id": "JCR-08",
       "status": "NOT_STARTED",
-      "authorized": false
+      "authorized": true
     },
     {
       "id": "JCR-09",
       "status": "NOT_STARTED",
-      "authorized": false
+      "authorized": true
     }
   ],
-  "next_action": "Explicit owner authorization is required before JCR-01 implementation begins."
+  "next_action": "Begin JCR-01 and continue unattended through all automatable JCR work. Record owner/live/permission/paid/external or unresolved engineering dependencies in DEFERRED_FINAL_GATES.md and keep advancing on independent work. Do not wait for owner between rounds. JCR-09 final convergence is the only package-level wait point after all automatable work is exhausted.",
+  "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
+  "deferred_final_gate_policy": {
+    "enabled": true,
+    "ledger": "docs/consumer-readiness-v1/DEFERRED_FINAL_GATES.md",
+    "advance_with_deferred_non_destructive_work": true,
+    "unsafe_or_unverified_action": "REFUSE_OR_DEFER",
+    "deferred_evidence_must_not_be_marked_pass": true,
+    "final_convergence_round": "JCR-09",
+    "only_package_level_wait_point": "JCR-09_FINAL_CONVERGENCE_AFTER_AUTOMATABLE_WORK_EXHAUSTED"
+  }
 }

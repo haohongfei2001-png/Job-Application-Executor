@@ -2,7 +2,11 @@
 <section id="07_final_certification" class="chapter"><h1 id="07_final_certification-最终认证与真人验收计划">最终认证与真人验收计划</h1>
 <h2 id="07_final_certification-1-发布标签">1. 发布标签</h2>
 <p>DESIGN_ONLY → IMPLEMENTING → AUTOMATED_CANDIDATE → REAL_ACCEPTANCE_PENDING → PERSONAL_RC → PERSONAL_CONSUMER_READY。</p>
-<p>当前仅 DESIGN_ONLY。main CI通过、docs齐全、9轮提交合并都不自动进入最后状态。对外/对自己都要区分已认证范围和其他通用尝试。</p>
+<p>当前 certification 仍为 DESIGN_ONLY / NOT_CERTIFIED，但工程执行已整包预授权。main CI 通过、docs 齐全或 9 轮代码合并都不自动进入 consumer-ready；对外/对自己都要区分工程完成、自动认证、真人认证和最终日用证据。</p>
+<h2 id="07_final_certification-1a-final-convergence">1A. Final convergence 是唯一集中等待阶段</h2>
+<p>JCR-01～08 以及 JCR-09 的自动部分不因真人、权限、付费、真实账号、真实短信、真实设备或外部服务证据缺失而等待。所有这类事项进入 <code>DEFERRED_FINAL_GATES.md</code>，相关 case 保持 UNVERIFIED/NOT_RUN，但其他开发继续。</p>
+<p>进入 final convergence 前必须先耗尽所有可自动工作：包括 production implementation、synthetic/isolated E2E、AUTO/AUTO_MAC/PUBLIC、migration/rollback、fault injection、release/update/recovery、公开 drift、privacy/no-submit/protected invariants，以及可自动解决的全部 <code>ENGINEERING_DEBT</code>。只有剩余集合全部是不可由无人工程合法完成的 owner/live/external evidence 时，才进入 <code>REAL_ACCEPTANCE_PENDING</code>。</p>
+<p>24h soak 和 5-day normal-use observation 都是最终认证门槛，不是中途开发停机点。候选满足条件后尽早启动 soak，并在其运行期间继续其他独立工作；5-day observation 只在 PERSONAL_RC 之后按真实日用自然发生。</p>
 <h2 id="07_final_certification-2-最后叫-owner-前必须完成">2. 最后叫 owner 前必须完成</h2>
 <p>所有核心AUTO矩阵通过；100完整黄金任务由独立oracle验证；1000状态序列和关键fault重复；Macapp启动、session、更新/回退真实进程认证；24hsoak；privacy/submit/protected invariants通过；公开站点drift已查；exact candidate SHA/builddigest锁定；具体3种平台机制与真实目标候选范围准备好；脱敏诊断/安全停止/回退已经可用。</p>
 <p>严禁先让owner投一个岗位看看，再以“真实反馈”替代这些门槛。可用的公共网页、旧已脱敏案例、合成framework fixtures应先用尽。</p>
@@ -40,7 +44,7 @@
 <p>这些是合并的验收时段，不是保证网站永远只让用户验证三次。不可自动化的挑战将来仍可能出现。实际时长取决于站点和用户目标，不为了压缩时长跳过必要review。</p>
 <p>没有真实愿意投的合适岗位时不虚假申请、不占用志愿、不创建不需要的账号。最终提交绝不为测试强迫用户；用户未选择实际提交时，post-submit真实观测保持未验证，并在证书中明确范围，不能伪造服务器回执。</p>
 <h2 id="07_final_certification-4-真实异常处理">4. 真实异常处理</h2>
-<p>先判断是平台安全挑战、缺真实事实、外部站点变更，还是基础产品bug。前三者按既定handoff处理；基础bug立即停止该任务的自动写入，保留已完成工作，用脱敏最小证据做fixture并修复。修好并完整自动回归前不要求owner继续试。</p>
+<p>先判断是平台安全挑战、缺真实事实、外部站点变更，还是基础产品 bug。前三者停止对应真实动作并进入 deferred ledger，不阻塞其他工程；基础 bug 立即停止受影响任务的自动写入，保留已完成工作，用脱敏最小证据做 fixture 并修复。修好并完整自动回归前不要求 owner 继续试。</p>
 <p>计划保留一个复验时段而非假装一定一次过。若超过三个时段仍需owner反复找基础bug，说明前置测试/架构门槛失败，应重新进入工程闭环，不再把产品称为“即将完成”。这不是机械限制安全验证码次数。</p>
 <h2 id="07_final_certification-5-短期真实日用">5. 短期真实日用</h2>
 <p>realacceptance后形成PERSONAL_RC，随后5个实际使用日按本人正常投递需求使用，不安排额外工程QA。任务不必每天提交，但有正常打开/暂停/恢复/资料重用和队列使用证据。无需Terminal、DesktopCommander或临时开发补丁才可完成已认证范围任务；无错目标/虚构事实/秘密外发/假READY；外部CAPTCHA和新决定按设计处理。</p>

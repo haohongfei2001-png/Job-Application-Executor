@@ -31,10 +31,14 @@ Status: NOT_STARTED
 - Real applicant data accessed:
 - Real website side effects:
 - Owner interactions and necessity:
-- Unverified / blocked evidence:
+- Unverified evidence:
+- Deferred Final Gate IDs added/updated:
+- Safe degradation used while continuing development:
 
 ## Closure
 - Exit criteria satisfied:
 - Merge SHA / remote readback:
 - STATUS update:
-- Next round authorization and NOT_STARTED/READY:
+- Round status (COMPLETE / ADVANCE_ALLOWED_WITH_DEFERRED / other):
+- Independent work that remains executable:
+- Next round / continuation state (whole-package engineering is preauthorized):

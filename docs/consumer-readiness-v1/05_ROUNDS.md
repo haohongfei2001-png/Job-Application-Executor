@@ -1,10 +1,10 @@
 <!-- Pro audit text preserved; STATUS.json is authoritative for current execution state. -->
 <section id="05_rounds" class="chapter"><h1 id="05_rounds-开发轮次与工程闭环">开发轮次与工程闭环</h1>
-<p>包：<code>JAE-CONSUMER-READINESS-v1</code>。本文件是可注册的执行合同，不是本轮开始实现的授权。</p>
+<p>包：<code>JAE-CONSUMER-READINESS-v1</code>。本文件是 canonical round contract。2026-09-23 owner 已对 JCR-01～JCR-09 的工程开发给出整包连续无人执行预授权；不再逐轮等待新授权。真实账号副作用、付费、新系统权限与最终 submit 仍不在该授权内。</p>
 <h2 id="05_rounds-0-统一规则">0. 统一规则</h2>
 <p>每一轮沿用 remote main + 当前有效 docs/STATUS 作为事实源。只保留一个 writer；有正在工作的 PR 时接续该 PR，不新建平行实现。每轮必须有可运行的生产路径、针对性自动证据、历史安全回归、迁移/回退验证、exact-head CI、合入后集成证据与 receipt。单纯类/接口/页面存在不算完成。</p>
-<p>本包不要求一轮后真人试站。JCR-01～08 owner interaction 默认 NO。开发者能通过合成输入、真实隔离浏览器、真实进程、公开只读站点、macOS runner 完成的验证不得转交 owner。只有真实世界权限/付费/新产品边界无法解决时才阻塞并指出最小动作，不能把一般 debug 当成 owner blocker。</p>
-<p>所有新路径必须受原 no-submit/secret/protected-target 不变量约束。新的矩阵在整个包完成前允许 NOT_RUN，但每轮自己负责的 gate 必须通过；不把未来未实施项隐藏成 skip 后宣称整个包通过。</p>
+<p>本包不要求一轮后真人试站。JCR-01～08 owner interaction 默认 NO。开发者能通过合成输入、真实隔离浏览器、真实进程、公开只读站点、fake services、hosted macOS 完成的验证不得转交 owner。任何真实世界权限/付费/真实数据/安全挑战/外部副作用问题只阻塞对应动作，统一写入 <code>DEFERRED_FINAL_GATES.md</code>，随后继续所有不依赖它的工程工作；不得把一般 debug 或最终真人证据变成 package-level blocker。</p>
+<p>所有新路径必须受原 no-submit/secret/protected-target 不变量约束。新的矩阵在整个包完成前允许 NOT_RUN/UNVERIFIED；deferred 事项不得伪造 PASS。round 只有真实满足自己的自动 gate 才标 COMPLETE，但若未决项已安全隔离且不阻塞后续独立工作，可保持 <code>ADVANCE_ALLOWED_WITH_DEFERRED</code> 并继续开发。所有 deferred 最终在 JCR-09 convergence 统一清零、验证或明确阻塞。</p>
 <h2 id="05_rounds-1-依赖关系">1. 依赖关系</h2>
 <pre><code class="language-text">JCR-01 统一任务/命令合同 + 独立验收底座
    └─ JCR-02 浏览器归属、bootstrap、自诊断/恢复
@@ -17,7 +17,7 @@ JCR-06 + 04 → JCR-07 最终证书、复核和手动边界
 JCR-01…07 → JCR-08 完整消费入口、应用壳和事务式发布
 JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 </code></pre>
-<p>顺序上的重要限制：测试、诊断、恢复先于大规模站点功能；主体 UI/read model 在前几轮逐步接入，不到第八轮才发现状态无法呈现；第八轮负责完成交付形态，不是突然把前七轮全部重写。</p>
+<p>顺序上的重要限制：测试、诊断、恢复先于大规模站点功能；主体 UI/read model 在前几轮逐步接入，不到第八轮才发现状态无法呈现；第八轮负责完成交付形态，不是突然把前七轮全部重写。依赖关系约束“哪些结果可以声称成立”，不要求因为一个局部 deferred 项就停止所有后续独立开发。</p>
 <h2 id="05_rounds-jcr-01--authoritative-task-contract--outcome-test-foundation">JCR-01 — Authoritative Task Contract &amp; Outcome Test Foundation</h2>
 <p><strong>Objective</strong>：建立可证明的任务/命令模型与独立 oracle，使后续每一项能力都能用真实结果验收，并把已发现的假 READY/错页/错城市反例变成防回归门槛。</p>
 <p><strong>Files/surfaces</strong>：现有 <code>executor/autonomy/{manager,queue,worker,supervisor}.py</code>、<code>executor/models.py</code>、<code>tests/</code>、CI；新增或等价 <code>executor/commands/</code>、<code>executor/tasks/</code>、<code>tests/fixtures/</code>、<code>tests/e2e/</code>、<code>tests/state_machine/</code>、本包 STATUS/receipts。</p>
@@ -31,7 +31,7 @@ JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 </ul>
 <p><strong>Automated tests</strong>：状态序列/非法转移/同一 command 重发/丢响应；A/B任务指代与否定“不要暂停”；模型超时期间 local control；三反例；现有 no-submit/auth/privacy/queue tests；一个经生产 UI 完成的简单合成任务，独立 server oracle。</p>
 <p><strong>Acceptance gate</strong>：所有命令可查是否受理；local control 不被 provider 网络锁阻塞；错误项目/城市/页不会继续被现有 gate 误认为充分通过；兼容迁移保留任务与保护记录；基础 golden journey 正确、submit count 0。F类基础出口门槛通过，后续新增出口须继续扩展。</p>
-<p><strong>Stop condition</strong>：错误目标/最终动作/秘密越界，或无法无损解释旧状态迁移，立即暂停该变更排查；普通代码/测试问题自行修复。不得进入 live profile 验证。</p>
+<p><strong>Deferred / safety rule</strong>：错误目标/最终动作/秘密越界时立即拒绝该动作并修复；若旧真实状态迁移暂时无法安全证明，则真实迁移路径保持禁用/只读并登记 <code>REAL_DATA_MIGRATION</code> deferred，继续完成 schema、synthetic migration、command/state、oracle 和其他独立工作。不得进入 live profile 验证。</p>
 <p><strong>Owner interaction</strong>：NO。</p>
 <p><strong>Rollback</strong>：添加字段可被旧版忽略；旧可执行 schema 的一致备份；回退命令入口时不得放回已经明确发现的 unsafe 自动行为，必要时保持保守只读/阻塞。</p>
 <h2 id="05_rounds-jcr-02--owned-browser-bootstrap--recovery">JCR-02 — Owned Browser, Bootstrap &amp; Recovery</h2>
@@ -47,7 +47,7 @@ JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 </ul>
 <p><strong>Automated tests</strong>：真正启动/kill隔离服务、浏览器、fixture server；关闭任务tab/开无关tab/重定向弹窗；pause during operation；UI session重连；基本 Mac hosted启动；检查原始用户Chrome默认路径永远不被访问。</p>
 <p><strong>Acceptance gate</strong>：合成任务在中途 kill/restart 后 actual draft 和任务身份正确；无重复基础写入；ordinary facts 本轮尚未新实现的持久能力标 pending，不冒充完成；服务不可用时 bootstrap 能报告 safe cause 并恢复；G类会话/进程基础门槛通过。</p>
-<p><strong>Stop condition</strong>：无法确认本应用浏览器归属、会话所指岗位不明、外部结果未知时安全停下；不要关闭/修改无关用户窗口。真实机器新权限不是自动索要的 debug 手段。</p>
+<p><strong>Deferred / safety rule</strong>：无法确认浏览器归属、会话岗位或外部结果时，禁止该 session 的自动写入并记录 UNKNOWN/UNSUPPORTED；在 isolated fixture 中继续修复 ownership/recovery。若只缺真实机器证明，登记 <code>FINAL_LIVE</code> 并继续后续工程，不关闭/修改无关用户窗口。</p>
 <p><strong>Owner interaction</strong>：NO。真实本机权限留最后；使用合成 Mac 环境验证系统接口。</p>
 <p><strong>Rollback</strong>：保持旧 profile不变，元数据可回退；由bootstrap切回上个健康服务，保留新task/receipt；旧 global-last-page 禁止恢复为自动默认。</p>
 <h2 id="05_rounds-jcr-03--job-discovery--verified-target-identity">JCR-03 — Job Discovery &amp; Verified Target Identity</h2>
@@ -63,7 +63,7 @@ JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 </ul>
 <p><strong>Automated tests</strong>：无URL intent、landing/list/detail、multiple exact titles、locationignored反例、fragment routing、下线/恶意redirect、sameID跨tenant、protected aliases；真实公开只读contract smoke，结果保存结构摘要无私人数据。</p>
 <p><strong>Acceptance gate</strong>：B类功能在合成/公开支持路径成立；公司+岗位指令无需用户粘精确URL；唯一性证据不足时不写；有明确平台支持矩阵和后续认证任务类型。</p>
-<p><strong>Stop condition</strong>：不能确定唯一岗位/官方归属时返回候选或unsupported；不得“帮用户改投另一个”。网站登录/验证码不是本轮必须让owner做的测试。</p>
+<p><strong>Deferred / safety rule</strong>：不能确定唯一岗位/官方归属时返回候选或 unsupported，不得替用户改投；这只阻塞该候选的真实写入。公开/合成 discovery、identity、UI 和其他平台合同继续开发；真实歧义证据集中到 JCR-09。</p>
 <p><strong>Owner interaction</strong>：NO；在最终真实验收选择实际愿意投的岗位时才要人作现实决策。</p>
 <p><strong>Rollback</strong>：保留原task identity和source chain，resolver version可回退；禁止将已核验task重新解释成不同岗位。</p>
 <h2 id="05_rounds-jcr-04--durable-applicant-facts--structured-evidence">JCR-04 — Durable Applicant Facts &amp; Structured Evidence</h2>
@@ -79,7 +79,7 @@ JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 </ul>
 <p><strong>Automated tests</strong>：既有源/用户覆盖优先；重建/重启/更新后不重问；一次答案不跨站复用；冲突不覆盖；bad JSON/write crash原子性；项目标题重叠、日期精度、简历解析误分类；privacycanary。</p>
 <p><strong>Acceptance gate</strong>：E类自动测试全部通过；明确保存的事实重启后可用；相同有效scope重复提问0；项目/研究不静默丢失；一处权威事实存储，旧入口也通过它写入。</p>
-<p><strong>Stop condition</strong>：证据冲突或缺客观值时保留未知，不填虚构值；真实MAX/简历不是本轮基础测试材料。</p>
+<p><strong>Deferred / safety rule</strong>：证据冲突或缺客观值时保留 UNKNOWN，不填虚构值；使用 synthetic/sanitized facts 完成事实系统、冲突、scope、persistence 和 UI。真实 MAX/简历/私人资料核对登记 <code>FINAL_LIVE</code>，移至 JCR-09。</p>
 <p><strong>Owner interaction</strong>：NO。最终onboarding核对现有私人资料和需要授权的复用政策，不每轮问资料。</p>
 <p><strong>Rollback</strong>：迁移前快照与schema版本；旧字段兼容读取；保留所有新确认journal，不以旧JSON覆盖丢失确认。</p>
 <h2 id="05_rounds-jcr-05--auth--otp-lifecycle">JCR-05 — Auth &amp; OTP Lifecycle</h2>
@@ -89,7 +89,7 @@ JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 <p>保留全部现有SMS严格边界和QR营销误报修复；把密码/CAPTCHA/人脸/设备挑战交本人。不要把“让owner手动验证码输入”设计成每次都必须发生；只在transport失败/安全验证不可自动完成时调用人。</p>
 <p><strong>Automated tests</strong>：15个C类场景的statefulauthfixtures；跨taskcode、authattempt切换、发送后crash/迟到；同屏多mode/分段OTP支持声明；consent rerender/marketing不勾/无auto resend；secret全出口扫描。</p>
 <p><strong>Acceptance gate</strong>：C类合成结果通过；普通可自动SMS登陆完整回原岗位；unknown send不重复发；自动code不落盘/不进模型；humanhandoff明确且自动重检；现有auth negative tests全部保留或等价增强。</p>
-<p><strong>Stop condition</strong>：真实安全挑战/密码/新SMS费用或未授权relay，不自动操作；无法定位验证码所属attempt则等待，不能猜。</p>
+<p><strong>Deferred / safety rule</strong>：真实安全挑战/密码/新 SMS 费用/未授权 relay 不自动操作；无法定位验证码 attempt 时不猜。使用 fake transport/stateful fixtures 完成 auth 生命周期、恢复和 UI；真实手机桥、权限与真实短信证据登记 <code>FINAL_LIVE</code>/<code>EXTERNAL</code>，统一移至 JCR-09。</p>
 <p><strong>Owner interaction</strong>：NO；真实手机桥与权限最终集中验证。</p>
 <p><strong>Rollback</strong>：authattempt版本可识别；中断清除code不复用，普通task/facts保留；回退不自动发新验证码。</p>
 <h2 id="05_rounds-jcr-06--structured-forms--reliable-draft-execution">JCR-06 — Structured Forms &amp; Reliable Draft Execution</h2>
@@ -99,7 +99,7 @@ JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 <p>已有GenericWebAdapter保留为可组合默认driver，不继续把所有站点认证/字段/导航写入一个大文件。复用之前已验证的站点能力；不在本轮引入任意模型执行JS。</p>
 <p><strong>Automated tests</strong>：D类全部结构/组件fixture；实际React/Vue controlled页面与本地API；依赖字段/虚拟选项/iframe/open shadow支持范围；每个重要写入前后kill；结果用独立serverdraft比较。</p>
 <p><strong>Acceptance gate</strong>：认证范围的完整合成任务所有必需记录/值/附件/保存结果正确；错select不只warning；隐藏要求/observation error不假READY；不存在虚构经历或重复副作用；unsupported被明确分类而非借问owner遮盖。</p>
-<p><strong>Stop condition</strong>：新外站动作effect不明/无可靠driver、网站限制不能保持真实事实时安全停；不能以auto-fillJS强行越过页面逻辑。</p>
+<p><strong>Deferred / safety rule</strong>：新外站动作 effect 不明、无可靠 driver 或网站限制不能保持真实事实时，禁用/标 unsupported 该写入路径，建立 fixture 并继续结构化表单、其他 drivers、恢复与验证工作；需要真实站点才能确认的部分登记 final deferred，不以 auto-fill JS 强行越过页面逻辑。</p>
 <p><strong>Owner interaction</strong>：NO；大量合成与已脱敏公开结构，私人站点最后验收。</p>
 <p><strong>Rollback</strong>：driver按版本切回；新observations保留引用；未证明兼容的draft先只读恢复，不把旧locator重放。</p>
 <h2 id="05_rounds-jcr-07--independent-final-review--human-submit-boundary">JCR-07 — Independent Final Review &amp; Human Submit Boundary</h2>
@@ -109,7 +109,7 @@ JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 <p>旧“生成checklist”改为“逐项证据+需人做的最后决定”。无private值的diagnostics与本人复核分离。就绪状态可以只读重核，但不得通过新接口实现自动final-click。</p>
 <p><strong>Automated tests</strong>：H类全部；与实际draft故意不一致的计划；隐含默认/未展开要求/附件失败/缺研究；certificate过期；Continue实际提交/Enter默认提交对抗fixture；fake human actor模拟最终点击，automation actor提交计数为0。</p>
 <p><strong>Acceptance gate</strong>：所有false-ready反例被拒绝；expectedreview与actualdraft一致；无必须事项UNKNOWN/FAIL时才READY；任何更改正确使证书失效；用户点击后只读验证分级、保护identity生效。</p>
-<p><strong>Stop condition</strong>：有任何无法证明的mandatory项时保持未就绪；不能用“反正user最后会看”豁免检查。</p>
+<p><strong>Deferred / safety rule</strong>：有任何无法证明的 mandatory 项时，该 task/certificate 保持 NOT_READY，不能用“user 最后会看”豁免；这不停止 JCR-07/08 的 certificate、invalidation、review UI、fake-human-submit 与其他自动验证。只缺真实 draft/owner 证据的项登记到 JCR-09。</p>
 <p><strong>Owner interaction</strong>：NO；实际最终点击只在JCR-09由owner自主决定。</p>
 <p><strong>Rollback</strong>：旧证书作废，保留只读review；绝不回到“先READY后review”的批准路径。</p>
 <h2 id="05_rounds-jcr-08--consumer-app--transactional-local-release">JCR-08 — Consumer App &amp; Transactional Local Release</h2>
@@ -125,7 +125,7 @@ JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 </ul>
 <p><strong>Automated tests</strong>：真实macOSapp/服务/Chromefixture交互，键盘/缩放/标签；expiredsession；缺profile/key/daemon端口占用；真实两版本依赖升级/失败/migration/kill/updater并发；A/U类门槛和privacy全部通过。</p>
 <p><strong>Acceptance gate</strong>：app可独立打开和自诊断，不以业务服务健康为前提；没有routine Terminal/DC路径；更新不依赖开发工作树干净才能日用；candidate加载SHA正确；badrelease能回退；本人能在UI看见完整真实review而不是工程枚举。</p>
-<p><strong>Stop condition</strong>：需要新付费承诺/发布签名账号/扩大系统权限且无授权时说明最小必需条件；不得悄悄采购或弱化鉴权。</p>
+<p><strong>Deferred / safety rule</strong>：需要新付费承诺、发布签名账号或扩大系统权限时不采购、不申请、不弱化鉴权；完成 unsigned/dev/hosted Mac、bootstrap、update/rollback、diagnostics 等可验证工程路径，将真实签名/权限/账号前置登记为 <code>EXTERNAL</code>/<code>FINAL_LIVE</code> 并移至 JCR-09。</p>
 <p><strong>Owner interaction</strong>：NO（开发）。本机首次权限/安装确认保留到最后，不能以没有owner日常电脑权限为由不做hostedMac合成验证。</p>
 <p><strong>Rollback</strong>：由独立bootstrap切回known-good；数据journal/schema兼容验证，不删除新确认事实；app入口保持可用。</p>
 <h2 id="05_rounds-jcr-09--integrated-certification--final-personal-acceptance">JCR-09 — Integrated Certification &amp; Final Personal Acceptance</h2>
@@ -134,10 +134,10 @@ JCR-01…08 → JCR-09 集成认证、最后真人验收、短期日用
 <p><strong>Implementation scope</strong>：先自动执行100黄金任务、1000状态序列、关键fault重复、24hsoak、privacy和Mac安装/更新/恢复；公开只读再查站点drift；冻结exact candidate build及platformcontracts；安排最后1–3个owner时段，收集真实兼容性证据；最后短期正常日用。</p>
 <p><strong>Automated tests</strong>：完整矩阵所有AUTO/AUTO_MAC/PUBLIC层；不是只跑某个focusedbrowser test。任何fix后跑受影响全链及历史安全门槛，必要时重签candidate。</p>
 <p><strong>Acceptance gate</strong>：所有mandatory矩阵有对应证据；至少3种真实招聘机制、4–6合适真实任务覆盖已声明范围；安全/假READY事故0；真实权限/短信/最终手动边界证据明确；5个正常使用日不需工程救援。不同真实平台出现不可自动化安全挑战不算产品bug，但要正确handoff。</p>
-<p><strong>Stop condition</strong>：自动基础门槛未过不得叫owner验收；真实证据缺失则UNVERIFIED而非COMPLETE；严重外部变化/真实账号安全/权限由owner判断。发现基础bug先fixture复现与自动修复，不无限请求重复真人测试。</p>
+<p><strong>Deferred / safety rule</strong>：JCR-09 是唯一 final convergence。先完成所有 AUTO/AUTO_MAC/PUBLIC/synthetic/fault/soak 等无需 owner 的工作并清理所有可自动解决的 ENGINEERING_DEBT；真实证据缺失保持 UNVERIFIED。只有已经没有任何剩余可无人执行工作时，才允许停在 <code>REAL_ACCEPTANCE_PENDING</code> / final blocker；基础 bug 必须先 fixture 复现与自动修复。</p>
 <p><strong>Owner interaction</strong>：YES，最多计划3个集中时段，内容见07。正常日用5日不是额外工程QA作业；不要求为达标额外申请不想投的岗位。</p>
 <p><strong>Rollback</strong>：候选失败恢复前一已知安全版本和原任务；新版本未认证前不改consumer-ready标签。若没有已认证旧版，回到受限/工程Alpha并明确范围，不回报虚假完成。</p>
 <h2 id="05_rounds-2-每轮必须提交的闭环证据">2. 每轮必须提交的闭环证据</h2>
-<p>objective/result；base/head/merged SHA；实际修改文件；旧路径保留/退役清单；对应matrix IDs；actual entrypoints；测试命令与结果/CI链接/seed；最小失败与修复证据；迁移/回退；是否真实访问/写入外站；owner interaction次数及原因；剩余未验证事项；下一轮授权/未启动状态。</p>
-<p>一轮可包含多次实现/诊断/修复和多个commit，不必切成用户每次都要回应的微轮次。执行模型可按本包直接继续本轮普通工程问题；遇到真正权限/付费/产品方向问题才停。不存在“commit了所以需要owner真人验收”的默认协议。</p>
+<p>objective/result；base/head/merged SHA；实际修改文件；旧路径保留/退役清单；对应 matrix IDs；actual entrypoints；测试命令与结果/CI链接/seed；最小失败与修复证据；迁移/回退；是否真实访问/写入外站；owner interaction 次数及原因；剩余未验证事项；新增/关闭的 deferred ledger IDs；下一轮继续条件与真实依赖状态。</p>
+<p>一轮可包含多次实现/诊断/修复和多个 commit，不必切成用户每次都要回应的微轮次。执行模型应持续推进：权限/付费/真人/外部问题登记 deferred 后跳过对应危险动作，继续所有独立工作。不存在“commit 了所以需要 owner 真人验收”或“下一轮未重新授权所以停”的协议。只有 JCR-09 已耗尽全部可无人执行工作时，才允许进入 package-level 等待。</p>
 </section>
