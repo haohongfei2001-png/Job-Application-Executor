@@ -59,12 +59,12 @@
     },
     {
       "id": "JCR-05",
-      "status": "IN_PROGRESS",
+      "status": "ADVANCE_ALLOWED_WITH_DEFERRED",
       "authorized": true
     },
     {
       "id": "JCR-06",
-      "status": "NOT_STARTED",
+      "status": "READY",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-04 PR #14 merged as fc2ba2185b9dddfdec07e3dcd95b30489603ce73 with exact-main CI 35924692517 successful. Sole JCR-05 writer feat/jcr05-auth-attempts is implementing durable non-secret AuthAttempt lifecycle, attempt-bound in-memory OTP, guarded send/resend, decoupled transports, isolated fake-SMS and return-target evidence. Real accounts, SMS, device permissions and security challenges remain deferred to JCR-09; no final-live PASS or automated final submit is authorized. Continue independent engineering through later rounds.",
+  "next_action": "JCR-05 sole writer PR #15 completed synthetic auth/OTP engineering with local isolated/headless 378 passing tests and exact-head CI run 35930191668 successful on head 6c5d9b0c58881475d9e6b0e3c14b9e01cd8b9926. Close any review findings, rerun exact-head CI after final status commit, merge, verify exact-main CI and remote STATUS readback; then begin JCR-06 structured forms immediately. DFG-006 keeps real account/SMS/device/security and real job-return evidence FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

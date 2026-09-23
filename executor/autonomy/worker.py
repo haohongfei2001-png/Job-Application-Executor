@@ -160,7 +160,7 @@ class Worker:
                         current = self.queue.get(task_id)
                         if not current["owner"] and current["stage"] == "NEEDS_USER_ACTION":
                             self.queue.resume(task_id)
-                except (OSError, RuntimeError, ValueError, KeyError):
+                except Exception:
                     # A disconnected source leaves the task at a visible wait.
                     pass
                 finally:
