@@ -39,12 +39,12 @@
   "rounds": [
     {
       "id": "JCR-01",
-      "status": "IMPLEMENTING",
+      "status": "ADVANCE_ALLOWED_WITH_DEFERRED",
       "authorized": true
     },
     {
       "id": "JCR-02",
-      "status": "NOT_STARTED",
+      "status": "READY",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "Continue JCR-01 on PR #11. Resolve DFG-001 free-form private fact handling, complete F-01 through F-09 evidence and exact-head CI, then review/merge/read back before marking COMPLETE. Continue unattended through later JCR rounds under the canonical dependency contract; DFG-001 does not block independent engineering work.",
+  "next_action": "Finish exact-head CI and review on JCR-01 PR #11, merge, verify main integration and attach the F-01 through F-09 automatic receipt. DFG-001 remains mitigated but durable applicant-fact recovery stays pending for JCR-04. Then start JCR-02 owned browser/bootstrap/recovery on one new writer branch; continue unattended through later JCR rounds.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

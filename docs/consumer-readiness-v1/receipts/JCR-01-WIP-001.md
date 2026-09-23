@@ -1,6 +1,6 @@
 # JCR-01 execution receipt — in progress
 
-Status: IMPLEMENTING. This is a checkpoint, not round certification.
+Status: ADVANCE_ALLOWED_WITH_DEFERRED on the PR branch, subject to exact-head CI and main readback. This is a checkpoint, not round certification.
 
 ## Source of truth
 
@@ -31,6 +31,22 @@ Status: IMPLEMENTING. This is a checkpoint, not round certification.
 
 ## Boundaries and remaining work
 
+### F-class automatic evidence map (local, pending latest exact-head CI and main readback)
+
+| Case | Production path and direct regression |
+| --- | --- |
+| F-01 | Manager rejects OTP/credentials locally; `test_sensitive_chat_is_rejected_before_provider` plus `test_manager_http_retry_payload_is_minimized_for_novel_fact` inspect initial and fallback model request bodies. |
+| F-02 | Manager context contains fixed flags/task state only; field mapper sends fixed semantic hints, not raw DOM labels/options. `tests/test_jcr01_privacy.py` covers novel names, family facts, URL values, site options and injected instructions. |
+| F-03 | Scoped local answers are absent from queue SQLite/UI responses; OTP broker remains memory-only; diagnostics now omit arbitrary target strings. `test_ui_private_fact_input_is_local_scoped_and_revision_checked`, `test_diagnostics_are_copy_safe_and_never_emit_buffered_otp`, historical audit/queue tests. |
+| F-04 | Local HTTP binds loopback and validates Host, Origin, bearer token, one-use ticket, session expiry and replay. `test_api_auth_local_binding_routes_and_redacted_errors`, `test_dashboard_http_ticket_cookie_and_same_origin_chat`, `test_ui_ticket_and_session_expire_without_auth_relaxation`. |
+| F-05 | Worker and legacy audit screenshots are disabled by default; original CLI engines now reject external sites before connecting. `test_audit_redacts_sensitive_payloads` and `test_legacy_engine_rejects_external_site_before_browser_connect`. CI publishes no browser trace/HAR artifacts. |
+| F-06 | Private runtime directories and real applicant files are absent from the Git index; the SyntheticATS fixture has a copy-safe manifest and loopback-only network allowlist. `tests/test_jcr01_artifact_policy.py`. |
+| F-07 | The same protected-target predicate is called by enqueue, resume, retarget and worker before any browser write. `test_protected_target_guard_covers_enqueue_resume_retarget_and_worker`. Alias normalization beyond the current predicate belongs to JCR-03 B-12. |
+| F-08 | Untrusted DOM instructions cannot map into profile values or final-submit authority; model receives fixed hints and never browser capabilities. `test_prompt_injection_label_cannot_map_to_profile_fact`, `test_submit_authorized_still_requires_manual_final_click`. |
+| F-09 | Live CDP refuses an unrelated process or non-dedicated profile; isolated tests use their own Chromium. `tests/test_browser_runtime_v1.py`. Session/task/tab lineage remains JCR-02 scope. |
+
+This table records local automatic evidence only. Matrix statuses remain `NOT_RUN` until the corresponding exact-head and main integration evidence is attached; later-round identity, durable facts, and live proof are not inferred from these tests.
+
 - Real applicant data accessed: no. Real account, SMS, application or website side effects: no. Owner interaction: no.
-- No acceptance matrix case is marked PASS by this checkpoint. F-01 through F-09 require complete per-case evidence. Real local profile migration was not attempted. DFG-001 is mitigated for engineering through strict provider minimization and disabled chat fact entry; durable recovery is still JCR-04 work. JCR-01 remains IMPLEMENTING.
+- No acceptance matrix case is marked PASS by this checkpoint. F-01 through F-09 require exact-head CI and main integration evidence before final per-case disposition. Real local profile migration was not attempted. DFG-001 is mitigated for engineering through strict provider minimization and disabled chat fact entry; durable recovery is still JCR-04 work. JCR-01 is eligible for safe independent JCR-02 work after PR integration without falsely closing the deferred fact recovery.
 - Next: complete F-class privacy/HTTP/browser ownership evidence, full exact-head regression and CI, review, merge, main readback, then close JCR-01 and advance to JCR-02.
