@@ -367,6 +367,17 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         )
                         self._send_json(200, result)
                         return
+                    if self.command == "POST" and parsed.path == "/ui/api/tasks":
+                        data = self._read_json()
+                        if set(data) != {"company", "role", "target_url"}:
+                            raise ValueError("invalid local task envelope")
+                        result = supervisor.run_mutation(
+                            lambda: supervisor.manager.create_from_local_form(
+                                data["company"], data["role"], data["target_url"]
+                            )
+                        )
+                        self._send_json(200, {"task_id": result["task_id"], "revision": result["revision"]})
+                        return
                     if self.command == "POST" and parsed.path == "/ui/api/command":
                         command = CommandEnvelope.model_validate(self._read_json())
                         receipt = supervisor.run_local_command(command)

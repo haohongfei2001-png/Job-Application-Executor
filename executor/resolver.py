@@ -121,6 +121,33 @@ PRIVATE_LABEL = re.compile(
     r"(?<!\d)\d{15,18}[0-9Xx]?(?!\d)|CANARY_PRIVATE", re.I,
 )
 
+# Site labels are untrusted text and can embed novel personal values that a
+# regex-based PII scanner cannot recognize. Only these fixed semantic hints
+# may cross the model boundary; all unmatched text stays local.
+MODEL_LABEL_HINTS: tuple[tuple[str, str], ...] = (
+    ("email", r"\be-?mail\b|邮箱|电子邮件"),
+    ("phone", r"\b(?:phone|mobile|telephone)\b|手机|电话"),
+    ("name", r"\bname\b|姓名|名字"),
+    ("gender", r"\bgender\b|性别"),
+    ("birth_date", r"\b(?:birth|birthday)\b|出生|生日"),
+    ("address", r"\baddress\b|地址|住址"),
+    ("city", r"\bcity\b|城市"),
+    ("nationality", r"\bnationality\b|国籍"),
+    ("education", r"\b(?:education|school|university|college|degree|major|gpa)\b|教育|学校|院校|学历|学位|专业"),
+    ("experience", r"\b(?:experience|employer|employment|company)\b|工作经历|实习|公司"),
+    ("project", r"\bproject\b|项目"),
+    ("family", r"\b(?:family|father|mother|parent)\b|家庭|父亲|母亲|家属"),
+    ("political_status", r"\bpolitical\b|政治面貌"),
+    ("salary", r"\bsalary\b|薪资|薪酬"),
+    ("date", r"\bdate\b|日期|时间"),
+)
+MODEL_INPUT_TYPES = {"text", "email", "tel", "number", "select", "checkbox", "radio", "date", "textarea"}
+MODEL_CANONICAL_KEYS = {key for key, _ in RULES}
+
+
+def _model_label_hints(label: str) -> list[str]:
+    return [hint for hint, pattern in MODEL_LABEL_HINTS if re.search(pattern, label, re.I)]
+
 
 def _nonempty(value: Any) -> bool:
     return value not in (None, "", [])
@@ -250,6 +277,10 @@ class DeepSeekMapper:
         label = str(field.label or "")[:180]
         if PRIVATE_LABEL.search(label) or UNTRUSTED_INSTRUCTION.search(label):
             return None, 0.0, "field label contains private data"
+        hints = _model_label_hints(label)
+        allowed_keys = [key for key in keys if key in MODEL_CANONICAL_KEYS]
+        if not hints or not allowed_keys or field.input_type not in MODEL_INPUT_TYPES:
+            return None, 0.0, "field has no safe model mapping context"
         payload = {
             "model": self.model,
             "messages": [
@@ -264,10 +295,10 @@ class DeepSeekMapper:
                 {
                     "role": "user",
                     "content": json.dumps({
-                        "label": label,
+                        "label_hints": hints,
                         "input_type": field.input_type,
                         "required": field.required,
-                        "allowed_keys": keys,
+                        "allowed_keys": allowed_keys,
                     }, ensure_ascii=False),
                 },
             ],
@@ -323,7 +354,7 @@ class DeepSeekMapper:
             key = parsed.get("canonical_key")
             confidence = float(parsed.get("confidence") or 0.0)
             reason = str(parsed.get("reason") or "DeepSeek semantic mapping")
-            if key not in keys:
+            if key not in allowed_keys:
                 return None, 0.0, "DeepSeek returned unknown key"
             return key, confidence, reason
         except Exception as exc:

@@ -86,7 +86,8 @@ def test_manager_report_is_read_only(tmp_path):
     result = manager.handle("现在什么情况？")
     assert result["actions"] == [{"action": "REPORT", "status": "observed"}]
     assert q.get(tid)["stage"] == "DISCOVERED"
-    assert provider.seen["tasks"][0]["target_host"] == "jobs.example.test"
+    assert provider.seen["tasks"][0]["task_id"] == tid
+    assert "target_host" not in provider.seen["tasks"][0]
 
 
 def test_cancel_requires_explicit_user_intent(tmp_path):
@@ -138,7 +139,8 @@ def test_pending_answer_must_be_pending_and_verbatim_user_fact(tmp_path):
     assert accepted["actions"][0]["status"] == "accepted"
     assert q.get(tid)["stage"] != "NEEDS_USER_INPUT"
     assert worker.answers[tid][field] == "群众"
-    assert provider.seen["message"] == "LOCAL_PRIVATE_ANSWER_PENDING"
+    assert json.loads(provider.seen["message"])["private_answer_pending"] is True
+    assert "群众" not in provider.seen["message"]
 
 
 def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_path):
@@ -180,7 +182,7 @@ def test_create_task_requires_explicit_apply_exact_url_and_local_profile(tmp_pat
     assert accepted["actions"][0]["status"] == "accepted"
     task = q.get(accepted["actions"][0]["task_id"])
     assert task["spec"]["profile_ref"] == str(profile)
-    assert task["spec"]["live_authorized"] is True
+    assert task["spec"]["live_authorized"] is False
 
 
 @pytest.mark.parametrize(
@@ -363,12 +365,12 @@ def test_unlabeled_otp_is_local_only_while_otp_is_waiting(tmp_path, blocker, pau
     assert "DeepSeek" in result["reply"]
 
 
-def test_unlabeled_numeric_chat_is_not_globally_treated_as_otp(tmp_path):
+def test_unlabeled_numeric_chat_is_minimized_before_provider(tmp_path):
     turn = ManagerTurn(reply="只报告。", decisions=[])
     _, _, provider, manager = controller(tmp_path, turn)
     result = manager.handle("482913")
     assert result["reply"] == "只报告。"
-    assert provider.seen["message"] == "482913"
+    assert "482913" not in provider.seen["message"]
 
 
 def test_create_task_rejects_prefix_before_internal_localized_punctuation(tmp_path):
@@ -529,10 +531,11 @@ def test_boolean_answer_does_not_flip_negated_chinese_text(tmp_path):
 def test_dashboard_http_ticket_cookie_and_same_origin_chat(tmp_path):
     q = TaskQueue(tmp_path / "runtime")
     worker = Worker(q, settings={"deepseek": {"enabled": False}})
+    provider = FakeProvider(ManagerTurn(reply="状态正常。", decisions=[]))
     manager = ManagerController(
         q,
         worker,
-        provider=FakeProvider(ManagerTurn(reply="状态正常。", decisions=[])),
+        provider=provider,
         settings={"profile_path": "unused"},
     )
     supervisor = Supervisor(q, worker=worker, token="x" * 40, manager=manager)
@@ -575,6 +578,21 @@ def test_dashboard_http_ticket_cookie_and_same_origin_chat(tmp_path):
         )
         with opener.open(chat_request) as response:
             assert json.load(response)["reply"] == "状态正常。"
+
+        create_request = urllib.request.Request(
+            base + "/ui/api/tasks",
+            data=json.dumps({
+                "company": "Synthetic Co", "role": "AI Product Manager",
+                "target_url": "https://jobs.example.test/roles/role-1",
+            }).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with opener.open(create_request) as response:
+            created = json.load(response)
+        assert q.get(created["task_id"])["spec"]["target_url"] == "https://jobs.example.test/roles/role-1"
+        assert q.get(created["task_id"])["spec"]["live_authorized"] is False
+        assert "jobs.example.test/roles" not in provider.seen["message"]
 
         evil = urllib.request.Request(
             base + "/ui/api/chat",

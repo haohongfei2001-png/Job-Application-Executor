@@ -21,6 +21,7 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .task .title{font-weight:650}.task .meta{font-size:12px;color:#64748b;margin-top:4px}.stage{font-size:11px;border-radius:999px;padding:3px 7px;background:#eef2ff;display:inline-block;margin-top:7px}
 .taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
 .factinput{display:flex;gap:5px;margin-top:8px}.factinput input{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.factinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}
+.newtask{display:grid;gap:7px;margin:12px 0 17px}.newtask input{width:100%;border:1px solid #cbd5e1;border-radius:7px;padding:8px}.newtask button{padding:9px}
 .chat{padding:20px 24px;overflow:auto}.bubble{max-width:820px;padding:11px 13px;border-radius:13px;margin:8px 0;white-space:pre-wrap;line-height:1.5}
 .me{margin-left:auto;background:#111;color:#fff}.ai{background:#fff;border:1px solid #e5e7eb}.actions{font-size:12px;color:#64748b;margin-top:5px}
 .composer{background:#fff;border-top:1px solid #e5e7eb;padding:14px 20px;display:flex;gap:10px}
@@ -40,6 +41,13 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
     <div class="metric"><span>等你确认</span><b id="ready">0</b></div>
     <div class="metric"><span>已结束</span><b id="done">0</b></div>
   </div>
+  <form id="newtask" class="newtask" autocomplete="off">
+    <strong>添加明确岗位</strong>
+    <input name="company" maxlength="150" placeholder="公司" required>
+    <input name="role" maxlength="200" placeholder="岗位名称" required>
+    <input name="target_url" type="url" maxlength="2000" placeholder="完整岗位链接" required>
+    <button type="submit">添加任务</button>
+  </form>
   <div id="tasks" class="empty">正在读取任务…</div>
 </aside>
 <main>
@@ -52,7 +60,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   </div>
 </header>
 <div id="chat" class="chat">
-  <div class="bubble ai">把职位链接发给我并说“投递这个岗位”。暂停、继续和取消可在任务卡片操作；私人资料请在任务卡片本地填写。遇到需要你决定或安全验证的地方会停下来，最终提交由你本人完成。</div>
+  <div class="bubble ai">请在左侧填写明确岗位；任务控制可在任务卡片操作，私人资料也请在任务卡片本地填写。遇到需要你决定或安全验证的地方会停下来，最终提交由你本人完成。</div>
 </div>
 <div class="composer">
   <textarea id="message" placeholder="告诉我你想投哪个岗位，或直接说“继续这个岗位”…"></textarea>
@@ -63,6 +71,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 <div id="toast" class="toast"></div>
 <script>
 const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
+const newTaskForm=document.getElementById('newtask');
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const stageText={
   DISCOVERED:'已加入',
@@ -134,6 +143,18 @@ tasksEl.addEventListener('click',async event=>{
     notify({PAUSE:'任务已暂停',RESUME:'任务已继续',CANCEL:'任务已取消'}[action]);
     await state();
   }catch(e){notify('任务状态已变化，请刷新后重试。');await state()}
+});
+newTaskForm.addEventListener('submit',async event=>{
+  event.preventDefault();
+  const button=newTaskForm.querySelector('button');button.disabled=true;
+  const data=Object.fromEntries(new FormData(newTaskForm).entries());
+  try{
+    const r=await fetch('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',body:JSON.stringify(data)});
+    if(!r.ok)throw new Error();
+    newTaskForm.reset();notify('任务已添加；目标核验完成前不会自动写入招聘网站。');await state();
+  }catch(e){notify('无法安全添加任务，请核对岗位链接、配置与已有任务。')}
+  finally{button.disabled=false}
 });
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-answer]');if(!button)return;
@@ -281,7 +302,7 @@ function bubble(text,kind,actions){
 }
 async function submit(){
   const text=msg.value.trim();if(!text)return;
-  bubble(text,'me');msg.value='';send.disabled=true;
+  bubble('消息已在本地处理','me');msg.value='';send.disabled=true;
   try{
     const r=await fetch('/ui/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({message:text})});
     const data=await r.json();

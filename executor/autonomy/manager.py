@@ -83,6 +83,38 @@ def safe_task_view(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _provider_context(message: str, task_rows: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """Send only local intent flags and bounded queue state to the provider.
+
+    Arbitrary chat text, URLs, applicant facts, and externally sourced task
+    descriptions have no safe general-purpose redactor. Never put them in a
+    provider request, even if a known-pattern scanner found no secret.
+    """
+    context = {
+        "intent": {
+            "status": True,
+            "pause": _explicit_control(message, _PAUSE_RE),
+            "resume": _explicit_control(message, _RESUME_RE),
+            "cancel": _explicit_control(message, _CANCEL_RE),
+            "apply": bool(_APPLY_RE.search(message)),
+            "target_url_supplied": bool(re.search(r"https?://\S+", message, re.I)),
+        },
+        "referenced_task_ids": [
+            str(task["task_id"])
+            for task in task_rows
+            if _selected_task_is_explicit(message, task, task_rows)
+        ],
+        "private_answer_pending": any(
+            task.get("stage") == "NEEDS_USER_INPUT" for task in task_rows
+        ),
+    }
+    tasks = [
+        {key: view[key] for key in ("task_id", "stage", "revision", "run_state")}
+        for view in (safe_task_view(task) for task in task_rows)
+    ]
+    return json.dumps(context, ensure_ascii=False, sort_keys=True), tasks
+
+
 class DeepSeekManagerProvider:
     """Semantic manager. It can propose only typed high-level decisions."""
 
@@ -110,8 +142,9 @@ class DeepSeekManagerProvider:
             '{"reply":"...", "decisions":[{"action":"REPORT|RESUME|PAUSE|CANCEL|ANSWER_PENDING|CREATE_TASK",'
             '"task_id":"","field_key":"","value":null,"company":"","role":"","target_url":"","reason":""}]}. '
             "Use REPORT when no state change is justified. CREATE_TASK is allowed only "
-            "when the user's message itself contains the exact target URL. ANSWER_PENDING "
-            "may only use a value explicitly present in the user's current message. "
+            "when the user's message itself contains the exact target URL. The provider "
+            "does not receive raw URLs or applicant answers, so do not propose CREATE_TASK "
+            "or ANSWER_PENDING from this minimized context. Those values use local inputs. "
             "Do not claim that a state-changing action has already succeeded; describe intent only. "
             "The deterministic controller will append the actual execution result."
         )
@@ -395,6 +428,21 @@ class ManagerController:
             raise ValueError("profile_path is not configured")
         return value
 
+    def create_from_local_form(self, company: str, role: str, target_url: str) -> dict[str, Any]:
+        """Structured UI entry keeps target values out of the model request."""
+        if not all(isinstance(value, str) for value in (company, role, target_url)):
+            raise ValueError("invalid task fields")
+        spec = TaskSpec(
+            company=company.strip(),
+            role=role.strip(),
+            target_url=target_url.strip(),
+            profile_ref=self._profile_ref(),
+            # JCR-03 owns verified target identity. A user-supplied URL alone
+            # is not yet sufficient evidence for automatic external writes.
+            live_authorized=False,
+        )
+        return self.queue.enqueue(spec)
+
     def _apply(self, decision: ManagerDecision, message: str, *, expected_revision: int | None = None) -> dict[str, Any]:
         action = decision.action
         if action == ManagerAction.REPORT:
@@ -515,7 +563,7 @@ class ManagerController:
                 target_url=target_url,
                 job_id=job_id,
                 profile_ref=self._profile_ref(),
-                live_authorized=True,
+                live_authorized=False,
             )
             task = self.queue.enqueue(spec)
             result = {"action": str(action), "status": "accepted", "task_id": task["task_id"]}
@@ -651,16 +699,10 @@ class ManagerController:
                     "actions": [action_result],
                     **self.state(),
                 }
-        tasks = [safe_task_view(task) for task in task_rows]
-        # Pending answers are private task input. A model can propose a typed
-        # action from the safe task view, but it never receives the user's raw
-        # answer text. The deterministic controller checks the original local
-        # message before accepting any proposed value.
-        provider_message = (
-            "LOCAL_PRIVATE_ANSWER_PENDING"
-            if any(task["stage"] == "NEEDS_USER_INPUT" for task in task_rows)
-            else message
-        )
+        # No arbitrary chat or task description crosses the model boundary.
+        # The model receives local intent flags only. Structured task creation
+        # and applicant answers remain local until later product rounds.
+        provider_message, tasks = _provider_context(message, task_rows)
         try:
             turn = self.provider.decide(provider_message, tasks)
         except RuntimeError:
