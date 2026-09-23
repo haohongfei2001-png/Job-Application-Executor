@@ -241,11 +241,21 @@ def update_lock_held(runtime: str | Path) -> bool:
 
 def reconciled_update_state(runtime: str | Path) -> dict:
     state = read_update_state(runtime)
-    if state.get("status") in {"checking", "updating", "restarting"}:
+    status = state.get("status")
+    if status in {"checking", "updating", "restarting"}:
         if not update_lock_held(runtime):
+            # A stale checking state cannot have mutated the checkout yet.
+            # Updating/restarting may have crossed the Git boundary, so keep
+            # normal task mutations fenced until a restart/update retry proves
+            # the loaded service matches the checkout again.
+            recovered = (
+                "failed"
+                if status == "checking"
+                else "restart_required"
+            )
             write_update_state(
                 runtime,
-                "failed",
+                recovered,
                 reason="stale_update_recovered",
             )
             return read_update_state(runtime)
