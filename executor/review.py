@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -25,38 +26,38 @@ def canonical_project_titles(profile: dict[str, Any]) -> list[str]:
         if not isinstance(project, dict):
             continue
         title = str(project.get("title") or "").strip()
-        if title and title not in titles:
+        if title:
             titles.append(title)
     return titles
 
 
 def structured_project_names(fields: list[FieldResolution]) -> list[str]:
     names: list[str] = []
+    seen_fields: set[tuple[str, str]] = set()
     for item in fields:
         label = str(item.label or "")
         if not PROJECT_NAME_PATTERN.search(label):
             continue
         value = item.value
-        if isinstance(value, str) and value.strip() and value.strip() not in names:
+        identity = (item.field_id, item.selector)
+        if isinstance(value, str) and value.strip() and identity not in seen_fields:
             names.append(value.strip())
+            seen_fields.add(identity)
     return names
 
 
 def _covered(title: str, names: list[str]) -> bool:
-    nt = _norm(title)
-    if not nt:
-        return False
-    for name in names:
-        nn = _norm(name)
-        if nn and nt == nn:
-            return True
-    return False
+    """Exact normalized title match retained for historical review contracts."""
+    normalized = _norm(title)
+    return bool(normalized and any(_norm(name) == normalized for name in names))
 
 
 def project_coverage_review(
     profile: dict[str, Any],
     plan: ApplicationPlan,
 ) -> dict[str, Any]:
+    records = [item for item in ((profile.get("collections") or {}).get("projects") or [])
+               if isinstance(item, dict) and str(item.get("title") or "").strip()]
     canonical = canonical_project_titles(profile)
     structured = structured_project_names(plan.fields)
     exclusions = [
@@ -64,10 +65,37 @@ def project_coverage_review(
         for x in (plan.metadata.get("project_exclusions") or [])
         if str(x).strip()
     ]
-    uncovered = [
-        title for title in canonical
-        if not _covered(title, structured) and not _covered(title, exclusions)
-    ]
+    scoped = ((profile.get("collections") or {}).get("fact_exclusions") or {}).get(
+        plan.execution_id, {})
+    scoped_ids = set()
+    if isinstance(scoped, dict):
+        for record in records:
+            decision = scoped.get(record.get("id"))
+            if (isinstance(decision, dict) and decision.get("source") == "user_explicit_task"
+                    and str(decision.get("reason") or "").strip()):
+                scoped_ids.add(record.get("id"))
+                title = str(record["title"]).strip()
+                if title not in exclusions:
+                    exclusions.append(title)
+
+    # A title is not a record identity. Match each non-excluded canonical
+    # occurrence to one distinct structured title field, so two real records
+    # with the same title require two separate form rows.
+    available = Counter(_norm(name) for name in structured)
+    title_counts = Counter(_norm(record["title"]) for record in records)
+    uncovered = []
+    legacy_exclusions = {_norm(title) for title in (plan.metadata.get("project_exclusions") or [])}
+    for record in records:
+        title = str(record["title"]).strip()
+        normalized = _norm(title)
+        if record.get("id") in scoped_ids:
+            continue
+        if title_counts[normalized] == 1 and normalized in legacy_exclusions:
+            continue
+        if available[normalized]:
+            available[normalized] -= 1
+        else:
+            uncovered.append(title)
     return {
         "canonical_projects": canonical,
         "structured_projects": structured,

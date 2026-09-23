@@ -10,7 +10,9 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from .models import FieldResolution, ResolutionStatus, WebField
-from .profile import aliases_for, get_field, is_sensitive_key, profile_keys
+from .profile import (aliases_for, field_is_current, get_field, has_unresolved_conflict,
+                      is_sensitive_key, profile_keys)
+from .facts.representation import represent_choice
 
 
 PRIVACY_PATTERNS = (
@@ -383,11 +385,35 @@ class FieldResolver:
         if key:
             profile_field = get_field(self.profile, key)
             if profile_field and _nonempty(profile_field.value):
+                if has_unresolved_conflict(self.profile, key) or not field_is_current(profile_field):
+                    return FieldResolution(
+                        field_id=field.field_id, selector=field.selector,
+                        label=field.label, canonical_key=key,
+                        status=ResolutionStatus.UNRESOLVED,
+                        reason=("conflicting sources require explicit local confirmation"
+                                if has_unresolved_conflict(self.profile, key)
+                                else "canonical fact validity expired or unproven"),
+                        required=field.required,
+                        sensitive=profile_field.sensitive or is_sensitive_key(key),
+                    )
                 source = "user_confirmed_profile" if profile_field.user_confirmed else "evidence_profile"
+                represented = profile_field.value
+                if field.input_type == "select" and field.options:
+                    choice = represent_choice(profile_field.value, field.options)
+                    if choice is None:
+                        return FieldResolution(
+                            field_id=field.field_id, selector=field.selector,
+                            label=field.label, canonical_key=key,
+                            status=ResolutionStatus.UNRESOLVED,
+                            reason="site option representation is unverified",
+                            required=field.required,
+                            sensitive=profile_field.sensitive or is_sensitive_key(key),
+                        )
+                    represented = choice.site_value
                 return FieldResolution(
                     field_id=field.field_id, selector=field.selector, label=field.label,
                     canonical_key=key, status=ResolutionStatus.RESOLVED,
-                    value=profile_field.value, source=source,
+                    value=represented, source=source,
                     confidence=min(confidence or 0.9, profile_field.confidence),
                     reason=reason, required=field.required,
                     sensitive=profile_field.sensitive or is_sensitive_key(key),
@@ -403,19 +429,41 @@ class FieldResolver:
                 "policy.auto_accept_privacy_terms",
                 "policy.auto_accept_truth_submission_declarations",
             }:
+                policy_value = True
+                if field.input_type == "select" and field.options:
+                    choice = represent_choice(True, field.options)
+                    if choice is None:
+                        return FieldResolution(
+                            field_id=field.field_id, selector=field.selector,
+                            label=field.label, canonical_key=policy_key,
+                            status=ResolutionStatus.UNRESOLVED, required=field.required,
+                            reason="site option representation is unverified",
+                        )
+                    policy_value = choice.site_value
                 return FieldResolution(
                     field_id=field.field_id, selector=field.selector, label=field.label,
                     canonical_key=policy_key, status=ResolutionStatus.RESOLVED,
-                    value=True, source="standing_user_policy", confidence=1.0,
+                    value=policy_value, source="standing_user_policy", confidence=1.0,
                     reason=f"standing user policy: {policy_key}", required=field.required,
                 )
 
             if policy_enabled and policy_key == "policy.auto_decide_company_legal_compliance":
                 if _matches_any(field.label, LEGAL_ASSENT_PATTERNS):
+                    policy_value = True
+                    if field.input_type == "select" and field.options:
+                        choice = represent_choice(True, field.options)
+                        if choice is None:
+                            return FieldResolution(
+                                field_id=field.field_id, selector=field.selector,
+                                label=field.label, canonical_key=policy_key,
+                                status=ResolutionStatus.UNRESOLVED, required=field.required,
+                                reason="site option representation is unverified",
+                            )
+                        policy_value = choice.site_value
                     return FieldResolution(
                         field_id=field.field_id, selector=field.selector, label=field.label,
                         canonical_key=policy_key, status=ResolutionStatus.RESOLVED,
-                        value=True, source="standing_user_policy", confidence=1.0,
+                        value=policy_value, source="standing_user_policy", confidence=1.0,
                         reason="standing user policy: company legal/compliance assent",
                         required=field.required,
                     )
@@ -430,11 +478,23 @@ class FieldResolver:
                 ai_key, ai_conf, ai_reason = self.ai.map_field(field, profile_keys(self.profile))
                 if ai_key and ai_conf >= 0.80:
                     mapped = get_field(self.profile, ai_key)
-                    if mapped and _nonempty(mapped.value):
+                    if mapped and _nonempty(mapped.value) and field_is_current(mapped) and not has_unresolved_conflict(self.profile, ai_key):
+                        represented = mapped.value
+                        if field.input_type == "select" and field.options:
+                            choice = represent_choice(mapped.value, field.options)
+                            if choice is None:
+                                return FieldResolution(
+                                    field_id=field.field_id, selector=field.selector,
+                                    label=field.label, canonical_key=ai_key,
+                                    status=ResolutionStatus.UNRESOLVED, required=field.required,
+                                    reason="site option representation is unverified",
+                                    sensitive=mapped.sensitive or is_sensitive_key(ai_key),
+                                )
+                            represented = choice.site_value
                         return FieldResolution(
                             field_id=field.field_id, selector=field.selector, label=field.label,
                             canonical_key=ai_key, status=ResolutionStatus.RESOLVED,
-                            value=mapped.value, source="standing_policy_ai_mapping",
+                            value=represented, source="standing_policy_ai_mapping",
                             confidence=min(ai_conf, mapped.confidence),
                             reason=ai_reason, required=field.required,
                             sensitive=mapped.sensitive or is_sensitive_key(ai_key),
@@ -478,11 +538,24 @@ class FieldResolver:
         ai_key, ai_conf, ai_reason = self.ai.map_field(field, profile_keys(self.profile))
         if ai_key and ai_conf >= 0.80:
             profile_field = get_field(self.profile, ai_key)
-            if profile_field and _nonempty(profile_field.value):
+            if profile_field and _nonempty(profile_field.value) and field_is_current(profile_field) and not has_unresolved_conflict(self.profile, ai_key):
+                represented = profile_field.value
+                if field.input_type == "select" and field.options:
+                    choice = represent_choice(profile_field.value, field.options)
+                    if choice is None:
+                        return FieldResolution(
+                            field_id=field.field_id, selector=field.selector,
+                            label=field.label, canonical_key=ai_key,
+                            status=ResolutionStatus.UNRESOLVED,
+                            reason="site option representation is unverified",
+                            required=field.required,
+                            sensitive=profile_field.sensitive or is_sensitive_key(ai_key),
+                        )
+                    represented = choice.site_value
                 return FieldResolution(
                     field_id=field.field_id, selector=field.selector, label=field.label,
                     canonical_key=ai_key, status=ResolutionStatus.RESOLVED,
-                    value=profile_field.value, source="ai_mapping_only",
+                    value=represented, source="ai_mapping_only",
                     confidence=min(ai_conf, profile_field.confidence),
                     reason=ai_reason, required=field.required,
                     sensitive=profile_field.sensitive or is_sensitive_key(ai_key),

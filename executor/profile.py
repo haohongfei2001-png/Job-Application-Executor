@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
 
@@ -146,6 +147,30 @@ def get_value(profile: dict[str, Any], dotted: str | None):
     if field is None or field.value in (None, ""):
         return None
     return field.value
+
+
+def has_unresolved_conflict(profile: dict[str, Any], key: str) -> bool:
+    conflicts = (profile.get("collections") or {}).get("conflicts") or []
+    if not any(isinstance(item, dict) and item.get("key") == key for item in conflicts):
+        return False
+    chosen = get_field(profile, key)
+    return not (chosen and any(source.kind == "user_explicit" for source in chosen.sources))
+
+
+def field_is_current(field: ProfileField) -> bool:
+    until = field.normalization.get("valid_until")
+    if not until:
+        return True
+    try:
+        if isinstance(until, str) and len(until) == 10:
+            expiry = datetime.combine(date.fromisoformat(until), time.max, timezone.utc)
+        else:
+            expiry = datetime.fromisoformat(str(until))
+            if expiry.tzinfo is None:
+                return False
+        return datetime.now(timezone.utc) <= expiry
+    except (TypeError, ValueError):
+        return False
 
 
 def profile_keys(profile: dict[str, Any]) -> list[str]:

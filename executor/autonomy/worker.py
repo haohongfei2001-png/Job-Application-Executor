@@ -13,6 +13,9 @@ from ..application import ApplicationExecutor
 from ..models import ApplicationStage
 from ..protected_targets import assert_target_not_protected
 from ..settings import load_settings
+from ..evidence import BOOL_KEYS, set_user_confirmed_field
+from ..profile import DEFAULT_ALIASES
+from ..facts.answers import TaskAnswerStore
 from .otp import BrokerBridge, OtpBroker
 from .queue import RUNTIME, STOPPED, private_dir, IDENTIFIER
 
@@ -108,6 +111,7 @@ class Worker:
         self.stop_event = threading.Event()
         self.answers = {}
         self.answers_lock = threading.RLock()
+        self.answer_store = TaskAnswerStore(queue)
         self.active = None
 
     def _runner_settings(self):
@@ -117,7 +121,23 @@ class Worker:
             settings.setdefault("deepseek", {})["enabled"] = False
         return settings
 
-    def user_input(self, tid, answers, *, expected_revision=None):
+    def _promote_pending_facts(self, tid: str, profile_ref: str) -> bool:
+        try:
+            for pending in self.answer_store.pending_reuse(tid):
+                note = f"task-answer:{tid}:{pending['key']}:{pending['version']}"
+                self.queue.begin_profile_write(profile_ref, task_id=tid)
+                set_user_confirmed_field(profile_ref, pending["key"], pending["value"],
+                                         note=note)
+                self.answer_store.mark_reuse_applied(
+                    pending["sequence"], task_id=tid, profile_ref=profile_ref)
+            self.answer_store.finish_pending_task(tid, profile_ref)
+            return True
+        except (OSError, ValueError, RuntimeError):
+            # The answer remains task-scoped and the consent stays pending;
+            # retrying never replays an unconfirmed website write.
+            return False
+
+    def user_input(self, tid, answers, *, expected_revision=None, remember=False):
         task = self.queue.get(tid)
         if expected_revision is None:
             expected_revision = task["revision"]
@@ -134,19 +154,55 @@ class Worker:
             raise ValueError("invalid answer value")
         if any(any(x in k.lower() for x in ("password", "cookie", "token", "otp", "secret")) for k in answers):
             raise ValueError("use OTP ingestion for authentication")
-        with self.answers_lock:
-            previous = dict(self.answers.get(tid, {}))
-            self.answers.setdefault(tid, {}).update(answers)
-            try:
-                return self.queue.resume(tid, expected_revision=expected_revision)
-            except BaseException:
-                if previous:
-                    self.answers[tid] = previous
+        if type(remember) is not bool:
+            raise ValueError("explicit fact scope required")
+        if remember and any(key.startswith(("policy.", "declaration.", "legal.")) for key in answers):
+            raise ValueError("one-time declarations cannot become reusable facts")
+        if remember and any(key not in DEFAULT_ALIASES for key in answers):
+            raise ValueError("reusable fact requires a known canonical key")
+        normalized = dict(answers)
+        for key, value in answers.items():
+            if key not in BOOL_KEYS:
+                continue
+            if type(value) is bool:
+                normalized[key] = value
+            elif isinstance(value, str):
+                chosen = value.strip().casefold()
+                if chosen in {"true", "yes", "是", "同意", "1"}:
+                    normalized[key] = True
+                elif chosen in {"false", "no", "否", "不同意", "0"}:
+                    normalized[key] = False
                 else:
-                    self.answers.pop(tid, None)
-                raise
+                    raise ValueError("boolean fact requires explicit yes or no")
+            else:
+                raise ValueError("boolean fact requires explicit yes or no")
+        if remember:
+            profile_path = Path(task["spec"]["profile_ref"]).expanduser().resolve()
+            profile_data = json.loads(profile_path.read_text(encoding="utf-8"))
+            if not isinstance(profile_data, dict) or (profile_data and "fields" not in profile_data):
+                raise ValueError("reusable fact requires a canonical profile")
+        # Answer and transition share one SQLite transaction: rejected input
+        # cannot be applied later by a restarted worker.
+        resumed = self.answer_store.save_and_resume(
+            tid, normalized, expected_revision=expected_revision, remember=remember)
+        with self.answers_lock:
+            self.answers.setdefault(tid, {}).update(normalized)
+        if remember:
+            resumed["fact_reuse_status"] = (
+                "SAVED" if self._promote_pending_facts(tid, task["spec"]["profile_ref"])
+                else "PENDING"
+            )
+            resumed.update(self.queue.get(tid))
+        return resumed
 
     def run_once(self):
+        for pending_tid in self.answer_store.pending_tasks():
+            try:
+                pending_task = self.queue.get(pending_tid)
+                self._promote_pending_facts(
+                    pending_tid, pending_task["spec"]["profile_ref"])
+            except (KeyError, ValueError):
+                pass
         task = self.queue.claim("worker-" + str(os.getpid()))
         if not task:
             self.broker.expire()
@@ -226,8 +282,10 @@ class Worker:
                 runner.browser_document_set = lambda target_id, document_epoch: self.queue.record_browser_document(
                     tid, owner, session_epoch, target_id, document_epoch,
                 )
-            with self.answers_lock:
-                runner.user_answers = [{"canonical_key": k, "field_id": k, "value": v} for k, v in self.answers.get(tid, {}).items()]
+            runner.user_answers = [
+                {"canonical_key": key, "field_id": key, "value": value}
+                for key, value in self.answer_store.load(tid).items()
+            ]
             runner.plan.metadata["recovered_from_stage"] = task["checkpoint"]
             if spec["attachment_refs"]:
                 for key, path in spec["attachment_refs"].items():

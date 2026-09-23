@@ -21,7 +21,8 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
 .task .title{font-weight:650}.task .meta{font-size:12px;color:#64748b;margin-top:4px}.stage{font-size:11px;border-radius:999px;padding:3px 7px;background:#eef2ff;display:inline-block;margin-top:7px}
 .taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
-.factinput{display:flex;gap:5px;margin-top:8px}.factinput input{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.factinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}
+.factinput{display:flex;gap:5px;margin-top:8px}.factinput input,.factinput select{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.factinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}
+.factinput .remember-fact{flex:0 0 16px;width:16px;min-width:16px;padding:0}
 .newtask{display:grid;gap:7px;margin:12px 0 17px}.newtask input{width:100%;border:1px solid #cbd5e1;border-radius:7px;padding:8px}.newtask button{padding:9px}
 .candidates{display:grid;gap:7px;margin-bottom:16px}.candidate{border:1px solid #d7dce2;border-radius:9px;padding:9px;font-size:12px}.candidate button{display:block;margin-top:7px;padding:6px 9px;font-size:12px}.candidate-note{font-size:12px;color:#92400e}
 .chat{padding:20px 24px;overflow:auto}.bubble{max-width:820px;padding:11px 13px;border-radius:13px;margin:8px 0;white-space:pre-wrap;line-height:1.5}
@@ -109,6 +110,7 @@ const blockerText={
   unknown_outcome:'上次写入结果不明，等待只读核对',
   user_paused_from_unknown_outcome:'上次写入结果不明，等待只读核对',
   validation:'需要检查表单',
+  profile_changed:'资料已更新，需要重新核对申请',
   retry_pending:'正在重试',
   retry_exhausted:'需要处理后再继续',
   user_paused:'你已暂停'
@@ -134,8 +136,9 @@ function render(state){
       <div class="meta">${esc(t.target_host||'')} ${t.blocker?'· '+esc(humanBlocker(t.blocker)):''}</div>
       <span class="stage">${esc(humanStage(t.stage))}</span>
       ${t.stage==='NEEDS_USER_INPUT'?(t.unresolved_keys||[]).map(key=>`
-        <label class="factinput"><span>${esc(key)}</span><input autocomplete="off" aria-label="${esc(key)}">
-          <button type="button" data-answer="true" data-key="${esc(key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button></label>`).join(''):''}
+        <label class="factinput"><span>${esc(key)}</span>${(t.boolean_keys||[]).includes(key)?`<select aria-label="${esc(key)}"><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select>`:`<input autocomplete="off" aria-label="${esc(key)}">`}
+          <button type="button" data-answer="true" data-key="${esc(key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button>
+          ${(t.reusable_keys||[]).includes(key)?'<input type="checkbox" class="remember-fact" aria-label="保存为可复用事实"><span>经我确认后记住，供以后申请使用</span>':''}</label>`).join(''):''}
       <div class="taskcontrols">
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
         ${['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="OBSERVE" data-task="${esc(t.task_id)}">只读核对</button>`:''}
@@ -202,16 +205,19 @@ candidatesEl.addEventListener('click',async event=>{
 });
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-answer]');if(!button)return;
+  event.preventDefault();
   const input=button.previousElementSibling,value=input.value;
+  const remember=button.nextElementSibling?.classList.contains('remember-fact')&&button.nextElementSibling.checked;
   if(!value.trim()){notify('请先填写答案。');return}
   button.disabled=true;
   try{
     const r=await fetch('/ui/api/user-input',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
       body:JSON.stringify({task_id:button.dataset.task,field_key:button.dataset.key,
-        value,expected_revision:Number(button.dataset.revision)})});
+        value,expected_revision:Number(button.dataset.revision),remember})});
     if(!r.ok)throw new Error();
+    const result=await r.json();
     input.value='';
-    notify('答案已在本地交给当前任务。');await state();
+    notify(remember?(result.task?.fact_reuse_status==='SAVED'?'答案已在本地保存为经确认的可复用事实。':'答案已交给当前任务；可复用保存待重试。'):'答案已在本地交给当前任务。');await state();
   }catch(e){
     try{
       const r=await fetch('/ui/api/state',{credentials:'same-origin'}),data=await r.json();
@@ -344,7 +350,7 @@ async function state(){
     const r=await fetch('/ui/api/state',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
     const data=await r.json();
-    if(![...tasksEl.querySelectorAll('.factinput input')].some(input=>input.value))render(data);
+    if(![...tasksEl.querySelectorAll('.factinput input:not([type=checkbox]),.factinput select')].some(input=>input.value))render(data);
     updateLabel(data.update);
   }catch(e){document.getElementById('health').textContent='连接异常'}
 }
