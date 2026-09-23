@@ -228,7 +228,14 @@ async function submit(){
     if(!r.ok)throw new Error(data.error||'request failed');
     bubble(data.reply||'已处理。','ai',data.actions||[]);render(data);
   }catch(e){bubble('请求失败；现有任务未被修改。','ai')}
-  finally{send.disabled=false;msg.focus()}
+  finally{
+    try{
+      const r=await fetch('/ui/api/update-status',{credentials:'same-origin'});
+      const update=r.ok?await r.json():{status:'idle'};
+      updateLabel(update);
+    }catch(e){send.disabled=false;msg.disabled=false}
+    msg.focus();
+  }
 }
 send.onclick=submit;msg.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit()}});
 state();setInterval(state,2500);
