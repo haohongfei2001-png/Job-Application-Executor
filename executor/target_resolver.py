@@ -5,7 +5,7 @@ import re
 from dataclasses import asdict, dataclass
 from urllib.parse import urlencode, urljoin, urlsplit
 
-from .browser import connect
+from playwright.sync_api import sync_playwright
 
 
 @dataclass
@@ -17,6 +17,8 @@ class Candidate:
     job_url: str
     apply_url: str | None = None
     exact_title: bool = False
+    campaign: str = ""
+    employment_type: str = ""
 
 
 SCHNEIDER_ALIASES = {"施耐德", "施耐德电气", "schneider", "schneider electric"}
@@ -82,9 +84,24 @@ def _parse_card(title, href, text, apply_url, query_title):
     )
 
 
-def resolve_schneider(title: str, location: str = "China", max_pages: int = 8):
-    pw, browser, ctx, page = connect()
+def _public_connect():
+    """Public discovery never attaches to the applicant's live Chrome profile."""
+    pw = sync_playwright().start()
+    try:
+        browser = pw.chromium.launch(headless=True)
+    except Exception:
+        pw.stop()
+        raise
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    return pw, browser, ctx, page
+
+
+def resolve_schneider(title: str, location: str = "China", max_pages: int = 8,
+                      *, return_coverage: bool = False):
+    pw, browser, ctx, page = _public_connect()
     out = []
+    complete = False
     try:
         base = "https://careers.se.com/jobs?" + urlencode(
             {
@@ -99,9 +116,9 @@ def resolve_schneider(title: str, location: str = "China", max_pages: int = 8):
         page.goto(base, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(2000)
         body = page.locator("body").inner_text()
-        m = re.search(r"(\d+)\s*(?:Results|结果)", body, re.I)
-        total = int(m.group(1)) if m else 10
-        pages = min(max_pages, max(1, math.ceil(total / 10)))
+        m = re.search(r"([\d,]+)\s*(?:Results|结果)", body, re.I)
+        total = int(m.group(1).replace(",", "")) if m else None
+        pages = min(max_pages, max(1, math.ceil((total or 10) / 10)))
         for n in range(1, pages + 1):
             if n > 1:
                 page.goto(
@@ -135,12 +152,14 @@ def resolve_schneider(title: str, location: str = "China", max_pages: int = 8):
                 candidate.location.casefold(),
             )
         )
-        return out
+        complete = total is not None and total <= max_pages * 10 and len(out) >= total
+        return (out, complete) if return_coverage else out
     finally:
         try:
             page.close()
         except Exception:
             pass
+        browser.close()
         pw.stop()
 
 
@@ -234,57 +253,101 @@ def _oppo_search_input(page):
     return visible[0] if len(visible) == 1 else None
 
 
-def resolve_oppo(title: str, location: str = "", max_scrolls: int = 6):
-    pw, browser, ctx, attached = connect()
-    page = ctx.new_page()
+def resolve_oppo(title: str, location: str = "", max_pages: int = 40,
+                 *, return_coverage: bool = False):
+    """Query the observed public listing endpoint, proving every result page.
+
+    This endpoint lists public jobs only. It never creates an application or
+    attaches to the applicant's browser/profile.
+    """
+    pw, browser, ctx, page = _public_connect()
     aggregate: dict[str, Candidate] = {}
+    complete = False
     try:
-        for start_url in (OPPO_CAMPUS_POST_LIST, OPPO_CAMPUS_ROOT):
-            try:
-                page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(1500)
-            except Exception:
-                continue
-
-            for item in _collect_oppo_candidates(page, title):
-                aggregate[item.job_id] = item
-            exact = [item for item in aggregate.values() if item.exact_title and _location_matches(location, item.location)]
-            if exact:
-                exact.sort(key=lambda item: (item.location.casefold(), item.job_id))
-                rest = [item for item in aggregate.values() if not item.exact_title]
-                return exact + sorted(rest, key=lambda item: (item.title.casefold(), item.job_id))
-
-            search = _oppo_search_input(page)
-            if search is not None:
-                try:
-                    search.fill(title)
-                    search.press("Enter")
-                    page.wait_for_timeout(1200)
-                except Exception:
-                    pass
-                for item in _collect_oppo_candidates(page, title):
-                    aggregate[item.job_id] = item
-                exact = [item for item in aggregate.values() if item.exact_title and _location_matches(location, item.location)]
-                if exact:
-                    exact.sort(key=lambda item: (item.location.casefold(), item.job_id))
-                    rest = [item for item in aggregate.values() if not item.exact_title]
-                    return exact + sorted(rest, key=lambda item: (item.title.casefold(), item.job_id))
-
-            for _ in range(max_scrolls):
-                try:
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(700)
-                except Exception:
+        page.goto(OPPO_CAMPUS_POST_LIST, wait_until="domcontentloaded", timeout=60000)
+        endpoint = "https://careers.oppo.com/openapi/position/pageNew"
+        expected_total = None
+        expected_pages = None
+        for number in range(1, max_pages + 1):
+            payload = {
+                "pageNum": number, "pageSize": 10, "positionName": title,
+                "projectList": [], "positionTypeList": [],
+                "workCityCodeList": [], "shareId": "",
+            }
+            response = ctx.request.post(
+                endpoint, data=payload, headers={"Content-Type": "application/json"}, timeout=30000)
+            if response.status != 200:
+                break
+            document = response.json()
+            data = document.get("data") if isinstance(document, dict) and document.get("code") == 0 else None
+            if not isinstance(data, dict) or not isinstance(data.get("records"), list):
+                break
+            total, pages, current = data.get("total"), data.get("pages"), data.get("current")
+            if (not isinstance(total, int) or not isinstance(pages, int)
+                    or current != number or total < 0 or pages < 0):
+                break
+            if expected_total is None:
+                expected_total, expected_pages = total, pages
+                if pages > max_pages:
                     break
-                for item in _collect_oppo_candidates(page, title):
-                    aggregate[item.job_id] = item
-                exact = [item for item in aggregate.values() if item.exact_title and _location_matches(location, item.location)]
-                if exact:
-                    exact.sort(key=lambda item: (item.location.casefold(), item.job_id))
-                    rest = [item for item in aggregate.values() if not item.exact_title]
-                    return exact + sorted(rest, key=lambda item: (item.title.casefold(), item.job_id))
-
-        return sorted(
+            elif total != expected_total or pages != expected_pages:
+                break
+            valid_page = True
+            for record in data["records"]:
+                if not isinstance(record, dict):
+                    valid_page = False
+                    break
+                job_id = str(record.get("idRecruitPosition") or "")
+                name = str(record.get("positionName") or "").strip()
+                if not job_id.isdigit() or not name or job_id in aggregate:
+                    valid_page = False
+                    break
+                city = str(record.get("workCityName") or "")
+                aggregate[job_id] = Candidate(
+                    title=name, job_id=job_id, location=city,
+                    category=str(record.get("positionTypeName") or ""),
+                    job_url=f"{OPPO_CAMPUS_ROOT}/post/{job_id}",
+                    exact_title=_norm_title(name) == _norm_title(title),
+                    campaign=str(record.get("projectName") or ""),
+                    employment_type=str(record.get("recruitmentTypeName") or ""),
+                )
+            if not valid_page:
+                break
+            if (total == 0 and pages == 0 and not data["records"] or
+                    number == pages and len(aggregate) == total):
+                complete = True
+                break
+            if number >= pages or not data["records"]:
+                break
+        if complete:
+            for item in aggregate.values():
+                if not item.exact_title:
+                    continue
+                try:
+                    detail_response = ctx.request.get(
+                        f"https://careers.oppo.com/openapi/position/detail?id={item.job_id}",
+                        timeout=30000)
+                    detail_body = detail_response.json() if detail_response.status == 200 else {}
+                    detail = detail_body.get("data") if detail_body.get("code") == 0 else None
+                    detail_cities = [
+                        str(city.get("workCityName") or "")
+                        for city in (detail.get("workCityVOList") or [])
+                        if isinstance(city, dict)
+                    ] if isinstance(detail, dict) else []
+                    if (
+                        not isinstance(detail, dict)
+                        or str(detail.get("idRecruitPosition") or "") != item.job_id
+                        or _norm_title(str(detail.get("positionName") or "")) != _norm_title(item.title)
+                        or str(detail.get("projectName") or "") != item.campaign
+                        or (item.location and item.location not in detail_cities)
+                        or detail.get("positionStatus") != 0
+                    ):
+                        complete = False
+                        break
+                except Exception:
+                    complete = False
+                    break
+        result = sorted(
             (item for item in aggregate.values() if _location_matches(location, item.location)),
             key=lambda item: (
                 not item.exact_title,
@@ -293,11 +356,13 @@ def resolve_oppo(title: str, location: str = "", max_scrolls: int = 6):
                 item.job_id,
             ),
         )
+        return (result, complete) if return_coverage else result
     finally:
         try:
             page.close()
         except Exception:
             pass
+        browser.close()
         pw.stop()
 
 
@@ -306,8 +371,9 @@ def resolve_known_landing(company: str, title: str, target_url: str) -> Candidat
         _is_oppo_company(company)
         and is_oppo_campus_landing(target_url)
     ):
-        exact = [item for item in resolve_oppo(title) if item.exact_title]
-        return exact[0] if len(exact) == 1 else None
+        items, complete = resolve_oppo(title, return_coverage=True)
+        exact = [item for item in items if item.exact_title]
+        return exact[0] if complete and len(exact) == 1 else None
     return None
 
 

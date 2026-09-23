@@ -49,7 +49,7 @@
     },
     {
       "id": "JCR-03",
-      "status": "READY",
+      "status": "IMPLEMENTING",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "Finish sole JCR-02 PR #12 exact-head CI/review/merge and exact-main readback, then begin JCR-03 independent discovery/target work. JCR-02 is ADVANCE_ALLOWED_WITH_DEFERRED, not COMPLETE: DFG-002 still blocks unknown/unverified live-write replay and G-01 through G-13 certification. Continue JCR-04 facts and later independent engineering while resolving DFG-002 before final consumer certification; DFG-001 remains JCR-04 durable fact work.",
+  "next_action": "JCR-02 PR #12 merged as 959cd9d after exact-head and exact-main CI; see JCR-02-MAIN-INTEGRATION. Sole JCR-03 writer feat/jcr03-discovery-identity implements read-only discovery, verified target identity, ambiguity handling, UI and B-class synthetic/public evidence. JCR-02 remains ADVANCE_ALLOWED_WITH_DEFERRED: DFG-002 blocks unknown/unverified live-write replay and G-01 through G-13 certification. DFG-001 remains JCR-04 durable fact work. Continue later independent engineering and resolve engineering debt before final consumer certification.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

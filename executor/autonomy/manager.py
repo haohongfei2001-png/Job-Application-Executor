@@ -12,6 +12,8 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..resolver import DeepSeekMapper
+from ..discovery.core import DiscoveryRequest, DiscoveryResult
+from ..discovery.service import discover
 from ..settings import load_settings
 from ..target_resolver import is_oppo_campus_landing, resolve_known_landing
 from .queue import TaskQueue, TaskSpec
@@ -230,6 +232,38 @@ def _explicit_control(message: str, pattern: re.Pattern[str]) -> bool:
                for match in pattern.finditer(message))
 
 
+_DISCOVERY_COMPANIES = ("Schneider Electric", "施耐德电气", "Schneider", "施耐德", "OPPO")
+
+
+def _local_discovery_intent(message: str) -> tuple[str, str, str, str] | None:
+    """Parse only explicit supported company/role phrases; never guess a URL."""
+    if re.search(r"https?://\S+", message, re.I) or not _explicit_control(message, _APPLY_RE):
+        return None
+    company_pattern = "|".join(re.escape(item) for item in _DISCOVERY_COMPANIES)
+    match = re.fullmatch(
+        rf"\s*(?:请|帮我|我要|我想|请帮我)?\s*(?:投递|申请|开始投)\s*"
+        rf"(?P<company>{company_pattern})\s*(?:的)?\s*(?P<role>.+?)\s*[。！!]?\s*",
+        message, re.I,
+    )
+    if not match:
+        return None
+    role = match.group("role").strip(" ：:，,。！! ")
+    location = ""
+    location_match = re.search(r"[（(](北京|上海|深圳|广州|杭州|成都|南京|武汉|西安|重庆)[）)]$", role)
+    if location_match:
+        location = location_match.group(1)
+        role = role[:location_match.start()].strip()
+    campaign = ""
+    campaign_match = re.search(r"[（(](20\d\d届校园招聘)[）)]$", role)
+    if campaign_match:
+        campaign = campaign_match.group(1)
+        role = role[:campaign_match.start()].strip()
+    role = re.sub(r"(?:岗位|职位)$", "", role).strip()
+    if len(role) < 2 or len(role) > 200:
+        return None
+    return match.group("company"), role, location, campaign
+
+
 def _selected_task_is_explicit(message: str, selected: dict[str, Any], tasks: list[dict[str, Any]]) -> bool:
     active = [task for task in tasks if task.get("stage") not in {"CANCELLED", "SUBMITTED", "VERIFIED"}]
     if len(active) <= 1:
@@ -428,20 +462,101 @@ class ManagerController:
             raise ValueError("profile_path is not configured")
         return value
 
-    def create_from_local_form(self, company: str, role: str, target_url: str) -> dict[str, Any]:
-        """Structured UI entry keeps target values out of the model request."""
-        if not all(isinstance(value, str) for value in (company, role, target_url)):
+    def prepare_local_form(self, company: str, role: str, target_url: str = "", *,
+                           location: str = "", campaign: str = "",
+                           employment_type: str = "",
+                           selected_candidate_id: str = "") -> tuple[DiscoveryRequest, DiscoveryResult]:
+        """Read-only discovery runs outside the supervisor mutation lock."""
+        if not all(isinstance(value, str) for value in (
+            company, role, target_url, location, campaign, employment_type, selected_candidate_id
+        )):
             raise ValueError("invalid task fields")
+        request = DiscoveryRequest(
+            company=company.strip(), role=role.strip(), source_url=target_url.strip(),
+            location=location.strip(), campaign=campaign.strip(),
+            employment_type=employment_type.strip(),
+        )
+        return request, discover(request, selected_candidate_id=selected_candidate_id)
+
+    def commit_local_form(self, request: DiscoveryRequest, result: DiscoveryResult, *,
+                          selected_candidate_id: str = "") -> dict[str, Any]:
+        """Queue only the already observed candidate under the mutation lock."""
+        if result.status == "VERIFIED" and result.target is not None:
+            target = result.target
+            spec = TaskSpec(
+                company=target.employer, role=target.title,
+                target_url=target.detail_url, job_id=target.job_id,
+                tenant=target.tenant, campaign=target.campaign,
+                location=target.location, employment_type=target.employment_type,
+                target_evidence_digest=target.evidence_digest, target_verified=True,
+                profile_ref=self._profile_ref(), live_authorized=False,
+            )
+            task = self.queue.enqueue(spec)
+            return {**task, "discovery": result.public_dict()}
+        if (result.status != "UNSUPPORTED" or result.reason != "no_official_site_contract"
+                or not request.source_url or selected_candidate_id):
+            return {"discovery": result.public_dict()}
+        # Legacy exact URLs remain queueable but are explicitly unverified and
+        # cannot authorize a live write. Unsupported discovery is surfaced.
         spec = TaskSpec(
-            company=company.strip(),
-            role=role.strip(),
-            target_url=target_url.strip(),
+            company=request.company,
+            role=request.role,
+            target_url=request.source_url,
             profile_ref=self._profile_ref(),
             # JCR-03 owns verified target identity. A user-supplied URL alone
             # is not yet sufficient evidence for automatic external writes.
             live_authorized=False,
         )
-        return self.queue.enqueue(spec)
+        return {**self.queue.enqueue(spec), "discovery": result.public_dict()}
+
+    def create_from_local_form(self, company: str, role: str, target_url: str = "", *,
+                               location: str = "", campaign: str = "",
+                               employment_type: str = "",
+                               selected_candidate_id: str = "") -> dict[str, Any]:
+        """Structured direct entry, also used by non-server clients."""
+        request, result = self.prepare_local_form(
+            company, role, target_url, location=location, campaign=campaign,
+            employment_type=employment_type, selected_candidate_id=selected_candidate_id)
+        return self.commit_local_form(request, result,
+                                      selected_candidate_id=selected_candidate_id)
+
+    def prepare_chat_discovery(self, message: str) -> tuple[DiscoveryRequest, DiscoveryResult] | None:
+        if not isinstance(message, str) or len(message) > 4000:
+            return None
+        if _contains_sensitive_credential(message) or _PRIVATE_FACT_RE.search(message):
+            return None
+        intent = _local_discovery_intent(message.strip())
+        if intent is None:
+            return None
+        company, role, location, campaign = intent
+        return self.prepare_local_form(company, role, location=location, campaign=campaign)
+
+    def finish_chat_discovery(self, prepared: tuple[DiscoveryRequest, DiscoveryResult]) -> dict[str, Any]:
+        request, discovery = prepared
+        discovered = self.commit_local_form(request, discovery)
+        result = discovered["discovery"]
+        status = result["status"]
+        if "task_id" in discovered:
+            reply = "已找到并核验唯一岗位，任务已加入；开始准备前仍会检查运行授权。"
+            action = {"action": "CREATE_TASK", "status": "accepted",
+                      "task_id": discovered["task_id"], "resolved_target": True}
+        elif status == "AMBIGUOUS":
+            labels = "；".join(
+                f"{item['title']}（{item['location'] or '地点未注明'}、"
+                f"{item['campaign'] or '批次未注明'}、职位 {item['job_id']}）"
+                for item in result["candidates"][:8]
+            )
+            reply = "找到多个符合条件的岗位，请在左侧填写公司和岗位后选择具体候选：" + labels
+            action = {"action": "DISCOVER", "status": "candidate_selection_required"}
+        else:
+            reply = {
+                "INCOMPLETE": "公开职位列表尚未完整核验，任务未创建；请稍后重试或使用左侧表单提供官方入口。",
+                "UNAVAILABLE": "没有找到符合全部条件的在招岗位，任务未创建。",
+                "UNSUPPORTED": "目前不支持从这家公司自动发现岗位，任务未创建；可在左侧提供官方入口。",
+            }.get(status, "岗位尚未核验，任务未创建。")
+            action = {"action": "DISCOVER", "status": "denied", "reason": status.lower()}
+        return {"reply": reply, "actions": [action],
+                "discovery": result, **self.state()}
 
     def _apply(self, decision: ManagerDecision, message: str, *, expected_revision: int | None = None) -> dict[str, Any]:
         action = decision.action
@@ -608,6 +723,14 @@ class ManagerController:
                 "actions": [],
                 **self.state(),
             }
+        discovery_intent = _local_discovery_intent(message)
+        if discovery_intent:
+            try:
+                prepared = self.prepare_chat_discovery(message)
+            except (ValueError, RuntimeError):
+                return {"reply": "公开岗位暂时无法核验，任务未创建。", "actions": [], **self.state()}
+            if prepared is not None:
+                return self.finish_chat_discovery(prepared)
         # A plain, explicit resume command for one human-action wait is
         # deterministic control, not a semantic decision. Handle it locally so
         # the model cannot downgrade "继续这个岗位" into a read-only REPORT.

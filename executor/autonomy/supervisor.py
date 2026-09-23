@@ -391,21 +391,31 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         data = self._read_json()
                         if set(data) != {"message"}:
                             raise ValueError("invalid chat envelope")
+                        prepared = supervisor.manager.prepare_chat_discovery(data["message"])
                         result = supervisor.run_mutation(
-                            lambda: supervisor.manager.handle(data["message"])
+                            lambda: supervisor.manager.finish_chat_discovery(prepared)
+                            if prepared is not None else supervisor.manager.handle(data["message"])
                         )
                         self._send_json(200, result)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/tasks":
                         data = self._read_json()
-                        if set(data) != {"company", "role", "target_url"}:
+                        required = {"company", "role"}
+                        optional = {"target_url", "location", "campaign", "employment_type", "selected_candidate_id"}
+                        if not required <= set(data) or set(data) - required - optional:
                             raise ValueError("invalid local task envelope")
-                        result = supervisor.run_mutation(
-                            lambda: supervisor.manager.create_from_local_form(
-                                data["company"], data["role"], data["target_url"]
-                            )
+                        request, discovery = supervisor.manager.prepare_local_form(
+                            data["company"], data["role"], data.get("target_url", ""),
+                            location=data.get("location", ""), campaign=data.get("campaign", ""),
+                            employment_type=data.get("employment_type", ""),
+                            selected_candidate_id=data.get("selected_candidate_id", ""),
                         )
-                        self._send_json(200, {"task_id": result["task_id"], "revision": result["revision"]})
+                        result = supervisor.run_mutation(lambda: supervisor.manager.commit_local_form(
+                            request, discovery, selected_candidate_id=data.get("selected_candidate_id", "")))
+                        response = {"discovery": result.get("discovery")}
+                        if "task_id" in result:
+                            response.update(task_id=result["task_id"], revision=result["revision"])
+                        self._send_json(200, response)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/command":
                         command = CommandEnvelope.model_validate(self._read_json())

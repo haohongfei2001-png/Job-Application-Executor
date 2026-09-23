@@ -180,7 +180,13 @@ class Worker:
         try:
             guard()
             try:
-                assert_target_not_protected(spec["target_url"])
+                if spec.get("tenant") and spec.get("job_id"):
+                    assert_target_not_protected(spec["target_url"],
+                                                tenant=spec["tenant"],
+                                                job_id=spec["job_id"],
+                                                campaign=spec.get("campaign", ""))
+                else:
+                    assert_target_not_protected(spec["target_url"])
             except RuntimeError:
                 checkpoint("BLOCKED", blocker="protected_target", release=True)
                 return True

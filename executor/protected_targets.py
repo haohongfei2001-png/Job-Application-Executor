@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .discovery.core import normalize_component
+
 
 ROOT = Path.home() / "Job-Application-Executor"
 PROTECTED_TARGETS = ROOT / "config" / "protected-targets.json"
@@ -18,10 +20,21 @@ def load_protected_targets(path: str | Path = PROTECTED_TARGETS) -> list[dict]:
     return items if isinstance(items, list) else []
 
 
-def protected_target(target_url: str, items: list[dict] | None = None) -> dict | None:
+def protected_target(target_url: str, items: list[dict] | None = None, *,
+                     tenant: str = "", job_id: str = "", campaign: str = "") -> dict | None:
     parsed = urlparse(target_url)
     query = parse_qs(parsed.query)
     for item in items if items is not None else load_protected_targets():
+        # A verified tenant/job identity protects URL aliases on shared ATS
+        # hosts. Older host/query rules remain valid for legacy targets.
+        target_identity = item.get("target_identity")
+        if isinstance(target_identity, dict) and tenant and job_id:
+            if (
+                str(target_identity.get("tenant", "")).casefold() == tenant.casefold()
+                and str(target_identity.get("job_id", "")) == job_id
+                and normalize_component(str(target_identity.get("campaign", ""))) == normalize_component(campaign)
+            ):
+                return item
         hosts = {str(x).casefold() for x in item.get("hosts", [])}
         if hosts and (parsed.hostname or "").casefold() not in hosts:
             continue
@@ -37,8 +50,9 @@ def protected_target(target_url: str, items: list[dict] | None = None) -> dict |
     return None
 
 
-def assert_target_not_protected(target_url: str) -> None:
-    hit = protected_target(target_url)
+def assert_target_not_protected(target_url: str, *, tenant: str = "", job_id: str = "",
+                                campaign: str = "") -> None:
+    hit = protected_target(target_url, tenant=tenant, job_id=job_id, campaign=campaign)
     if hit:
         label = hit.get("label") or "protected submitted application"
         status = hit.get("status") or "protected"

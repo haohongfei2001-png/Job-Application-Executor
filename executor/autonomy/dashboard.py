@@ -23,6 +23,7 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
 .factinput{display:flex;gap:5px;margin-top:8px}.factinput input{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.factinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}
 .newtask{display:grid;gap:7px;margin:12px 0 17px}.newtask input{width:100%;border:1px solid #cbd5e1;border-radius:7px;padding:8px}.newtask button{padding:9px}
+.candidates{display:grid;gap:7px;margin-bottom:16px}.candidate{border:1px solid #d7dce2;border-radius:9px;padding:9px;font-size:12px}.candidate button{display:block;margin-top:7px;padding:6px 9px;font-size:12px}.candidate-note{font-size:12px;color:#92400e}
 .chat{padding:20px 24px;overflow:auto}.bubble{max-width:820px;padding:11px 13px;border-radius:13px;margin:8px 0;white-space:pre-wrap;line-height:1.5}
 .me{margin-left:auto;background:#111;color:#fff}.ai{background:#fff;border:1px solid #e5e7eb}.actions{font-size:12px;color:#64748b;margin-top:5px}
 .composer{background:#fff;border-top:1px solid #e5e7eb;padding:14px 20px;display:flex;gap:10px}
@@ -43,12 +44,16 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
     <div class="metric"><span>已结束</span><b id="done">0</b></div>
   </div>
   <form id="newtask" class="newtask" autocomplete="off">
-    <strong>添加明确岗位</strong>
+    <strong>查找并添加岗位</strong>
     <input name="company" maxlength="150" placeholder="公司" required>
     <input name="role" maxlength="200" placeholder="岗位名称" required>
-    <input name="target_url" type="url" maxlength="2000" placeholder="完整岗位链接" required>
-    <button type="submit">添加任务</button>
+    <input name="location" maxlength="150" placeholder="地点（可选）">
+    <input name="campaign" maxlength="150" placeholder="招聘批次（可选）">
+    <input name="employment_type" maxlength="100" placeholder="用工类型（可选）">
+    <input name="target_url" type="url" maxlength="2000" placeholder="官方招聘页或岗位链接（可选）">
+    <button type="submit">查找岗位</button>
   </form>
+  <div id="candidates" class="candidates"></div>
   <div id="tasks" class="empty">正在读取任务…</div>
 </aside>
 <main>
@@ -62,10 +67,10 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   </div>
 </header>
 <div id="chat" class="chat">
-  <div class="bubble ai">请在左侧填写明确岗位；任务控制可在任务卡片操作，私人资料也请在任务卡片本地填写。遇到需要你决定或安全验证的地方会停下来，最终提交由你本人完成。</div>
+  <div class="bubble ai">可按公司和岗位查找官方招聘信息；同名岗位会请你选择。任务控制可在任务卡片操作，私人资料请在任务卡片本地填写。最终提交由你本人完成。</div>
 </div>
 <div class="composer">
-  <textarea id="message" placeholder="查看任务状态；添加岗位请使用左侧表单，私人资料请在任务卡片填写…"></textarea>
+  <textarea id="message" placeholder="查看任务状态；添加岗位请使用左侧表单查找，私人资料请在任务卡片填写…"></textarea>
   <button id="send">发送</button>
 </div>
 </main>
@@ -74,6 +79,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 <script>
 const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
 const newTaskForm=document.getElementById('newtask');
+const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const stageText={
   DISCOVERED:'已加入',
@@ -170,9 +176,29 @@ newTaskForm.addEventListener('submit',async event=>{
     const r=await fetch('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
       credentials:'same-origin',body:JSON.stringify(data)});
     if(!r.ok)throw new Error();
-    newTaskForm.reset();notify('任务已添加；目标核验完成前不会自动写入招聘网站。');await state();
-  }catch(e){notify('无法安全添加任务，请核对岗位链接、配置与已有任务。')}
+    const result=await r.json();showDiscovery(result,data);
+    if(result.task_id){newTaskForm.reset();await state()}
+  }catch(e){notify('暂时无法安全查找岗位；请核对公司、岗位和官方链接。')}
   finally{button.disabled=false}
+});
+function showDiscovery(result,request){
+  const discovery=result.discovery||{};
+  if(result.task_id){pendingDiscovery=null;candidatesEl.replaceChildren();notify(discovery.status==='VERIFIED'?'已核验并添加明确岗位；准备草稿前会再次检查授权。':'已添加待核验任务；不会自动写入招聘网站。');return}
+  pendingDiscovery={request,discovery};
+  const labels={AMBIGUOUS:'发现多个同名岗位，请按地点、批次和用工类型选择。',INCOMPLETE:'公开列表覆盖范围尚未证实，暂不选择或写入。',UNAVAILABLE:'未找到符合全部条件的在招岗位。',UNSUPPORTED:'此公司或链接暂不在已验证的发现范围内。'};
+  candidatesEl.innerHTML='<div class="candidate-note">'+esc(labels[discovery.status]||'岗位尚未核验。')+'</div>'+
+    (discovery.candidates||[]).map(c=>'<div class="candidate"><b>'+esc(c.title)+'</b><br>'+esc(c.location||'地点未注明')+' · '+esc(c.campaign||'批次未注明')+' · '+esc(c.employment_type||'类型未注明')+'<br>职位 '+esc(c.job_id)+(discovery.status==='AMBIGUOUS'?'<button type="button" data-candidate="'+esc(c.candidate_id)+'">选择此岗位</button>':'')+'</div>').join('');
+}
+candidatesEl.addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-candidate]');if(!button||!pendingDiscovery)return;
+  button.disabled=true;
+  try{
+    const data={...pendingDiscovery.request,selected_candidate_id:button.dataset.candidate};
+    const r=await fetch('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(data)});
+    if(!r.ok)throw new Error();
+    const result=await r.json();showDiscovery(result,pendingDiscovery?.request||data);
+    if(result.task_id){newTaskForm.reset();await state()}
+  }catch(e){notify('候选已变化或暂时无法核验，请重新查找。');button.disabled=false}
 });
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-answer]');if(!button)return;
