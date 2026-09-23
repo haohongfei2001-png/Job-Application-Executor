@@ -83,6 +83,21 @@ def test_generic_adapter_rejects_ambiguous_one_time_code_fields(tmp_path):
         assert adapter.page.locator("#email-code").input_value() == ""
 
 
+def test_segmented_otp_without_certified_driver_is_human_handoff(tmp_path):
+    html = tmp_path / "segmented-otp.html"
+    html.write_text('''<!doctype html><body><form id="login"><h2>登录</h2>
+      <label>验证码第1位 <input id="otp-1" maxlength="1"></label>
+      <label>验证码第2位 <input id="otp-2" maxlength="1"></label>
+      <label>验证码第3位 <input id="otp-3" maxlength="1"></label>
+      <label>验证码第4位 <input id="otp-4" maxlength="1"></label>
+    </form></body>''', encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.auth_challenge_kind() == "one_time_code"
+        assert adapter.otp_field_status() == "ambiguous"
+        assert adapter.enter_one_time_code("4829") is False
+        assert [adapter.page.locator(f"#otp-{n}").input_value() for n in range(1, 5)] == [""] * 4
+
+
 @pytest.mark.parametrize(
     ("body", "expected"),
     [

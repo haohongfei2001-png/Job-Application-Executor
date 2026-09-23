@@ -1,16 +1,20 @@
 """Synthetic auth lifecycle evidence; no real SMS, account, or user profile."""
 
 import json
+import http.cookiejar
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from playwright.sync_api import sync_playwright
 
 from executor.auth.attempts import AuthAttemptStore
 from executor.autonomy.otp import OtpBroker
 from executor.autonomy.queue import TaskQueue, TaskSpec
-from executor.autonomy.supervisor import Supervisor
+from executor.autonomy.supervisor import Supervisor, create_server
 from executor.autonomy.worker import Worker
 from executor.evidence import write_profile
 from executor.models import ApplicantProfile, ProfileField
@@ -184,6 +188,92 @@ def test_late_source_resumes_exact_wait_without_worker_lease(tmp_path):
     assert worker.broker.consume(tid, attempt_id=attempt["attempt_id"]) is None
 
 
+def test_authenticated_local_ui_otp_handoff_never_echoes_code(tmp_path):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid, spec = _task(tmp_path, queue)
+    store, owner, attempt = _attempt(queue, tid, spec)
+    store.record_send_intent(attempt["attempt_id"], tid, owner)
+    queue.checkpoint(tid, owner, "NEEDS_USER_ACTION", blocker="otp_waiting", release=True)
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    supervisor = Supervisor(queue, worker=worker, token="x" * 40)
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        payload = json.dumps({"task_id": tid, "attempt_id": attempt["attempt_id"],
+                              "message": "482913"}).encode()
+        request = urllib.request.Request(base + "/ui/api/otp", data=payload,
+                                         headers={"Content-Type": "application/json",
+                                                  "Origin": base})
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(request)
+        assert denied.value.code == 401
+        ticket_request = urllib.request.Request(
+            base + "/v1/ui-ticket", data=b"{}", method="POST",
+            headers={"Authorization": "Bearer " + "x" * 40,
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(ticket_request) as response:
+            ticket = json.load(response)["ticket"]
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        with opener.open(base + "/ui-login?ticket=" + ticket):
+            pass
+        with opener.open(base + "/ui/api/state") as response:
+            state = json.load(response)
+        view = next(t for t in state["tasks"] if t["task_id"] == tid)
+        assert view["auth_attempt_id"] == attempt["attempt_id"]
+        assert view["otp_source"] == "local_input_only"
+        with opener.open(request) as response:
+            body = response.read().decode()
+        assert '"accepted": true' in body
+        assert "482913" not in body
+        assert b"482913" not in queue.path.read_bytes()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_headless_local_task_card_delivers_otp_without_chat(tmp_path):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid, spec = _task(tmp_path, queue)
+    store, owner, attempt = _attempt(queue, tid, spec)
+    store.record_send_intent(attempt["attempt_id"], tid, owner)
+    queue.checkpoint(tid, owner, "NEEDS_USER_ACTION", blocker="otp_waiting", release=True)
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    supervisor = Supervisor(queue, worker=worker, token="x" * 40)
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        ticket_request = urllib.request.Request(
+            base + "/v1/ui-ticket", data=b"{}", method="POST",
+            headers={"Authorization": "Bearer " + "x" * 40,
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(ticket_request) as response:
+            ticket = json.load(response)["ticket"]
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(base + "/ui-login?ticket=" + ticket)
+            field = page.locator(f'[data-otp-task="{tid}"]')
+            field.wait_for()
+            assert page.locator("#chat").inner_text().find("482913") == -1
+            field.fill("482913")
+            page.locator(f'[data-otp-send][data-task="{tid}"]').click()
+            page.get_by_text("验证码已通过本地专用通道交给当前任务。").wait_for()
+            assert page.locator("#chat").inner_text().find("482913") == -1
+            assert queue.get(tid)["stage"] != "NEEDS_USER_ACTION"
+            browser.close()
+        assert b"482913" not in queue.path.read_bytes()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 @pytest.mark.parametrize("authorized_resend", [False, True])
 def test_isolated_worker_sms_send_once_then_returns_to_exact_task(tmp_path, authorized_resend):
     state = {"sms_requests": 0, "authenticated": False, "submits": 0}
@@ -259,5 +349,11 @@ def test_isolated_worker_sms_send_once_then_returns_to_exact_task(tmp_path, auth
                          "authenticated": True, "submits": 0}
         assert worker.broker.attempts.current(tid) is None
         assert b"482913" not in queue.path.read_bytes()
+        assert "482913" not in json.dumps(supervisor.diagnostics(), ensure_ascii=False)
+        assert "482913" not in json.dumps(supervisor.ui_state(), ensure_ascii=False)
+        assert "482913" not in json.dumps(queue.events(0), ensure_ascii=False)
+        for path in tmp_path.rglob("*"):
+            if path.is_file():
+                assert b"482913" not in path.read_bytes(), path.name
     finally:
         server.shutdown()

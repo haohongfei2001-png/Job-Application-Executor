@@ -96,6 +96,27 @@ class Supervisor:
 
     def ui_state(self):
         state = self.manager.state()
+        for task in state.get("tasks", []):
+            if task.get("stage") != "NEEDS_USER_ACTION" or task.get("blocker") != "otp_waiting":
+                continue
+            attempt = self.worker.broker.attempts.valid_wait(task["task_id"])
+            if not attempt:
+                task["otp_status"] = "attempt_expired_or_unverified"
+                continue
+            task["auth_attempt_id"] = attempt["attempt_id"]
+            task["otp_status"] = "waiting"
+            task["resend_eligible"] = attempt["send_outcome"] in {
+                "CLICK_OBSERVED", "SEND_UNKNOWN"}
+            task["resend_wait_seconds"] = max(
+                0, int((attempt.get("cooldown_until") or self.queue.clock()) - self.queue.clock()))
+            relay = self.worker.relay
+            local_ready = bool(relay and getattr(relay, "local_messages_enabled", False)
+                               and getattr(relay, "_rule_for", lambda _site: {})(
+                                   attempt["origin"]).get("sender_hint"))
+            task["otp_source"] = (
+                "configured_unverified" if relay and (
+                    getattr(relay, "relay_enabled", False) or local_ready)
+                else "local_input_only")
         return {
             "ok": True,
             "worker_active": self.worker.active,
@@ -452,6 +473,24 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                             raise ValueError("invalid fact scope")
                         result = supervisor.run_local_fact(
                             tid, key, data["value"], revision, remember=remember)
+                        self._send_json(200, result)
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/otp":
+                        data = self._read_json()
+                        if set(data) != {"task_id", "attempt_id", "message"}:
+                            raise ValueError("invalid local OTP envelope")
+                        result = supervisor.dispatch("POST", "/v1/otp", data)
+                        self._send_json(200 if result.get("accepted") else 409, result)
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/otp-resend":
+                        data = self._read_json()
+                        if set(data) != {"task_id", "command_id", "expected_revision"}:
+                            raise ValueError("invalid local resend envelope")
+                        tid = data.pop("task_id")
+                        if not isinstance(tid, str):
+                            raise ValueError("invalid local resend target")
+                        result = supervisor.dispatch(
+                            "POST", f"/v1/tasks/{tid}/authorize-otp-resend", data)
                         self._send_json(200, result)
                         return
                     self._send_json(404, {"error": "not_found"})
