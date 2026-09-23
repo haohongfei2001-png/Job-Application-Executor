@@ -281,6 +281,7 @@ def test_oppo_public_listing_requires_all_pages_and_matching_detail(monkeypatch)
             self.page_numbers = []
             self.bad_page = False
             self.bad_detail = False
+            self.bad_employment = False
         def post(self, url, *, data, headers, timeout):
             assert url.endswith("/openapi/position/pageNew")
             number = data["pageNum"]
@@ -292,6 +293,7 @@ def test_oppo_public_listing_requires_all_pages_and_matching_detail(monkeypatch)
             assert url.endswith("/openapi/position/detail?id=11")
             return Response({"code": 0, "data": {
                 **record(11), "idRecruitPosition": 99 if self.bad_detail else 11,
+                "recruitmentTypeName": "社会招聘" if self.bad_employment else "应届生",
                 "workCityVOList": [{"workCityName": "北京市"}], "positionStatus": 0}})
 
     class Page:
@@ -326,10 +328,54 @@ def test_oppo_public_listing_requires_all_pages_and_matching_detail(monkeypatch)
     request.bad_detail = True
     assert target_resolver.resolve_oppo("AI产品经理", return_coverage=True)[1] is False
     request.bad_detail = False
+    request.bad_employment = True
+    assert target_resolver.resolve_oppo("AI产品经理", return_coverage=True)[1] is False
+    request.bad_employment = False
     page.redirect = True
     before = len(request.page_numbers)
     assert target_resolver.resolve_oppo("AI产品经理", return_coverage=True)[1] is False
     assert len(request.page_numbers) == before
+
+
+def test_schneider_visible_zero_count_does_not_claim_listing_coverage(monkeypatch):
+    class Page:
+        url = "https://careers.se.com/jobs?keywords=synthetic"
+
+        def goto(self, url, **kwargs):
+            self.url = url
+
+        def locator(self, selector):
+            if selector == "body":
+                return self
+            assert selector == 'a[href^="/jobs/"]'
+            return self
+
+        def inner_text(self):
+            return "0 Results"
+
+        def count(self):
+            return 0
+
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+        def close(self):
+            pass
+
+    class Browser:
+        def close(self):
+            pass
+
+    class Playwright:
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(target_resolver, "_public_connect",
+                        lambda: (Playwright(), Browser(), None, Page()))
+    candidates, complete = target_resolver.resolve_schneider(
+        "synthetic", return_coverage=True)
+    assert candidates == []
+    assert complete is False
 
 
 def test_plain_hash_job_route_is_preserved_but_secret_fragment_is_rejected(tmp_path):

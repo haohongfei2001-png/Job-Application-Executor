@@ -159,7 +159,9 @@ def resolve_schneider(title: str, location: str = "China", max_pages: int = 8,
                 candidate.location.casefold(),
             )
         )
-        complete = total is not None and total <= max_pages * 10 and len(out) >= total
+        # DFG-003: the visible count/card shape is not yet a proven complete
+        # listing contract, and no Schneider detail contract is verified.
+        complete = False
         return (out, complete) if return_coverage else out
     finally:
         try:
@@ -348,6 +350,7 @@ def resolve_oppo(title: str, location: str = "", max_pages: int = 40,
                         or str(detail.get("idRecruitPosition") or "") != item.job_id
                         or _norm_title(str(detail.get("positionName") or "")) != _norm_title(item.title)
                         or str(detail.get("projectName") or "") != item.campaign
+                        or str(detail.get("recruitmentTypeName") or "") != item.employment_type
                         or (item.location and item.location not in detail_cities)
                         or detail.get("positionStatus") != 0
                     ):
