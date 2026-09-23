@@ -132,7 +132,15 @@ async function copyDiagnostics(){
     const data=await r.json();
     if(!r.ok)throw new Error();
     const text=JSON.stringify(data,null,2);
-    await navigator.clipboard.writeText(text);
+    try{
+      await navigator.clipboard.writeText(text);
+    }catch(copyError){
+      const helper=document.createElement('textarea');
+      helper.value=text;helper.setAttribute('readonly','');helper.style.position='fixed';helper.style.opacity='0';
+      document.body.appendChild(helper);helper.select();
+      if(!document.execCommand('copy'))throw copyError;
+      helper.remove();
+    }
     notify('诊断信息已复制。可以直接粘贴给 ChatGPT。');
   }catch(e){
     notify('复制诊断失败；现有任务未被修改。');
