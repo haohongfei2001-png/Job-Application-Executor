@@ -88,7 +88,7 @@ def test_generic_adapter_rejects_ambiguous_one_time_code_fields(tmp_path):
     [
         ('<label>Password <input type="password"></label>', "password"),
         ('<div class="captcha">Verify you are human</div>', "captcha"),
-        ('<p>请扫码登录</p>', "other"),
+        ('<div role="dialog"><h2>登录</h2><p>请扫码登录</p></div>', "other"),
     ],
 )
 def test_generic_adapter_distinguishes_non_otp_auth_challenges(tmp_path, body, expected):
