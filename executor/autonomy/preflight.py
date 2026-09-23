@@ -43,7 +43,7 @@ def collect_live_preflight(
     if chrome_exists is None:
         chrome_exists = Path(browser.CHROME).is_file()
     if cdp_alive is None:
-        cdp_alive = browser._alive()
+        cdp_alive = browser.owned_cdp_session()
 
     if deepseek_available is None:
         try:

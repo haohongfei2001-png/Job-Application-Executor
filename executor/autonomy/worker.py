@@ -171,7 +171,7 @@ class Worker:
                 if not spec["live_authorized"]:
                     checkpoint("BLOCKED", blocker="live_not_authorized", release=True)
                     return True
-                if not browser._alive():
+                if not browser.owned_cdp_session():
                     checkpoint("BLOCKED", blocker="session_unavailable", release=True)
                     return True
             audit = OperationalAudit(self.queue.root, tid, checkpoint, guard)

@@ -1,5 +1,9 @@
 from executor import browser as browser_module
 from executor.browser import cleanup_live_pages
+import os
+from types import SimpleNamespace
+
+import pytest
 
 
 class FakePage:
@@ -58,3 +62,28 @@ def test_isolated_connect_never_starts_live_profile(tmp_path, monkeypatch):
     finally:
         browser.close()
         pw.stop()
+
+
+def test_cdp_listener_requires_own_process_and_dedicated_private_profile(tmp_path, monkeypatch):
+    profile = tmp_path / "dedicated-profile"
+    profile.mkdir(mode=0o700)
+    monkeypatch.setattr(browser_module, "PROFILE", profile)
+    monkeypatch.setattr(browser_module, "CHROME", "/synthetic/Chrome")
+    monkeypatch.setattr(browser_module, "_alive", lambda: True)
+    command = (f"{os.getuid()} /synthetic/Chrome --user-data-dir={profile} "
+               "--remote-debugging-port=9333 --remote-debugging-address=127.0.0.1")
+
+    def fake_run(args, **_):
+        if args[0] == "lsof":
+            return SimpleNamespace(stdout="12345\n")
+        return SimpleNamespace(stdout=command)
+
+    monkeypatch.setattr(browser_module.subprocess, "run", fake_run)
+    assert browser_module.owned_cdp_session()
+    command = command.replace(str(profile), str(tmp_path / "other-profile"))
+    assert not browser_module.owned_cdp_session()
+    with pytest.raises(RuntimeError, match="does not belong"):
+        browser_module.ensure_chrome()
+    command = command.replace(str(tmp_path / "other-profile"), str(profile))
+    profile.chmod(0o755)
+    assert not browser_module.owned_cdp_session()
