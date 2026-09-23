@@ -154,6 +154,7 @@ class Worker:
         tid, owner, spec = task["task_id"], task["owner"], task["spec"]
         done, lost = threading.Event(), threading.Event()
         self.active = tid
+        session_epoch = None
 
         def guard():
             if self.stop_event.is_set() or lost.is_set():
@@ -161,6 +162,8 @@ class Worker:
             current = self.queue.get(tid)
             if current["owner"] != owner or current["lease_until"] <= self.queue.clock():
                 raise LeaseLost("lease lost")
+            if session_epoch is not None and browser.owned_cdp_fingerprint() != session_epoch:
+                raise browser.BrowserOwnershipError("owned browser process changed")
 
         def keep_lease():
             while not done.wait(10):
@@ -192,7 +195,8 @@ class Worker:
                 if not spec["live_authorized"]:
                     checkpoint("BLOCKED", blocker="live_not_authorized", release=True)
                     return True
-                if not browser.owned_cdp_session():
+                session_epoch = browser.owned_cdp_fingerprint()
+                if session_epoch is None:
                     checkpoint("BLOCKED", blocker="session_unavailable", release=True)
                     return True
             audit = OperationalAudit(self.queue.root, tid, checkpoint, guard)
@@ -217,6 +221,11 @@ class Worker:
                 with self.answers_lock:
                     self.answers.pop(tid, None)
                 self.broker.discard(tid)
+        except browser.BrowserOwnershipError:
+            try:
+                checkpoint("BLOCKED", blocker="browser_ownership_unknown", release=True)
+            except RuntimeError:
+                pass
         except LeaseLost:
             pass  # Cancellation/stop fences the next operation; stale lease is recoverable.
         except Exception:

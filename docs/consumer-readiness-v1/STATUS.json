@@ -44,7 +44,7 @@
     },
     {
       "id": "JCR-02",
-      "status": "READY",
+      "status": "IMPLEMENTING",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "Finish exact-head CI and review on JCR-01 PR #11, merge, verify main integration and attach the F-01 through F-09 automatic receipt. DFG-001 remains mitigated but durable applicant-fact recovery stays pending for JCR-04. Then start JCR-02 owned browser/bootstrap/recovery on one new writer branch; continue unattended through later JCR rounds.",
+  "next_action": "Continue JCR-02 on feat/jcr02-owned-browser-recovery after JCR-01 PR #11 merge and exact-main CI success. Complete owned task/tab/process/session lineage, safe bootstrap and recovery, UNKNOWN_OUTCOME reconciliation, G-01 through G-13 automatic evidence, review/CI/merge/readback. DFG-001 durable facts remain JCR-04 work; DFG-002 browser ownership uncertainty blocks only blind replay, not independent engineering.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

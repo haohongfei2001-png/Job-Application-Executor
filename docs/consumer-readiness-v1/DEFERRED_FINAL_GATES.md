@@ -46,11 +46,24 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 - **Blocking scope:** Treating free-form chat as a supported applicant-fact entry or certifying durable fact recovery. It remains disabled as a fact entry; the local task-card input is the only supported path for pending values until JCR-04 persistence.
 - **Non-blocked work:** Command/state controls, browser ownership, SyntheticATS, migration compatibility, discovery, fact-store and UI development.
 - **Safe degradation:** Model requests now receive only fixed local intent flags and bounded task state. The mapper receives fixed field meaning hints, never raw DOM labels/options. Structured local task creation preserves an entry path without exporting target values. New tasks remain `live_authorized=false` until JCR-03 target verification. Local task-card fact answers remain memory-only until JCR-04. No privacy PASS is claimed by this ledger update.
-- **Existing evidence:** `tests/test_manager_v1.py`, `tests/test_jcr01_privacy.py` with novel name/family/URL/DOM and provider-retry canaries, local fact-input browser/API tests, and SyntheticATS runs on PR #11. The updated full isolated suite passed locally with 269 tests; exact-head CI for the latest work remains pending.
-- **Missing final evidence:** Durable private fact storage and restart recovery in JCR-04; full F-01 through F-09 per-case evidence and exact-head CI for JCR-01.
+- **Existing evidence:** `tests/test_manager_v1.py`, `tests/test_jcr01_privacy.py` with novel name/family/URL/DOM and provider-retry canaries, local fact-input browser/API tests, and SyntheticATS runs on PR #11. Final PR-head and merged-main `foundation`/full `test` CI passed at `f44fc2a` and `f09f419` respectively; see `receipts/JCR-01-MAIN-INTEGRATION.md`.
+- **Missing final evidence:** Durable private fact storage and restart recovery in JCR-04; per-case F-01 through F-09 certification remains pending and is not inferred from the integration run.
 - **Final convergence condition:** Close this engineering debt only after durable fact storage and the related JCR-04 recovery tests. No owner input is needed to implement the fix.
 - **Related acceptance IDs:** F-01, F-02, F-03; E-class fact-store cases in JCR-04.
-- **Evidence / PR / commit:** PR #11; no PASS or merge SHA yet.
+- **Evidence / PR / commit:** PR #11; merge `f09f419af4eb6d9cda7b4a5efd0641b8eaf790c7`; no acceptance PASS claimed.
+
+### DFG-002 — Browser page ownership after uncertain action
+
+- **Source round:** JCR-02
+- **Type / status:** `ENGINEERING_DEBT` / `MITIGATED_FOR_ENGINEERING`
+- **Blocking scope:** Automatic replay or manual resume of a task whose browser page/popup lineage is ambiguous or whose selected page left the task origin. That task remains blocked until a read-only reconciliation path proves the same target and draft.
+- **Non-blocked work:** Owned-page selection, isolated popup tests, service/bootstrap recovery, action-attempt journal, other tasks and later independent rounds.
+- **Safe degradation:** The production generic adapter no longer takes the global latest tab. Ambiguous, closed or cross-origin successors raise a typed ownership error; worker records `browser_ownership_unknown`, disables automatic retry, and refuses resume even after pause. Live worker mutations are also fenced when the owned CDP process fingerprint changes.
+- **Existing evidence:** `tests/test_browser_runtime_v1.py` covers unrelated tab, unique owned popup, multiple popups, closed page, cross-origin page, process-epoch change and no blind worker replay. One case uses actual isolated headless Chromium and a loopback HTTP fixture.
+- **Missing final evidence:** Durable page/session epoch binding, read-only draft reconciliation after crash, process restart and human handoff race tests; G-01 through G-13 per-case evidence.
+- **Final convergence condition:** Resolve through JCR-02 production recovery and exact-head synthetic/fault CI; no owner input is needed.
+- **Related acceptance IDs:** G-01, G-02, G-04, G-06, G-10, G-11, G-12.
+- **Evidence / PR / commit:** JCR-02 writer branch `feat/jcr02-owned-browser-recovery`; PR and merge SHA pending.
 
 ## Invariants
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import re
 import subprocess
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
@@ -15,6 +17,10 @@ CDP = "http://127.0.0.1:9333"
 PROFILE = Path.home() / "Job-Application-Executor/chrome-profile"
 BROWSER_MODE_ENV = "APPLICATION_EXECUTOR_BROWSER_MODE"
 BLANK_URLS = {"about:blank", "chrome://newtab/", "chrome://new-tab-page/"}
+
+
+class BrowserOwnershipError(RuntimeError):
+    """The task's page or successor cannot be proven; never replay writes."""
 
 
 def browser_mode() -> str:
@@ -59,6 +65,31 @@ def owned_cdp_session() -> bool:
         return bool(required)
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
+
+
+def owned_cdp_fingerprint() -> str | None:
+    """Bind one worker lease to the specific owned browser process epoch."""
+    if not owned_cdp_session():
+        return None
+    try:
+        listeners = subprocess.run(
+            ["lsof", "-nP", "-t", "-iTCP:9333", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=3, check=True,
+        ).stdout.splitlines()
+        pids = {line.strip() for line in listeners if line.strip().isdigit()}
+        if len(pids) != 1:
+            return None
+        pid = pids.pop()
+        started = subprocess.run(
+            ["ps", "-ww", "-p", pid, "-o", "lstart="],
+            capture_output=True, text=True, timeout=3, check=True,
+        ).stdout.strip()
+        if not started:
+            return None
+        material = f"{pid}:{started}:{PROFILE.stat().st_ino}"
+        return hashlib.sha256(material.encode()).hexdigest()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 def ensure_chrome(start_url: str = "about:blank") -> None:
@@ -201,3 +232,36 @@ def connect(target_url: str | None = None, *, existing_only: bool = False):
 def latest_page(ctx, fallback):
     pages = [page for page in ctx.pages if not page.is_closed()]
     return pages[-1] if pages else fallback
+
+
+def owned_page_after_action(ctx, current, target_url: str):
+    """Follow only one popup opened by the task page, never the global last tab.
+
+    The JCR-03 target contract will add verified cross-origin navigation. Until
+    then, a different host is an observation error and cannot receive writes.
+    """
+    expected = urlsplit(target_url)
+    children = []
+    for page in ctx.pages:
+        if page is current or page.is_closed():
+            continue
+        try:
+            if page.opener() is current:
+                children.append(page)
+        except Exception:
+            continue
+    if len(children) > 1:
+        raise BrowserOwnershipError("multiple task popups; page ownership ambiguous")
+    if children:
+        selected = children[0]
+    elif current.is_closed():
+        raise BrowserOwnershipError("task page closed without an owned successor")
+    else:
+        selected = current
+    observed = urlsplit(selected.url)
+    if expected.scheme == "file":
+        if observed.scheme != "file":
+            raise BrowserOwnershipError("task page left its local fixture origin")
+    elif observed.scheme != expected.scheme or observed.netloc != expected.netloc:
+        raise BrowserOwnershipError("task page left its verified origin")
+    return selected

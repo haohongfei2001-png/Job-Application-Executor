@@ -6,7 +6,7 @@ from typing import Iterable
 from urllib.parse import urlparse
 
 from .base import SiteAdapter
-from ..browser import connect, latest_page
+from ..browser import connect, owned_page_after_action
 from ..field_classifier import is_final_submit, is_initial_apply, is_next
 from ..models import (
     ApplicationPlan,
@@ -592,7 +592,7 @@ class GenericWebAdapter(SiteAdapter):
             send.click()
             self._otp_request_prepared = True
             self.page.wait_for_timeout(800)
-            self.page = latest_page(self.ctx, self.page)
+            self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
             return "requested"
         except Exception:
             return "ambiguous"
@@ -784,7 +784,7 @@ class GenericWebAdapter(SiteAdapter):
         try:
             candidates[0].fill(code)
             self.page.wait_for_timeout(1500)
-            self.page = latest_page(self.ctx, self.page)
+            self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
             return True
         except Exception:
             return False
@@ -904,7 +904,7 @@ class GenericWebAdapter(SiteAdapter):
             getattr(self, "mutation_guard", lambda: None)()
             self.page.locator(BUTTON_SELECTOR).nth(index).click()
             self.page.wait_for_timeout(1800)
-            self.page = latest_page(self.ctx, self.page)
+            self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
             return True
         except Exception:
             return False
@@ -922,7 +922,7 @@ class GenericWebAdapter(SiteAdapter):
             return False
         matches[0][0].click()
         self.page.wait_for_timeout(1000)
-        self.page = latest_page(self.ctx, self.page)
+        self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
         return True
 
     def save_draft(self) -> bool:
@@ -935,7 +935,7 @@ class GenericWebAdapter(SiteAdapter):
             return False
         matches[0][0].click()
         self.page.wait_for_timeout(800)
-        self.page = latest_page(self.ctx, self.page)
+        self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
         return True
 
     def advance(self) -> bool:
@@ -944,7 +944,7 @@ class GenericWebAdapter(SiteAdapter):
             if is_next(text) and not is_final_submit(text):
                 element.click()
                 self.page.wait_for_timeout(1000)
-                self.page = latest_page(self.ctx, self.page)
+                self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
                 return True
         return False
 
