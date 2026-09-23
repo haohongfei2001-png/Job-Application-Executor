@@ -15,7 +15,9 @@
       "fail": "要求开发目录/.venv 手工修复；未配置也声称可执行",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-02",
@@ -28,7 +30,9 @@
       "fail": "反复新开 manager 页、丢上下文或重复新建任务",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-03",
@@ -41,7 +45,9 @@
       "fail": "要用户启动 daemon/CDP、把任务标丢失或直接信旧证书",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-04",
@@ -54,7 +60,9 @@
       "fail": "误用默认 profile、占用用户标签或只给端口错误",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-05",
@@ -67,7 +75,9 @@
       "fail": "设置/诊断随服务一同消失",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-06",
@@ -80,7 +90,9 @@
       "fail": "key 存在就显示模型正常；控制命令等模型超时",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-07",
@@ -93,7 +105,9 @@
       "fail": "只弹通用失败并要求 ChatGPT 或终端分析",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-08",
@@ -106,7 +120,9 @@
       "fail": "无限等待或把验证码输入普通模型聊天",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-09",
@@ -119,7 +135,9 @@
       "fail": "半升级不可启动或暗示任务未变化但无证据",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-10",
@@ -132,7 +150,9 @@
       "fail": "将全局故障误归用户事实缺失或永远转圈",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-11",
@@ -145,7 +165,9 @@
       "fail": "一小时后要求 CLI，或为恢复删除鉴权",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "A-12",
@@ -158,7 +180,9 @@
       "fail": "写半个 profile/队列/版本后报成功",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-01",
@@ -171,7 +195,9 @@
       "fail": "凭 URL 外形或页面标题模糊匹配直接写",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-02",
@@ -184,7 +210,9 @@
       "fail": "入口因缺 URL 拒绝，或模型编造 URL",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-03",
@@ -197,7 +225,9 @@
       "fail": "首页扫码宣传被误认为 auth，或填在站点搜索框",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-04",
@@ -210,7 +240,9 @@
       "fail": "见一个同名结果即称唯一",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-05",
@@ -223,7 +255,9 @@
       "fail": "擅自选第一个/职位 ID 最小者/不同城市",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-06",
@@ -236,7 +270,9 @@
       "fail": "忽略 location/campaign 或拿社招替校招",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-07",
@@ -249,7 +285,9 @@
       "fail": "换相近岗位或无限重新打开",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-08",
@@ -262,7 +300,9 @@
       "fail": "同域/同标题就默认为同雇主或所有跨域都受信",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-09",
@@ -275,7 +315,9 @@
       "fail": "停在个人中心、另一职位或新草稿并报成功",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-10",
@@ -288,7 +330,9 @@
       "fail": "剪掉 job 路由导致错位，或记录 access token",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-11",
@@ -301,7 +345,9 @@
       "fail": "要求所有情况手工找 URL，或宣称通用后盲点",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-12",
@@ -314,7 +360,9 @@
       "fail": "换链接/显示名称能绕过 protected target",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "B-13",
@@ -327,7 +375,9 @@
       "fail": "只看 job ID 或 host 导致跨公司串任务",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-01",
@@ -340,7 +390,9 @@
       "fail": "有可用 session 仍发码或使用错误账号",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-02",
@@ -353,7 +405,9 @@
       "fail": "填入页面外手机号或无授权发送",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-03",
@@ -366,7 +420,9 @@
       "fail": "唯一 code 但匹配到错误请求/任务",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-04",
@@ -379,7 +435,9 @@
       "fail": "2 秒结束后无人处理或旧码被新会话使用",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-05",
@@ -392,7 +450,9 @@
       "fail": "消费二次/选择最新看似正确码",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-06",
@@ -405,7 +465,9 @@
       "fail": "自动重发、重复短信请求或绕过限频",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-07",
@@ -418,7 +480,9 @@
       "fail": "把未知当未发送，重新点击初始发送",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-08",
@@ -431,7 +495,9 @@
       "fail": "扫码宣传触发错误 blocker 或对 inactive password 填写",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-09",
@@ -444,7 +510,9 @@
       "fail": "把挑战验证码当普通 OTP 或等待文案不指出操作",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-10",
@@ -457,7 +525,9 @@
       "fail": "模拟/绕过或切到无关页面",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-11",
@@ -470,7 +540,9 @@
       "fail": "密码进入 chat、日志、模型或队列",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-12",
@@ -483,7 +555,9 @@
       "fail": "重新提问已有事实、丢原岗位或继续旧证书",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-13",
@@ -496,7 +570,9 @@
       "fail": "Mac Messages 必须依赖坏 relay 或源不可达仍绿",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-14",
@@ -509,7 +585,9 @@
       "fail": "为了方便把 code 发送 DeepSeek",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "C-15",
@@ -522,7 +600,9 @@
       "fail": "凭多个数字 input 猜位置",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-01",
@@ -535,7 +615,9 @@
       "fail": "select 错值只 warning，或 false/0 被当空",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-02",
@@ -548,7 +630,9 @@
       "fail": "只验证 fill 调用完成",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-03",
@@ -561,7 +645,9 @@
       "fail": "旧快照不含新字段便忽略",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-04",
@@ -574,7 +660,9 @@
       "fail": "子级重置却继续用旧 plan",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-05",
@@ -587,7 +675,9 @@
       "fail": "两行同 name 都写入首行",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-06",
@@ -600,7 +690,9 @@
       "fail": "补不存在实习，或漏掉研究",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-07",
@@ -613,7 +705,9 @@
       "fail": "标题包含算同项目或 silently omit",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-08",
@@ -626,7 +720,9 @@
       "fail": "重放 add 生成重复记录或删别人的行",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-09",
@@ -639,7 +735,9 @@
       "fail": "basename/input.value 即当附件成功",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-10",
@@ -652,7 +750,9 @@
       "fail": "所有 file input 都上传 resume",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-11",
@@ -665,7 +765,9 @@
       "fail": "substring first 或滚动错位后无验证",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-12",
@@ -678,7 +780,9 @@
       "fail": "编一号/当月或把结束至今变虚假日期",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-13",
@@ -691,7 +795,9 @@
       "fail": "20万变20元或新岗位默用旧薪资承诺",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-14",
@@ -704,7 +810,9 @@
       "fail": "宽泛正则或已有默认勾选替本人决定",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-15",
@@ -717,7 +825,9 @@
       "fail": "模型为了连贯编造经历或结果",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-16",
@@ -730,7 +840,9 @@
       "fail": "映射失败冒充事实缺失，反复问学校手机号",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-17",
@@ -743,7 +855,9 @@
       "fail": "只检查当前 visible native controls",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-18",
@@ -756,7 +870,9 @@
       "fail": "evaluate exception 当空表单，在 final button 前 READY",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-19",
@@ -769,7 +885,9 @@
       "fail": "只查 required，不查网站明确错误",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-20",
@@ -782,7 +900,9 @@
       "fail": "固定 sleep 后声称已保存",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-21",
@@ -795,7 +915,9 @@
       "fail": "只核对当前页，前页误丢仍 READY",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "D-22",
@@ -808,7 +930,9 @@
       "fail": "无穷重试或随机用 JS 写值绕过语义",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "E-01",
@@ -821,7 +945,9 @@
       "fail": "重启/新任务后再问系统已保存的事实",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "E-02",
@@ -834,7 +960,9 @@
       "fail": "重启丢掉或静默变全局事实",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "E-03",
@@ -847,7 +975,9 @@
       "fail": "未经同意永久记住或旧文档覆盖新确认",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "E-04",
@@ -860,7 +990,9 @@
       "fail": "随机取高confidence或网站默认覆盖真值",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "E-05",
@@ -873,7 +1005,9 @@
       "fail": "网站选项限制反向污染 canonical truth",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "E-06",
@@ -886,7 +1020,9 @@
       "fail": "含特定分隔符才认识项目却报告完整",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "E-07",
@@ -899,7 +1035,9 @@
       "fail": "产品岗默认遗漏研究、本科项目排除影响其他申请",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "E-08",
@@ -912,7 +1050,9 @@
       "fail": "半个 JSON、文件截断或确认事件丢失",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "E-09",
@@ -925,7 +1065,9 @@
       "fail": "事实改了但 READY 仍指向旧值",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "F-01",
@@ -1055,7 +1197,9 @@
       "fail": "只验证 CDP 再在线，未证明原任务",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-02",
@@ -1068,7 +1212,9 @@
       "fail": "只在READY后重启验证数据库行还在",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-03",
@@ -1081,7 +1227,9 @@
       "fail": "休眠期间显示持续工作或直接重放",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-04",
@@ -1094,7 +1242,9 @@
       "fail": "要求手工daemon启动、重新输入已知事实",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-05",
@@ -1107,7 +1257,9 @@
       "fail": "错误提示一概“没有改变”或重复save/add",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-06",
@@ -1120,7 +1272,9 @@
       "fail": "global latest-page 接手其他窗口",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-07",
@@ -1133,7 +1287,9 @@
       "fail": "无限循环或将超时当作空表单通过",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-08",
@@ -1146,7 +1302,9 @@
       "fail": "持有写锁直到模型返回再处理暂停",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-09",
@@ -1159,7 +1317,9 @@
       "fail": "建议用户清空任务/无限重试/重新提交",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-10",
@@ -1172,7 +1332,9 @@
       "fail": "队列checkpoint存在即声称完整恢复",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-11",
@@ -1185,7 +1347,9 @@
       "fail": "A事实或OTP落入B任务",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-12",
@@ -1198,7 +1362,9 @@
       "fail": "用户滑块或改字段时worker同时写",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "G-13",
@@ -1211,7 +1377,9 @@
       "fail": "UI回滚状态、重复新建申请或变绿",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "H-01",
@@ -1224,7 +1392,9 @@
       "fail": "READY先设置，review只是提醒用户查",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "H-02",
@@ -1237,7 +1407,9 @@
       "fail": "仅exact_target_review_required=true",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "H-03",
@@ -1250,7 +1422,9 @@
       "fail": "无error字段就PASS或默认是站点给的便信",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "H-04",
@@ -1263,7 +1437,9 @@
       "fail": "标题包含匹配或只读plan",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "H-05",
@@ -1276,7 +1452,9 @@
       "fail": "只显示文件名和一张checklist",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "H-06",
@@ -1289,7 +1467,9 @@
       "fail": "一到READY永久就绪不能检查",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "H-07",
@@ -1302,7 +1482,9 @@
       "fail": "用脚本代用户点或把“查看并提交”按钮代理提交",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "H-08",
@@ -1315,7 +1497,9 @@
       "fail": "未提交报告已投，或resume补填造成修改/重复投递",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-01",
@@ -1328,7 +1512,9 @@
       "fail": "直接把main pull到运行目录且不验依赖",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-02",
@@ -1341,7 +1527,9 @@
       "fail": "需DC或Terminal才能再次打开",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-03",
@@ -1354,7 +1542,9 @@
       "fail": "回滚旧快照静默删除更新后的确认事实",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-04",
@@ -1367,7 +1557,9 @@
       "fail": "重启丢一次答案、码/请求串新attempt",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-05",
@@ -1380,7 +1572,9 @@
       "fail": "永远checking或多个updater竞争",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-06",
@@ -1393,7 +1587,9 @@
       "fail": "只报告supervisor=true或checkout SHA",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-07",
@@ -1406,7 +1602,9 @@
       "fail": "永久绿色就绪，任务卡无下一步",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-08",
@@ -1419,7 +1617,9 @@
       "fail": "只读卡片+通用聊天框，让人猜“这个”",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-09",
@@ -1432,7 +1632,9 @@
       "fail": "每步弹窗或密码输入中突然换页",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "U-10",
@@ -1445,7 +1647,9 @@
       "fail": "git HEAD改变就宣称更新成功",
       "mandatory": true,
       "status": "NOT_RUN",
-      "evidence": []
+      "evidence": [],
+      "final_live_round": "JCR-09",
+      "final_live_blocks_round_advance": false
     },
     {
       "id": "Z-01",
@@ -1538,5 +1742,12 @@
       "status": "NOT_RUN",
       "evidence": []
     }
-  ]
+  ],
+  "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
+  "final_live_policy": {
+    "collection_round": "JCR-09",
+    "blocks_engineering_advance": false,
+    "status_until_collected": "UNVERIFIED_OR_NOT_RUN",
+    "note": "The case.round field remains the engineering implementation owner. Any FINAL_LIVE component is collected only during JCR-09 final convergence and must not block independent earlier engineering."
+  }
 }
