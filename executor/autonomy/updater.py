@@ -76,7 +76,7 @@ def write_update_state(
         "status": status,
         "old_version": old_version[:12] if re.fullmatch(r"[0-9a-fA-F]{40}", old_version or "") else "",
         "new_version": new_version[:12] if re.fullmatch(r"[0-9a-fA-F]{40}", new_version or "") else "",
-        "reason": safe_reason if status == "failed" else "",
+        "reason": safe_reason if status in {"failed", "restart_required"} else "",
     }
     path = _state_path(root)
     temp_path = None
@@ -517,6 +517,35 @@ def perform_update(
                 old_version=old,
                 new_version=remote,
                 reason="fast_forward_required",
+            )
+            return 1
+
+        final_repo = repository_update_preconditions(repo)
+        if not final_repo.get("ok"):
+            write_update_state(
+                runtime_path,
+                "failed",
+                old_version=old,
+                new_version=remote,
+                reason=final_repo["reason"],
+            )
+            return 1
+        if final_repo.get("head") != old:
+            write_update_state(
+                runtime_path,
+                "failed",
+                old_version=old,
+                new_version=remote,
+                reason="repository_changed_during_update",
+            )
+            return 1
+        if _git(repo, "rev-parse", "origin/main") != remote:
+            write_update_state(
+                runtime_path,
+                "failed",
+                old_version=old,
+                new_version=remote,
+                reason="remote_changed_during_update",
             )
             return 1
 
