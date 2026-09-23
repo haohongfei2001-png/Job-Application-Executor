@@ -54,6 +54,7 @@ class Supervisor:
         self.manager = manager or ManagerController(queue, self.worker)
         self._ui_lock = threading.RLock()
         self._mutation_lock = threading.RLock()
+        self._command_lock = threading.RLock()
         self._ui_tickets: dict[str, float] = {}
         self._ui_sessions: dict[str, float] = {}
 
@@ -133,31 +134,43 @@ class Supervisor:
 
     def begin_update(self, port: int):
         with self._mutation_lock:
-            if self.update_in_progress():
-                return {
-                    "ok": False,
-                    "status": "denied",
-                    "reason": "update_in_progress",
-                }
-            safe, reason = safe_to_update(self)
-            if not safe:
-                return {
-                    "ok": False,
-                    "status": "denied",
-                    "reason": reason,
-                }
-            return spawn_update(
-                repo_root=Path(__file__).resolve().parents[2],
-                runtime=self.queue.root,
-                port=port,
-            )
+            with self._command_lock:
+                if self.update_in_progress():
+                    return {
+                        "ok": False,
+                        "status": "denied",
+                        "reason": "update_in_progress",
+                    }
+                safe, reason = safe_to_update(self)
+                if not safe:
+                    return {
+                        "ok": False,
+                        "status": "denied",
+                        "reason": reason,
+                    }
+                return spawn_update(
+                    repo_root=Path(__file__).resolve().parents[2],
+                    runtime=self.queue.root,
+                    port=port,
+                )
+
+    def run_local_command(self, command: CommandEnvelope):
+        # Serialize admission with the updater's final safety check and spawn.
+        # Model calls hold neither this lock nor a task lease.
+        with self._command_lock:
+            if self.mutation_fenced():
+                raise RuntimeError("update in progress")
+            receipt = self.queue.control(**command.model_dump())
+            if command.action == "CANCEL":
+                self.worker.broker.discard(command.task_id)
+                with self.worker.answers_lock:
+                    self.worker.answers.pop(command.task_id, None)
+            return receipt
 
     def dispatch(self, method, path, data):
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
         if method == "POST" and parts == ["v1", "commands"]:
-            if self.mutation_fenced():
-                raise RuntimeError("update in progress")
             return self._dispatch_unlocked(method, path, data)
         if method == "POST" and parts != ["v1", "ui-ticket"]:
             return self.run_mutation(
@@ -176,15 +189,7 @@ class Supervisor:
             return self.queue.command_receipt(parts[2])
         if method == "POST" and parts == ["v1", "commands"]:
             command = CommandEnvelope.model_validate(data)
-            if command.action == "CANCEL":
-                # Clear transient OTP and unsaved answers only after the
-                # transactional control succeeds.
-                receipt = self.queue.control(**command.model_dump())
-                self.worker.broker.discard(command.task_id)
-                with self.worker.answers_lock:
-                    self.worker.answers.pop(command.task_id, None)
-                return receipt
-            return self.queue.control(**command.model_dump())
+            return self.run_local_command(command)
         if method == "GET" and parts == ["v1", "events"]:
             return {"events": self.queue.events(int(parse_qs(parsed.query).get("after", [0])[0]))}
         if method == "GET" and parts == ["v1", "diagnostics"]:
@@ -356,13 +361,7 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/command":
                         command = CommandEnvelope.model_validate(self._read_json())
-                        if supervisor.mutation_fenced():
-                            raise RuntimeError("update in progress")
-                        receipt = supervisor.queue.control(**command.model_dump())
-                        if command.action == "CANCEL":
-                            supervisor.worker.broker.discard(command.task_id)
-                            with supervisor.worker.answers_lock:
-                                supervisor.worker.answers.pop(command.task_id, None)
+                        receipt = supervisor.run_local_command(command)
                         self._send_json(200, receipt)
                         return
                     self._send_json(404, {"error": "not_found"})

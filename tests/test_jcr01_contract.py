@@ -18,6 +18,7 @@ from executor.autonomy.supervisor import Supervisor, create_server
 from executor.autonomy.worker import Worker
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.models import ApplicationPlan, FieldResolution, ResolutionStatus
+from executor.models import WebField
 from executor.review import _covered
 from executor.target_resolver import _location_matches
 
@@ -133,6 +134,73 @@ def test_city_select_rerender_cannot_claim_validated(tmp_path):
         result = adapter.validate(plan)
         assert not result.ok
         assert any("selected option" in error for error in result.errors)
+
+
+def test_missing_field_check_only_covers_current_page(monkeypatch):
+    adapter = GenericWebAdapter("https://jobs.example.test/apply")
+    monkeypatch.setattr(adapter, "discover_fields", lambda: [
+        WebField(field_id="city", selector="#city", label="City",
+                 current_value="Beijing"),
+    ])
+    old = FieldResolution(field_id="name", selector="#name", label="Name",
+                          status=ResolutionStatus.RESOLVED, value="Synthetic")
+    current = FieldResolution(field_id="city", selector="#city", label="City",
+                              status=ResolutionStatus.RESOLVED, value="Beijing")
+    plan = ApplicationPlan(execution_id="multipage", target_url="https://jobs.example.test/apply",
+                           site_id="generic_web", fields=[old, current],
+                           metadata={"current_page_selectors": ["#city"]})
+    assert adapter.validate(plan).ok
+    plan.metadata["current_page_selectors"] = ["#city", "#missing"]
+    plan.fields.append(FieldResolution(field_id="missing", selector="#missing",
+        label="Missing", status=ResolutionStatus.RESOLVED, value="expected"))
+    assert not adapter.validate(plan).ok
+
+
+def test_command_cannot_resume_between_update_safety_check_and_start(tmp_path, monkeypatch):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = task(queue, tmp_path)["task_id"]
+    queue.pause(tid)
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    supervisor = Supervisor(queue, worker=worker)
+    checking, proceed = threading.Event(), threading.Event()
+    fenced = [False]
+    monkeypatch.setattr(supervisor, "mutation_fenced", lambda: fenced[0])
+
+    def check(_):
+        checking.set()
+        assert proceed.wait(3)
+        return True, None
+
+    def start(**_):
+        fenced[0] = True
+        return {"ok": True, "status": "started"}
+
+    monkeypatch.setattr("executor.autonomy.supervisor.safe_to_update", check)
+    monkeypatch.setattr("executor.autonomy.supervisor.spawn_update", start)
+    monkeypatch.setattr(supervisor, "update_in_progress", lambda: False)
+    results = {}
+    update_thread = threading.Thread(target=lambda: results.update(supervisor.begin_update(9344)))
+    update_thread.start()
+    assert checking.wait(2)
+    paused = queue.get(tid)
+    command = CommandEnvelope(command_id="update-race-resume-01", task_id=tid,
+        action="RESUME", expected_revision=paused["revision"])
+    outcome = []
+
+    def resume():
+        try:
+            outcome.append(supervisor.run_local_command(command))
+        except RuntimeError:
+            outcome.append("FENCED")
+
+    command_thread = threading.Thread(target=resume)
+    command_thread.start()
+    proceed.set()
+    update_thread.join(3)
+    command_thread.join(3)
+    assert results["ok"]
+    assert outcome == ["FENCED"]
+    assert queue.get(tid)["run_state"] == "PAUSED"
 
 
 def test_ui_pause_does_not_wait_for_model_timeout(tmp_path):

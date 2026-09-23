@@ -109,6 +109,19 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip()).casefold()
 
 
+UNTRUSTED_INSTRUCTION = re.compile(
+    r"ignore\s+(?:all\s+)?(?:previous|prior)\s+instructions|"
+    r"system\s+prompt|developer\s+(?:message|instruction)|"
+    r"忽略(?:之前|以上|所有).{0,12}(?:指令|规则)|"
+    r"执行(?:shell|命令)|自动(?:点击|提交)(?:申请|投递)", re.I,
+)
+PRIVATE_LABEL = re.compile(
+    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|"
+    r"(?<!\d)1[3-9]\d{9}(?!\d)|"
+    r"(?<!\d)\d{15,18}[0-9Xx]?(?!\d)|CANARY_PRIVATE", re.I,
+)
+
+
 def _nonempty(value: Any) -> bool:
     return value not in (None, "", [])
 
@@ -231,6 +244,12 @@ class DeepSeekMapper:
     def map_field(self, field: WebField, keys: list[str]) -> tuple[str | None, float, str]:
         if not self.available or not keys:
             return None, 0.0, "DeepSeek unavailable"
+        # Site labels can contain rendered applicant data or attacker text.
+        # Options are never needed to select a canonical key and may include
+        # a phone, identity number or prefilled personal choice.
+        label = str(field.label or "")[:180]
+        if PRIVATE_LABEL.search(label) or UNTRUSTED_INSTRUCTION.search(label):
+            return None, 0.0, "field label contains private data"
         payload = {
             "model": self.model,
             "messages": [
@@ -245,10 +264,9 @@ class DeepSeekMapper:
                 {
                     "role": "user",
                     "content": json.dumps({
-                        "label": field.label,
+                        "label": label,
                         "input_type": field.input_type,
                         "required": field.required,
-                        "options": field.options[:40],
                         "allowed_keys": keys,
                     }, ensure_ascii=False),
                 },
@@ -318,6 +336,12 @@ class FieldResolver:
         self.ai = DeepSeekMapper(settings)
 
     def resolve(self, field: WebField) -> FieldResolution:
+        if UNTRUSTED_INSTRUCTION.search(field.label) or PRIVATE_LABEL.search(field.label):
+            return FieldResolution(
+                field_id=field.field_id, selector=field.selector, label=field.label,
+                status=ResolutionStatus.UNRESOLVED, reason="untrusted field instruction",
+                required=field.required,
+            )
         key, confidence, reason = _contextual_rule_key(field)
         if not key:
             key, confidence, reason = _rule_key(field.label)

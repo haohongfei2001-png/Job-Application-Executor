@@ -20,7 +20,8 @@ Status: IMPLEMENTING. This is a checkpoint, not round certification.
 - 1,000 seeded control steps, migration/backup readback, duplicate command replay and cross-process CAS tests: local AUTO tests passed.
 - Local UI → supervisor → worker → headless browser → SyntheticATS server draft: expected synthetic name/email matched actual server state; automated submission count was 0.
 - Wrong-city select after rerender, project-title prefix and location mismatch counterexamples: targeted AUTO tests passed.
-- Historical suite: 250 passed in isolated macOS run before the final stale-proposal and migration-lock edits; those final edits have targeted tests. Exact-head CI and post-merge main integration are pending.
+- Historical suite plus current JCR-01 tests: 255 passed in an isolated macOS run after the review fixes. Exact-head CI and post-merge main integration are pending.
+- PR review found a multi-page selector regression and an update/command admission race. Both received production fixes and targeted regressions before this 255-test run.
 
 ## Boundaries and remaining work
 

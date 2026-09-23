@@ -302,7 +302,10 @@ class GenericWebAdapter(SiteAdapter):
         errors: list[str] = []
         warnings: list[str] = []
         current_fields = self.discover_fields()
-        by_selector = {item.selector: item for item in plan.fields}
+        page_selectors = plan.metadata.get("current_page_selectors")
+        current_scope = set(page_selectors) if isinstance(page_selectors, list) else None
+        by_selector = {item.selector: item for item in plan.fields
+                       if current_scope is None or item.selector in current_scope}
         observed_selectors = {item.selector for item in current_fields}
         for selector, expected in by_selector.items():
             if expected.status == ResolutionStatus.RESOLVED and selector not in observed_selectors:

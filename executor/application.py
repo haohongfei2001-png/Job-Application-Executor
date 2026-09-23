@@ -403,6 +403,7 @@ class ApplicationExecutor:
                     self.audit.record_action({"type": "start_application", "page_index": page_index})
                     continue
                 resolutions = self._resolve_page(fields)
+                self.plan.metadata["current_page_selectors"] = [item.selector for item in resolutions]
                 self.plan.fields.extend(resolutions)
                 self.plan.unresolved_fields.extend([
                     item for item in resolutions
