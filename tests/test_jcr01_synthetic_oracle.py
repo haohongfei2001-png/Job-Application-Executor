@@ -6,6 +6,7 @@ import json
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from executor.autonomy.manager import ManagerAction, ManagerController, ManagerDecision, ManagerTurn
 from executor.autonomy.queue import TaskQueue
@@ -81,6 +82,9 @@ class Proposal:
 
 
 def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path):
+    manifest = json.loads((Path(__file__).parent / "fixtures/syntheticats-v1.manifest.json").read_text())
+    assert manifest["origin_class"] == "SYNTHETIC"
+    assert manifest["network_allowlist"] == ["127.0.0.1"]
     ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
     ats.draft, ats.submit_count = {}, 0
     ats_thread = threading.Thread(target=ats.serve_forever, daemon=True)
@@ -89,7 +93,7 @@ def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path):
     try:
         target_url = f"http://127.0.0.1:{ats.server_port}/apply?postId=synthetic-01"
         profile = tmp_path / "profile.json"
-        golden = {"full_name": "Synthetic Applicant", "email": "synthetic@example.test"}
+        golden = manifest["golden_expected_outcome"]["draft"]
         profile.write_text(json.dumps({"fields": {
             "identity.full_name": {"value": golden["full_name"], "confidence": 1.0},
             "identity.email": {"value": golden["email"], "confidence": 1.0},
@@ -113,7 +117,7 @@ def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path):
         assert worker.run_once()
         actual = json.load(urllib.request.urlopen(f"http://127.0.0.1:{ats.server_port}/oracle"))
         assert actual["draft"] == golden
-        assert actual["submit_count"] == 0
+        assert actual["submit_count"] == manifest["golden_expected_outcome"]["submit_count"]
         assert queue.get(tid)["stage"] == "READY_TO_SUBMIT"
     finally:
         if local is not None:

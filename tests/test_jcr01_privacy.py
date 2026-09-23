@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import urllib.error
 
 from executor.models import ResolutionStatus, WebField
 from executor.resolver import DeepSeekMapper, FieldResolver
-from executor.autonomy.manager import ManagerController, ManagerTurn
+from executor.autonomy.manager import DeepSeekManagerProvider, ManagerController, ManagerTurn
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.worker import Worker
 
@@ -128,3 +129,33 @@ def test_novel_chat_facts_and_task_descriptions_never_enter_provider_payload(tmp
         ):
             assert forbidden not in payload
         assert task["task_id"] in payload
+
+
+def test_manager_http_retry_payload_is_minimized_for_novel_fact(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-api-key")
+    seen = []
+
+    class Opener:
+        def open(self, request, timeout):
+            seen.append(request.data.decode())
+            if len(seen) == 1:
+                raise urllib.error.HTTPError(request.full_url, 400, "retry", {}, None)
+            response = {"choices": [{"message": {"content": json.dumps({
+                "reply": "请使用本地输入。", "decisions": [],
+            })}}]}
+            return io.BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr("executor.autonomy.manager.urllib.request.build_opener", lambda *_: Opener())
+    queue = TaskQueue(tmp_path / "runtime")
+    manager = ManagerController(
+        queue, Worker(queue, settings={"deepseek": {"enabled": False}}),
+        provider=DeepSeekManagerProvider({"deepseek": {"enabled": True}}),
+        settings={},
+    )
+    result = manager.handle("我的家人 Alice Nouvel 的信息是 CANARY_NOVEL_FACT")
+    assert result["actions"] == []
+    assert len(seen) == 2
+    for payload in seen:
+        assert "Alice Nouvel" not in payload
+        assert "CANARY_NOVEL_FACT" not in payload
+        assert "家人" not in payload

@@ -1,0 +1,17 @@
+{
+  "fixture_id": "syntheticats-v1",
+  "origin_class": "SYNTHETIC",
+  "capture_date": "2026-09-24",
+  "contract_version": "JAE-CONSUMER-READINESS-v1/JCR-01",
+  "capture_method": "hand-built isolated HTTP service and browser page",
+  "privacy_class": "COPY_SAFE_SYNTHETIC",
+  "transformations": ["no real applicant, account, job, attachment, cookie or external URL"],
+  "valid_interactions": ["render application form", "write draft fields", "read independent server oracle", "count final submit requests"],
+  "limitations": ["single page", "no authentication", "no file upload", "no production ATS compatibility claim"],
+  "golden_expected_outcome": {
+    "draft": {"full_name": "Synthetic Applicant", "email": "synthetic@example.test"},
+    "submit_count": 0
+  },
+  "synthetic_replacements": {"applicant": "Synthetic Applicant", "email": "synthetic@example.test", "job_id": "synthetic-01"},
+  "network_allowlist": ["127.0.0.1"]
+}
