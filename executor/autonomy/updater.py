@@ -65,6 +65,7 @@ def write_update_state(
         "up_to_date",
         "updating",
         "restarting",
+        "restart_required",
         "success",
         "failed",
     }
@@ -117,6 +118,7 @@ def read_update_state(runtime: str | Path) -> dict:
         "up_to_date",
         "updating",
         "restarting",
+        "restart_required",
         "success",
         "failed",
     }:
@@ -220,6 +222,36 @@ def acquire_update_lock(runtime: str | Path) -> int | None:
         raise
 
 
+def update_lock_held(runtime: str | Path) -> bool:
+    root = Path(runtime).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root.chmod(0o700)
+    fd = os.open(_update_lock_path(root), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def reconciled_update_state(runtime: str | Path) -> dict:
+    state = read_update_state(runtime)
+    if state.get("status") in {"checking", "updating", "restarting"}:
+        if not update_lock_held(runtime):
+            write_update_state(
+                runtime,
+                "failed",
+                reason="stale_update_recovered",
+            )
+            return read_update_state(runtime)
+    return state
+
+
 def spawn_update(
     *,
     repo_root: str | Path,
@@ -237,7 +269,14 @@ def spawn_update(
         if not pre.get("ok"):
             return {"ok": False, "status": "denied", "reason": pre["reason"]}
 
-        write_update_state(runtime_path, "checking", old_version=pre["head"])
+        previous = read_update_state(runtime_path)
+        restart_only = previous.get("status") == "restart_required"
+        write_update_state(
+            runtime_path,
+            "restarting" if restart_only else "checking",
+            old_version=pre["head"],
+            new_version=pre["head"] if restart_only else "",
+        )
         log = runtime_path / "updater.log"
         runtime_path.mkdir(parents=True, exist_ok=True, mode=0o700)
         with log.open("ab") as stream:
@@ -255,6 +294,7 @@ def spawn_update(
                     str(port),
                     "--lock-fd",
                     str(lock_fd),
+                    *(["--restart-only"] if restart_only else []),
                 ],
                 cwd=repo,
                 stdin=subprocess.DEVNULL,
@@ -279,12 +319,107 @@ def spawn_update(
         os.close(lock_fd)
 
 
+def _restart_service(
+    repo: Path,
+    runtime_path: Path,
+    port: int,
+    python: str,
+    *,
+    old_version: str,
+    new_version: str,
+) -> int:
+    write_update_state(
+        runtime_path,
+        "restarting",
+        old_version=old_version,
+        new_version=new_version,
+    )
+
+    stop = subprocess.run(
+        [
+            python,
+            "-m",
+            "executor.autonomy.cli",
+            "--runtime",
+            str(runtime_path),
+            "--port",
+            str(port),
+            "stop",
+        ],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=20,
+    )
+    if stop.returncode != 0:
+        write_update_state(
+            runtime_path,
+            "restart_required",
+            old_version=old_version,
+            new_version=new_version,
+            reason="service_stop_failed",
+        )
+        return 1
+
+    start = subprocess.run(
+        [
+            python,
+            "-m",
+            "executor.autonomy.cli",
+            "--runtime",
+            str(runtime_path),
+            "--port",
+            str(port),
+            "start",
+        ],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=20,
+    )
+    if start.returncode != 0:
+        write_update_state(
+            runtime_path,
+            "restart_required",
+            old_version=old_version,
+            new_version=new_version,
+            reason="service_start_failed",
+        )
+        return 1
+
+    write_update_state(
+        runtime_path,
+        "success",
+        old_version=old_version,
+        new_version=new_version,
+    )
+    subprocess.Popen(
+        [
+            python,
+            "-m",
+            "executor.autonomy.cli",
+            "--runtime",
+            str(runtime_path),
+            "--port",
+            str(port),
+            "ui",
+        ],
+        cwd=repo,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return 0
+
+
 def perform_update(
     repo_root: str | Path,
     runtime: str | Path,
     port: int,
     *,
     python_executable: str | None = None,
+    restart_only: bool = False,
 ) -> int:
     repo = Path(repo_root).expanduser().resolve()
     runtime_path = Path(runtime).expanduser().resolve()
@@ -319,7 +454,37 @@ def perform_update(
         remote = _git(repo, "rev-parse", "origin/main")
         if not re.fullmatch(r"[0-9a-fA-F]{40}", remote):
             raise RuntimeError("invalid remote head")
+
+        refreshed = repository_update_preconditions(repo)
+        if not refreshed.get("ok"):
+            write_update_state(
+                runtime_path,
+                "failed",
+                old_version=old,
+                new_version=remote,
+                reason=refreshed["reason"],
+            )
+            return 1
+        if refreshed.get("head") != old:
+            write_update_state(
+                runtime_path,
+                "failed",
+                old_version=old,
+                new_version=remote,
+                reason="repository_changed_during_update",
+            )
+            return 1
+
         if remote == old:
+            if restart_only:
+                return _restart_service(
+                    repo,
+                    runtime_path,
+                    port,
+                    python,
+                    old_version=old,
+                    new_version=remote,
+                )
             write_update_state(
                 runtime_path,
                 "up_to_date",
@@ -367,89 +532,14 @@ def perform_update(
         if new_head != remote:
             raise RuntimeError("head mismatch after update")
 
-        write_update_state(
+        return _restart_service(
+            repo,
             runtime_path,
-            "restarting",
+            port,
+            python,
             old_version=old,
             new_version=new_head,
         )
-
-        stop = subprocess.run(
-            [
-                python,
-                "-m",
-                "executor.autonomy.cli",
-                "--runtime",
-                str(runtime_path),
-                "--port",
-                str(port),
-                "stop",
-            ],
-            cwd=repo,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=20,
-        )
-        if stop.returncode != 0:
-            write_update_state(
-                runtime_path,
-                "failed",
-                old_version=old,
-                new_version=new_head,
-                reason="service_stop_failed",
-            )
-            return 1
-
-        start = subprocess.run(
-            [
-                python,
-                "-m",
-                "executor.autonomy.cli",
-                "--runtime",
-                str(runtime_path),
-                "--port",
-                str(port),
-                "start",
-            ],
-            cwd=repo,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=20,
-        )
-        if start.returncode != 0:
-            write_update_state(
-                runtime_path,
-                "failed",
-                old_version=old,
-                new_version=new_head,
-                reason="service_start_failed",
-            )
-            return 1
-
-        write_update_state(
-            runtime_path,
-            "success",
-            old_version=old,
-            new_version=new_head,
-        )
-        subprocess.Popen(
-            [
-                python,
-                "-m",
-                "executor.autonomy.cli",
-                "--runtime",
-                str(runtime_path),
-                "--port",
-                str(port),
-                "ui",
-            ],
-            cwd=repo,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return 0
     except subprocess.TimeoutExpired:
         write_update_state(
             runtime_path,
@@ -474,6 +564,7 @@ def main(argv=None) -> int:
     parser.add_argument("--runtime", required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--lock-fd", type=int)
+    parser.add_argument("--restart-only", action="store_true")
     args = parser.parse_args(argv)
 
     owned_lock = None
@@ -489,7 +580,12 @@ def main(argv=None) -> int:
 
     try:
         time.sleep(0.8)
-        return perform_update(args.repo, args.runtime, args.port)
+        return perform_update(
+            args.repo,
+            args.runtime,
+            args.port,
+            restart_only=args.restart_only,
+        )
     finally:
         if owned_lock is not None:
             os.close(owned_lock)
