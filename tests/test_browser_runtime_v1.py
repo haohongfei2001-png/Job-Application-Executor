@@ -1,7 +1,9 @@
 from executor import browser as browser_module
 from executor.browser import cleanup_live_pages, owned_page_after_action
+from executor.adapters import generic_web
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.worker import Worker
+from executor.models import ApplicationStage
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -103,6 +105,151 @@ def test_live_connect_never_adopts_or_closes_an_unbound_tab(monkeypatch):
     assert pw.stopped is True
 
 
+def test_bound_live_connect_selects_only_the_recorded_tab(monkeypatch):
+    target = "https://jobs.example.test/apply"
+    owned = FakePage(target + "/draft")
+    unrelated = FakePage(target + "/other")
+    owned.target_id = "ownedtarget123"
+    unrelated.target_id = "othertarget123"
+    ctx = FakeContext([owned, unrelated])
+    ctx.new_page = lambda: (_ for _ in ()).throw(AssertionError("must reuse bound tab"))
+
+    class Browser:
+        contexts = [ctx]
+
+        def connect_over_cdp(self, *_args, **_kwargs):
+            return self
+
+    class Playwright:
+        chromium = Browser()
+
+        def start(self):
+            return self
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser_module, "owned_cdp_session", lambda: True)
+    monkeypatch.setattr(browser_module, "sync_playwright", lambda: Playwright())
+    monkeypatch.setattr(browser_module, "page_target_id", lambda context, page: page.target_id)
+    binding = {"process_epoch": "epoch12345", "target_id": owned.target_id}
+    _, _, _, page = browser_module.connect(target, existing_only=True,
+        task_binding=binding, session_epoch="epoch12345")
+    assert page is owned
+    assert unrelated.is_closed() is False
+    with pytest.raises(browser_module.BrowserOwnershipError, match="epoch changed"):
+        browser_module.connect(target, existing_only=True,
+            task_binding=binding, session_epoch="epoch99999")
+    monkeypatch.setattr(browser_module, "page_document_epoch", lambda page: "100.0")
+    with pytest.raises(browser_module.BrowserOwnershipError, match="document changed"):
+        browser_module.connect(target, existing_only=True,
+            task_binding={**binding, "document_epoch": "200.0"}, session_epoch="epoch12345")
+    owned.url = "https://other.example.test/draft"
+    with pytest.raises(browser_module.BrowserOwnershipError, match="verified origin"):
+        browser_module.connect(target, existing_only=True,
+            task_binding=binding, session_epoch="epoch12345")
+
+
+def test_browser_binding_persists_and_fences_popup_transition(tmp_path):
+    runtime = tmp_path / "runtime"
+    queue = TaskQueue(runtime)
+    created = queue.enqueue(TaskSpec(
+        company="Synthetic", role="Engineer",
+        target_url="https://jobs.example.test/apply?postId=bind-1",
+        profile_ref=str(tmp_path / "profile.json"), live_authorized=True,
+    ))
+    tid = created["task_id"]
+    claimed = queue.claim("browser-worker")
+    owner = claimed["owner"]
+    queue.bind_browser_page(tid, owner, "epoch12345", "target12345")
+    assert TaskQueue(runtime).browser_binding(tid)["target_id"] == "target12345"
+    queue.record_browser_document(tid, owner, "epoch12345", "target12345", "123456.78")
+    assert TaskQueue(runtime).browser_binding(tid)["document_epoch"] == "123456.78"
+    queue.bind_browser_page(tid, owner, "epoch12345", "popup12345",
+                            previous_target_id="target12345")
+    assert queue.browser_binding(tid)["target_id"] == "popup12345"
+    assert queue.browser_binding(tid)["document_epoch"] is None
+    with pytest.raises(RuntimeError, match="binding changed"):
+        queue.record_browser_document(tid, owner, "epoch12345", "target12345", "123456.78")
+    with pytest.raises(RuntimeError, match="changed"):
+        queue.bind_browser_page(tid, owner, "epoch12345", "other12345",
+                                previous_target_id="target12345")
+    with pytest.raises(RuntimeError, match="lease lost"):
+        queue.bind_browser_page(tid, "old-worker", "epoch12345", "other12345",
+                                previous_target_id="popup12345")
+
+
+def test_adapter_records_owned_popup_transition(monkeypatch):
+    target = "https://jobs.example.test/apply"
+    parent = FakePage(target)
+    popup = FakePage(target + "/draft", opener=parent)
+    popup.target_id = "popup12345"
+    adapter = generic_web.GenericWebAdapter(target)
+    adapter.ctx = FakeContext([parent, popup])
+    adapter.page = parent
+    adapter.bound_target_id = "parent12345"
+    adapter.document_epoch = "100.0"
+    recorded = []
+    adapter.browser_binding_set = lambda target_id, previous_target_id=None: recorded.append(
+        (target_id, previous_target_id)
+    )
+    monkeypatch.setattr(generic_web, "page_target_id", lambda ctx, page: page.target_id)
+    monkeypatch.setattr(generic_web, "page_document_epoch", lambda page: "200.0")
+    adapter.browser_document_set = lambda target_id, epoch: recorded.append((target_id, epoch))
+    adapter._adopt_owned_page()
+    assert adapter.page is popup
+    assert recorded == [("popup12345", "parent12345"), ("popup12345", "200.0")]
+
+
+def test_adapter_fences_stale_document_before_write(monkeypatch):
+    target = "https://jobs.example.test/apply"
+    page = FakePage(target)
+    page.target_id = "target12345"
+    adapter = generic_web.GenericWebAdapter(target)
+    adapter.ctx = FakeContext([page])
+    adapter.page = page
+    adapter.bound_target_id = "target12345"
+    adapter.document_epoch = "100.0"
+    observed = ["100.0"]
+    monkeypatch.setattr(generic_web, "page_target_id", lambda ctx, page: page.target_id)
+    monkeypatch.setattr(generic_web, "page_document_epoch", lambda page: observed[0])
+    adapter.verify_document()
+    observed[0] = "200.0"
+    with pytest.raises(browser_module.BrowserOwnershipError, match="document changed"):
+        adapter.verify_document()
+
+
+def test_live_worker_persists_browser_binding_before_runner_return(tmp_path, monkeypatch):
+    queue = TaskQueue(tmp_path / "runtime")
+    created = queue.enqueue(TaskSpec(
+        company="Synthetic", role="Engineer",
+        target_url="https://jobs.example.test/apply?postId=bind-2",
+        profile_ref=str(tmp_path / "profile.json"), live_authorized=True,
+    ))
+    monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser_module, "owned_cdp_fingerprint", lambda: "epoch12345")
+
+    class SyntheticRunner:
+        def __init__(self, *_args, **_kwargs):
+            self.plan = SimpleNamespace(
+                metadata={}, stage=ApplicationStage.BLOCKED, unresolved_fields=[],
+            )
+
+        def run(self):
+            assert self.browser_binding_get() is None
+            self.browser_binding_set("target12345")
+            self.browser_document_set("target12345", "123456.78")
+            return self.plan
+
+    assert Worker(queue, runner_factory=SyntheticRunner,
+                  settings={"deepseek": {"enabled": False}}).run_once() is True
+    binding = TaskQueue(queue.root).browser_binding(created["task_id"])
+    assert binding["process_epoch"] == "epoch12345"
+    assert binding["target_id"] == "target12345"
+    assert binding["document_epoch"] == "123456.78"
+
+
 def test_second_live_run_waits_for_tab_reconciliation(tmp_path, monkeypatch):
     queue = TaskQueue(tmp_path / "runtime")
     task = queue.enqueue(TaskSpec(
@@ -150,10 +297,14 @@ def test_real_headless_popup_lineage_does_not_adopt_unrelated_tab(monkeypatch):
     pw = browser = None
     try:
         pw, browser, ctx, page = browser_module.connect(target)
+        initial_id = browser_module.page_target_id(ctx, page)
+        assert initial_id == browser_module.page_target_id(ctx, page)
+        assert browser_module.page_document_epoch(page) == browser_module.page_document_epoch(page)
         with page.expect_popup() as opened:
             page.locator("#open").click()
         popup = opened.value
         popup.wait_for_load_state()
+        assert browser_module.page_target_id(ctx, popup) != initial_id
         unrelated = ctx.new_page()
         unrelated.goto(target)
         assert owned_page_after_action(ctx, page, target) is popup

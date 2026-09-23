@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .adapters.registry import adapter_for_url, site_id_for_url
+from .browser import BrowserOwnershipError
 from .audit import AuditStore
 from .models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus, WebField
 from .otp.bridge import OtpBridge, OtpBridgeError
@@ -67,6 +68,8 @@ class ApplicationExecutor:
             if callable(method):
                 return method()
             return "other" if adapter.auth_challenge() else None
+        except BrowserOwnershipError:
+            raise
         except Exception:
             return "other"
 
@@ -116,6 +119,8 @@ class ApplicationExecutor:
                 phone,
                 allow_standard_auth_terms=allow_standard_auth_terms,
             )
+        except BrowserOwnershipError:
+            raise
         except Exception:
             prepare = "ambiguous"
         self.audit.record_action({
@@ -204,6 +209,8 @@ class ApplicationExecutor:
         try:
             if re.fullmatch(r"\d{4,8}", code):
                 entered = bool(adapter.enter_one_time_code(code))
+        except BrowserOwnershipError:
+            raise
         except Exception:
             entered = False
         finally:
@@ -221,6 +228,8 @@ class ApplicationExecutor:
         if remaining_kind == "one_time_code":
             try:
                 confirmed = bool(adapter.confirm_one_time_code_auth())
+            except BrowserOwnershipError:
+                raise
             except Exception:
                 confirmed = False
             self.audit.record_action({
@@ -373,8 +382,17 @@ class ApplicationExecutor:
     def run(self, max_pages: int = 15) -> ApplicationPlan:
         self.guard()
         adapter = adapter_for_url(self.target_url)
-        adapter.mutation_guard = self.guard
+        def guarded_browser_mutation():
+            self.guard()
+            verify = getattr(adapter, "verify_document", None)
+            if callable(verify):
+                verify()
+        adapter.mutation_guard = guarded_browser_mutation
         adapter.existing_browser_only = self.existing_browser_only
+        adapter.browser_binding_get = getattr(self, "browser_binding_get", None)
+        adapter.browser_binding_set = getattr(self, "browser_binding_set", None)
+        adapter.browser_document_set = getattr(self, "browser_document_set", None)
+        adapter.browser_session_epoch = getattr(self, "browser_session_epoch", None)
         if self.resume_url:
             from .protected_targets import assert_target_not_protected
             if urlparse(self.resume_url).netloc != urlparse(self.target_url).netloc:

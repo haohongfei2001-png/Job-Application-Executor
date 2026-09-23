@@ -6,7 +6,7 @@ from typing import Iterable
 from urllib.parse import urlparse
 
 from .base import SiteAdapter
-from ..browser import connect, owned_page_after_action
+from ..browser import BrowserOwnershipError, connect, owned_page_after_action, page_document_epoch, page_target_id
 from ..field_classifier import is_final_submit, is_initial_apply, is_next
 from ..models import (
     ApplicationPlan,
@@ -76,10 +76,57 @@ class GenericWebAdapter(SiteAdapter):
         return target_url.startswith(("http://", "https://", "file://"))
 
     def open(self) -> None:
+        binding_get = getattr(self, "browser_binding_get", None)
+        binding = binding_get() if callable(binding_get) else None
+        bind_page = getattr(self, "browser_binding_set", None)
+        record_document = getattr(self, "browser_document_set", None)
+        epoch = getattr(self, "browser_session_epoch", None)
         if getattr(self, "existing_browser_only", False):
-            self.pw, self.browser, self.ctx, self.page = connect(self.target_url, existing_only=True)
+            self.pw, self.browser, self.ctx, self.page = connect(
+                self.target_url, existing_only=True, task_binding=binding,
+                bind_page=bind_page, session_epoch=epoch,
+            )
         else:
             self.pw, self.browser, self.ctx, self.page = connect(self.target_url)
+        if callable(bind_page):
+            try:
+                self.bound_target_id = page_target_id(self.ctx, self.page)
+                self.document_epoch = page_document_epoch(self.page)
+                if callable(record_document):
+                    record_document(self.bound_target_id, self.document_epoch)
+            except BaseException:
+                self.close()
+                raise
+        else:
+            self.bound_target_id = None
+            self.document_epoch = None
+
+    def verify_document(self) -> None:
+        if self.bound_target_id is None:
+            return
+        if self.page.is_closed() or page_target_id(self.ctx, self.page) != self.bound_target_id:
+            raise BrowserOwnershipError("task tab changed before write")
+        # This is a read-only check immediately before the browser primitive.
+        if page_document_epoch(self.page) != self.document_epoch:
+            raise BrowserOwnershipError("task document changed before write")
+        if owned_page_after_action(self.ctx, self.page, self.target_url) is not self.page:
+            raise BrowserOwnershipError("task popup changed before write")
+
+    def _adopt_owned_page(self) -> None:
+        selected = owned_page_after_action(self.ctx, self.page, self.target_url)
+        record_document = getattr(self, "browser_document_set", None)
+        if selected is not self.page:
+            bind_page = getattr(self, "browser_binding_set", None)
+            if callable(bind_page):
+                target_id = page_target_id(self.ctx, selected)
+                bind_page(target_id, previous_target_id=self.bound_target_id)
+                self.bound_target_id = target_id
+        if self.bound_target_id is not None:
+            observed_epoch = page_document_epoch(selected)
+            if observed_epoch != self.document_epoch and callable(record_document):
+                record_document(self.bound_target_id, observed_epoch)
+            self.document_epoch = observed_epoch
+        self.page = selected
 
     def close(self) -> None:
         if self.pw:
@@ -199,7 +246,7 @@ class GenericWebAdapter(SiteAdapter):
         try:
             snapshot = self.page.evaluate(script) or []
         except Exception:
-            snapshot = []
+            raise BrowserOwnershipError("field observation unavailable") from None
 
         return [
             WebField(
@@ -260,6 +307,7 @@ class GenericWebAdapter(SiteAdapter):
             hay = {text.casefold().removesuffix("市"), val.casefold()}
             for target in normalized:
                 if target in hay:
+                    getattr(self, "mutation_guard", lambda: None)()
                     element.select_option(value=val)
                     return True
         return False
@@ -279,22 +327,28 @@ class GenericWebAdapter(SiteAdapter):
                 tag = element.evaluate("e=>e.tagName.toLowerCase()")
                 value = resolution.value
                 if input_type == "file":
+                    getattr(self, "mutation_guard", lambda: None)()
                     element.set_input_files(str(value))
                 elif tag == "select":
+                    getattr(self, "mutation_guard", lambda: None)()
                     if not self._fill_select(element, value):
                         raise ValueError("no matching select option")
                 elif input_type in {"checkbox", "radio"}:
                     desired = bool(value)
                     if element.is_checked() != desired:
+                        getattr(self, "mutation_guard", lambda: None)()
                         element.click()
                 else:
                     desired = self._control_text(value, input_type, resolution.label)
                     current = str(element.input_value() or "")
                     if current != desired:
+                        getattr(self, "mutation_guard", lambda: None)()
                         element.fill(desired)
                 actions.append({"field_id": resolution.field_id, "ok": True, "source": resolution.source})
-            except Exception as exc:
-                actions.append({"field_id": resolution.field_id, "ok": False, "reason": type(exc).__name__})
+            except Exception:
+                # The primitive may have reached the page before Playwright
+                # reported failure. Do not turn that uncertainty into a retry.
+                raise BrowserOwnershipError("field write outcome unknown") from None
         return actions
 
     def validate(self, plan: ApplicationPlan) -> ValidationResult:
@@ -592,10 +646,10 @@ class GenericWebAdapter(SiteAdapter):
             send.click()
             self._otp_request_prepared = True
             self.page.wait_for_timeout(800)
-            self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
+            self._adopt_owned_page()
             return "requested"
         except Exception:
-            return "ambiguous"
+            raise BrowserOwnershipError("SMS preparation outcome unknown") from None
 
     def _current_sms_initial_send_index(self) -> int:
         """Return the one current send-code control in a proven SMS auth context."""
@@ -784,10 +838,10 @@ class GenericWebAdapter(SiteAdapter):
         try:
             candidates[0].fill(code)
             self.page.wait_for_timeout(1500)
-            self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
+            self._adopt_owned_page()
             return True
         except Exception:
-            return False
+            raise BrowserOwnershipError("OTP entry outcome unknown") from None
 
     def confirm_one_time_code_auth(self) -> bool:
         """Confirm OTP auth only inside the unique, conservative OTP context.
@@ -904,10 +958,10 @@ class GenericWebAdapter(SiteAdapter):
             getattr(self, "mutation_guard", lambda: None)()
             self.page.locator(BUTTON_SELECTOR).nth(index).click()
             self.page.wait_for_timeout(1800)
-            self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
+            self._adopt_owned_page()
             return True
         except Exception:
-            return False
+            raise BrowserOwnershipError("OTP confirmation outcome unknown") from None
 
     def otp_field_status(self) -> str:
         count = len(self._otp_candidates())
@@ -920,9 +974,10 @@ class GenericWebAdapter(SiteAdapter):
         matches = [(el, text) for el, text in self._buttons() if is_initial_apply(text) and not is_final_submit(text)]
         if len(matches) != 1:
             return False
+        getattr(self, "mutation_guard", lambda: None)()
         matches[0][0].click()
         self.page.wait_for_timeout(1000)
-        self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
+        self._adopt_owned_page()
         return True
 
     def save_draft(self) -> bool:
@@ -933,18 +988,20 @@ class GenericWebAdapter(SiteAdapter):
         ]
         if len(matches) != 1:
             return False
+        getattr(self, "mutation_guard", lambda: None)()
         matches[0][0].click()
         self.page.wait_for_timeout(800)
-        self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
+        self._adopt_owned_page()
         return True
 
     def advance(self) -> bool:
         getattr(self, "mutation_guard", lambda: None)()
         for element, text in self._buttons():
             if is_next(text) and not is_final_submit(text):
+                getattr(self, "mutation_guard", lambda: None)()
                 element.click()
                 self.page.wait_for_timeout(1000)
-                self.page = owned_page_after_action(self.ctx, self.page, self.target_url)
+                self._adopt_owned_page()
                 return True
         return False
 

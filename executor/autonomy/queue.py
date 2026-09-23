@@ -130,6 +130,13 @@ class TaskQueue:
             db.execute('''CREATE TABLE IF NOT EXISTS run_attempts (
                 attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner TEXT NOT NULL,
                 outcome TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS browser_bindings (
+                task_id TEXT PRIMARY KEY, process_epoch TEXT NOT NULL,
+                target_id TEXT NOT NULL, updated REAL NOT NULL,
+                document_epoch TEXT)''')
+            binding_columns = {r[1] for r in db.execute("PRAGMA table_info(browser_bindings)")}
+            if "document_epoch" not in binding_columns:
+                db.execute("ALTER TABLE browser_bindings ADD COLUMN document_epoch TEXT")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -236,6 +243,8 @@ class TaskQueue:
             view = self._view(row)
             if (row["owner"] and row["lease_until"] > self.clock()) or row["stage"] in STOPPED:
                 raise ValueError("task active or immutable")
+            if db.execute("SELECT 1 FROM run_attempts WHERE task_id=? LIMIT 1", (tid,)).fetchone():
+                raise ValueError("started task cannot change its target without reconciliation")
             old_spec = TaskSpec.model_validate(view["spec"])
             old_url = urlsplit(old_spec.target_url)
             resolved_url = urlsplit(new_url)
@@ -349,6 +358,66 @@ class TaskQueue:
                 "SELECT attempt_id,task_id,outcome,created,updated FROM run_attempts WHERE task_id=? ORDER BY created",
                 (tid,),
             )]
+
+    def browser_binding(self, tid: str) -> dict | None:
+        with self.tx() as db:
+            row = db.execute(
+                "SELECT process_epoch,target_id,document_epoch,updated FROM browser_bindings WHERE task_id=?",
+                (tid,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def bind_browser_page(
+        self, tid: str, owner: str, process_epoch: str, target_id: str,
+        *, previous_target_id: str | None = None,
+    ) -> None:
+        """Fence a page or popup transition to one live task lease and process."""
+        token = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+        if not token.fullmatch(process_epoch) or not token.fullmatch(target_id):
+            raise ValueError("invalid browser binding")
+        with self.tx() as db:
+            task = db.execute(
+                "SELECT owner,lease_until FROM tasks WHERE task_id=?", (tid,)
+            ).fetchone()
+            if task is None or task["owner"] != owner or task["lease_until"] <= self.clock():
+                raise RuntimeError("browser binding lease lost")
+            prior = db.execute(
+                "SELECT process_epoch,target_id FROM browser_bindings WHERE task_id=?", (tid,)
+            ).fetchone()
+            if prior is None:
+                if previous_target_id is not None:
+                    raise RuntimeError("popup has no bound parent")
+                db.execute("INSERT INTO browser_bindings(task_id,process_epoch,target_id,updated) VALUES(?,?,?,?)",
+                           (tid, process_epoch, target_id, self.clock()))
+            else:
+                if prior["process_epoch"] != process_epoch or (
+                    previous_target_id is None and prior["target_id"] != target_id
+                ) or (
+                    previous_target_id is not None and prior["target_id"] != previous_target_id
+                ):
+                    raise RuntimeError("browser binding changed")
+                db.execute("UPDATE browser_bindings SET target_id=?,document_epoch=NULL,updated=? WHERE task_id=?",
+                           (target_id, self.clock(), tid))
+
+    def record_browser_document(
+        self, tid: str, owner: str, process_epoch: str,
+        target_id: str, document_epoch: str,
+    ) -> None:
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", document_epoch):
+            raise ValueError("invalid browser document epoch")
+        with self.tx() as db:
+            task = db.execute("SELECT owner,lease_until FROM tasks WHERE task_id=?", (tid,)).fetchone()
+            binding = db.execute(
+                "SELECT process_epoch,target_id FROM browser_bindings WHERE task_id=?", (tid,)
+            ).fetchone()
+            if task is None or task["owner"] != owner or task["lease_until"] <= self.clock():
+                raise RuntimeError("browser document lease lost")
+            if binding is None or binding["process_epoch"] != process_epoch or binding["target_id"] != target_id:
+                raise RuntimeError("browser document binding changed")
+            db.execute(
+                "UPDATE browser_bindings SET document_epoch=?,updated=? WHERE task_id=?",
+                (document_epoch, self.clock(), tid),
+            )
 
     def claim(self, worker, lease_seconds=60):
         now = self.clock()

@@ -210,6 +210,16 @@ class Worker:
             runner = self.runner_factory(spec["target_url"], spec["profile_ref"], self._runner_settings(), execution_id=tid,
                 otp_bridge=bridge, audit_store=audit, guard=guard,
                 resume_url=task.get("checkpoint_url"), existing_browser_only=True)
+            if session_epoch is not None:
+                runner.browser_session_epoch = session_epoch
+                runner.browser_binding_get = lambda: self.queue.browser_binding(tid)
+                runner.browser_binding_set = lambda target_id, previous_target_id=None: self.queue.bind_browser_page(
+                    tid, owner, session_epoch, target_id,
+                    previous_target_id=previous_target_id,
+                )
+                runner.browser_document_set = lambda target_id, document_epoch: self.queue.record_browser_document(
+                    tid, owner, session_epoch, target_id, document_epoch,
+                )
             with self.answers_lock:
                 runner.user_answers = [{"canonical_key": k, "field_id": k, "value": v} for k, v in self.answers.get(tid, {}).items()]
             runner.plan.metadata["recovered_from_stage"] = task["checkpoint"]
