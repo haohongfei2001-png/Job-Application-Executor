@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.cookiejar
 import json
+import os
 import subprocess
 import threading
 import urllib.request
@@ -169,6 +170,75 @@ def test_safe_update_refuses_active_or_runnable_task(tmp_path):
             (task["task_id"],),
         )
     assert updater.safe_to_update(supervisor) == (True, "")
+
+    with q.tx() as db:
+        db.execute(
+            "UPDATE tasks SET stage='BLOCKED',blocker='user_paused_from_otp_waiting' WHERE task_id=?",
+            (task["task_id"],),
+        )
+    assert updater.safe_to_update(supervisor) == (False, "otp_in_flight")
+
+
+def test_update_state_is_written_with_atomic_replace(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    calls = []
+    original = updater.os.replace
+
+    def wrapped(src, dst):
+        calls.append((str(src), str(dst)))
+        return original(src, dst)
+
+    monkeypatch.setattr(updater.os, "replace", wrapped)
+    updater.write_update_state(
+        runtime,
+        "checking",
+        old_version="a" * 40,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1].endswith("update-state.json")
+    assert updater.read_update_state(runtime)["status"] == "checking"
+    assert not list(runtime.glob(".update-state-*.tmp"))
+
+
+def test_update_lock_serializes_concurrent_launches(tmp_path):
+    runtime = tmp_path / "runtime"
+    first = updater.acquire_update_lock(runtime)
+    assert first is not None
+    try:
+        second = updater.acquire_update_lock(runtime)
+        assert second is None
+        denied = updater.spawn_update(
+            repo_root=tmp_path / "repo",
+            runtime=runtime,
+            port=9344,
+        )
+        assert denied == {
+            "ok": False,
+            "status": "denied",
+            "reason": "update_in_progress",
+        }
+    finally:
+        os.close(first)
+
+    third = updater.acquire_update_lock(runtime)
+    assert third is not None
+    os.close(third)
+
+
+def test_recent_events_returns_actual_tail_beyond_first_200(tmp_path):
+    q = TaskQueue(tmp_path / "runtime")
+    task = q.enqueue(_spec(tmp_path))
+    with q.tx() as db:
+        for _ in range(220):
+            q._event(db, task["task_id"], "diagnostic_tick", "DISCOVERED")
+
+    recent = q.recent_events(12)
+
+    assert len(recent) == 12
+    assert [row["seq"] for row in recent] == sorted(row["seq"] for row in recent)
+    assert recent[0]["seq"] > 200
+    assert recent[-1]["kind"] == "diagnostic_tick"
 
 
 def test_update_check_uses_http11_and_leaves_code_unchanged_when_current(
