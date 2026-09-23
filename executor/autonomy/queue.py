@@ -172,6 +172,8 @@ class TaskQueue:
             binding_columns = {r[1] for r in db.execute("PRAGMA table_info(browser_bindings)")}
             if "document_epoch" not in binding_columns:
                 db.execute("ALTER TABLE browser_bindings ADD COLUMN document_epoch TEXT")
+            db.execute('''CREATE TABLE IF NOT EXISTS profile_write_barriers (
+                profile_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL, created REAL NOT NULL)''')
         self.path.chmod(0o600)
 
     @contextmanager
@@ -483,6 +485,10 @@ class TaskQueue:
             rows = db.execute("SELECT * FROM tasks WHERE (owner IS NULL OR lease_until<=?) AND next_run<=? ORDER BY created", (now, now)).fetchall()
             for row in rows:
                 spec = json.loads(row["spec"])
+                profile_ref = str(Path(spec["profile_ref"]).expanduser().resolve())
+                if db.execute("SELECT 1 FROM profile_write_barriers WHERE profile_ref=?",
+                              (profile_ref,)).fetchone():
+                    continue
                 runnable = row["stage"] in SAFE_STAGES or (row["stage"] == "ERROR" and row["blocker"] == "retry_pending")
                 if not runnable:
                     continue
@@ -616,15 +622,21 @@ class TaskQueue:
             return receipt
         return self.get(tid)
 
-    def invalidate_profile_reviews(self, profile_ref: str, *, except_task_id: str | None = None) -> list[str]:
-        """Fence every other nonterminal task before a canonical profile write."""
+    def begin_profile_write(self, profile_ref: str, *, task_id: str) -> list[str]:
+        """Atomically stop admissions and fence stale profile readers."""
         canonical = str(Path(profile_ref).expanduser().resolve())
         invalidated = []
         with self.tx() as db:
+            barrier = db.execute("SELECT task_id FROM profile_write_barriers WHERE profile_ref=?",
+                                 (canonical,)).fetchone()
+            if barrier and barrier["task_id"] != task_id:
+                raise RuntimeError("another task is promoting this profile")
+            db.execute("INSERT OR IGNORE INTO profile_write_barriers VALUES(?,?,?)",
+                       (canonical, task_id, self.clock()))
             rows = db.execute("""SELECT task_id,spec FROM tasks
                 WHERE stage NOT IN ('SUBMITTED','VERIFIED','CANCELLED')""").fetchall()
             for row in rows:
-                if row["task_id"] == except_task_id:
+                if row["task_id"] == task_id:
                     continue
                 candidate = json.loads(row["spec"]).get("profile_ref", "")
                 if str(Path(candidate).expanduser().resolve()) != canonical:
@@ -636,6 +648,15 @@ class TaskQueue:
                 self._event(db, tid, "profile_changed", "BLOCKED")
                 invalidated.append(tid)
         return invalidated
+
+    def _finish_profile_write_in_tx(self, db, profile_ref: str, task_id: str) -> None:
+        canonical = str(Path(profile_ref).expanduser().resolve())
+        barrier = db.execute("SELECT task_id FROM profile_write_barriers WHERE profile_ref=?",
+                             (canonical,)).fetchone()
+        if barrier and barrier["task_id"] != task_id:
+            raise RuntimeError("profile promotion barrier belongs to another task")
+        db.execute("DELETE FROM profile_write_barriers WHERE profile_ref=? AND task_id=?",
+                   (canonical, task_id))
 
     def pause(self, tid, *, command_id=None, expected_revision=None):
         """Pause a task at its last safe checkpoint without cancelling it.

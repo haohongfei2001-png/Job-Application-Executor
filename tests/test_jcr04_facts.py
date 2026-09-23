@@ -209,7 +209,7 @@ def test_reusable_fact_promotion_retries_without_duplicate_revision(tmp_path, mo
     worker = Worker(queue, settings={"deepseek": {"enabled": False}})
     real_mark = worker.answer_store.mark_reuse_applied
 
-    def crash_after_profile_write(sequence):
+    def crash_after_profile_write(*args, **kwargs):
         raise RuntimeError("synthetic crash after canonical replace")
 
     monkeypatch.setattr(worker.answer_store, "mark_reuse_applied", crash_after_profile_write)
@@ -227,6 +227,80 @@ def test_reusable_fact_promotion_retries_without_duplicate_revision(tmp_path, mo
     assert ApplicantProfile.model_validate_json(profile.read_text()).collections["profile_write_version"] == version
 
 
+def test_final_promotion_marker_and_resume_roll_back_together(tmp_path, monkeypatch):
+    profile = tmp_path / "synthetic-profile.json"
+    write_profile(ApplicantProfile(), profile)
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = _task(queue, tmp_path)
+    _wait_for_fact(queue, tid, "identity.current_city")
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    original = queue._resume_in_tx
+    monkeypatch.setattr(queue, "_resume_in_tx",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                            RuntimeError("synthetic crash before atomic resume")))
+    result = worker.user_input(tid, {"identity.current_city": "Synthetic City"}, remember=True)
+    assert result["fact_reuse_status"] == "PENDING"
+    assert queue.get(tid)["blocker"] == "profile_promotion_pending"
+    assert len(worker.answer_store.pending_reuse(tid)) == 1
+    version = ApplicantProfile.model_validate_json(profile.read_text()).collections["profile_write_version"]
+    monkeypatch.setattr(queue, "_resume_in_tx", original)
+    restarted = Worker(TaskQueue(queue.root), settings={"deepseek": {"enabled": False}})
+    assert restarted._promote_pending_facts(tid, str(profile))
+    assert restarted.answer_store.pending_reuse(tid) == []
+    assert queue.get(tid)["stage"] == "DISCOVERED"
+    assert ApplicantProfile.model_validate_json(profile.read_text()).collections["profile_write_version"] == version
+
+
+def test_profile_write_barrier_rejects_new_claim_before_file_replace(tmp_path, monkeypatch):
+    import executor.autonomy.worker as worker_module
+    profile = tmp_path / "synthetic-profile.json"
+    write_profile(ApplicantProfile(), profile)
+    queue = TaskQueue(tmp_path / "runtime")
+    source = _task(queue, tmp_path, "source")
+    _wait_for_fact(queue, source, "identity.current_city")
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    original = worker_module.set_user_confirmed_field
+    observed = []
+
+    def race_between_fence_and_write(*args, **kwargs):
+        newcomer = _task(queue, tmp_path, "newcomer")
+        observed.append((newcomer, TaskQueue(queue.root).claim("new-worker")))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(worker_module, "set_user_confirmed_field", race_between_fence_and_write)
+    worker.user_input(source, {"identity.current_city": "Synthetic City"}, remember=True)
+    assert observed and observed[0][1] is None
+    assert queue.get(observed[0][0])["stage"] == "DISCOVERED"
+    with queue.tx() as db:
+        assert db.execute("SELECT COUNT(*) FROM profile_write_barriers").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("control", ["pause", "cancel"])
+def test_profile_promotion_never_resumes_a_user_stopped_task(tmp_path, monkeypatch, control):
+    import executor.autonomy.worker as worker_module
+    profile = tmp_path / "synthetic-profile.json"
+    write_profile(ApplicantProfile(), profile)
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = _task(queue, tmp_path)
+    _wait_for_fact(queue, tid, "identity.current_city")
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    original = worker_module.set_user_confirmed_field
+
+    def stop_during_promotion(*args, **kwargs):
+        getattr(queue, control)(tid)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(worker_module, "set_user_confirmed_field", stop_during_promotion)
+    result = worker.user_input(tid, {"identity.current_city": "Synthetic City"}, remember=True)
+    assert result["fact_reuse_status"] == "SAVED"
+    task = queue.get(tid)
+    assert task["stage"] == ("CANCELLED" if control == "cancel" else "BLOCKED")
+    if control == "pause":
+        assert task["blocker"].startswith("user_paused")
+    with queue.tx() as db:
+        assert db.execute("SELECT COUNT(*) FROM profile_write_barriers").fetchone()[0] == 0
+
+
 def test_project_same_title_different_context_keeps_stable_distinct_ids():
     from executor.evidence import _merge_projects, _parse_project_lines
 
@@ -239,6 +313,24 @@ def test_project_same_title_different_context_keeps_stable_distinct_ids():
     assert len({item["id"] for item in merged}) == 2
     assert merged[0]["source_refs"] == [{"kind": "synthetic", "locator": "line:0"}]
     assert _merge_projects([], records) == merged
+
+
+def test_same_project_merges_across_max_and_resume_categories():
+    from executor.evidence import _merge_projects
+    max_item = {"title": "Research platform", "metadata": ["University A", "2024.01-2024.06"],
+                "bullets": ["Synthetic work"], "source_kind": "max_docx",
+                "category": "project_or_research", "source_refs": [{"kind": "max_docx", "locator": "line:1"}]}
+    resume_item = {"title": "Research platform", "metadata": ["University A", "2024.01-2024.06"],
+                   "bullets": ["Synthetic work"], "source_kind": "resume_docx",
+                   "category": "research", "source_refs": [{"kind": "resume_docx", "locator": "line:2"}]}
+    merged = _merge_projects([max_item], [resume_item])
+    assert len(merged) == 1
+    assert merged[0]["category"] == "research"
+    assert merged[0]["sources"] == ["max_docx", "resume_docx"]
+    assert len(merged[0]["source_refs"]) == 2
+    assert _merge_projects(merged, [resume_item]) == merged
+    distinct = {**resume_item, "metadata": ["University B", "2025.01-2025.06"]}
+    assert len(_merge_projects(merged, [distinct])) == 2
 
 
 def test_project_exclusion_is_explicit_and_single_task_only(tmp_path):

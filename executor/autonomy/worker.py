@@ -125,13 +125,12 @@ class Worker:
         try:
             for pending in self.answer_store.pending_reuse(tid):
                 note = f"task-answer:{tid}:{pending['key']}:{pending['version']}"
-                self.queue.invalidate_profile_reviews(profile_ref, except_task_id=tid)
+                self.queue.begin_profile_write(profile_ref, task_id=tid)
                 set_user_confirmed_field(profile_ref, pending["key"], pending["value"],
                                          note=note)
-                self.answer_store.mark_reuse_applied(pending["sequence"])
-            task = self.queue.get(tid)
-            if task["stage"] == "BLOCKED" and task["blocker"] == "profile_promotion_pending":
-                self.queue.resume(tid)
+                self.answer_store.mark_reuse_applied(
+                    pending["sequence"], task_id=tid, profile_ref=profile_ref)
+            self.answer_store.finish_pending_task(tid, profile_ref)
             return True
         except (OSError, ValueError, RuntimeError):
             # The answer remains task-scoped and the consent stays pending;

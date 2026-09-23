@@ -178,13 +178,46 @@ class TaskAnswerStore:
 
     def pending_tasks(self) -> list[str]:
         with self.queue.tx() as db:
-            return [row[0] for row in db.execute("""SELECT DISTINCT task_id
-                FROM task_answer_events WHERE reuse_requested=1 AND reuse_applied=0""")]
+            return [row[0] for row in db.execute("""SELECT task_id FROM task_answer_events
+                WHERE reuse_requested=1 AND reuse_applied=0
+                UNION SELECT task_id FROM tasks
+                WHERE stage='BLOCKED' AND blocker='profile_promotion_pending'""")]
 
-    def mark_reuse_applied(self, sequence: int) -> None:
+    def mark_reuse_applied(self, sequence: int, *, task_id: str, profile_ref: str) -> None:
+        """The final applied marker, task resume and barrier release commit together."""
         with self.queue.tx() as db:
-            db.execute("UPDATE task_answer_events SET reuse_applied=1 WHERE sequence=?",
-                       (sequence,))
+            updated = db.execute("""UPDATE task_answer_events SET reuse_applied=1
+                WHERE sequence=? AND task_id=? AND reuse_requested=1""",
+                (sequence, task_id)).rowcount
+            if updated != 1:
+                raise RuntimeError("reusable answer event missing")
+            remaining = db.execute("""SELECT 1 FROM task_answer_events
+                WHERE task_id=? AND reuse_requested=1 AND reuse_applied=0 LIMIT 1""",
+                (task_id,)).fetchone()
+            if not remaining:
+                task = db.execute("SELECT stage,blocker FROM tasks WHERE task_id=?",
+                                  (task_id,)).fetchone()
+                if task and task["stage"] == "BLOCKED" and task["blocker"] in {
+                    "profile_promotion_pending", "profile_changed",
+                }:
+                    self.queue._resume_in_tx(db, task_id)
+                elif not task or not (task["stage"] == "CANCELLED" or
+                                     str(task["blocker"] or "").startswith("user_paused")):
+                    raise RuntimeError("promotion task state changed unexpectedly")
+                self.queue._finish_profile_write_in_tx(db, profile_ref, task_id)
+
+    def finish_pending_task(self, task_id: str, profile_ref: str) -> None:
+        """Recover a legacy post-marker crash with no pending answer event."""
+        with self.queue.tx() as db:
+            pending = db.execute("""SELECT 1 FROM task_answer_events
+                WHERE task_id=? AND reuse_requested=1 AND reuse_applied=0 LIMIT 1""",
+                (task_id,)).fetchone()
+            if pending:
+                return
+            task = db.execute("SELECT stage,blocker FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task and task["stage"] == "BLOCKED" and task["blocker"] == "profile_promotion_pending":
+                self.queue._resume_in_tx(db, task_id)
+                self.queue._finish_profile_write_in_tx(db, profile_ref, task_id)
 
 
 class ExecutionAnswerStore:

@@ -171,9 +171,10 @@ def _parse_project_lines(lines: list[str], source_kind: str,
 def _merge_projects(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = [dict(x) for x in existing]
     def project_key(item: dict) -> str:
-        # Same title is not identity: date, institution, and context can differ.
-        parts = [item.get("category", "unspecified"), item.get("title", ""),
-                 *(item.get("metadata") or [])]
+        # The same project has source-specific categories: MAX calls it
+        # project_or_research while a resume may call it project or research.
+        # Title plus date/institution/context distinguish same-title records.
+        parts = [item.get("title", ""), *(item.get("metadata") or [])]
         return "|".join(re.sub(r"\s+", "", str(part)).casefold() for part in parts)
 
     def stable_id(item: dict) -> str:
@@ -191,6 +192,10 @@ def _merge_projects(existing: list[dict[str, Any]], incoming: list[dict[str, Any
             out.append({**item, "id": stable_id(item)})
             continue
         old = out[index[key]]
+        if old.get("category") in {None, "unspecified", "project_or_research"}:
+            old["category"] = item.get("category") or old.get("category")
+        elif (item.get("category") not in {None, "unspecified", "project_or_research", old.get("category")}):
+            old["category"] = "ambiguous"
         old_meta = list(old.get("metadata") or [])
         for value in item.get("metadata") or []:
             if value not in old_meta:
