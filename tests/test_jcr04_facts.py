@@ -37,6 +37,8 @@ def test_task_answer_survives_worker_restart_without_cross_task_reuse(tmp_path):
     canary = "PRIVATE_TASK_ONLY_CANARY"
     with pytest.raises(ValueError):
         worker.user_input(first, {"otp_code": "123456"})
+    with pytest.raises(ValueError):
+        worker.user_input(first, {"family.primary.role": "123456"})
     worker.user_input(first, {"family.primary.role": canary})
     assert worker.answer_store.metadata(first)[0]["answer_version"] == 1
 
@@ -199,6 +201,9 @@ def test_legacy_cli_answers_migrate_to_encrypted_versioned_store(tmp_path, monke
     assert restarted.load_user_answers()[0]["value"] == "updated"
     assert canary.encode() not in restarted.answer_store.path.read_bytes()
     assert audit.AuditStore("another-execution").load_user_answers() == []
+    with pytest.raises(ValueError):
+        restarted.add_user_answer({"field_id": "security_code", "selector": "#code",
+                                   "canonical_key": "unknown_fact", "value": "123456"})
 
 
 def test_site_representation_requires_observed_unique_reversible_option():

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import re
 import sqlite3
 import tempfile
 import time
@@ -11,6 +12,23 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 from ..autonomy.queue import IDENTIFIER, private_dir
+
+
+_AUTH_FRAGMENTS = ("password", "cookie", "token", "otp", "secret",
+                   "authorization", "verification code", "security code",
+                   "验证码", "短信码")
+
+
+def _validate_applicant_answer(key: str, value, *, label: str = "") -> None:
+    context = f"{key} {label}".casefold()
+    if any(fragment in context for fragment in _AUTH_FRAGMENTS):
+        raise ValueError("authentication values are not applicant facts")
+    if isinstance(value, str) and (
+        re.fullmatch(r"\s*\d{4,8}\s*", value)
+        or any(fragment in value.casefold() for fragment in
+               ("otp", "verification code", "security code", "验证码", "短信码"))
+    ):
+        raise ValueError("OTP-like values require the dedicated in-memory channel")
 
 
 def _private_cipher(root: Path, key_name: str) -> Fernet:
@@ -57,14 +75,14 @@ class TaskAnswerStore:
     def save(self, task_id: str, answers: dict, *, expected_revision: int) -> None:
         if not isinstance(answers, dict) or not answers or len(answers) > 100:
             raise ValueError("answers must be a canonical-key mapping")
-        if any(not isinstance(key, str) or not IDENTIFIER.fullmatch(key) or
-               any(fragment in key.casefold() for fragment in
-                   ("password", "cookie", "token", "otp", "secret", "authorization"))
+        if any(not isinstance(key, str) or not IDENTIFIER.fullmatch(key)
                for key in answers):
-            raise ValueError("authentication values are not applicant facts")
+            raise ValueError("invalid answer key")
         if any(not isinstance(value, (str, int, bool, float)) or
                len(str(value)) > 10000 for value in answers.values()):
             raise ValueError("invalid answer value")
+        for key, value in answers.items():
+            _validate_applicant_answer(key, value)
         with self.queue.tx() as db:
             task = db.execute("SELECT revision,stage,owner,details FROM tasks WHERE task_id=?",
                               (task_id,)).fetchone()
@@ -133,9 +151,10 @@ class ExecutionAnswerStore:
         key = selector or field_id or canonical
         if not isinstance(key, str) or not key or len(key) > 1000:
             raise ValueError("answer requires a bounded field identity")
-        if any(part in key.casefold() for part in
-               ("password", "cookie", "token", "otp", "secret", "authorization")):
-            raise ValueError("authentication values are not applicant facts")
+        for candidate in (selector, field_id, canonical):
+            if isinstance(candidate, str):
+                _validate_applicant_answer(candidate, answer.get("value"),
+                                           label=str(answer.get("label") or ""))
         return hashlib.sha256(key.encode()).hexdigest()
 
     def save(self, answer: dict) -> Path:
