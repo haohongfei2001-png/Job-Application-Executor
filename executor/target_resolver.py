@@ -22,6 +22,12 @@ class Candidate:
 SCHNEIDER_ALIASES = {"施耐德", "施耐德电气", "schneider", "schneider electric"}
 OPPO_ALIASES = {"oppo", "oppo招聘", "oppo广东移动通信有限公司"}
 OPPO_CAMPUS_ROOT = "https://careers.oppo.com/university/oppo/campus"
+OPPO_CAMPUS_POST_LIST = OPPO_CAMPUS_ROOT + "/post"
+
+
+def _is_oppo_company(company: str) -> bool:
+    normalized = (company or "").strip().casefold()
+    return normalized in OPPO_ALIASES or normalized.startswith("oppo")
 
 
 def _norm_title(value: str) -> str:
@@ -223,38 +229,62 @@ def _oppo_search_input(page):
 def resolve_oppo(title: str, location: str = "", max_scrolls: int = 6):
     pw, browser, ctx, attached = connect()
     page = ctx.new_page()
+    aggregate: dict[str, Candidate] = {}
     try:
-        page.goto(OPPO_CAMPUS_ROOT, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(1500)
-        candidates = _collect_oppo_candidates(page, title)
-        exact = [item for item in candidates if item.exact_title]
-        if exact:
-            return exact + [item for item in candidates if not item.exact_title]
-
-        search = _oppo_search_input(page)
-        if search is not None:
+        for start_url in (OPPO_CAMPUS_POST_LIST, OPPO_CAMPUS_ROOT):
             try:
-                search.fill(title)
-                search.press("Enter")
-                page.wait_for_timeout(1200)
+                page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(1500)
             except Exception:
-                pass
-            candidates = _collect_oppo_candidates(page, title)
-            exact = [item for item in candidates if item.exact_title]
-            if exact:
-                return exact + [item for item in candidates if not item.exact_title]
+                continue
 
-        for _ in range(max_scrolls):
-            try:
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(700)
-            except Exception:
-                break
-            candidates = _collect_oppo_candidates(page, title)
-            exact = [item for item in candidates if item.exact_title]
+            for item in _collect_oppo_candidates(page, title):
+                aggregate[item.job_id] = item
+            exact = [item for item in aggregate.values() if item.exact_title]
             if exact:
-                return exact + [item for item in candidates if not item.exact_title]
-        return candidates
+                exact.sort(key=lambda item: (item.location.casefold(), item.job_id))
+                rest = [item for item in aggregate.values() if not item.exact_title]
+                return exact + sorted(rest, key=lambda item: (item.title.casefold(), item.job_id))
+
+            search = _oppo_search_input(page)
+            if search is not None:
+                try:
+                    search.fill(title)
+                    search.press("Enter")
+                    page.wait_for_timeout(1200)
+                except Exception:
+                    pass
+                for item in _collect_oppo_candidates(page, title):
+                    aggregate[item.job_id] = item
+                exact = [item for item in aggregate.values() if item.exact_title]
+                if exact:
+                    exact.sort(key=lambda item: (item.location.casefold(), item.job_id))
+                    rest = [item for item in aggregate.values() if not item.exact_title]
+                    return exact + sorted(rest, key=lambda item: (item.title.casefold(), item.job_id))
+
+            for _ in range(max_scrolls):
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(700)
+                except Exception:
+                    break
+                for item in _collect_oppo_candidates(page, title):
+                    aggregate[item.job_id] = item
+                exact = [item for item in aggregate.values() if item.exact_title]
+                if exact:
+                    exact.sort(key=lambda item: (item.location.casefold(), item.job_id))
+                    rest = [item for item in aggregate.values() if not item.exact_title]
+                    return exact + sorted(rest, key=lambda item: (item.title.casefold(), item.job_id))
+
+        return sorted(
+            aggregate.values(),
+            key=lambda item: (
+                not item.exact_title,
+                item.title.casefold(),
+                item.location.casefold(),
+                item.job_id,
+            ),
+        )
     finally:
         try:
             page.close()
@@ -265,7 +295,7 @@ def resolve_oppo(title: str, location: str = "", max_scrolls: int = 6):
 
 def resolve_known_landing(company: str, title: str, target_url: str) -> Candidate | None:
     if (
-        company.strip().casefold() in OPPO_ALIASES
+        _is_oppo_company(company)
         and is_oppo_campus_landing(target_url)
     ):
         exact = [item for item in resolve_oppo(title) if item.exact_title]
@@ -277,7 +307,7 @@ def resolve(company: str, title: str, location: str = "China"):
     normalized = company.strip().casefold()
     if normalized in SCHNEIDER_ALIASES:
         return resolve_schneider(title, location)
-    if normalized in OPPO_ALIASES:
+    if _is_oppo_company(company):
         return resolve_oppo(title, location)
     raise NotImplementedError(f"company resolver not implemented yet: {company}")
 
