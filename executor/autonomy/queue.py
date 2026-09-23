@@ -140,6 +140,63 @@ class TaskQueue:
             self._event(db, tid, "enqueued", "DISCOVERED")
             return self._view(db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone())
 
+    def retarget_same_origin_landing(self, tid, new_url, *, job_id=""):
+        """Replace a known landing-page task with one exact same-origin job target."""
+        TaskSpec.safe_url(new_url)
+        assert_target_not_protected(new_url)
+        with self.tx() as db:
+            row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
+            view = self._view(row)
+            if (row["owner"] and row["lease_until"] > self.clock()) or row["stage"] in STOPPED:
+                raise ValueError("task active or immutable")
+            old_spec = TaskSpec.model_validate(view["spec"])
+            old_url = urlsplit(old_spec.target_url)
+            resolved_url = urlsplit(new_url)
+            old_path = old_url.path.rstrip("/")
+            if (
+                old_url.scheme != resolved_url.scheme
+                or old_url.hostname != resolved_url.hostname
+                or not old_path
+                or not resolved_url.path.startswith(old_path + "/post/")
+            ):
+                raise ValueError("resolved target is not a same-origin job detail")
+            new_spec = TaskSpec.model_validate({
+                **old_spec.model_dump(),
+                "target_url": new_url,
+                "job_id": str(job_id or old_spec.job_id),
+            })
+            ids = [
+                value
+                for key, value in parse_qsl(resolved_url.query)
+                if key.lower() in {"postid", "jobid", "positionid"}
+            ]
+            identity_job = ids[0] if ids else new_spec.job_id
+            identity = (
+                f"{resolved_url.hostname}:{identity_job}"
+                if identity_job
+                else new_spec.target_url
+            )
+            key = hashlib.sha256(identity.encode()).hexdigest()
+            conflict = db.execute(
+                "SELECT task_id FROM tasks WHERE idempotency_key=? AND task_id!=?",
+                (key, tid),
+            ).fetchone()
+            if conflict:
+                raise ValueError("resolved target already queued")
+            now = self.clock()
+            db.execute(
+                """UPDATE tasks
+                   SET idempotency_key=?,spec=?,stage='DISCOVERED',checkpoint='DISCOVERED',
+                       attempts=0,owner=NULL,lease_until=NULL,next_run=0,blocker=NULL,
+                       details='{}',checkpoint_url=NULL,updated=?
+                   WHERE task_id=?""",
+                (key, new_spec.model_dump_json(), now, tid),
+            )
+            self._event(db, tid, "retargeted", "DISCOVERED")
+            return self._view(
+                db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
+            )
+
     def get(self, tid):
         with self.tx() as db:
             return self._view(db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone())
