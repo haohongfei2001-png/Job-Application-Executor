@@ -1,0 +1,28 @@
+{
+  "package": "JAE-CONSUMER-READINESS-v1",
+  "audit_baseline_sha": "72dd892c144699f8a9e9988265bfb20f50b3db4e",
+  "evidence_class": "Pro audit source-excerpt probes using synthetic stubs; registered as audit evidence, not rerun during registration",
+  "probes": [
+    {
+      "id": "P01",
+      "source": "executor/review.py:_covered",
+      "condition": "distinct project identities with overlapping titles",
+      "observed": "covered=true",
+      "conclusion": "title substring matching alone cannot prove project identity coverage"
+    },
+    {
+      "id": "P02",
+      "source": "executor/adapters/generic_web.py:validate",
+      "condition": "expected 北京, observed 上海 in select",
+      "observed": "validation ok=true with warning",
+      "conclusion": "warning-only disagreement cannot serve as consumer-grade correctness gate"
+    },
+    {
+      "id": "P03",
+      "source": "executor/browser.py:latest_page",
+      "condition": "task page followed by unrelated later tab",
+      "observed": "unrelated last tab selected",
+      "conclusion": "global page order cannot prove task ownership"
+    }
+  ]
+}

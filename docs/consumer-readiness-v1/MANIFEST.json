@@ -1,0 +1,87 @@
+{
+  "format": "jae-consumer-readiness-registration-v1",
+  "package": "JAE-CONSUMER-READINESS-v1",
+  "repository": "haohongfei2001-png/Job-Application-Executor",
+  "audit_baseline_sha": "72dd892c144699f8a9e9988265bfb20f50b3db4e",
+  "registration_kind": "documentation_only",
+  "registration_status": "REGISTERED",
+  "implementation_started": false,
+  "runtime_modified": false,
+  "source_archive_sha256": "14d6a95f1f15f9b4d9d7ae09f216ade064e11faef4485d5e35510805c5075bc3",
+  "acceptance_case_count": 118,
+  "note": "The original readable Pro audit is preserved as index.html. Chapter files are content-preserving splits; STATUS.json records registration state. No JCR implementation is authorized by this commit.",
+  "registered_paths": [
+    {
+      "path": "README.md",
+      "blob_sha": "4bb53c10dfe72f77a534b3b2415f0a7261fd0d9f"
+    },
+    {
+      "path": "01_AUDIT.md",
+      "blob_sha": "b39d8d48b356563bd3d1bcb073ff17528365a3e1"
+    },
+    {
+      "path": "02_ARCHITECTURE.md",
+      "blob_sha": "af9e62cdc4d83461d55734aef873c9b044267bd9"
+    },
+    {
+      "path": "03_TEST_STRATEGY.md",
+      "blob_sha": "3f132ac726fa547b0ca865a7ba9f5f2b812d0bc9"
+    },
+    {
+      "path": "04_ACCEPTANCE_MATRIX.md",
+      "blob_sha": "a25e7bfa12b389c6d0adfcd53da868de087bbb8a"
+    },
+    {
+      "path": "index.html",
+      "blob_sha": "38ffe5155f892273d1f8b15dfda5fa2e4cc7aadb"
+    },
+    {
+      "path": "05_ROUNDS.md",
+      "blob_sha": "fd2286a620516cd0f9d1398cfb7f8d1929d1cfdf"
+    },
+    {
+      "path": "06_EXECUTION_PROTOCOL.md",
+      "blob_sha": "7969f6cdf2eda76d01bed9b4fce07834451cf7b4"
+    },
+    {
+      "path": "07_FINAL_CERTIFICATION.md",
+      "blob_sha": "5b3f2969765a6cb1858908326a45eaaef7697de1"
+    },
+    {
+      "path": "08_EVIDENCE_INDEX.md",
+      "blob_sha": "fe4c7b56bf6e52f49a1dd20280f92a70d72eb6fa"
+    },
+    {
+      "path": "09_TRACEABILITY.md",
+      "blob_sha": "e655d454467ea87edbc1b65f3bf5492fa29e26c5"
+    },
+    {
+      "path": "SOURCE_PROVENANCE.md",
+      "blob_sha": "2e32d3fee21f4e20a88379a35ccd40c0f522c3b2"
+    },
+    {
+      "path": "STATUS.json",
+      "blob_sha": "74eeba2bb3a986d6413c895f4bb6d7017bbfecab"
+    },
+    {
+      "path": "acceptance-matrix.json",
+      "blob_sha": "d86dd572ed1cf78b340cfb436f3b36eb8351d2a0"
+    },
+    {
+      "path": "evidence/ci-log-excerpt.txt",
+      "blob_sha": "42a3b67d6feaaff352d9930d39a41cbb5f16645d"
+    },
+    {
+      "path": "evidence/source_excerpt_probes.json",
+      "blob_sha": "2d0651d0340ed447a1232929a67e578d232c1e2a"
+    },
+    {
+      "path": "evidence/source_excerpt_probes.py",
+      "blob_sha": "7f2cc8d8c078a90a743cf3f25fcf7e7ea7401909"
+    },
+    {
+      "path": "receipts/TEMPLATE.md",
+      "blob_sha": "07fde2e967528c4aa4922d3b585c4bc03551b638"
+    }
+  ]
+}

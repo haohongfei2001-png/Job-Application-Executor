@@ -1,0 +1,9 @@
+JAE-CONSUMER-READINESS-v1 baseline CI evidence
+repository: haohongfei2001-png/Job-Application-Executor
+audit_baseline_sha: 72dd892c144699f8a9e9988265bfb20f50b3db4e
+workflow_run: 35848476087
+job_id: 107140245000
+conclusion: success
+observed_log: 240 passed in 56.33s
+classification: baseline remote CI evidence read during the Pro audit; not rerun during documentation registration
+registration_runtime_changes: none
