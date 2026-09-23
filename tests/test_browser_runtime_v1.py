@@ -5,11 +5,16 @@ from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.worker import Worker
 from executor.models import ApplicationStage
 import os
+import socket
+import subprocess
 import threading
+import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
+from playwright.sync_api import sync_playwright
 
 
 class FakePage:
@@ -286,6 +291,142 @@ def test_readonly_observation_reports_only_page_continuity(monkeypatch):
         "replay_allowed": False,
     }
     assert stopped == [True]
+
+
+def test_real_headless_cdp_binding_observation_and_browser_loss(tmp_path, monkeypatch):
+    draft = {"value": "", "writes": 0, "submits": 0}
+
+    class Site(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            body = (f'<label>Name<input id="name" value="{draft["value"]}"></label>'
+                    '<script>document.querySelector("#name").oninput=e=>'
+                    'fetch("/save",{method:"POST",body:e.target.value})</script>').encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if self.path != "/save":
+                draft["submits"] += 1
+                self.send_error(404)
+                return
+            draft["value"] = self.rfile.read(min(int(self.headers.get("Content-Length", "0")), 100)).decode()
+            draft["writes"] += 1
+            self.send_response(204)
+            self.end_headers()
+
+    fixture = ThreadingHTTPServer(("127.0.0.1", 0), Site)
+    thread = threading.Thread(target=fixture.serve_forever, daemon=True)
+    thread.start()
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        cdp_port = reservation.getsockname()[1]
+    target = f"http://127.0.0.1:{fixture.server_port}/apply"
+    clock = [100.0]
+    queue = TaskQueue(tmp_path / "runtime", clock=lambda: clock[0])
+    task = queue.enqueue(TaskSpec(
+        company="SyntheticATS", role="Engineer", target_url=target,
+        profile_ref=str(tmp_path / "synthetic-profile.json"), live_authorized=True,
+    ))
+    claimed = queue.claim("first-worker", lease_seconds=1)
+    attempt = queue.begin_run_attempt(task["task_id"], claimed["owner"])
+    with sync_playwright() as pw:
+        executable = pw.chromium.executable_path
+    args = [executable, "--headless=new", "--no-sandbox", "--disable-gpu",
+            f"--user-data-dir={tmp_path / 'isolated-cdp-profile'}",
+            f"--remote-debugging-port={cdp_port}",
+            "--remote-debugging-address=127.0.0.1", "--no-first-run", "about:blank"]
+    def start_headless():
+        return subprocess.Popen(
+            args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    headless = start_headless()
+    try:
+        for _ in range(50):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json/version", timeout=.2):
+                    break
+            except OSError:
+                time.sleep(.1)
+        monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
+        monkeypatch.setattr(browser_module, "CDP", f"http://127.0.0.1:{cdp_port}")
+        monkeypatch.setattr(browser_module, "owned_cdp_session", lambda: True)
+        epoch = ["fixtureepoch123"]
+        monkeypatch.setattr(browser_module, "owned_cdp_fingerprint", lambda: epoch[0])
+        bound = []
+        client, _, ctx, page = browser_module.connect(
+            target, existing_only=True, session_epoch="fixtureepoch123",
+            bind_page=lambda target_id: (
+                queue.bind_browser_page(task["task_id"], claimed["owner"], "fixtureepoch123", target_id),
+                bound.append(target_id),
+            ),
+        )
+        try:
+            page.locator("#name").fill("Synthetic")
+            for _ in range(50):
+                if draft["writes"]:
+                    break
+                time.sleep(.05)
+            assert draft == {"value": "Synthetic", "writes": 1, "submits": 0}
+            binding = {
+                "process_epoch": "fixtureepoch123", "target_id": bound[0],
+                "document_epoch": browser_module.page_document_epoch(page),
+            }
+            queue.record_browser_document(task["task_id"], claimed["owner"],
+                                          "fixtureepoch123", bound[0], binding["document_epoch"])
+        finally:
+            client.stop()
+        observed = browser_module.observe_bound_draft(target, binding)
+        assert observed["status"] == "BOUND_DOCUMENT_OBSERVED"
+        assert observed["replay_allowed"] is False
+        assert draft == {"value": "Synthetic", "writes": 1, "submits": 0}
+        client, _, ctx, page = browser_module.connect(
+            target, existing_only=True, task_binding=binding,
+            session_epoch="fixtureepoch123",
+        )
+        try:
+            assert page.locator("#name").input_value() == "Synthetic"
+            assert browser_module.page_target_id(ctx, page) == bound[0]
+        finally:
+            client.stop()
+        headless.terminate()
+        headless.wait(timeout=5)
+        clock[0] += 2
+        replacement = TaskQueue(queue.root, clock=lambda: clock[0])
+        assert replacement.claim("replacement-worker") is None
+        blocked = replacement.get(task["task_id"])
+        assert blocked["task_id"] == task["task_id"]
+        assert blocked["stage"] == "BLOCKED"
+        assert blocked["blocker"] == "unknown_outcome"
+        assert replacement.run_attempts(task["task_id"])[0]["attempt_id"] == attempt
+        assert replacement.run_attempts(task["task_id"])[0]["outcome"] == "UNKNOWN_OUTCOME"
+        lost = browser_module.observe_bound_draft(target, binding)
+        assert lost["replay_allowed"] is False
+        assert lost["status"] != "BOUND_DOCUMENT_OBSERVED"
+        headless = start_headless()
+        for _ in range(50):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json/version", timeout=.2):
+                    break
+            except OSError:
+                time.sleep(.1)
+        epoch[0] = "fixtureepoch456"
+        restarted = browser_module.observe_bound_draft(target, binding)
+        assert restarted["status"] == "PROCESS_EPOCH_CHANGED"
+        assert draft == {"value": "Synthetic", "writes": 1, "submits": 0}
+    finally:
+        if headless.poll() is None:
+            headless.terminate()
+            headless.wait(timeout=5)
+        fixture.shutdown()
+        fixture.server_close()
+        thread.join()
 
 
 def test_second_live_run_waits_for_tab_reconciliation(tmp_path, monkeypatch):
