@@ -859,3 +859,81 @@ def test_queue_retarget_rejects_cross_origin_or_non_detail_target(tmp_path):
     unchanged = q.get(task["task_id"])
     assert unchanged["stage"] == "DISCOVERED"
     assert unchanged["spec"]["target_url"] == OPPO_CAMPUS_ROOT
+
+
+def test_model_selected_oppo_resume_also_retargets_landing(tmp_path, monkeypatch):
+    from executor.target_resolver import Candidate, OPPO_CAMPUS_ROOT
+
+    q = TaskQueue(tmp_path / "runtime")
+    profile = tmp_path / "profile.json"
+    profile.write_text("{}")
+    oppo = q.enqueue(TaskSpec(
+        company="OPPO 2027届校园招聘",
+        role="AI产品经理",
+        target_url=OPPO_CAMPUS_ROOT,
+        profile_ref=str(profile),
+        live_authorized=True,
+    ))
+    claimed = q.claim("worker-oppo")
+    q.checkpoint(
+        oppo["task_id"],
+        claimed["owner"],
+        "NEEDS_USER_ACTION",
+        blocker="security_challenge",
+        release=True,
+    )
+
+    other = q.enqueue(TaskSpec(
+        company="Other Co",
+        role="Other Role",
+        target_url="https://jobs.example.test/apply?postId=other",
+        job_id="other",
+        profile_ref=str(profile),
+        live_authorized=True,
+    ))
+    claimed_other = q.claim("worker-other")
+    q.checkpoint(
+        other["task_id"],
+        claimed_other["owner"],
+        "NEEDS_USER_ACTION",
+        blocker="security_challenge",
+        release=True,
+    )
+
+    candidate = Candidate(
+        title="AI 产品经理",
+        job_id="2048",
+        location="北京市",
+        category="产品类",
+        job_url=OPPO_CAMPUS_ROOT + "/post/2048?recruitType=Campus",
+        exact_title=True,
+    )
+    monkeypatch.setattr(
+        "executor.autonomy.manager.resolve_known_landing",
+        lambda *_: candidate,
+    )
+    provider = FakeProvider(ManagerTurn(
+        reply="继续 OPPO。",
+        decisions=[
+            ManagerDecision(
+                action=ManagerAction.RESUME,
+                task_id=oppo["task_id"],
+            )
+        ],
+    ))
+    worker = Worker(q, settings={"deepseek": {"enabled": False}})
+    manager = ManagerController(
+        q,
+        worker,
+        provider=provider,
+        settings={"profile_path": str(profile)},
+    )
+
+    result = manager.handle("继续 OPPO 这个岗位")
+
+    assert provider.seen is not None
+    assert result["actions"][0]["status"] == "accepted"
+    assert result["actions"][0]["resolved_target"] is True
+    assert q.get(oppo["task_id"])["spec"]["target_url"] == candidate.job_url
+    assert q.get(oppo["task_id"])["stage"] == "DISCOVERED"
+    assert q.get(other["task_id"])["stage"] == "NEEDS_USER_ACTION"
