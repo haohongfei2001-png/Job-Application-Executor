@@ -241,25 +241,33 @@ def update_lock_held(runtime: str | Path) -> bool:
 
 def reconciled_update_state(runtime: str | Path) -> dict:
     state = read_update_state(runtime)
-    status = state.get("status")
-    if status in {"checking", "updating", "restarting"}:
-        if not update_lock_held(runtime):
-            # A stale checking state cannot have mutated the checkout yet.
-            # Updating/restarting may have crossed the Git boundary, so keep
-            # normal task mutations fenced until a restart/update retry proves
-            # the loaded service matches the checkout again.
-            recovered = (
-                "failed"
-                if status == "checking"
-                else "restart_required"
-            )
-            write_update_state(
-                runtime,
-                recovered,
-                reason="stale_update_recovered",
-            )
-            return read_update_state(runtime)
-    return state
+    if state.get("status") not in {"checking", "updating", "restarting"}:
+        return state
+
+    lock_fd = acquire_update_lock(runtime)
+    if lock_fd is None:
+        return state
+    try:
+        # Re-read only after the updater lock is held. Another launcher may
+        # have replaced the stale state between the first read and lock claim.
+        current = read_update_state(runtime)
+        status = current.get("status")
+        if status not in {"checking", "updating", "restarting"}:
+            return current
+
+        # A stale checking state cannot have mutated the checkout yet.
+        # Updating/restarting may have crossed the Git boundary, so keep
+        # normal task mutations fenced until a restart/update retry proves
+        # the loaded service matches the checkout again.
+        recovered = "failed" if status == "checking" else "restart_required"
+        write_update_state(
+            runtime,
+            recovered,
+            reason="stale_update_recovered",
+        )
+        return read_update_state(runtime)
+    finally:
+        os.close(lock_fd)
 
 
 def spawn_update(
@@ -345,22 +353,42 @@ def _restart_service(
         new_version=new_version,
     )
 
-    stop = subprocess.run(
-        [
-            python,
-            "-m",
-            "executor.autonomy.cli",
-            "--runtime",
-            str(runtime_path),
-            "--port",
-            str(port),
-            "stop",
-        ],
-        cwd=repo,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=20,
-    )
+    try:
+        stop = subprocess.run(
+            [
+                python,
+                "-m",
+                "executor.autonomy.cli",
+                "--runtime",
+                str(runtime_path),
+                "--port",
+                str(port),
+                "stop",
+            ],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        write_update_state(
+            runtime_path,
+            "restart_required",
+            old_version=old_version,
+            new_version=new_version,
+            reason="service_restart_timeout",
+        )
+        return 1
+    except Exception:
+        write_update_state(
+            runtime_path,
+            "restart_required",
+            old_version=old_version,
+            new_version=new_version,
+            reason="service_restart_failed",
+        )
+        return 1
+
     if stop.returncode != 0:
         write_update_state(
             runtime_path,
@@ -371,22 +399,42 @@ def _restart_service(
         )
         return 1
 
-    start = subprocess.run(
-        [
-            python,
-            "-m",
-            "executor.autonomy.cli",
-            "--runtime",
-            str(runtime_path),
-            "--port",
-            str(port),
-            "start",
-        ],
-        cwd=repo,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=20,
-    )
+    try:
+        start = subprocess.run(
+            [
+                python,
+                "-m",
+                "executor.autonomy.cli",
+                "--runtime",
+                str(runtime_path),
+                "--port",
+                str(port),
+                "start",
+            ],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        write_update_state(
+            runtime_path,
+            "restart_required",
+            old_version=old_version,
+            new_version=new_version,
+            reason="service_restart_timeout",
+        )
+        return 1
+    except Exception:
+        write_update_state(
+            runtime_path,
+            "restart_required",
+            old_version=old_version,
+            new_version=new_version,
+            reason="service_restart_failed",
+        )
+        return 1
+
     if start.returncode != 0:
         write_update_state(
             runtime_path,
@@ -403,23 +451,26 @@ def _restart_service(
         old_version=old_version,
         new_version=new_version,
     )
-    subprocess.Popen(
-        [
-            python,
-            "-m",
-            "executor.autonomy.cli",
-            "--runtime",
-            str(runtime_path),
-            "--port",
-            str(port),
-            "ui",
-        ],
-        cwd=repo,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    try:
+        subprocess.Popen(
+            [
+                python,
+                "-m",
+                "executor.autonomy.cli",
+                "--runtime",
+                str(runtime_path),
+                "--port",
+                str(port),
+                "ui",
+            ],
+            cwd=repo,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
     return 0
 
 
@@ -454,6 +505,16 @@ def perform_update(
     git_mutation_started = False
 
     try:
+        if restart_only:
+            return _restart_service(
+                repo,
+                runtime_path,
+                port,
+                python,
+                old_version=old,
+                new_version=old,
+            )
+
         _run(
             repo,
             [
@@ -492,15 +553,6 @@ def perform_update(
             return 1
 
         if remote == old:
-            if restart_only:
-                return _restart_service(
-                    repo,
-                    runtime_path,
-                    port,
-                    python,
-                    old_version=old,
-                    new_version=remote,
-                )
             write_update_state(
                 runtime_path,
                 "up_to_date",
