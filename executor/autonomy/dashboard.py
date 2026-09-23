@@ -117,11 +117,13 @@ function notify(text){
 }
 function updateLabel(update){
   const status=(update||{}).status||'idle';
-  if(['checking','updating','restarting'].includes(status)){
-    updateBtn.disabled=true;
+  const busy=['checking','updating','restarting'].includes(status);
+  updateBtn.disabled=busy;
+  msg.disabled=busy;
+  send.disabled=busy;
+  if(busy){
     updateBtn.textContent=status==='checking'?'正在检查…':status==='updating'?'正在更新…':'正在重启…';
   }else{
-    updateBtn.disabled=false;
     updateBtn.textContent='检查并更新';
   }
 }
@@ -160,6 +162,7 @@ async function startUpdate(){
       const reason={
         worker_active:'当前正在执行真实任务，请等任务停在安全节点后再更新。',
         runnable_task_pending:'还有可立即执行的任务，请先暂停或等它停在安全节点。',
+        otp_in_flight:'正在等待或处理短信验证码，此时不能更新。',
         not_on_main:'当前代码不在 main 分支，已拒绝自动更新。',
         tracked_changes_present:'本地有未提交代码修改，已拒绝自动更新。',
         unexpected_origin:'GitHub 来源不符合预期，已拒绝自动更新。'
@@ -183,7 +186,20 @@ async function pollUpdate(){
     }
     if(data.status==='up_to_date')notify('已经是最新版本。');
     if(data.status==='success')notify('更新完成，正在打开新版本。');
-    if(data.status==='failed')notify('更新没有完成；当前任务和已有版本保持安全。');
+    if(data.status==='failed'){
+      const reason={
+        worker_active:'更新取消：当前仍有任务在执行。',
+        runnable_task_pending:'更新取消：还有可立即执行的任务。',
+        otp_in_flight:'更新取消：短信验证码流程正在进行。',
+        not_on_main:'更新取消：当前不在 main 分支。',
+        tracked_changes_present:'更新取消：本地有未提交的代码修改。',
+        unexpected_origin:'更新取消：GitHub 来源不符合预期。',
+        fast_forward_required:'更新取消：远端无法安全快进到本地。',
+        service_stop_failed:'代码已检查，但服务没有安全停止。',
+        service_start_failed:'代码已更新，但服务未能自动重启；重新打开 AI 投递经理即可重试启动。'
+      }[data.reason]||'更新没有完成；当前任务和已有版本保持安全。';
+      notify(reason);
+    }
   }catch(e){
     // During a successful restart this old session disappears. The updater
     // opens a new authenticated UI, so no destructive retry is attempted here.
