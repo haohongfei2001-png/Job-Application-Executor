@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json,re,time
 from pathlib import Path
+from urllib.parse import urlsplit
 from .browser import connect,latest_page
 from .field_classifier import classify,is_final_submit,is_next,is_initial_apply
 from .profile import load_profile,get_value,masked_preview
@@ -162,6 +163,13 @@ class Executor:
         return p
 
     def run(self,max_pages=12):
+        # The original CLI engine stores raw page text and screenshots in its
+        # legacy runtime files. Until those artifacts have a copy-safe
+        # replacement, it may exercise only synthetic local fixtures.
+        target=urlsplit(self.job_url)
+        if not (target.scheme=='file' or
+                (target.scheme in {'http','https'} and target.hostname in {'127.0.0.1','localhost'})):
+            raise RuntimeError('legacy executor supports isolated local fixtures only')
         self.pw,self.browser,self.ctx,self.page=connect(self.job_url)
         try:
             self.checkpoint(RunState.LOCATING_APPLICATION)

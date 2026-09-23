@@ -209,6 +209,16 @@ def test_audit_redacts_sensitive_payloads(tmp_path, monkeypatch):
     assert "123456789012345678" not in store.actions_path.read_text(encoding="utf-8")
     assert "462810" not in store.actions_path.read_text(encoding="utf-8")
     assert "secret-token" not in (store.root / "submit-receipt.json").read_text(encoding="utf-8")
+    with pytest.raises(RuntimeError, match="screenshots are disabled"):
+        store.screenshot_path("ready-to-submit")
+
+
+def test_legacy_application_cli_rejects_external_execution():
+    from executor.app_cli import _require_isolated_fixture
+
+    with pytest.raises(RuntimeError, match="isolated local fixtures only"):
+        _require_isolated_fixture("https://careers.example.test/jobs/1")
+    _require_isolated_fixture("http://127.0.0.1:8123/apply")
 
 
 def test_optional_legal_or_subjective_question_still_blocks(tmp_path, monkeypatch):

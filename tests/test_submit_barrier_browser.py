@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 from executor.engine import Executor
+import pytest
 from executor.state import RunState
 
 def test_browser_fill_and_stop_before_submit(tmp_path, monkeypatch):
@@ -32,3 +33,15 @@ def test_legacy_submit_helper_cannot_click_final_submit():
 
     with pytest.raises(RuntimeError, match="must be clicked by the user"):
         submit_current("FINAL_SUBMIT")
+
+
+def test_legacy_engine_rejects_external_site_before_browser_connect(tmp_path, monkeypatch):
+    resume = tmp_path / "resume.pdf"
+    resume.write_bytes(b"synthetic")
+    profile = tmp_path / "profile.json"
+    profile.write_text("{}")
+    monkeypatch.setattr("executor.engine.connect", lambda *_: (_ for _ in ()).throw(
+        AssertionError("external browser connection attempted")))
+    runner = Executor("https://careers.example.test/jobs/1", str(resume), str(profile))
+    with pytest.raises(RuntimeError, match="isolated local fixtures only"):
+        runner.run()

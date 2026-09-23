@@ -112,4 +112,6 @@ class AuditStore:
         return path
 
     def screenshot_path(self, name: str) -> str:
-        return str(self.root / "evidence" / f"{name}.png")
+        # Real pages may contain applicant facts, OTPs, cookies or QR codes.
+        # No default screenshot path is safe for this legacy audit store.
+        raise RuntimeError("automatic screenshots are disabled")
