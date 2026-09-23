@@ -48,7 +48,7 @@ def _covered(title: str, names: list[str]) -> bool:
         return False
     for name in names:
         nn = _norm(name)
-        if nn and (nt in nn or nn in nt):
+        if nn and nt == nn:
             return True
     return False
 

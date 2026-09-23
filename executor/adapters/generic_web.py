@@ -259,7 +259,7 @@ class GenericWebAdapter(SiteAdapter):
             val = opt.get_attribute("value") or ""
             hay = {text.casefold().removesuffix("市"), val.casefold()}
             for target in normalized:
-                if target in hay or (target and any(target in item for item in hay)):
+                if target in hay:
                     element.select_option(value=val)
                     return True
         return False
@@ -303,6 +303,10 @@ class GenericWebAdapter(SiteAdapter):
         warnings: list[str] = []
         current_fields = self.discover_fields()
         by_selector = {item.selector: item for item in plan.fields}
+        observed_selectors = {item.selector for item in current_fields}
+        for selector, expected in by_selector.items():
+            if expected.status == ResolutionStatus.RESOLVED and selector not in observed_selectors:
+                errors.append(f"{expected.label or expected.field_id}: field was not observed after fill")
 
         for field in current_fields:
             label = field.label or field.field_id
@@ -328,7 +332,7 @@ class GenericWebAdapter(SiteAdapter):
                 normalized = {str(x).strip().casefold().removesuffix("市") for x in candidates}
                 actual_norm = selected_text.casefold().removesuffix("市")
                 if normalized and actual_norm not in normalized:
-                    warnings.append(f"{label}: selected option uses site-specific normalization")
+                    errors.append(f"{label}: selected option does not match canonical value")
             else:
                 desired = self._control_text(expected.value, field.input_type, field.label)
                 if str(actual or "") != desired:

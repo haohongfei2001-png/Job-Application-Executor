@@ -19,6 +19,7 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .metric{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
 .task .title{font-weight:650}.task .meta{font-size:12px;color:#64748b;margin-top:4px}.stage{font-size:11px;border-radius:999px;padding:3px 7px;background:#eef2ff;display:inline-block;margin-top:7px}
+.taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
 .chat{padding:20px 24px;overflow:auto}.bubble{max-width:820px;padding:11px 13px;border-radius:13px;margin:8px 0;white-space:pre-wrap;line-height:1.5}
 .me{margin-left:auto;background:#111;color:#fff}.ai{background:#fff;border:1px solid #e5e7eb}.actions{font-size:12px;color:#64748b;margin-top:5px}
 .composer{background:#fff;border-top:1px solid #e5e7eb;padding:14px 20px;display:flex;gap:10px}
@@ -109,8 +110,27 @@ function render(state){
       <div class="title">${esc(t.company)} · ${esc(t.role)}</div>
       <div class="meta">${esc(t.target_host||'')} ${t.blocker?'· '+esc(humanBlocker(t.blocker)):''}</div>
       <span class="stage">${esc(humanStage(t.stage))}</span>
+      <div class="taskcontrols">
+        ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
+        ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
+        ${!['SUBMITTED','VERIFIED','CANCELLED','READY_TO_SUBMIT'].includes(t.stage)?`<button type="button" data-action="CANCEL" data-task="${esc(t.task_id)}" data-revision="${t.revision}">取消</button>`:''}
+      </div>
     </div>`).join('');
 }
+tasksEl.addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-action]');if(!button)return;
+  button.disabled=true;
+  const action=button.dataset.action,task_id=button.dataset.task;
+  const expected_revision=Number(button.dataset.revision);
+  const command_id='ui-'+crypto.randomUUID();
+  try{
+    const r=await fetch('/ui/api/command',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      body:JSON.stringify({command_id,task_id,action,expected_revision})});
+    if(!r.ok)throw new Error();
+    notify({PAUSE:'任务已暂停',RESUME:'任务已继续',CANCEL:'任务已取消'}[action]);
+    await state();
+  }catch(e){notify('任务状态已变化，请刷新后重试。');await state()}
+});
 function notify(text){
   toast.textContent=text;toast.style.display='block';
   clearTimeout(notify.timer);notify.timer=setTimeout(()=>{toast.style.display='none'},4200);

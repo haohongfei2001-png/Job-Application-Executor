@@ -118,11 +118,8 @@ def _connect_isolated(target_url: str | None = None):
                 "--no-default-browser-check",
             ],
         }
-        # macOS live applications use the user's installed Google Chrome. Isolated
-        # tests must also run on CI/Linux, where that path does not exist; in that
-        # case use Playwright's bundled Chromium without touching the live profile.
-        if Path(CHROME).exists():
-            launch_kwargs["executable_path"] = CHROME
+        # Test runs always use the bundled headless browser. The installed Chrome
+        # belongs to the live CDP path and may carry user policy or permissions.
         browser = pw.chromium.launch(**launch_kwargs)
         ctx = browser.new_context()
         page = ctx.new_page()

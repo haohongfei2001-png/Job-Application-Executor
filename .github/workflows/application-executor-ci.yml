@@ -10,6 +10,21 @@ permissions:
   contents: read
 
 jobs:
+  foundation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Deterministic task and command contract
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q tests/test_jcr01_contract.py -k 'not city_select'
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20

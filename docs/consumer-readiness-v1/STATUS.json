@@ -5,7 +5,7 @@
   "audit_baseline_sha": "72dd892c144699f8a9e9988265bfb20f50b3db4e",
   "registration_base_sha": "72dd892c144699f8a9e9988265bfb20f50b3db4e",
   "registration_status": "REGISTERED",
-  "implementation_status": "AUTHORIZED_NOT_STARTED",
+  "implementation_status": "IMPLEMENTING",
   "consumer_certification": "NOT_CERTIFIED",
   "runtime_modified_by_registration": false,
   "private_runtime_accessed_by_registration": false,
@@ -39,7 +39,7 @@
   "rounds": [
     {
       "id": "JCR-01",
-      "status": "READY",
+      "status": "IMPLEMENTING",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "Begin JCR-01 and continue unattended through all automatable JCR work. Record owner/live/permission/paid/external or unresolved engineering dependencies in DEFERRED_FINAL_GATES.md and keep advancing on independent work. Do not wait for owner between rounds. JCR-09 final convergence is the only package-level wait point after all automatable work is exhausted.",
+  "next_action": "Continue JCR-01. Command CAS/receipts, local controls, synthetic oracle and initial false-READY repairs are implemented; complete F-01 through F-09 evidence, migration/rollback and exact-head CI before marking the round COMPLETE. Then continue unattended through later JCR rounds under the canonical dependency contract.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

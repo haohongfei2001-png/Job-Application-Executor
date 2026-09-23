@@ -4,6 +4,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+import uuid
 from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit
@@ -73,6 +74,8 @@ def safe_task_view(task: dict[str, Any]) -> dict[str, Any]:
         "job_id": str(spec.get("job_id") or "")[:150],
         "campaign": str(spec.get("campaign") or "")[:150],
         "stage": str(task.get("stage") or ""),
+        "revision": int(task.get("revision") or 0),
+        "run_state": str(task.get("run_state") or ""),
         "checkpoint": str(task.get("checkpoint") or ""),
         "blocker": str(task.get("blocker") or ""),
         "unresolved_keys": unresolved,
@@ -352,7 +355,7 @@ class ManagerController:
             raise ValueError("profile_path is not configured")
         return value
 
-    def _apply(self, decision: ManagerDecision, message: str) -> dict[str, Any]:
+    def _apply(self, decision: ManagerDecision, message: str, *, expected_revision: int | None = None) -> dict[str, Any]:
         action = decision.action
         if action == ManagerAction.REPORT:
             return {"action": str(action), "status": "observed"}
@@ -390,22 +393,28 @@ class ManagerController:
                     "task_id": decision.task_id,
                     "resolved_target": True,
                 }
-            self.queue.resume(decision.task_id)
+            self.queue.control("RESUME", decision.task_id,
+                command_id="manager-" + uuid.uuid4().hex,
+                expected_revision=expected_revision)
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
         if action == ManagerAction.PAUSE:
             if not _PAUSE_RE.search(message):
                 return {"action": str(action), "status": "denied", "reason": "explicit_pause_required"}
-            self.queue.pause(decision.task_id)
+            self.queue.control("PAUSE", decision.task_id,
+                command_id="manager-" + uuid.uuid4().hex,
+                expected_revision=expected_revision)
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
         if action == ManagerAction.CANCEL:
             if not _CANCEL_RE.search(message):
                 return {"action": str(action), "status": "denied", "reason": "explicit_cancel_required"}
+            self.queue.control("CANCEL", decision.task_id,
+                command_id="manager-" + uuid.uuid4().hex,
+                expected_revision=expected_revision)
             self.worker.broker.discard(decision.task_id)
             with self.worker.answers_lock:
                 self.worker.answers.pop(decision.task_id, None)
-            self.queue.cancel(decision.task_id)
             return {"action": str(action), "status": "accepted", "task_id": decision.task_id}
 
         if action == ManagerAction.ANSWER_PENDING:
@@ -611,9 +620,23 @@ class ManagerController:
                 **self.state(),
             }
         actions = []
+        observed_revisions = {task["task_id"]: task["revision"] for task in task_rows}
         for decision in turn.decisions:
             try:
-                actions.append(self._apply(decision, message))
+                if decision.action not in {ManagerAction.REPORT, ManagerAction.CREATE_TASK}:
+                    observed = observed_revisions.get(decision.task_id)
+                    if observed is None or self.queue.get(decision.task_id)["revision"] != observed:
+                        actions.append({"action": str(decision.action), "status": "denied",
+                                        "reason": "stale_task_revision"})
+                        continue
+                if decision.action == ManagerAction.CREATE_TASK:
+                    current = {task["task_id"]: task["revision"] for task in self.queue.tasks()}
+                    if current != observed_revisions:
+                        actions.append({"action": str(decision.action), "status": "denied",
+                                        "reason": "stale_task_context"})
+                        continue
+                actions.append(self._apply(decision, message,
+                    expected_revision=observed_revisions.get(decision.task_id)))
             except (KeyError, ValueError, RuntimeError):
                 actions.append(
                     {

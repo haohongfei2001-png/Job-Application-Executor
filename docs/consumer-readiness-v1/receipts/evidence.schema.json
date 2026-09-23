@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JAE Consumer Readiness Evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["package", "round", "case_id", "evidence_class", "status", "source_sha", "environment", "expected", "actual", "artifact_refs"],
+  "properties": {
+    "package": {"const": "JAE-CONSUMER-READINESS-v1"},
+    "round": {"type": "string", "pattern": "^JCR-0[1-9]$"},
+    "case_id": {"type": "string", "minLength": 1},
+    "evidence_class": {"enum": ["AUTO", "AUTO_MAC", "PUBLIC", "FINAL_LIVE"]},
+    "status": {"enum": ["PASS", "FAIL", "NOT_RUN", "UNVERIFIED", "PENDING"]},
+    "source_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "environment": {"type": "string", "minLength": 1},
+    "seed": {"type": ["integer", "null"]},
+    "expected": {"type": "string"},
+    "actual": {"type": "string"},
+    "oracle": {"type": ["string", "null"]},
+    "artifact_refs": {"type": "array", "items": {"type": "string"}},
+    "deferred_gate_id": {"type": ["string", "null"], "pattern": "^DFG-[0-9]{3}$"}
+  }
+}

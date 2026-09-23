@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import re
 import sqlite3
@@ -78,6 +79,20 @@ class TaskQueue:
         self.path = self.root / "tasks.sqlite3"
         self.clock = clock
         self.lock = threading.RLock()
+        # Preserve one consistent pre-migration snapshot. The old executable
+        # schema can still read it if a rollback is needed; never overwrite it.
+        backup_path = self.root / "tasks.sqlite3.pre-jcr01.sqlite3"
+        migration_lock = self.root / "migration.lock"
+        with migration_lock.open("a+") as lock_handle:
+            migration_lock.chmod(0o600)
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            if self.path.exists() and not backup_path.exists():
+                with sqlite3.connect(self.path) as source:
+                    columns_before = {row[1] for row in source.execute("PRAGMA table_info(tasks)")}
+                    if columns_before and "revision" not in columns_before:
+                        with sqlite3.connect(backup_path) as destination:
+                            source.backup(destination)
+                        backup_path.chmod(0o600)
         with self.tx() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -93,6 +108,25 @@ class TaskQueue:
             columns = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
             if "checkpoint_url" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN checkpoint_url TEXT")
+            if "revision" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+            if "phase" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN phase TEXT NOT NULL DEFAULT 'DISCOVERED'")
+                db.execute("UPDATE tasks SET phase=checkpoint")
+            if "run_state" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN run_state TEXT NOT NULL DEFAULT 'RUNNABLE'")
+            if "wait_reason" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN wait_reason TEXT")
+                db.execute("UPDATE tasks SET wait_reason=blocker WHERE blocker IS NOT NULL")
+            if "paused_from" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN paused_from TEXT")
+                db.execute("UPDATE tasks SET paused_from='NEEDS_USER_INPUT' WHERE blocker='user_paused_from_input'")
+                db.execute("UPDATE tasks SET paused_from='NEEDS_USER_ACTION' WHERE blocker IN ('user_paused_from_action','user_paused_from_otp_waiting','user_paused_from_otp_ambiguous')")
+                db.execute("UPDATE tasks SET paused_from='BLOCKED' WHERE blocker IN ('user_paused_from_session_unavailable','user_paused_from_validation')")
+            db.execute("UPDATE tasks SET run_state=CASE WHEN stage='BLOCKED' AND blocker LIKE 'user_paused%' THEN 'PAUSED' WHEN stage IN ('BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION') THEN 'WAITING' WHEN stage='READY_TO_SUBMIT' THEN 'READY' WHEN stage IN ('SUBMITTED','VERIFIED') THEN 'DONE' WHEN stage='CANCELLED' THEN 'CANCELLED' WHEN stage='ERROR' THEN 'ERROR' ELSE 'RUNNABLE' END")
+            db.execute('''CREATE TABLE IF NOT EXISTS commands (
+                command_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+                action TEXT NOT NULL, receipt TEXT NOT NULL, created REAL NOT NULL)''')
         self.path.chmod(0o600)
 
     @contextmanager
@@ -112,6 +146,55 @@ class TaskQueue:
 
     def _event(self, db, task_id, kind, stage):
         db.execute("INSERT INTO events(task_id,at,kind,stage) VALUES(?,?,?,?)", (task_id, self.clock(), kind, stage))
+        row = db.execute("SELECT stage,checkpoint,blocker FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        run_state = (
+            "PAUSED" if row["stage"] == "BLOCKED" and str(row["blocker"] or "").startswith("user_paused")
+            else "WAITING" if row["stage"] in {"BLOCKED", "NEEDS_USER_INPUT", "NEEDS_USER_ACTION"}
+            else "READY" if row["stage"] == "READY_TO_SUBMIT"
+            else "DONE" if row["stage"] in {"SUBMITTED", "VERIFIED"}
+            else "CANCELLED" if row["stage"] == "CANCELLED"
+            else "ERROR" if row["stage"] == "ERROR"
+            else "RUNNABLE"
+        )
+        db.execute("UPDATE tasks SET revision=revision+1,phase=?,run_state=?,wait_reason=? WHERE task_id=?",
+                   (row["checkpoint"], run_state, row["blocker"] if run_state in {"PAUSED", "WAITING", "ERROR"} else None, task_id))
+
+    def _command_before(self, db, task_id, action, command_id, expected_revision):
+        if command_id:
+            existing = db.execute("SELECT * FROM commands WHERE command_id=?", (command_id,)).fetchone()
+            if existing:
+                if existing["task_id"] != task_id or existing["action"] != action:
+                    raise ValueError("command ID reused for different operation")
+                return json.loads(existing["receipt"])
+        if expected_revision is not None:
+            row = db.execute("SELECT revision FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError("task not found")
+            if row["revision"] != expected_revision:
+                raise RuntimeError("stale task revision")
+        return None
+
+    def _command_after(self, db, task_id, action, command_id):
+        row = db.execute("SELECT revision,stage FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        receipt = {"command_id": command_id, "task_id": task_id, "action": action,
+                   "status": "accepted", "revision": row["revision"], "stage": row["stage"]}
+        if command_id:
+            db.execute("INSERT INTO commands VALUES(?,?,?,?,?)",
+                       (command_id, task_id, action, json.dumps(receipt), self.clock()))
+        return receipt
+
+    def control(self, action, task_id, *, command_id, expected_revision):
+        if not isinstance(command_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,120}", command_id):
+            raise ValueError("invalid command ID")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expected revision required")
+        if action == "PAUSE":
+            return self.pause(task_id, command_id=command_id, expected_revision=expected_revision)
+        if action == "RESUME":
+            return self.resume(task_id, command_id=command_id, expected_revision=expected_revision)
+        if action == "CANCEL":
+            return self.cancel(task_id, command_id=command_id, expected_revision=expected_revision)
+        raise ValueError("unsupported local control")
 
     @staticmethod
     def _view(row):
@@ -201,6 +284,13 @@ class TaskQueue:
         with self.tx() as db:
             return self._view(db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone())
 
+    def command_receipt(self, command_id):
+        with self.tx() as db:
+            row = db.execute("SELECT receipt FROM commands WHERE command_id=?", (command_id,)).fetchone()
+            if row is None:
+                raise KeyError("command not found")
+            return json.loads(row["receipt"])
+
     def tasks(self):
         with self.tx() as db:
             return [self._view(x) for x in db.execute("SELECT * FROM tasks ORDER BY created")]
@@ -278,8 +368,11 @@ class TaskQueue:
             db.execute("UPDATE tasks SET stage=?,checkpoint=?,blocker=?,details=?,owner=?,lease_until=?,next_run=?,updated=? WHERE task_id=?", (stage, cp, blocker, json.dumps(safe), None if release else owner, None if release else row["lease_until"], self.clock()+delay, self.clock(), tid))
             self._event(db, tid, "checkpoint", stage)
 
-    def resume(self, tid):
+    def resume(self, tid, *, command_id=None, expected_revision=None):
         with self.tx() as db:
+            prior = self._command_before(db, tid, "RESUME", command_id, expected_revision)
+            if prior is not None:
+                return prior
             row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
             self._view(row)
             if (row["owner"] and row["lease_until"] > self.clock()) or row["stage"] in STOPPED:
@@ -324,11 +417,14 @@ class TaskQueue:
                 }
             )
             attempts = 0 if (human_wait or recoverable_block) else row["attempts"]
-            db.execute("UPDATE tasks SET stage=checkpoint,blocker=NULL,next_run=0,attempts=?,owner=NULL,lease_until=NULL,updated=? WHERE task_id=?", (attempts, self.clock(), tid))
+            db.execute("UPDATE tasks SET stage=checkpoint,blocker=NULL,next_run=0,attempts=?,owner=NULL,lease_until=NULL,paused_from=NULL,updated=? WHERE task_id=?", (attempts, self.clock(), tid))
             self._event(db, tid, "resumed", row["checkpoint"])
+            receipt = self._command_after(db, tid, "RESUME", command_id)
+        if command_id:
+            return receipt
         return self.get(tid)
 
-    def pause(self, tid):
+    def pause(self, tid, *, command_id=None, expected_revision=None):
         """Pause a task at its last safe checkpoint without cancelling it.
 
         An active worker is fenced immediately by clearing its lease. An in-flight
@@ -336,6 +432,9 @@ class TaskQueue:
         mutations. Resume returns the task to its existing safe checkpoint.
         """
         with self.tx() as db:
+            prior = self._command_before(db, tid, "PAUSE", command_id, expected_revision)
+            if prior is not None:
+                return prior
             row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
             self._view(row)
             if row["stage"] in STOPPED or row["stage"] in {"SUBMITTED", "VERIFIED"}:
@@ -376,18 +475,27 @@ class TaskQueue:
             paused_attempts = max(0, row["attempts"] - 1) if active_claim else row["attempts"]
             db.execute(
                 "UPDATE tasks SET stage='BLOCKED',blocker=?,attempts=?,"
-                "owner=NULL,lease_until=NULL,next_run=0,updated=? WHERE task_id=?",
-                (pause_blocker, paused_attempts, now, tid),
+                "owner=NULL,lease_until=NULL,next_run=0,paused_from=COALESCE(paused_from,?),updated=? WHERE task_id=?",
+                (pause_blocker, paused_attempts, row["stage"], now, tid),
             )
             self._event(db, tid, "paused", "BLOCKED")
+            receipt = self._command_after(db, tid, "PAUSE", command_id)
+        if command_id:
+            return receipt
         return self.get(tid)
 
-    def cancel(self, tid):
+    def cancel(self, tid, *, command_id=None, expected_revision=None):
         with self.tx() as db:
+            prior = self._command_before(db, tid, "CANCEL", command_id, expected_revision)
+            if prior is not None:
+                return prior
             row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
             self._view(row)
             if row["stage"] in {"SUBMITTED", "VERIFIED"}:
                 raise ValueError("submitted task is read-only")
             db.execute("UPDATE tasks SET stage='CANCELLED',owner=NULL,lease_until=NULL,updated=? WHERE task_id=?", (self.clock(), tid))
             self._event(db, tid, "cancelled", "CANCELLED")
+            receipt = self._command_after(db, tid, "CANCEL", command_id)
+        if command_id:
+            return receipt
         return self.get(tid)

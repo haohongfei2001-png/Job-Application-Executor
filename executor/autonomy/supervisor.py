@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .dashboard import DASHBOARD_HTML
+from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
 from .manager import ManagerController
 from .queue import TaskQueue, TaskSpec, private_dir
@@ -154,6 +155,10 @@ class Supervisor:
     def dispatch(self, method, path, data):
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
+        if method == "POST" and parts == ["v1", "commands"]:
+            if self.mutation_fenced():
+                raise RuntimeError("update in progress")
+            return self._dispatch_unlocked(method, path, data)
         if method == "POST" and parts != ["v1", "ui-ticket"]:
             return self.run_mutation(
                 lambda: self._dispatch_unlocked(method, path, data)
@@ -167,6 +172,19 @@ class Supervisor:
             return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user"}
         if method == "GET" and parts == ["v1", "tasks"]:
             return {"tasks": self.queue.tasks()}
+        if method == "GET" and len(parts) == 3 and parts[:2] == ["v1", "commands"]:
+            return self.queue.command_receipt(parts[2])
+        if method == "POST" and parts == ["v1", "commands"]:
+            command = CommandEnvelope.model_validate(data)
+            if command.action == "CANCEL":
+                # Clear transient OTP and unsaved answers only after the
+                # transactional control succeeds.
+                receipt = self.queue.control(**command.model_dump())
+                self.worker.broker.discard(command.task_id)
+                with self.worker.answers_lock:
+                    self.worker.answers.pop(command.task_id, None)
+                return receipt
+            return self.queue.control(**command.model_dump())
         if method == "GET" and parts == ["v1", "events"]:
             return {"events": self.queue.events(int(parse_qs(parsed.query).get("after", [0])[0]))}
         if method == "GET" and parts == ["v1", "diagnostics"]:
@@ -335,6 +353,17 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                             lambda: supervisor.manager.handle(data["message"])
                         )
                         self._send_json(200, result)
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/command":
+                        command = CommandEnvelope.model_validate(self._read_json())
+                        if supervisor.mutation_fenced():
+                            raise RuntimeError("update in progress")
+                        receipt = supervisor.queue.control(**command.model_dump())
+                        if command.action == "CANCEL":
+                            supervisor.worker.broker.discard(command.task_id)
+                            with supervisor.worker.answers_lock:
+                                supervisor.worker.answers.pop(command.task_id, None)
+                        self._send_json(200, receipt)
                         return
                     self._send_json(404, {"error": "not_found"})
                 except (ValueError, TypeError):

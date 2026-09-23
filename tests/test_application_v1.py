@@ -136,6 +136,28 @@ def test_ready_to_submit_does_not_submit_without_authorization(tmp_path, monkeyp
     assert fake.submit_calls == 0
 
 
+def test_uncovered_project_blocks_false_ready(tmp_path, monkeypatch):
+    profile = tmp_path / "project-profile.json"
+    profile.write_text(json.dumps({"fields": {"identity.full_name": {
+        "value": "Synthetic Applicant", "confidence": 1.0,
+    }}, "collections": {"projects": [{"title": "AI Product Research"}]}}))
+    fake = FakeAdapter([
+        WebField(field_id="name", selector="#name", label="姓名", required=True),
+        WebField(field_id="project", selector="#project", label="项目名称", required=True,
+                 current_value="AI Product"),
+    ], final="Submit application")
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: fake)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    runner = ApplicationExecutor("https://example.test/apply", profile,
+                                 {"deepseek": {"enabled": False}})
+    # The existing site value is retained, but a prefix title cannot certify
+    # the distinct canonical project.
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["final_review"]["project_coverage"]["uncovered_projects"] == ["AI Product Research"]
+    assert fake.submit_calls == 0
+
+
 def test_submit_authorized_still_requires_manual_final_click(tmp_path, monkeypatch):
     fake = FakeAdapter([
         WebField(field_id="name", selector="#name", label="姓名", required=True),
