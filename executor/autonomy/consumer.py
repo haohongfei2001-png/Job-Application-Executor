@@ -68,7 +68,9 @@ def install_macos_app(
     apps_dir.mkdir(parents=True, exist_ok=True)
     app = apps_dir / f"{APP_NAME}.app"
     staging = apps_dir / f".{APP_NAME}.app.installing"
-    if staging.exists():
+    if staging.is_symlink():
+        staging.unlink()
+    elif staging.exists():
         shutil.rmtree(staging)
 
     macos = staging / "Contents" / "MacOS"
@@ -121,8 +123,10 @@ exit $STATUS
     with (staging / "Contents" / "Info.plist").open("wb") as handle:
         plistlib.dump(info, handle, sort_keys=True)
 
-    replaced = app.exists()
-    if app.exists():
+    replaced = app.exists() or app.is_symlink()
+    if app.is_symlink():
+        app.unlink()
+    elif app.exists():
         shutil.rmtree(app)
     staging.rename(app)
     return {
