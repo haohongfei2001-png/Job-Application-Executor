@@ -46,6 +46,12 @@ def structured_project_names(fields: list[FieldResolution]) -> list[str]:
     return names
 
 
+def _covered(title: str, names: list[str]) -> bool:
+    """Exact normalized title match retained for historical review contracts."""
+    normalized = _norm(title)
+    return bool(normalized and any(_norm(name) == normalized for name in names))
+
+
 def project_coverage_review(
     profile: dict[str, Any],
     plan: ApplicationPlan,
