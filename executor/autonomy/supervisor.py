@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
-from .manager import ManagerController
+from .manager import ManagerController, safe_task_view
 from .queue import TaskQueue, TaskSpec, private_dir
 from .updater import reconciled_update_state, safe_to_update, spawn_update
 from .worker import Worker
@@ -166,6 +166,14 @@ class Supervisor:
                 with self.worker.answers_lock:
                     self.worker.answers.pop(command.task_id, None)
             return receipt
+
+    def run_local_fact(self, task_id, field_key, value, revision):
+        with self._command_lock:
+            if self.mutation_fenced():
+                raise RuntimeError("update in progress")
+            updated = self.worker.user_input(task_id, {field_key: value},
+                                             expected_revision=revision)
+            return {"status": "accepted", "task": safe_task_view(updated)}
 
     def dispatch(self, method, path, data):
         parsed = urlsplit(path)
@@ -363,6 +371,19 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         command = CommandEnvelope.model_validate(self._read_json())
                         receipt = supervisor.run_local_command(command)
                         self._send_json(200, receipt)
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/user-input":
+                        data = self._read_json()
+                        if set(data) != {"task_id", "field_key", "value", "expected_revision"}:
+                            raise ValueError("invalid local fact envelope")
+                        tid, key = data["task_id"], data["field_key"]
+                        if not isinstance(tid, str) or not isinstance(key, str):
+                            raise ValueError("invalid local fact target")
+                        revision = data["expected_revision"]
+                        if type(revision) is not int or revision < 0:
+                            raise ValueError("expected revision required")
+                        result = supervisor.run_local_fact(tid, key, data["value"], revision)
+                        self._send_json(200, result)
                         return
                     self._send_json(404, {"error": "not_found"})
                 except (ValueError, TypeError):

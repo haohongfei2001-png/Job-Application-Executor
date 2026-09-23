@@ -7,6 +7,7 @@ import http.cookiejar
 import json
 import random
 import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -211,6 +212,88 @@ def test_command_cannot_resume_between_update_safety_check_and_start(tmp_path, m
     assert results["ok"]
     assert outcome == ["FENCED"]
     assert queue.get(tid)["run_state"] == "PAUSED"
+
+
+def test_ui_private_fact_input_is_local_scoped_and_revision_checked(tmp_path):
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = task(queue, tmp_path)["task_id"]
+    claimed = queue.claim("synthetic-worker")
+    queue.checkpoint(tid, claimed["owner"], "NEEDS_USER_INPUT",
+                     blocker="unknown_facts", details={"unresolved_keys": ["family.primary.role"]},
+                     release=True)
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    supervisor = Supervisor(queue, worker=worker)
+    server = create_server(supervisor, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    opener.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+    before = queue.get(tid)
+    secret = "Synthetic private family role"
+
+    def answer(revision):
+        request = urllib.request.Request(base + "/ui/api/user-input",
+            data=json.dumps({"task_id": tid, "field_key": "family.primary.role",
+                             "value": secret, "expected_revision": revision}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        return opener.open(request)
+
+    try:
+        with pytest.raises(urllib.error.HTTPError) as stale:
+            answer(before["revision"] - 1)
+        assert stale.value.code == 409
+        assert tid not in worker.answers
+        result = json.load(answer(before["revision"]))
+        assert result["status"] == "accepted"
+        assert secret not in json.dumps(result)
+        assert worker.answers[tid]["family.primary.role"] == secret
+        assert secret.encode() not in queue.path.read_bytes()
+        assert queue.get(tid)["stage"] == "DISCOVERED"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_dashboard_fact_control_submits_only_to_local_service(tmp_path):
+    from playwright.sync_api import sync_playwright
+
+    queue = TaskQueue(tmp_path / "runtime")
+    tid = task(queue, tmp_path)["task_id"]
+    claimed = queue.claim("synthetic-worker")
+    queue.checkpoint(tid, claimed["owner"], "NEEDS_USER_INPUT",
+                     blocker="unknown_facts", details={"unresolved_keys": ["family.primary.role"]},
+                     release=True)
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+
+    class ForbiddenProvider:
+        available = True
+
+        def decide(self, *_):
+            raise AssertionError("private answer reached model provider")
+
+    manager = ManagerController(queue, worker, provider=ForbiddenProvider(), settings={})
+    supervisor = Supervisor(queue, worker=worker, manager=manager)
+    server = create_server(supervisor, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    secret = "Synthetic private answer"
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                page.goto(f"http://127.0.0.1:{server.server_port}/ui-login?ticket="
+                          + supervisor.issue_ui_ticket())
+                page.get_by_label("family.primary.role").fill(secret)
+                page.get_by_role("button", name="本地填写").click()
+                page.locator("button[data-answer]").wait_for(state="detached")
+            finally:
+                browser.close()
+        assert worker.answers[tid]["family.primary.role"] == secret
+        assert queue.get(tid)["stage"] == "DISCOVERED"
+        assert secret.encode() not in queue.path.read_bytes()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_ui_pause_does_not_wait_for_model_timeout(tmp_path):

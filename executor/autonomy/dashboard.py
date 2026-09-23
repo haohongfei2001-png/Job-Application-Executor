@@ -20,6 +20,7 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
 .task .title{font-weight:650}.task .meta{font-size:12px;color:#64748b;margin-top:4px}.stage{font-size:11px;border-radius:999px;padding:3px 7px;background:#eef2ff;display:inline-block;margin-top:7px}
 .taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
+.factinput{display:flex;gap:5px;margin-top:8px}.factinput input{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.factinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}
 .chat{padding:20px 24px;overflow:auto}.bubble{max-width:820px;padding:11px 13px;border-radius:13px;margin:8px 0;white-space:pre-wrap;line-height:1.5}
 .me{margin-left:auto;background:#111;color:#fff}.ai{background:#fff;border:1px solid #e5e7eb}.actions{font-size:12px;color:#64748b;margin-top:5px}
 .composer{background:#fff;border-top:1px solid #e5e7eb;padding:14px 20px;display:flex;gap:10px}
@@ -51,7 +52,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   </div>
 </header>
 <div id="chat" class="chat">
-  <div class="bubble ai">把职位链接发给我并说“投递这个岗位”，或者直接说“继续”“暂停”“取消”。我会处理能自动完成的步骤；遇到需要你决定或安全验证的地方会停下来。最终提交由你确认。</div>
+  <div class="bubble ai">把职位链接发给我并说“投递这个岗位”。暂停、继续和取消可在任务卡片操作；私人资料请在任务卡片本地填写。遇到需要你决定或安全验证的地方会停下来，最终提交由你本人完成。</div>
 </div>
 <div class="composer">
   <textarea id="message" placeholder="告诉我你想投哪个岗位，或直接说“继续这个岗位”…"></textarea>
@@ -110,6 +111,9 @@ function render(state){
       <div class="title">${esc(t.company)} · ${esc(t.role)}</div>
       <div class="meta">${esc(t.target_host||'')} ${t.blocker?'· '+esc(humanBlocker(t.blocker)):''}</div>
       <span class="stage">${esc(humanStage(t.stage))}</span>
+      ${t.stage==='NEEDS_USER_INPUT'?(t.unresolved_keys||[]).map(key=>`
+        <label class="factinput"><span>${esc(key)}</span><input autocomplete="off" aria-label="${esc(key)}">
+          <button type="button" data-answer="true" data-key="${esc(key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button></label>`).join(''):''}
       <div class="taskcontrols">
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
         ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
@@ -130,6 +134,29 @@ tasksEl.addEventListener('click',async event=>{
     notify({PAUSE:'任务已暂停',RESUME:'任务已继续',CANCEL:'任务已取消'}[action]);
     await state();
   }catch(e){notify('任务状态已变化，请刷新后重试。');await state()}
+});
+tasksEl.addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-answer]');if(!button)return;
+  const input=button.previousElementSibling,value=input.value;
+  if(!value.trim()){notify('请先填写答案。');return}
+  button.disabled=true;
+  try{
+    const r=await fetch('/ui/api/user-input',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      body:JSON.stringify({task_id:button.dataset.task,field_key:button.dataset.key,
+        value,expected_revision:Number(button.dataset.revision)})});
+    if(!r.ok)throw new Error();
+    input.value='';
+    notify('答案已在本地交给当前任务。');await state();
+  }catch(e){
+    try{
+      const r=await fetch('/ui/api/state',{credentials:'same-origin'}),data=await r.json();
+      const task=(data.tasks||[]).find(t=>t.task_id===button.dataset.task);
+      if(task&&task.stage==='NEEDS_USER_INPUT'&&(task.unresolved_keys||[]).includes(button.dataset.key)){
+        button.dataset.revision=String(task.revision);
+        notify('任务状态已变化；答案仍在本地，请核对后重试。');
+      }else{notify('任务不再等待这个答案；未提交输入。')}
+    }catch(_){notify('本地服务暂不可用；答案仍在输入框中。')}
+  }finally{button.disabled=false}
 });
 function notify(text){
   toast.textContent=text;toast.style.display='block';
@@ -242,7 +269,9 @@ async function state(){
   try{
     const r=await fetch('/ui/api/state',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
-    const data=await r.json();render(data);updateLabel(data.update);
+    const data=await r.json();
+    if(![...tasksEl.querySelectorAll('.factinput input')].some(input=>input.value))render(data);
+    updateLabel(data.update);
   }catch(e){document.getElementById('health').textContent='连接异常'}
 }
 function bubble(text,kind,actions){

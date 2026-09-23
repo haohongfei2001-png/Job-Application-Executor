@@ -55,7 +55,7 @@ python3 -m venv .venv
 
 A real application execution keeps one Playwright/CDP attachment for the whole run instead of reconnecting for every page. Live connections only auto-clean automation-owned junk: stale pytest `file://` pages, redundant blank tabs, and duplicate copies of the exact same target URL. Unrelated real job/application tabs are never closed by that cleanup.
 
-Tests are hard-isolated from the live profile. Pytest sets `APPLICATION_EXECUTOR_BROWSER_MODE=isolated`, which launches a temporary headless Chrome with extensions disabled; it must never attach to port 9333 or mutate the persistent application profile.
+Tests are hard-isolated from the live profile. Pytest sets `APPLICATION_EXECUTOR_BROWSER_MODE=isolated`, which launches Playwright's bundled headless Chromium with extensions disabled; it must never attach to port 9333 or mutate the persistent application profile. Live CDP reuse is refused unless the listener belongs to the dedicated private application profile and Chrome process.
 
 Generic form discovery and validation use one in-page DOM snapshot per pass rather than hundreds of per-field CDP calls. This materially reduces UI contention on large React/Beisen-style forms.
 

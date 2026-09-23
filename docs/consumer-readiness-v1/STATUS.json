@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "Continue JCR-01. Command CAS/receipts, local controls, synthetic oracle and initial false-READY repairs are implemented; complete F-01 through F-09 evidence, migration/rollback and exact-head CI before marking the round COMPLETE. Then continue unattended through later JCR rounds under the canonical dependency contract.",
+  "next_action": "Continue JCR-01 on PR #11. Resolve DFG-001 free-form private fact handling, complete F-01 through F-09 evidence and exact-head CI, then review/merge/read back before marking COMPLETE. Continue unattended through later JCR rounds under the canonical dependency contract; DFG-001 does not block independent engineering work.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

@@ -12,6 +12,7 @@ Status: IMPLEMENTING. This is a checkpoint, not round certification.
 
 - Task rows now expose a durable revision, phase, run state, wait reason and paused origin. Existing task IDs survive additive schema migration; the old SQLite schema gets a private one-time consistent backup before alteration.
 - Authenticated local command and UI paths accept typed pause/resume/cancel with expected revision and idempotent receipt lookup. UI controls are independent of a waiting model request. A stale model proposal is refused after the task changes.
+- Pending facts have a local task-card input with revision checks and scoped field keys; values are kept out of UI responses, queue SQLite and model payloads. Persistence across restart remains JCR-04 work.
 - Generic select readback is a validation error on wrong value or missing observed field. Project coverage uses exact normalized titles, and uncovered canonical projects block READY. OPPO city filtering rejects different or unknown cities when a city is requested.
 - Isolated tests use Playwright's bundled headless Chromium; the live Chrome/CDP path remains separate.
 
@@ -20,12 +21,12 @@ Status: IMPLEMENTING. This is a checkpoint, not round certification.
 - 1,000 seeded control steps, migration/backup readback, duplicate command replay and cross-process CAS tests: local AUTO tests passed.
 - Local UI → supervisor → worker → headless browser → SyntheticATS server draft: expected synthetic name/email matched actual server state; automated submission count was 0.
 - Wrong-city select after rerender, project-title prefix and location mismatch counterexamples: targeted AUTO tests passed.
-- Historical suite plus current JCR-01 tests: 261 passed in an isolated macOS run after the review and task-reference fixes. Exact-head CI and post-merge main integration are pending.
-- PR review found a multi-page selector regression and an update/command admission race. Both received production fixes and targeted regressions before this 261-test run.
+- Historical suite plus current JCR-01 tests: 263 passed in an isolated macOS run after the review, task-reference and local fact-input fixes. Exact-head CI for the latest branch head and post-merge main integration are pending.
+- PR review found a multi-page selector regression and an update/command admission race. Both received production fixes and targeted regressions before this 263-test run.
 - New negative-control and A/B task-reference regressions deny a model proposal when the user says not to pause or names another task; the user-facing mutation reply is built from deterministic receipts.
 
 ## Boundaries and remaining work
 
 - Real applicant data accessed: no. Real account, SMS, application or website side effects: no. Owner interaction: no.
-- No acceptance matrix case is marked PASS by this checkpoint. F-01 through F-09 require complete per-case evidence. Real local profile migration was not attempted. JCR-01 remains IMPLEMENTING.
+- No acceptance matrix case is marked PASS by this checkpoint. F-01 through F-09 require complete per-case evidence. Real local profile migration was not attempted. DFG-001 records the still unresolved free-form private fact entry risk; this PR remains unmerged until that unsafe production path is closed. JCR-01 remains IMPLEMENTING.
 - Next: complete F-class privacy/HTTP/browser ownership evidence, full exact-head regression and CI, review, merge, main readback, then close JCR-01 and advance to JCR-02.
