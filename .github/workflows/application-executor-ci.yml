@@ -20,7 +20,9 @@ jobs:
           python-version: '3.12'
           cache: pip
       - name: Install Python dependencies
-        run: python -m pip install -r requirements.txt
+        run: |
+          python -m pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
       - name: Deterministic task and command contract
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated

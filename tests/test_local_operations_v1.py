@@ -65,6 +65,12 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
 ):
     q, worker, supervisor = _supervisor(tmp_path)
     task = q.enqueue(_spec(tmp_path))
+    q.enqueue(TaskSpec(
+        company="CANARY_NOVEL_FAMILY_VALUE",
+        role="Applicant Alice Nouvel",
+        target_url="https://private-canary.example.test/roles/other",
+        profile_ref=str(tmp_path / "private-profile.json"),
+    ))
     claimed = q.claim("diagnostic-worker")
     q.checkpoint(
         task["task_id"],
@@ -102,7 +108,10 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
     assert "very-private-profile" not in serialized
     assert "private-profile.json" not in serialized
     assert "postId=diag-1" not in serialized
-    assert report["tasks"][0]["target_host"] == "jobs.example.test"
+    for private in ("CANARY_NOVEL_FAMILY_VALUE", "Alice Nouvel", "private-canary.example.test"):
+        assert private not in serialized
+    assert report["tasks"][0]["task"] == task["task_id"][:8]
+    assert "target_host" not in report["tasks"][0]
 
 
 def _init_git_repo(path):

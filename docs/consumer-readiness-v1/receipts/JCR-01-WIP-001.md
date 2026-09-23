@@ -26,6 +26,7 @@ Status: IMPLEMENTING. This is a checkpoint, not round certification.
 - PR review found a multi-page selector regression and an update/command admission race. Both received production fixes and targeted regressions before this 264-test run.
 - New negative-control and A/B task-reference regressions deny a model proposal when the user says not to pause or names another task; the user-facing mutation reply is built from deterministic receipts.
 - A push after the prior exact-head CI was interrupted because `github.com:443` timed out while `api.github.com` remained reachable. The connection recovered during this checkpoint; new work must be pushed to the same PR branch and receive fresh exact-head CI before integration. No merge or PASS was inferred from earlier CI.
+- PR head `b8db941330bc099765cb41c059bf1dfc839ca0cf` had the full `test` job pass, but `foundation` failed because that job lacked the Playwright browser binary required by its new UI test. This is a CI setup fault, not a test assertion failure; the workflow now installs isolated Chromium in that job. Copy-safe diagnostics were also tightened to omit user-entered company, role, host and blocker strings after a novel-value canary exposed the export risk. These follow-up changes await a new head and CI.
 
 ## Boundaries and remaining work
 
