@@ -274,6 +274,59 @@ def connect(
         raise
 
 
+def observe_bound_draft(target_url: str, binding: dict | None) -> dict:
+    """Read an already-bound page without navigation or browser repair.
+
+    This establishes only process/tab/document continuity. A matching page is
+    not proof that the external draft was saved or that a write can be replayed.
+    """
+    if not binding:
+        status = "NO_TASK_BINDING"
+    elif not binding.get("document_epoch"):
+        status = "DOCUMENT_IDENTITY_UNRECORDED"
+    elif browser_mode() in {"test", "isolated", "headless"}:
+        status = "ISOLATED_LIVE_OBSERVATION_UNSUPPORTED"
+    else:
+        epoch = owned_cdp_fingerprint()
+        if epoch is None:
+            status = "OWNED_SESSION_UNAVAILABLE"
+        elif epoch != binding.get("process_epoch"):
+            status = "PROCESS_EPOCH_CHANGED"
+        else:
+            pw = None
+            try:
+                pw, _browser, ctx, page = connect(
+                    target_url, existing_only=True,
+                    task_binding=binding, session_epoch=epoch,
+                )
+                count = page.locator('input:not([type="hidden"]), textarea, select').count()
+                if page_target_id(ctx, page) != binding["target_id"] or (
+                    page_document_epoch(page) != binding["document_epoch"]
+                ):
+                    status = "DOCUMENT_CHANGED"
+                else:
+                    return {
+                        "status": "BOUND_DOCUMENT_OBSERVED",
+                        "visible_field_count": min(max(count, 0), 10000),
+                        "draft_identity_verified": False,
+                        "write_outcome_verified": False,
+                        "replay_allowed": False,
+                    }
+            except BrowserOwnershipError:
+                status = "OWNERSHIP_UNVERIFIED"
+            except Exception:
+                status = "OBSERVATION_UNAVAILABLE"
+            finally:
+                if pw is not None:
+                    pw.stop()
+    return {
+        "status": status,
+        "draft_identity_verified": False,
+        "write_outcome_verified": False,
+        "replay_allowed": False,
+    }
+
+
 def latest_page(ctx, fallback):
     pages = [page for page in ctx.pages if not page.is_closed()]
     return pages[-1] if pages else fallback

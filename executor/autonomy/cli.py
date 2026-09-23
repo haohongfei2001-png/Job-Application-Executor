@@ -163,7 +163,7 @@ def main(argv=None):
     commands.add_parser("chat")
     enqueue = commands.add_parser("enqueue")
     enqueue.add_argument("--file", type=Path, required=True)
-    for name in ("get", "resume", "pause", "cancel"):
+    for name in ("get", "observe", "resume", "pause", "cancel"):
         commands.add_parser(name).add_argument("task_id")
     answers = commands.add_parser("user-input")
     answers.add_argument("task_id")
@@ -215,7 +215,11 @@ def main(argv=None):
             result = request(args.runtime, args.port, "/v1/tasks/" + args.task_id + "/user-input", {"answers": json.load(sys.stdin)})
         else:
             path = "/v1/tasks/" + args.task_id
-            result = request(args.runtime, args.port, path if args.command == "get" else path + "/" + args.command, None if args.command == "get" else {})
+            result = request(
+                args.runtime, args.port,
+                path if args.command == "get" else path + "/" + args.command,
+                None if args.command in {"get", "observe"} else {},
+            )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok", True) else 1
     except Exception:

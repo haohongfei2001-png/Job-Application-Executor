@@ -250,6 +250,44 @@ def test_live_worker_persists_browser_binding_before_runner_return(tmp_path, mon
     assert binding["document_epoch"] == "123456.78"
 
 
+def test_readonly_observation_never_starts_or_replays_browser_work(monkeypatch):
+    monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser_module, "connect", lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("no tab may open without a proven owned process")
+    ))
+    assert browser_module.observe_bound_draft("https://jobs.example.test/apply", None)["status"] == "NO_TASK_BINDING"
+    assert browser_module.observe_bound_draft("https://jobs.example.test/apply",
+        {"process_epoch": "epoch12345", "target_id": "target12345"})["status"] == "DOCUMENT_IDENTITY_UNRECORDED"
+    monkeypatch.setattr(browser_module, "owned_cdp_fingerprint", lambda: None)
+    result = browser_module.observe_bound_draft("https://jobs.example.test/apply",
+        {"process_epoch": "epoch12345", "target_id": "target12345", "document_epoch": "100.0"})
+    assert result["status"] == "OWNED_SESSION_UNAVAILABLE"
+    assert result["replay_allowed"] is False
+
+
+def test_readonly_observation_reports_only_page_continuity(monkeypatch):
+    target = "https://jobs.example.test/apply"
+    page = FakePage(target)
+    page.target_id = "target12345"
+    page.locator = lambda selector: SimpleNamespace(count=lambda: 3)
+    stopped = []
+    monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser_module, "owned_cdp_fingerprint", lambda: "epoch12345")
+    monkeypatch.setattr(browser_module, "connect", lambda *args, **kwargs: (
+        SimpleNamespace(stop=lambda: stopped.append(True)), None, FakeContext([page]), page,
+    ))
+    monkeypatch.setattr(browser_module, "page_target_id", lambda ctx, page: page.target_id)
+    monkeypatch.setattr(browser_module, "page_document_epoch", lambda page: "100.0")
+    result = browser_module.observe_bound_draft(target,
+        {"process_epoch": "epoch12345", "target_id": "target12345", "document_epoch": "100.0"})
+    assert result == {
+        "status": "BOUND_DOCUMENT_OBSERVED", "visible_field_count": 3,
+        "draft_identity_verified": False, "write_outcome_verified": False,
+        "replay_allowed": False,
+    }
+    assert stopped == [True]
+
+
 def test_second_live_run_waits_for_tab_reconciliation(tmp_path, monkeypatch):
     queue = TaskQueue(tmp_path / "runtime")
     task = queue.enqueue(TaskSpec(

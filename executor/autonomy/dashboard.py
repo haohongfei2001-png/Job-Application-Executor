@@ -132,7 +132,8 @@ function render(state){
           <button type="button" data-answer="true" data-key="${esc(key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button></label>`).join(''):''}
       <div class="taskcontrols">
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
-        ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
+        ${['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="OBSERVE" data-task="${esc(t.task_id)}">只读核对</button>`:''}
+        ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
         ${!['SUBMITTED','VERIFIED','CANCELLED','READY_TO_SUBMIT'].includes(t.stage)?`<button type="button" data-action="CANCEL" data-task="${esc(t.task_id)}" data-revision="${t.revision}">取消</button>`:''}
       </div>
     </div>`).join('');
@@ -141,6 +142,16 @@ tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-action]');if(!button)return;
   button.disabled=true;
   const action=button.dataset.action,task_id=button.dataset.task;
+  if(action==='OBSERVE'){
+    try{
+      const r=await fetch('/ui/api/observe?task_id='+encodeURIComponent(task_id),{credentials:'same-origin'});
+      if(!r.ok)throw new Error();
+      const observed=await r.json();
+      notify(observed.status==='BOUND_DOCUMENT_OBSERVED'?'已找到原任务页面；草稿和写入结果仍待证明，任务保持暂停。':'原任务页面尚无法核实；任务保持暂停。');
+    }catch(e){notify('只读核对暂不可用；任务保持暂停。')}
+    finally{button.disabled=false}
+    return;
+  }
   const expected_revision=Number(button.dataset.revision);
   const command_id='ui-'+crypto.randomUUID();
   try{
