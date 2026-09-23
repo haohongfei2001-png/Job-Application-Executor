@@ -15,7 +15,7 @@ from .dashboard import DASHBOARD_HTML
 from .diagnostics import collect_diagnostics
 from .manager import ManagerController
 from .queue import TaskQueue, TaskSpec, private_dir
-from .updater import read_update_state, safe_to_update, spawn_update
+from .updater import reconciled_update_state, safe_to_update, spawn_update
 from .worker import Worker
 
 
@@ -52,6 +52,7 @@ class Supervisor:
             raise ValueError("local auth token too short")
         self.manager = manager or ManagerController(queue, self.worker)
         self._ui_lock = threading.RLock()
+        self._mutation_lock = threading.RLock()
         self._ui_tickets: dict[str, float] = {}
         self._ui_sessions: dict[str, float] = {}
 
@@ -95,7 +96,7 @@ class Supervisor:
         return {
             "ok": True,
             "worker_active": self.worker.active,
-            "update": read_update_state(self.queue.root),
+            "update": reconciled_update_state(self.queue.root),
             **state,
         }
 
@@ -106,35 +107,51 @@ class Supervisor:
         )
 
     def update_in_progress(self) -> bool:
-        return read_update_state(self.queue.root).get("status") in {
+        return reconciled_update_state(self.queue.root).get("status") in {
             "checking",
             "updating",
             "restarting",
         }
 
+    def run_mutation(self, callback):
+        with self._mutation_lock:
+            if self.update_in_progress():
+                raise RuntimeError("update in progress")
+            return callback()
+
     def begin_update(self, port: int):
-        safe, reason = safe_to_update(self)
-        if not safe:
-            return {
-                "ok": False,
-                "status": "denied",
-                "reason": reason,
-            }
-        return spawn_update(
-            repo_root=Path(__file__).resolve().parents[2],
-            runtime=self.queue.root,
-            port=port,
-        )
+        with self._mutation_lock:
+            if self.update_in_progress():
+                return {
+                    "ok": False,
+                    "status": "denied",
+                    "reason": "update_in_progress",
+                }
+            safe, reason = safe_to_update(self)
+            if not safe:
+                return {
+                    "ok": False,
+                    "status": "denied",
+                    "reason": reason,
+                }
+            return spawn_update(
+                repo_root=Path(__file__).resolve().parents[2],
+                runtime=self.queue.root,
+                port=port,
+            )
 
     def dispatch(self, method, path, data):
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
-        if (
-            method == "POST"
-            and parts != ["v1", "ui-ticket"]
-            and self.update_in_progress()
-        ):
-            raise RuntimeError("update in progress")
+        if method == "POST" and parts != ["v1", "ui-ticket"]:
+            return self.run_mutation(
+                lambda: self._dispatch_unlocked(method, path, data)
+            )
+        return self._dispatch_unlocked(method, path, data)
+
+    def _dispatch_unlocked(self, method, path, data):
+        parsed = urlsplit(path)
+        parts = parsed.path.strip("/").split("/")
         if method == "GET" and parts == ["health"]:
             return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user"}
         if method == "GET" and parts == ["v1", "tasks"]:
@@ -144,7 +161,7 @@ class Supervisor:
         if method == "GET" and parts == ["v1", "diagnostics"]:
             return self.diagnostics()
         if method == "GET" and parts == ["v1", "update-status"]:
-            return read_update_state(self.queue.root)
+            return reconciled_update_state(self.queue.root)
         if method == "POST" and parts == ["v1", "tasks"]:
             return self.queue.enqueue(TaskSpec.model_validate(data))
         if method == "POST" and parts == ["v1", "chat"] and set(data) == {"message"}:
@@ -290,7 +307,7 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         self._send_json(200, supervisor.diagnostics())
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/update-status":
-                        self._send_json(200, read_update_state(supervisor.queue.root))
+                        self._send_json(200, reconciled_update_state(supervisor.queue.root))
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/update":
                         data = self._read_json()
@@ -300,12 +317,13 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         self._send_json(200 if result.get("ok") else 409, result)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/chat":
-                        if supervisor.update_in_progress():
-                            raise RuntimeError("update in progress")
                         data = self._read_json()
                         if set(data) != {"message"}:
                             raise ValueError("invalid chat envelope")
-                        self._send_json(200, supervisor.manager.handle(data["message"]))
+                        result = supervisor.run_mutation(
+                            lambda: supervisor.manager.handle(data["message"])
+                        )
+                        self._send_json(200, result)
                         return
                     self._send_json(404, {"error": "not_found"})
                 except (ValueError, TypeError):
