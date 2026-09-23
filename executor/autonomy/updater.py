@@ -445,7 +445,13 @@ def perform_update(
         write_update_state(runtime_path, "failed", reason=pre["reason"])
         return 1
     old = pre["head"]
-    write_update_state(runtime_path, "checking", old_version=old)
+    write_update_state(
+        runtime_path,
+        "restarting" if restart_only else "checking",
+        old_version=old,
+        new_version=old if restart_only else "",
+    )
+    git_mutation_started = False
 
     try:
         _run(
@@ -565,6 +571,7 @@ def perform_update(
             old_version=old,
             new_version=remote,
         )
+        git_mutation_started = True
         _run(repo, ["git", "merge", "--ff-only", "origin/main"], timeout=60)
 
         new_head = _git(repo, "rev-parse", "HEAD")
@@ -580,17 +587,19 @@ def perform_update(
             new_version=new_head,
         )
     except subprocess.TimeoutExpired:
+        post_mutation = git_mutation_started or restart_only
         write_update_state(
             runtime_path,
-            "failed",
+            "restart_required" if post_mutation else "failed",
             old_version=old,
             reason="update_timeout",
         )
         return 1
     except Exception:
+        post_mutation = git_mutation_started or restart_only
         write_update_state(
             runtime_path,
-            "failed",
+            "restart_required" if post_mutation else "failed",
             old_version=old,
             reason="update_failed",
         )
