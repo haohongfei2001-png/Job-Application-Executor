@@ -106,16 +106,27 @@ class Supervisor:
             repo_root=Path(__file__).resolve().parents[2],
         )
 
+    def update_state(self):
+        return reconciled_update_state(self.queue.root)
+
     def update_in_progress(self) -> bool:
-        return reconciled_update_state(self.queue.root).get("status") in {
+        return self.update_state().get("status") in {
             "checking",
             "updating",
             "restarting",
         }
 
+    def mutation_fenced(self) -> bool:
+        return self.update_state().get("status") in {
+            "checking",
+            "updating",
+            "restarting",
+            "restart_required",
+        }
+
     def run_mutation(self, callback):
         with self._mutation_lock:
-            if self.update_in_progress():
+            if self.mutation_fenced():
                 raise RuntimeError("update in progress")
             return callback()
 
