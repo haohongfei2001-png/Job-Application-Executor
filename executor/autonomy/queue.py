@@ -209,6 +209,19 @@ class TaskQueue:
         with self.tx() as db:
             return [dict(x) for x in db.execute("SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT 200", (after,))]
 
+    def recent_events(self, limit=12):
+        limit = min(max(int(limit), 1), 200)
+        with self.tx() as db:
+            rows = [
+                dict(x)
+                for x in db.execute(
+                    "SELECT * FROM events ORDER BY seq DESC LIMIT ?",
+                    (limit,),
+                )
+            ]
+        rows.reverse()
+        return rows
+
     def claim(self, worker, lease_seconds=60):
         now = self.clock()
         with self.tx() as db:
