@@ -483,6 +483,90 @@ def test_restart_required_can_be_retried_when_code_is_already_current(
     assert state["status"] == "success"
 
 
+def test_restart_only_failure_never_releases_restart_fence(
+    tmp_path, monkeypatch
+):
+    old = "a" * 40
+    monkeypatch.setattr(
+        updater,
+        "runtime_safe_to_update",
+        lambda runtime: (True, ""),
+    )
+    monkeypatch.setattr(
+        updater,
+        "repository_update_preconditions",
+        lambda repo: {"ok": True, "head": old},
+    )
+
+    def timeout_fetch(repo, args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 1))
+
+    monkeypatch.setattr(updater, "_run", timeout_fetch)
+
+    rc = updater.perform_update(
+        tmp_path / "repo",
+        tmp_path / "runtime",
+        9344,
+        restart_only=True,
+    )
+
+    assert rc == 1
+    state = updater.read_update_state(tmp_path / "runtime")
+    assert state["status"] == "restart_required"
+    assert state["reason"] == "update_timeout"
+
+
+def test_failure_after_git_mutation_stays_restart_required(
+    tmp_path, monkeypatch
+):
+    old = "a" * 40
+    new = "b" * 40
+    preconditions = [
+        {"ok": True, "head": old},
+        {"ok": True, "head": old},
+        {"ok": True, "head": old},
+    ]
+
+    monkeypatch.setattr(
+        updater,
+        "runtime_safe_to_update",
+        lambda runtime: (True, ""),
+    )
+    monkeypatch.setattr(
+        updater,
+        "repository_update_preconditions",
+        lambda repo: preconditions.pop(0),
+    )
+
+    def fake_git(repo, *args, **kwargs):
+        if args == ("rev-parse", "origin/main"):
+            return new
+        raise AssertionError(args)
+
+    def fake_run(repo, args, **kwargs):
+        if args[:3] == ["git", "-c", "http.version=HTTP/1.1"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args == ["git", "merge", "--ff-only", "origin/main"]:
+            raise subprocess.TimeoutExpired(args, 60)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_git", fake_git)
+    monkeypatch.setattr(updater, "_run", fake_run)
+
+    rc = updater.perform_update(
+        tmp_path / "repo",
+        tmp_path / "runtime",
+        9344,
+    )
+
+    assert rc == 1
+    state = updater.read_update_state(tmp_path / "runtime")
+    assert state["status"] == "restart_required"
+    assert state["reason"] == "update_timeout"
+
+
 def test_restart_failure_persists_restart_required_state(tmp_path, monkeypatch):
     old = "a" * 40
     calls = []
