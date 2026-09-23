@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from .. import browser
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
@@ -107,6 +108,25 @@ class Supervisor:
             self,
             repo_root=Path(__file__).resolve().parents[2],
         )
+
+    def readiness(self):
+        from .consumer import humanize_preflight
+        from .preflight import collect_live_preflight
+
+        result = collect_live_preflight(supervisor_running=True)
+        return {**result, "message": humanize_preflight(result)}
+
+    def observe_task(self, tid: str):
+        task = self.queue.get(tid)
+        if task["owner"] or task["stage"] != "BLOCKED" or task["blocker"] not in {
+            "unknown_outcome", "browser_ownership_unknown",
+            "user_paused_from_unknown_outcome", "user_paused_from_browser_ownership_unknown",
+        }:
+            raise ValueError("task is not waiting for read-only reconciliation")
+        observed = browser.observe_bound_draft(
+            task["spec"]["target_url"], self.queue.browser_binding(tid)
+        )
+        return {"ok": True, "task_id": tid, **observed}
 
     def update_state(self):
         return reconciled_update_state(self.queue.root)
@@ -223,6 +243,8 @@ class Supervisor:
             tid = parts[2]
             if method == "GET" and len(parts) == 3:
                 return self.queue.get(tid)
+            if method == "GET" and len(parts) == 4 and parts[3] == "observe":
+                return self.observe_task(tid)
             if method == "POST" and len(parts) == 4:
                 if parts[3] == "resume" and not data:
                     return self.queue.resume(tid)
@@ -344,6 +366,13 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/state":
                         self._send_json(200, supervisor.ui_state())
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/readiness":
+                        self._send_json(200, supervisor.readiness())
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/observe":
+                        task_id = parse_qs(parsed.query).get("task_id", [""])[0]
+                        self._send_json(200, supervisor.observe_task(task_id))
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/diagnostics":
                         self._send_json(200, supervisor.diagnostics())

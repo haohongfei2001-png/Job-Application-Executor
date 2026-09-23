@@ -762,6 +762,21 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
     q, worker, supervisor = _supervisor(tmp_path)
     monkeypatch.setattr(
         supervisor,
+        "readiness",
+        lambda: {
+            "ok": False,
+            "ready_for_live_e2e": False,
+            "message": "个人资料尚未配置。",
+            "remediation": ["configure_profile_path"],
+            "submit_capability": False,
+        },
+    )
+    monkeypatch.setattr(
+        supervisor, "observe_task",
+        lambda task_id: {"ok": True, "task_id": task_id, "status": "NO_TASK_BINDING", "replay_allowed": False},
+    )
+    monkeypatch.setattr(
+        supervisor,
         "diagnostics",
         lambda: {
             "format": "application-executor-diagnostics-v1",
@@ -803,6 +818,16 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
         assert report["format"] == "application-executor-diagnostics-v1"
         assert report["safety"]["submit_capability"] is False
 
+        with opener.open(base + "/ui/api/readiness") as response:
+            readiness = json.load(response)
+        assert readiness["ready_for_live_e2e"] is False
+        assert readiness["submit_capability"] is False
+        assert readiness["remediation"] == ["configure_profile_path"]
+        with opener.open(base + "/ui/api/observe?task_id=synthetic-task") as response:
+            observation = json.load(response)
+        assert observation["status"] == "NO_TASK_BINDING"
+        assert observation["replay_allowed"] is False
+
         update_request = urllib.request.Request(
             base + "/ui/api/update",
             data=b"{}",
@@ -819,10 +844,46 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
         unauthenticated = urllib.request.Request(base + "/ui/api/diagnostics")
         with pytest.raises(Exception):
             urllib.request.urlopen(unauthenticated)
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(base + "/ui/api/readiness")
+        assert denied.value.code == 401
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(base + "/ui/api/observe?task_id=synthetic-task")
+        assert denied.value.code == 401
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_diagnostics_do_not_claim_clean_checkout_when_git_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(diagnostics, "_git", lambda *args, **kwargs: None)
+    state = diagnostics.repository_state(tmp_path)
+    assert state == {"version": "unknown", "branch": "unknown", "worktree_clean": None}
+
+
+def test_supervisor_readonly_observation_preserves_unknown_task(tmp_path, monkeypatch):
+    queue, worker, supervisor = _supervisor(tmp_path)
+    created = queue.enqueue(_spec(tmp_path))
+    claimed = queue.claim("synthetic-observer")
+    queue.checkpoint(created["task_id"], claimed["owner"], "BLOCKED",
+                     blocker="unknown_outcome", release=True)
+    before = queue.get(created["task_id"])
+    observed = []
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.browser.observe_bound_draft",
+        lambda target, binding: observed.append((target, binding)) or {
+            "status": "NO_TASK_BINDING", "draft_identity_verified": False,
+            "write_outcome_verified": False, "replay_allowed": False,
+        },
+    )
+    result = supervisor.dispatch("GET", "/v1/tasks/" + created["task_id"] + "/observe", {})
+    assert result["status"] == "NO_TASK_BINDING"
+    assert result["replay_allowed"] is False
+    assert observed == [(before["spec"]["target_url"], None)]
+    assert queue.get(created["task_id"])["revision"] == before["revision"]
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        queue.resume(created["task_id"])
 
 
 def test_supervisor_fences_mutations_while_update_is_running(

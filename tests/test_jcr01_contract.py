@@ -149,6 +149,13 @@ def test_existing_task_database_migrates_without_changing_identity(tmp_path):
     assert paused["paused_from"] == "NEEDS_USER_INPUT"
     assert paused["run_state"] == "PAUSED"
     assert queue.events()[0]["task_id"] == "paused-task"
+    with sqlite3.connect(path) as migrated:
+        assert {row[1] for row in migrated.execute("PRAGMA table_info(browser_bindings)")} == {
+            "task_id", "process_epoch", "target_id", "updated", "document_epoch"
+        }
+        assert {row[1] for row in migrated.execute("PRAGMA table_info(run_attempts)")} == {
+            "attempt_id", "task_id", "owner", "outcome", "created", "updated"
+        }
     backup = root / "tasks.sqlite3.pre-jcr01.sqlite3"
     assert backup.exists()
     assert backup.stat().st_mode & 0o077 == 0
@@ -184,6 +191,17 @@ def test_city_select_rerender_cannot_claim_validated(tmp_path):
         result = adapter.validate(plan)
         assert not result.ok
         assert any("selected option" in error for error in result.errors)
+
+
+def test_unmatched_select_is_a_prewrite_failure_not_unknown_outcome(tmp_path):
+    html = tmp_path / "select.html"
+    html.write_text('<label>城市<select id="city"><option value="bj">北京</option></select></label>')
+    expected = FieldResolution(field_id="city", selector="#city", label="城市",
+                               status=ResolutionStatus.RESOLVED, value="上海")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([expected])
+        assert actions == [{"field_id": "city", "ok": False, "reason": "no_matching_select_option"}]
+        assert adapter.page.locator("#city").input_value() == "bj"
 
 
 def test_missing_field_check_only_covers_current_page(monkeypatch):

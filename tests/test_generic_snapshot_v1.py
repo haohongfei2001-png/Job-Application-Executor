@@ -1,4 +1,6 @@
 from executor.adapters.generic_web import GenericWebAdapter
+from executor.browser import BrowserOwnershipError
+import pytest
 
 
 class SnapshotPage:
@@ -50,3 +52,16 @@ def test_discover_fields_uses_single_dom_snapshot():
     assert fields[0].current_value == "Example User"
     assert fields[1].options == ["上海市", "北京市"]
     assert fields[1].metadata["selected_text"] == "上海市"
+
+
+def test_failed_observation_is_not_reported_as_an_empty_form():
+    adapter = GenericWebAdapter("https://example.test/form")
+
+    class BrokenPage:
+        def evaluate(self, _script):
+            raise RuntimeError("synthetic private page detail")
+
+    adapter.page = BrokenPage()
+    with pytest.raises(BrowserOwnershipError, match="observation unavailable") as caught:
+        adapter.discover_fields()
+    assert "private page detail" not in str(caught.value)

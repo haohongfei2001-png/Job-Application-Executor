@@ -15,6 +15,7 @@ header{padding:18px 22px;background:#fff;border-bottom:1px solid #e5e7eb;display
 h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#16a34a;margin-right:7px}
 .headerbtn{border:1px solid #d7dce2;background:#fff;color:#111;padding:7px 11px;border-radius:9px;font-weight:600;font-size:13px}
 .headerbtn:hover{background:#f8fafc}.headerbtn:disabled{opacity:.45;cursor:default}
+.readiness{font-size:12px;color:#92400e;max-width:360px;line-height:1.35}
 .metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:16px 0}
 .metric{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
@@ -55,6 +56,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <h1>AI 投递经理</h1>
   <div class="statusbar">
     <div><span class="dot"></span><span id="health">本地服务</span></div>
+    <span id="readiness" class="readiness" role="status">正在检查运行条件…</span>
     <button id="diagnostics" class="headerbtn" type="button">复制诊断</button>
     <button id="update" class="headerbtn" type="button">检查并更新</button>
   </div>
@@ -96,6 +98,10 @@ const blockerText={
   session_unavailable:'浏览器连接中断',
   live_not_authorized:'尚未授权实时执行',
   isolated_external_target:'隔离测试模式只支持本地合成站',
+  browser_ownership_unknown:'浏览器页面归属不明，等待安全核对',
+  user_paused_from_browser_ownership_unknown:'浏览器页面归属不明，等待安全核对',
+  unknown_outcome:'上次写入结果不明，等待只读核对',
+  user_paused_from_unknown_outcome:'上次写入结果不明，等待只读核对',
   validation:'需要检查表单',
   retry_pending:'正在重试',
   retry_exhausted:'需要处理后再继续',
@@ -113,7 +119,7 @@ function render(state){
   const counts={running:0,need:0,ready:0,done:0};
   (state.tasks||[]).forEach(t=>counts[stageGroup(t.stage)]++);
   Object.entries(counts).forEach(([k,v])=>document.getElementById(k).textContent=v);
-  document.getElementById('health').textContent=state.final_click_actor==='user'?'已就绪 · 最终提交由你确认':'本地服务';
+  document.getElementById('health').textContent='本地服务已连接';
   if(!(state.tasks||[]).length){tasksEl.className='empty';tasksEl.textContent='暂无任务';return}
   tasksEl.className='';
   tasksEl.innerHTML=(state.tasks||[]).map(t=>`
@@ -126,7 +132,8 @@ function render(state){
           <button type="button" data-answer="true" data-key="${esc(key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button></label>`).join(''):''}
       <div class="taskcontrols">
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
-        ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
+        ${['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="OBSERVE" data-task="${esc(t.task_id)}">只读核对</button>`:''}
+        ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
         ${!['SUBMITTED','VERIFIED','CANCELLED','READY_TO_SUBMIT'].includes(t.stage)?`<button type="button" data-action="CANCEL" data-task="${esc(t.task_id)}" data-revision="${t.revision}">取消</button>`:''}
       </div>
     </div>`).join('');
@@ -135,6 +142,16 @@ tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-action]');if(!button)return;
   button.disabled=true;
   const action=button.dataset.action,task_id=button.dataset.task;
+  if(action==='OBSERVE'){
+    try{
+      const r=await fetch('/ui/api/observe?task_id='+encodeURIComponent(task_id),{credentials:'same-origin'});
+      if(!r.ok)throw new Error();
+      const observed=await r.json();
+      notify(observed.status==='BOUND_DOCUMENT_OBSERVED'?'已找到原任务页面；草稿和写入结果仍待证明，任务保持暂停。':'原任务页面尚无法核实；任务保持暂停。');
+    }catch(e){notify('只读核对暂不可用；任务保持暂停。')}
+    finally{button.disabled=false}
+    return;
+  }
   const expected_revision=Number(button.dataset.revision);
   const command_id='ui-'+crypto.randomUUID();
   try{
@@ -287,6 +304,15 @@ async function pollUpdate(){
 }
 diagnosticsBtn.onclick=copyDiagnostics;
 updateBtn.onclick=startUpdate;
+async function readiness(){
+  const label=document.getElementById('readiness');
+  try{
+    const r=await fetch('/ui/api/readiness',{credentials:'same-origin'});
+    if(!r.ok)throw new Error();
+    const data=await r.json();
+    label.textContent=data.ready_for_live_e2e?'已就绪 · 最终提交由你确认':data.message||'运行条件待检查';
+  }catch(e){label.textContent='无法检查运行条件；任务不会自动提交'}
+}
 async function state(){
   try{
     const r=await fetch('/ui/api/state',{credentials:'same-origin'});
@@ -320,7 +346,7 @@ async function submit(){
   }
 }
 send.onclick=submit;msg.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit()}});
-state();setInterval(state,2500);
+state();readiness();setInterval(state,2500);setInterval(readiness,10000);
 </script>
 </body>
 </html>"""

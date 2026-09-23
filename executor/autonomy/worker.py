@@ -154,6 +154,8 @@ class Worker:
         tid, owner, spec = task["task_id"], task["owner"], task["spec"]
         done, lost = threading.Event(), threading.Event()
         self.active = tid
+        session_epoch = None
+        attempt_id = None
 
         def guard():
             if self.stop_event.is_set() or lost.is_set():
@@ -161,6 +163,8 @@ class Worker:
             current = self.queue.get(tid)
             if current["owner"] != owner or current["lease_until"] <= self.queue.clock():
                 raise LeaseLost("lease lost")
+            if session_epoch is not None and browser.owned_cdp_fingerprint() != session_epoch:
+                raise browser.BrowserOwnershipError("owned browser process changed")
 
         def keep_lease():
             while not done.wait(10):
@@ -192,7 +196,13 @@ class Worker:
                 if not spec["live_authorized"]:
                     checkpoint("BLOCKED", blocker="live_not_authorized", release=True)
                     return True
-                if not browser.owned_cdp_session():
+                # Until a durable task-to-tab binding is observed, a prior
+                # runner return cannot justify a second live browser write.
+                if self.queue.run_attempts(tid):
+                    checkpoint("BLOCKED", blocker="browser_ownership_unknown", release=True)
+                    return True
+                session_epoch = browser.owned_cdp_fingerprint()
+                if session_epoch is None:
                     checkpoint("BLOCKED", blocker="session_unavailable", release=True)
                     return True
             audit = OperationalAudit(self.queue.root, tid, checkpoint, guard)
@@ -200,6 +210,16 @@ class Worker:
             runner = self.runner_factory(spec["target_url"], spec["profile_ref"], self._runner_settings(), execution_id=tid,
                 otp_bridge=bridge, audit_store=audit, guard=guard,
                 resume_url=task.get("checkpoint_url"), existing_browser_only=True)
+            if session_epoch is not None:
+                runner.browser_session_epoch = session_epoch
+                runner.browser_binding_get = lambda: self.queue.browser_binding(tid)
+                runner.browser_binding_set = lambda target_id, previous_target_id=None: self.queue.bind_browser_page(
+                    tid, owner, session_epoch, target_id,
+                    previous_target_id=previous_target_id,
+                )
+                runner.browser_document_set = lambda target_id, document_epoch: self.queue.record_browser_document(
+                    tid, owner, session_epoch, target_id, document_epoch,
+                )
             with self.answers_lock:
                 runner.user_answers = [{"canonical_key": k, "field_id": k, "value": v} for k, v in self.answers.get(tid, {}).items()]
             runner.plan.metadata["recovered_from_stage"] = task["checkpoint"]
@@ -208,20 +228,39 @@ class Worker:
                     # References become assets in the existing profile/attachment resolver.
                     runner.profile.setdefault("assets", {})[key] = {"path": path, "kind": key}
                     runner.plan.attachments[key] = path
+            attempt_id = self.queue.begin_run_attempt(tid, owner)
             plan = runner.run()
             stage, blocker = outcome(plan)
             checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields]}, release=True)
+            self.queue.finish_run_attempt(attempt_id, "RETURNED_UNVERIFIED")
             if blocker == "otp_waiting" and self.broker.pending(tid):
                 self.queue.resume(tid)
             if stage in STOPPED:
                 with self.answers_lock:
                     self.answers.pop(tid, None)
                 self.broker.discard(tid)
+        except browser.BrowserOwnershipError:
+            if attempt_id is not None:
+                self.queue.finish_run_attempt(attempt_id, "UNKNOWN_OUTCOME")
+            try:
+                checkpoint("BLOCKED", blocker="browser_ownership_unknown", release=True)
+            except RuntimeError:
+                pass
         except LeaseLost:
+            if attempt_id is not None:
+                self.queue.finish_run_attempt(attempt_id, "UNKNOWN_OUTCOME")
             pass  # Cancellation/stop fences the next operation; stale lease is recoverable.
         except Exception:
+            if attempt_id is not None:
+                try:
+                    self.queue.finish_run_attempt(attempt_id, "UNKNOWN_OUTCOME")
+                except RuntimeError:
+                    pass
             try:
-                checkpoint("ERROR", blocker="retry_pending" if task["attempts"] < spec["max_attempts"] else "retry_exhausted", release=True)
+                checkpoint("BLOCKED" if attempt_id is not None else "ERROR",
+                           blocker="unknown_outcome" if attempt_id is not None else
+                           ("retry_pending" if task["attempts"] < spec["max_attempts"] else "retry_exhausted"),
+                           release=True)
             except RuntimeError:
                 pass
         finally:

@@ -44,12 +44,12 @@
     },
     {
       "id": "JCR-02",
-      "status": "READY",
+      "status": "ADVANCE_ALLOWED_WITH_DEFERRED",
       "authorized": true
     },
     {
       "id": "JCR-03",
-      "status": "NOT_STARTED",
+      "status": "READY",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "Finish exact-head CI and review on JCR-01 PR #11, merge, verify main integration and attach the F-01 through F-09 automatic receipt. DFG-001 remains mitigated but durable applicant-fact recovery stays pending for JCR-04. Then start JCR-02 owned browser/bootstrap/recovery on one new writer branch; continue unattended through later JCR rounds.",
+  "next_action": "Finish sole JCR-02 PR #12 exact-head CI/review/merge and exact-main readback, then begin JCR-03 independent discovery/target work. JCR-02 is ADVANCE_ALLOWED_WITH_DEFERRED, not COMPLETE: DFG-002 still blocks unknown/unverified live-write replay and G-01 through G-13 certification. Continue JCR-04 facts and later independent engineering while resolving DFG-002 before final consumer certification; DFG-001 remains JCR-04 durable fact work.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,
