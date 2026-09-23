@@ -39,7 +39,17 @@ Only one updater process may exist at a time. A process-level file lock is
 acquired before the detached updater is launched and remains held by that child
 until it exits. Update-state JSON is written to a private temporary file and
 atomically replaced, so the supervisor's mutation fence never disappears during
-a partial write.
+a partial write. If the machine or updater process dies while a busy state is
+persisted, the next supervisor read reconciles that state against the actual
+file lock and recovers the stale fence instead of permanently disabling the UI.
+
+All admitted state-changing requests share one local mutation lock with update
+startup. An update waits for an already-running manager/chat mutation to finish,
+then rechecks queue safety before the updater is launched. Once update state is
+claimed, new chat/task/OTP mutations are fenced until the updated service is
+loaded. A post-merge restart failure remains `restart_required`: normal task
+mutations stay fenced, while the update control remains available to retry only
+the restart.
 
 The updater also treats active and paused OTP waits as update-sensitive because
 the code is intentionally memory-only.
@@ -50,11 +60,16 @@ is already latest, no restart happens.
 
 If an update exists, the updater requires the current HEAD to be an ancestor of
 `origin/main`; only a fast-forward is permitted. It rechecks runtime safety
-after fetch and before merge. Divergence, a dirty tracked worktree, an unexpected
-remote or any runtime race aborts the update.
+after fetch and before merge, and revalidates branch, HEAD, expected origin,
+tracked-worktree cleanliness, and the fetched `origin/main` again immediately
+before mutation. Divergence, a dirty tracked worktree, a branch/HEAD race, an
+unexpected remote or any runtime race aborts the update.
 
 After a successful fast-forward, the updater safely stops the localhost
-supervisor, starts the updated version, and opens a fresh authenticated UI.
+supervisor, starts the updated version, and opens a fresh authenticated UI. If
+the code update succeeded but stop/start did not, the durable
+`restart_required` state makes the next button press retry the restart even
+when local HEAD already equals `origin/main`.
 
 ## Runtime/update separation
 
