@@ -76,7 +76,7 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 - **Missing final evidence:** A versioned Schneider public listing/detail contract with reliable total, pagination, tenant/job identity and exact role/location/campaign proof, plus independent synthetic and public read-only regressions.
 - **Final convergence condition:** Resolve this engineering debt before claiming Schneider support or JCR-09 consumer certification; if public access remains unavailable, keep Schneider unsupported and record the external limitation without fabricating a B-case PASS.
 - **Related acceptance IDs:** B-01, B-02, B-04, B-06, B-07, B-08, B-11.
-- **Evidence / PR / commit:** JCR-03 sole writer `feat/jcr03-discovery-identity`; final PR/merge evidence pending.
+- **Evidence / PR / commit:** JCR-03 sole writer PR #13, `feat/jcr03-discovery-identity`; final head/merge evidence pending.
 
 ## Invariants
 

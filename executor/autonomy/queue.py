@@ -44,6 +44,7 @@ class TaskSpec(BaseModel):
     location: str = Field(default="", max_length=150)
     employment_type: str = Field(default="", max_length=100)
     target_evidence_digest: str = Field(default="", max_length=64)
+    target_source_chain: list[str] = Field(default_factory=list, max_length=4)
     target_verified: bool = False
     profile_ref: str = Field(min_length=1, max_length=1000)
     attachment_refs: dict[str, str] = Field(default_factory=dict)
@@ -58,7 +59,22 @@ class TaskSpec(BaseModel):
             ids.add(_safe_hash_job_id(parsed.fragment))
         if len(ids) > 1 or (ids and self.job_id and self.job_id not in ids):
             raise ValueError("conflicting target identifiers")
+        if self.target_verified and not (
+            self.tenant and self.job_id and len(self.target_evidence_digest) == 64
+            and self.target_source_chain
+        ):
+            raise ValueError("verified target requires tenant, job and source evidence")
         return self
+
+    @field_validator("target_source_chain")
+    @classmethod
+    def official_sources(cls, value):
+        for source in value:
+            parsed = urlsplit(source)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                    or parsed.password or parsed.query or parsed.fragment):
+                raise ValueError("unsafe target source chain")
+        return value
 
     @field_validator("target_url")
     @classmethod
@@ -259,7 +275,9 @@ class TaskQueue:
             self._event(db, tid, "enqueued", "DISCOVERED")
             return self._view(db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone())
 
-    def retarget_same_origin_landing(self, tid, new_url, *, job_id=""):
+    def retarget_same_origin_landing(self, tid, new_url, *, job_id="", tenant="",
+                                     campaign="", location="", employment_type="",
+                                     evidence_digest="", source_chain=()):
         """Replace a known landing-page task with one exact same-origin job target."""
         TaskSpec.safe_url(new_url)
         with self.tx() as db:
@@ -284,6 +302,14 @@ class TaskQueue:
                 **old_spec.model_dump(),
                 "target_url": new_url,
                 "job_id": str(job_id or old_spec.job_id),
+                "tenant": str(tenant or old_spec.tenant),
+                "campaign": str(campaign or old_spec.campaign),
+                "location": str(location or old_spec.location),
+                "employment_type": str(employment_type or old_spec.employment_type),
+                "target_evidence_digest": str(evidence_digest),
+                "target_source_chain": list(source_chain),
+                "target_verified": bool(tenant and job_id and evidence_digest and source_chain),
+                "live_authorized": bool(old_spec.live_authorized and tenant and job_id and evidence_digest and source_chain),
             })
             if new_spec.tenant and new_spec.job_id:
                 assert_target_not_protected(new_url, tenant=new_spec.tenant,

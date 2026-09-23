@@ -49,12 +49,12 @@
     },
     {
       "id": "JCR-03",
-      "status": "IMPLEMENTING",
+      "status": "ADVANCE_ALLOWED_WITH_DEFERRED",
       "authorized": true
     },
     {
       "id": "JCR-04",
-      "status": "NOT_STARTED",
+      "status": "READY",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-02 PR #12 merged as 959cd9d after exact-head and exact-main CI; see JCR-02-MAIN-INTEGRATION. Sole JCR-03 writer feat/jcr03-discovery-identity implements read-only discovery, verified target identity, ambiguity handling, UI and B-class synthetic/public evidence. JCR-02 remains ADVANCE_ALLOWED_WITH_DEFERRED: DFG-002 blocks unknown/unverified live-write replay and G-01 through G-13 certification. DFG-001 remains JCR-04 durable fact work. Continue later independent engineering and resolve engineering debt before final consumer certification.",
+  "next_action": "Finish sole JCR-03 PR #13 final-head CI/review/merge and exact-main readback, then begin JCR-04 durable facts. JCR-03 is ADVANCE_ALLOWED_WITH_DEFERRED, not COMPLETE: DFG-003 blocks Schneider unique-target certification, unsupported ATS employer source chains remain read-only, and B-class final-live evidence is NOT_RUN. DFG-001 remains JCR-04 fact persistence work; DFG-002 remains browser unknown-outcome engineering debt. Continue independent later rounds while resolving all engineering debt before final consumer certification.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

@@ -12,6 +12,7 @@ from executor.protected_targets import protected_target
 from executor.discovery.ats_routes import parse_ats_route, verified_official_ats_target
 import pytest
 import threading
+import json
 from playwright.sync_api import sync_playwright
 from executor.autonomy.supervisor import Supervisor, create_server
 from executor.autonomy.worker import Worker
@@ -151,6 +152,22 @@ def test_shared_ats_job_id_is_scoped_by_verified_tenant_and_protected_alias(tmp_
                             tenant="tenant-a", job_id="456", campaign="2027 届 校园招聘")
 
 
+def test_legacy_submitted_url_aliases_remain_protected_across_routes():
+    oppo_rule = [{"hosts": ["careers.oppo.com"],
+                  "exact_urls": [OPPO_CAMPUS_ROOT + "/post/101?recruitType=Campus"]}]
+    assert protected_target(OPPO_CAMPUS_ROOT + "/post/101", oppo_rule)
+    assert protected_target(OPPO_CAMPUS_ROOT + "/post/102", oppo_rule) is None
+    greenhouse_rule = [{"hosts": ["boards.greenhouse.io"],
+                        "exact_urls": ["https://boards.greenhouse.io/tenant-a/jobs/1234567"]}]
+    assert protected_target("https://job-boards.greenhouse.io/tenant-a/jobs/1234567",
+                            greenhouse_rule)
+    assert protected_target("https://job-boards.greenhouse.io/tenant-b/jobs/1234567",
+                            greenhouse_rule) is None
+    query_rule = [{"hosts": ["careers.example.test"],
+                   "query_any": {"postId": ["123"]}}]
+    assert protected_target("https://careers.example.test/jobs?jobId=123", query_rule)
+
+
 def test_local_company_role_entry_creates_only_after_explicit_candidate_choice(tmp_path, monkeypatch):
     from executor.autonomy import manager as manager_module
 
@@ -278,8 +295,10 @@ def test_oppo_public_listing_requires_all_pages_and_matching_detail(monkeypatch)
                 "workCityVOList": [{"workCityName": "北京市"}], "positionStatus": 0}})
 
     class Page:
+        redirect = False
         def goto(self, url, **kwargs):
             assert url == target_resolver.OPPO_CAMPUS_POST_LIST
+            self.url = "https://evil.example/list" if self.redirect else url
         def close(self):
             pass
 
@@ -293,8 +312,9 @@ def test_oppo_public_listing_requires_all_pages_and_matching_detail(monkeypatch)
 
     request = Request()
     ctx = type("Context", (), {"request": request})()
+    page = Page()
     monkeypatch.setattr(target_resolver, "_public_connect",
-                        lambda: (Playwright(), Browser(), ctx, Page()))
+                        lambda: (Playwright(), Browser(), ctx, page))
     items, complete = target_resolver.resolve_oppo("AI产品经理", return_coverage=True)
     assert complete is True
     assert len(items) == 11
@@ -305,6 +325,11 @@ def test_oppo_public_listing_requires_all_pages_and_matching_detail(monkeypatch)
     request.bad_page = False
     request.bad_detail = True
     assert target_resolver.resolve_oppo("AI产品经理", return_coverage=True)[1] is False
+    request.bad_detail = False
+    page.redirect = True
+    before = len(request.page_numbers)
+    assert target_resolver.resolve_oppo("AI产品经理", return_coverage=True)[1] is False
+    assert len(request.page_numbers) == before
 
 
 def test_plain_hash_job_route_is_preserved_but_secret_fragment_is_rejected(tmp_path):
@@ -365,3 +390,67 @@ def test_isolated_consumer_ui_requires_choice_before_creating_task(tmp_path, mon
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_legacy_landing_wrapper_keeps_verified_identity_and_disables_unproven_retarget(tmp_path, monkeypatch):
+    from executor.discovery import service as discovery_service
+
+    observed = snapshot(candidate("101"))
+    monkeypatch.setattr(discovery_service, "discover", lambda request:
+                        evaluate_snapshot(request, observed))
+    resolved = target_resolver.resolve_known_landing("OPPO", "AI产品经理", OPPO_CAMPUS_ROOT)
+    assert resolved is not None
+    assert resolved.tenant == "oppo-campus"
+    assert len(resolved.evidence_digest) == 64
+
+    profile = tmp_path / "synthetic-profile.json"
+    profile.write_text("{}")
+    queue = TaskQueue(tmp_path / "runtime")
+    landing = queue.enqueue(TaskSpec(company="OPPO", role="AI产品经理",
+                                     target_url=OPPO_CAMPUS_ROOT,
+                                     profile_ref=str(profile), live_authorized=True))
+    safe = queue.retarget_same_origin_landing(landing["task_id"], resolved.job_url,
+                                              job_id=resolved.job_id, tenant=resolved.tenant,
+                                              campaign=resolved.campaign,
+                                              evidence_digest=resolved.evidence_digest,
+                                              source_chain=resolved.source_chain)
+    assert safe["spec"]["target_verified"] is True
+    assert safe["spec"]["tenant"] == "oppo-campus"
+    assert safe["spec"]["live_authorized"] is True
+
+    second = queue.enqueue(TaskSpec(company="OPPO", role="Other role",
+                                    target_url=OPPO_CAMPUS_ROOT + "?postType=campus",
+                                    profile_ref=str(profile), live_authorized=True))
+    unproven = queue.retarget_same_origin_landing(second["task_id"],
+        OPPO_CAMPUS_ROOT + "/post/102", job_id="102")
+    assert unproven["spec"]["target_verified"] is False
+    assert unproven["spec"]["live_authorized"] is False
+
+
+def test_pre_jcr03_task_spec_survives_additive_read_and_new_identity_survives_restart(tmp_path):
+    root = tmp_path / "runtime"
+    profile = tmp_path / "synthetic-profile.json"
+    profile.write_text("{}")
+    queue = TaskQueue(root)
+    old = queue.enqueue(TaskSpec(company="Legacy", role="Engineer",
+                                 target_url="https://careers.example.test/jobs?postId=old-1",
+                                 profile_ref=str(profile)))
+    with queue.tx() as db:
+        old_spec = old["spec"]
+        for key in ("tenant", "location", "employment_type", "target_evidence_digest",
+                    "target_source_chain", "target_verified"):
+            old_spec.pop(key)
+        db.execute("UPDATE tasks SET spec=? WHERE task_id=?",
+                   (json.dumps(old_spec), old["task_id"]))
+    restarted = TaskQueue(root)
+    restored = restarted.get(old["task_id"])
+    assert TaskSpec.model_validate(restored["spec"]).target_verified is False
+    assert restored["task_id"] == old["task_id"]
+    new = restarted.enqueue(TaskSpec(
+        company="OPPO", role="AI产品经理", target_url=OPPO_CAMPUS_ROOT + "/post/101",
+        job_id="101", tenant="oppo-campus", campaign="Campus",
+        target_evidence_digest="a" * 64, target_source_chain=[OPPO_CAMPUS_ROOT],
+        target_verified=True, profile_ref=str(profile)))
+    again = TaskQueue(root).get(new["task_id"])
+    assert again["spec"]["tenant"] == "oppo-campus"
+    assert again["spec"]["target_source_chain"] == [OPPO_CAMPUS_ROOT]

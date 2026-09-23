@@ -489,6 +489,7 @@ class ManagerController:
                 tenant=target.tenant, campaign=target.campaign,
                 location=target.location, employment_type=target.employment_type,
                 target_evidence_digest=target.evidence_digest, target_verified=True,
+                target_source_chain=list(target.source_chain),
                 profile_ref=self._profile_ref(), live_authorized=False,
             )
             task = self.queue.enqueue(spec)
@@ -589,6 +590,10 @@ class ManagerController:
                     decision.task_id,
                     candidate.job_url,
                     job_id=candidate.job_id,
+                    tenant=candidate.tenant, campaign=candidate.campaign,
+                    location=candidate.location, employment_type=candidate.employment_type,
+                    evidence_digest=candidate.evidence_digest,
+                    source_chain=candidate.source_chain,
                 )
                 return {
                     "action": str(action),
@@ -677,6 +682,13 @@ class ManagerController:
                 role=decision.role,
                 target_url=target_url,
                 job_id=job_id,
+                tenant=candidate.tenant if resolved_target else "",
+                campaign=candidate.campaign if resolved_target else "",
+                location=candidate.location if resolved_target else "",
+                employment_type=candidate.employment_type if resolved_target else "",
+                target_evidence_digest=candidate.evidence_digest if resolved_target else "",
+                target_source_chain=list(candidate.source_chain) if resolved_target else [],
+                target_verified=bool(candidate.evidence_digest and candidate.source_chain) if resolved_target else False,
                 profile_ref=self._profile_ref(),
                 live_authorized=False,
             )
@@ -779,6 +791,10 @@ class ManagerController:
                             tid,
                             candidate.job_url,
                             job_id=candidate.job_id,
+                            tenant=candidate.tenant, campaign=candidate.campaign,
+                            location=candidate.location, employment_type=candidate.employment_type,
+                            evidence_digest=candidate.evidence_digest,
+                            source_chain=candidate.source_chain,
                         )
                         landing_retargeted = True
                     except (KeyError, ValueError, RuntimeError):

@@ -19,6 +19,9 @@ class Candidate:
     exact_title: bool = False
     campaign: str = ""
     employment_type: str = ""
+    tenant: str = ""
+    evidence_digest: str = ""
+    source_chain: tuple[str, ...] = ()
 
 
 SCHNEIDER_ALIASES = {"施耐德", "施耐德电气", "schneider", "schneider electric"}
@@ -114,6 +117,8 @@ def resolve_schneider(title: str, location: str = "China", max_pages: int = 8,
             }
         )
         page.goto(base, wait_until="domcontentloaded", timeout=60000)
+        if (urlsplit(page.url).hostname or "").casefold() != "careers.se.com":
+            return ([], False) if return_coverage else []
         page.wait_for_timeout(2000)
         body = page.locator("body").inner_text()
         m = re.search(r"([\d,]+)\s*(?:Results|结果)", body, re.I)
@@ -126,6 +131,8 @@ def resolve_schneider(title: str, location: str = "China", max_pages: int = 8,
                     wait_until="domcontentloaded",
                     timeout=60000,
                 )
+                if (urlsplit(page.url).hostname or "").casefold() != "careers.se.com":
+                    return (out, False) if return_coverage else out
                 page.wait_for_timeout(1200)
             anchors = page.locator('a[href^="/jobs/"]')
             for i in range(anchors.count()):
@@ -265,6 +272,8 @@ def resolve_oppo(title: str, location: str = "", max_pages: int = 40,
     complete = False
     try:
         page.goto(OPPO_CAMPUS_POST_LIST, wait_until="domcontentloaded", timeout=60000)
+        if (urlsplit(page.url).hostname or "").casefold() != "careers.oppo.com":
+            return ([], False) if return_coverage else []
         endpoint = "https://careers.oppo.com/openapi/position/pageNew"
         expected_total = None
         expected_pages = None
@@ -367,13 +376,21 @@ def resolve_oppo(title: str, location: str = "", max_pages: int = 40,
 
 
 def resolve_known_landing(company: str, title: str, target_url: str) -> Candidate | None:
-    if (
-        _is_oppo_company(company)
-        and is_oppo_campus_landing(target_url)
-    ):
-        items, complete = resolve_oppo(title, return_coverage=True)
-        exact = [item for item in items if item.exact_title]
-        return exact[0] if complete and len(exact) == 1 else None
+    if _is_oppo_company(company) and is_oppo_campus_landing(target_url):
+        from .discovery.core import DiscoveryRequest
+        from .discovery.service import discover
+
+        result = discover(DiscoveryRequest(company=company, role=title, source_url=target_url))
+        target = result.target
+        if result.status != "VERIFIED" or target is None:
+            return None
+        return Candidate(
+            title=target.title, job_id=target.job_id, location=target.location,
+            category="", job_url=target.detail_url, exact_title=True,
+            campaign=target.campaign, employment_type=target.employment_type,
+            tenant=target.tenant, evidence_digest=target.evidence_digest,
+            source_chain=target.source_chain,
+        )
     return None
 
 
