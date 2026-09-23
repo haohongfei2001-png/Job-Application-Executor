@@ -14,7 +14,7 @@ import webbrowser
 from pathlib import Path
 
 from ..otp.bridge import OtpBridge
-from ..browser import browser_mode
+from ..browser import browser_mode, ensure_chrome
 from .queue import RUNTIME, TaskQueue, private_dir
 from .supervisor import Supervisor, create_server, local_token
 from .worker import ProcessLock, Worker
@@ -97,12 +97,79 @@ def lifecycle(action, root, port):
         return {"ok": False, "reason": "health_timeout"}
 
 
+def open_ui(root, port):
+    ticket = request(root, port, "/v1/ui-ticket", {})["ticket"]
+    opened = webbrowser.open(
+        f"http://127.0.0.1:{port}/ui-login?ticket={ticket}",
+        new=2,
+    )
+    return {"ok": bool(opened), "opened": bool(opened)}
+
+
+def launch_consumer(root, port):
+    from .consumer import humanize_preflight
+    from .preflight import collect_live_preflight
+
+    if browser_mode() in {"test", "isolated", "headless"}:
+        result = collect_live_preflight(
+            supervisor_running=False,
+            browser_mode_value=browser_mode(),
+            chrome_exists=False,
+            cdp_alive=False,
+            deepseek_available=False,
+            profile_exists=False,
+            profile_loadable=False,
+        )
+        return {
+            **result,
+            "message": humanize_preflight(result),
+            "opened": False,
+        }
+
+    try:
+        ensure_chrome()
+    except Exception:
+        result = {
+            "ok": False,
+            "ready_for_live_e2e": False,
+            "checks": {"existing_cdp_session": False},
+            "remediation": ["start_dedicated_chrome_cdp"],
+            "final_click_actor": "user",
+            "submit_capability": False,
+        }
+        return {
+            **result,
+            "message": humanize_preflight(result),
+            "opened": False,
+        }
+
+    started = lifecycle("start", root, port)
+    health = lifecycle("health", root, port)
+    result = collect_live_preflight(
+        supervisor_running=bool(started.get("ok") and health.get("ok")),
+    )
+    if not result.get("ready_for_live_e2e"):
+        return {
+            **result,
+            "message": humanize_preflight(result),
+            "opened": False,
+        }
+
+    ui = open_ui(root, port)
+    return {
+        **result,
+        "ok": bool(ui.get("ok")),
+        "opened": bool(ui.get("opened")),
+        "message": "已就绪" if ui.get("opened") else "本地服务已就绪，但没有成功打开面板。",
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="application-autonomy")
     parser.add_argument("--runtime", type=Path, default=RUNTIME)
     parser.add_argument("--port", type=int, default=9344)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui"):
+    for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch", "install-app"):
         commands.add_parser(name)
     preflight = commands.add_parser("preflight")
     preflight.add_argument("--start", action="store_true")
@@ -135,6 +202,12 @@ def main(argv=None):
             result = collect_live_preflight(
                 supervisor_running=bool(health.get("ok")),
             )
+        elif args.command == "launch":
+            result = launch_consumer(args.runtime, args.port)
+        elif args.command == "install-app":
+            from .consumer import install_macos_app
+
+            result = install_macos_app(Path(__file__).resolve().parents[2])
         elif args.command == "enqueue":
             result = request(args.runtime, args.port, "/v1/tasks", json.loads(args.file.read_text()))
         elif args.command in {"tasks", "events"}:
@@ -143,12 +216,7 @@ def main(argv=None):
             message = sys.stdin.read(4001)
             result = request(args.runtime, args.port, "/v1/chat", {"message": message})
         elif args.command == "ui":
-            ticket = request(args.runtime, args.port, "/v1/ui-ticket", {})["ticket"]
-            opened = webbrowser.open(
-                f"http://127.0.0.1:{args.port}/ui-login?ticket={ticket}",
-                new=2,
-            )
-            result = {"ok": bool(opened), "opened": bool(opened)}
+            result = open_ui(args.runtime, args.port)
         elif args.command == "otp":
             result = request(args.runtime, args.port, "/v1/otp", {"message": sys.stdin.read(4097), "task_id": args.task, "hint": args.hint})
         elif args.command == "user-input":
