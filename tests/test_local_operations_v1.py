@@ -158,9 +158,16 @@ def test_safe_update_refuses_active_or_runnable_task(tmp_path):
         task["task_id"],
         claimed["owner"],
         "NEEDS_USER_ACTION",
-        blocker="security_challenge",
+        blocker="otp_waiting",
         release=True,
     )
+    assert updater.safe_to_update(supervisor) == (False, "otp_in_flight")
+
+    with q.tx() as db:
+        db.execute(
+            "UPDATE tasks SET blocker='security_challenge' WHERE task_id=?",
+            (task["task_id"],),
+        )
     assert updater.safe_to_update(supervisor) == (True, "")
 
 
@@ -333,3 +340,44 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_supervisor_fences_mutations_while_update_is_running(
+    tmp_path, monkeypatch
+):
+    q, worker, supervisor = _supervisor(tmp_path)
+    task = q.enqueue(_spec(tmp_path))
+    claimed = q.claim("fence-worker")
+    q.checkpoint(
+        task["task_id"],
+        claimed["owner"],
+        "NEEDS_USER_ACTION",
+        blocker="security_challenge",
+        release=True,
+    )
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.read_update_state",
+        lambda root: {
+            "status": "updating",
+            "old_version": "a" * 12,
+            "new_version": "b" * 12,
+            "reason": "",
+        },
+    )
+
+    with pytest.raises(RuntimeError):
+        supervisor.dispatch(
+            "POST",
+            "/v1/tasks/" + task["task_id"] + "/resume",
+            {},
+        )
+
+    # Read-only diagnostics remain available during an update.
+    monkeypatch.setattr(
+        supervisor,
+        "diagnostics",
+        lambda: {"format": "application-executor-diagnostics-v1"},
+    )
+    assert supervisor.dispatch("GET", "/v1/diagnostics", {})["format"] == (
+        "application-executor-diagnostics-v1"
+    )
