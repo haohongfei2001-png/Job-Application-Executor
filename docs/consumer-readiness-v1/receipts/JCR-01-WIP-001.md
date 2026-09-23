@@ -24,6 +24,7 @@ Status: IMPLEMENTING. This is a checkpoint, not round certification.
 - Historical suite plus current JCR-01 tests: 264 passed in an isolated macOS run after the review, task-reference, local fact-input and lease-state fixes. Exact-head CI for the latest branch head and post-merge main integration are pending.
 - PR review found a multi-page selector regression and an update/command admission race. Both received production fixes and targeted regressions before this 264-test run.
 - New negative-control and A/B task-reference regressions deny a model proposal when the user says not to pause or names another task; the user-facing mutation reply is built from deterministic receipts.
+- A push after the prior exact-head CI was interrupted because `github.com:443` timed out while `api.github.com` remained reachable. Local commits and a clean working tree were preserved; the active 20-minute heartbeat must retry the same PR branch and then require fresh exact-head CI. No merge or PASS was inferred from earlier CI.
 
 ## Boundaries and remaining work
 
