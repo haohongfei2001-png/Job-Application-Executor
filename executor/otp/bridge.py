@@ -83,7 +83,7 @@ class OtpBridge:
             return None
 
     def _rule_for(self, site: str) -> dict:
-        rules = self._load_json(DEFAULT_RULES) or {}
+        rules = self.config.get("site_rules") or self._load_json(DEFAULT_RULES) or {}
         host = (urlparse(site).hostname or site).casefold()
         return dict(rules.get(site) or rules.get(host) or {})
 
@@ -118,7 +118,8 @@ class OtpBridge:
                         request_id = None
                         response = {}
                     if response.get("status") == "received" and response.get("code"):
-                        if attempt_id and response.get("attempt_id") != attempt_id:
+                        if attempt_id and (response.get("attempt_id") != attempt_id or
+                                           response.get("origin") != site.casefold()):
                             return None
                         result = {"code": str(response["code"]), "source": "iphone_relay"}
                         if attempt_id:
@@ -126,13 +127,16 @@ class OtpBridge:
                         return result
                     if response.get("status") in {"expired", "missing", "consumed"}:
                         return None
-                if self.local_messages_enabled:
+                # A timestamp alone cannot attribute an SMS to this site. A
+                # private, site-specific sender rule is required before the
+                # local Messages source may supply an authentication code.
+                if self.local_messages_enabled and rule.get("sender_hint"):
                     try:
                         hit = self.messages_finder(
                             window_seconds=min(timeout, 300),
                             sender_hint=rule.get("sender_hint"),
                             body_keyword=rule.get("body_keyword"),
-                            not_before=(requested_at if requested_at is not None else start) - 3,
+                            not_before=requested_at if requested_at is not None else start,
                         )
                     except (OSError, PermissionError):
                         hit = None

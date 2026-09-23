@@ -326,6 +326,71 @@ def test_sms_login_never_auto_resends_code(tmp_path):
         assert adapter.page.locator("#resend").get_attribute("data-clicked") is None
 
 
+def test_proven_sms_form_can_coexist_with_separate_password_mode(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <form id="password-login"><h2>密码登录</h2>
+        <label>密码 <input type="password"></label></form>
+      <form id="sms-login"><h2>短信登录</h2>
+        <label>手机号 <input id="phone" type="tel"></label>
+        <label>验证码 <input id="otp" autocomplete="one-time-code"></label>
+        <button id="send" type="button">发送验证码</button>
+      </form>
+    ''', name="sms-password-modes.html")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.auth_challenge_kind() == "one_time_code"
+        assert adapter.page.locator('input[type="password"]').input_value() == ""
+
+
+def test_password_inside_sms_form_remains_human_challenge(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <form id="login"><h2>登录</h2>
+        <label>手机号 <input type="tel"></label>
+        <label>验证码 <input autocomplete="one-time-code"></label>
+        <label>密码 <input type="password"></label>
+        <button type="button">发送验证码</button>
+      </form>
+    ''', name="sms-password-same-form.html")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.auth_challenge_kind() != "one_time_code"
+
+
+def test_sms_login_resends_only_with_explicit_authorization_and_durable_intent(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>登录</h2>
+        <label>手机号 <input id="phone" type="tel" value="13800138000"></label>
+        <label>验证码 <input id="otp"></label>
+        <label><input id="marketing" type="checkbox">订阅营销消息</label>
+        <button id="resend" type="button" onclick="this.dataset.clicked='yes'">重新发送</button>
+      </div>
+    ''', name="sms-resend-authorized.html")
+    events = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.prepare_one_time_code_auth(
+            "13800138000", authorized_resend=True,
+            before_send=lambda: events.append("intent"),
+            after_send=lambda: events.append("observed")) == "requested"
+        assert events == ["intent", "observed"]
+        assert adapter.page.locator("#resend").get_attribute("data-clicked") == "yes"
+        assert adapter.page.locator("#marketing").is_checked() is False
+
+
+def test_sms_login_rejects_ambiguous_authorized_resend(tmp_path):
+    html = _sms_login_page(tmp_path, '''
+      <div role="dialog" id="login-dialog">
+        <h2>登录</h2>
+        <label>手机号 <input id="phone" type="tel" value="13800138000"></label>
+        <label>验证码 <input id="otp"></label>
+        <button type="button" onclick="this.dataset.clicked='yes'">重新发送</button>
+        <button type="button" onclick="this.dataset.clicked='yes'">重发验证码</button>
+      </div>
+    ''', name="sms-resend-ambiguous.html")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.prepare_one_time_code_auth(
+            "13800138000", authorized_resend=True) == "ambiguous"
+        assert adapter.page.locator("button[data-clicked]").count() == 0
+
+
 def test_sms_login_rejects_ambiguous_phone_controls(tmp_path):
     html = _sms_login_page(tmp_path, '''
       <div role="dialog" id="login-dialog">

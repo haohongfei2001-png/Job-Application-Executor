@@ -25,8 +25,8 @@ def find_recent_sms_code(db_path=None,window_seconds=180,sender_hint=None,body_k
     hits=[]
     for body,date,sender in rows:
         ts=_apple_ns_to_unix(date)
-        if ts and now-ts>window_seconds: continue
-        if ts and not_before is not None and ts < not_before: continue
+        if not ts or ts > now or now-ts > window_seconds: continue
+        if not_before is not None and ts < not_before: continue
         if sender_hint and sender_hint.lower() not in str(sender).lower(): continue
         if body_keyword and body_keyword.lower() not in str(body).lower(): continue
         codes=OTP_RE.findall(str(body))

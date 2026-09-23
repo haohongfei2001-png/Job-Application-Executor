@@ -472,6 +472,7 @@ class GenericWebAdapter(SiteAdapter):
         allow_standard_auth_terms: bool = False,
         before_send=None,
         after_send=None,
+        authorized_resend: bool = False,
     ) -> str:
         """Prepare one conservative SMS-login request before waiting for the OTP.
 
@@ -545,7 +546,7 @@ class GenericWebAdapter(SiteAdapter):
             .replace(/\s+/g, ' ').trim();
           const initial = controls.filter(e => initialSend.test(text(e)));
           const resendControls = controls.filter(e => resend.test(text(e)));
-          if (initial.length > 1) return {status: 'ambiguous'};
+          if (initial.length > 1 || resendControls.length > 1) return {status: 'ambiguous'};
 
           const checkboxes = inputs.filter(e =>
             visible(e) && context.contains(e)
@@ -566,6 +567,8 @@ class GenericWebAdapter(SiteAdapter):
             status: initial.length === 1 ? 'prepare' : (resendControls.length ? 'already_requested' : 'not_needed'),
             phoneIndex: inputs.indexOf(phones[0]),
             sendIndex: initial.length === 1 ? allControls.indexOf(initial[0]) : -1,
+            resendIndex: initial.length === 0 && resendControls.length === 1
+              ? allControls.indexOf(resendControls[0]) : -1,
             consentIndices: terms.map(e => inputs.indexOf(e)),
             uncheckedConsentIndices: terms.filter(e => !e.checked).map(e => inputs.indexOf(e)),
             hasChina86: /(?:中国\s*)?\+\s*86/.test(contextText),
@@ -577,11 +580,14 @@ class GenericWebAdapter(SiteAdapter):
             return "ambiguous"
 
         status = str(result.get("status") or "ambiguous")
+        if authorized_resend:
+            status = ("resend_prepare" if status == "already_requested"
+                      and int(result.get("resendIndex", -1)) >= 0 else "ambiguous")
         if status in {"not_needed", "already_requested", "ambiguous"}:
             if status == "already_requested":
                 self._otp_request_prepared = True
             return status
-        if status != "prepare":
+        if status not in {"prepare", "resend_prepare"}:
             return "ambiguous"
 
         digits = re.sub(r"\D", "", str(phone or ""))
@@ -592,7 +598,7 @@ class GenericWebAdapter(SiteAdapter):
 
         inputs = self.page.locator('input:not([type="hidden"])')
         phone_index = int(result.get("phoneIndex", -1))
-        send_index = int(result.get("sendIndex", -1))
+        send_index = int(result.get("resendIndex" if authorized_resend else "sendIndex", -1))
         if phone_index < 0 or send_index < 0:
             return "ambiguous"
 
@@ -625,7 +631,14 @@ class GenericWebAdapter(SiteAdapter):
             # Filling/checking can re-render React forms. Re-prove the exact
             # send-code control after those mutations instead of trusting the
             # pre-mutation global nth() index.
-            send_index = self._current_sms_initial_send_index()
+            if authorized_resend:
+                current = self.page.evaluate(script) or {}
+                if (current.get("status") != "already_requested"
+                        or int(current.get("resendIndex", -1)) < 0):
+                    return "ambiguous"
+                send_index = int(current["resendIndex"])
+            else:
+                send_index = self._current_sms_initial_send_index()
             if send_index < 0:
                 return "ambiguous"
             send = self.page.locator(BUTTON_SELECTOR).nth(send_index)
@@ -638,8 +651,9 @@ class GenericWebAdapter(SiteAdapter):
                 ).split()
             )
             if (
-                not OTP_INITIAL_SEND_CONTROL_RE.fullmatch(send_text)
-                or OTP_RESEND_CONTROL_RE.search(send_text)
+                ((not OTP_RESEND_CONTROL_RE.search(send_text)) if authorized_resend
+                 else (not OTP_INITIAL_SEND_CONTROL_RE.fullmatch(send_text)
+                       or OTP_RESEND_CONTROL_RE.search(send_text)))
                 or is_final_submit(send_text)
                 or is_initial_apply(send_text)
                 or ACCOUNT_OR_DESTRUCTIVE_RE.search(send_text)
@@ -731,6 +745,30 @@ class GenericWebAdapter(SiteAdapter):
         """Read-only proof that the visible OTP belongs to a unique SMS-login setup."""
         return self._current_sms_initial_send_index() >= 0
 
+    def _sms_context_excludes_password(self) -> bool:
+        """A separate password mode cannot block a proven SMS form."""
+        try:
+            return bool(self.page.evaluate(r"""() => {
+              const visible = e => {
+                const s = getComputedStyle(e), r = e.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden'
+                  && (r.width > 0 || r.height > 0 || e.getClientRects().length > 0)
+                  && !e.disabled;
+              };
+              const otps = [...document.querySelectorAll('input')].filter(e =>
+                visible(e) && ((e.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code'
+                || /验证码|校验码|动态码|短信码|otp|one[ -]?time[ -]?code/i.test([
+                  e.id || '', e.name || '', e.placeholder || '', e.getAttribute('aria-label') || '',
+                  ...(e.labels ? [...e.labels].map(x => x.innerText || '') : [])
+                ].join(' '))));
+              if (otps.length !== 1) return false;
+              const context = otps[0].closest('form') || otps[0].closest(
+                '[role="dialog"], [aria-modal="true"], [class*="auth" i], [class*="login" i]');
+              return !!context && ![...context.querySelectorAll('input[type="password"]')].some(visible);
+            }"""))
+        except Exception:
+            return False
+
     def _visible_alternative_auth_challenge(self) -> bool:
         """Detect QR/face/security-key auth only inside a visible auth container."""
         try:
@@ -807,6 +845,11 @@ class GenericWebAdapter(SiteAdapter):
                 kinds.add("captcha")
             if self._visible_alternative_auth_challenge():
                 kinds.add("other")
+            if ("password" in kinds and "one_time_code" in kinds
+                    and self._sms_context_excludes_password()
+                    and (bool(getattr(self, "_otp_request_prepared", False))
+                         or self._has_preparable_sms_auth())):
+                kinds.discard("password")
             if not kinds and re.search(
                 r"verification code|one.?time code|\botp\b|two.?factor|multi.?factor|"
                 r"验证码|校验码|动态码|短信码|安全验证|二次验证",

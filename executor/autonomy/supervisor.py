@@ -251,6 +251,13 @@ class Supervisor:
             if method == "GET" and len(parts) == 4 and parts[3] == "observe":
                 return self.observe_task(tid)
             if method == "POST" and len(parts) == 4:
+                if parts[3] == "authorize-otp-resend" and set(data) == {"command_id", "expected_revision"}:
+                    attempt = self.worker.broker.attempts.authorize_resend(
+                        tid, command_id=data["command_id"],
+                        expected_revision=data["expected_revision"])
+                    self.worker.broker.discard(tid)
+                    return {"task_id": tid, "attempt_id": attempt["attempt_id"],
+                            "status": "RESEND_AUTHORIZED_ONCE"}
                 if parts[3] == "resume" and not data:
                     return self.queue.resume(tid)
                 if parts[3] == "pause" and not data:

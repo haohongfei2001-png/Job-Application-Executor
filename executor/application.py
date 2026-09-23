@@ -147,7 +147,8 @@ class ApplicationExecutor:
             else:
                 send_callbacks = (
                     {"before_send": self.otp_bridge.before_send,
-                     "after_send": self.otp_bridge.after_send}
+                     "after_send": self.otp_bridge.after_send,
+                     "authorized_resend": bool(attempt.get("resend_parent_id"))}
                     if attempt else {}
                 )
                 prepare = getattr(

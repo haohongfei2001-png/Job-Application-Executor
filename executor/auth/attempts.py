@@ -29,12 +29,21 @@ class AuthAttemptStore:
                 requested_at REAL,
                 deadline REAL,
                 cooldown_until REAL,
+                resend_parent_id TEXT,
+                resend_command_id TEXT,
                 current INTEGER NOT NULL,
                 created REAL NOT NULL,
                 updated REAL NOT NULL
             )""")
             db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS one_current_auth_attempt
                 ON auth_attempts(task_id) WHERE current=1""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(auth_attempts)")}
+            if "resend_parent_id" not in columns:
+                db.execute("ALTER TABLE auth_attempts ADD COLUMN resend_parent_id TEXT")
+            if "resend_command_id" not in columns:
+                db.execute("ALTER TABLE auth_attempts ADD COLUMN resend_command_id TEXT")
+            db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS unique_resend_command
+                ON auth_attempts(resend_command_id) WHERE resend_command_id IS NOT NULL""")
 
     @staticmethod
     def _view(row):
@@ -98,6 +107,46 @@ class AuthAttemptStore:
             db.execute("""UPDATE auth_attempts SET send_outcome='SEND_UNKNOWN',
                 requested_at=?,deadline=?,cooldown_until=?,updated=? WHERE attempt_id=?""",
                 (now, now + self.ttl, now + 60, now, attempt_id))
+            return self._view(db.execute("SELECT * FROM auth_attempts WHERE attempt_id=?",
+                                         (attempt_id,)).fetchone())
+
+    def authorize_resend(self, task_id: str, *, command_id: str,
+                         expected_revision: int) -> dict:
+        """One explicit local command creates one new attempt after cooldown."""
+        if not isinstance(command_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,120}", command_id):
+            raise ValueError("invalid resend command ID")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expected task revision required")
+        with self.queue.tx() as db:
+            existing = db.execute("SELECT * FROM auth_attempts WHERE resend_command_id=?",
+                                  (command_id,)).fetchone()
+            if existing:
+                if existing["task_id"] != task_id:
+                    raise ValueError("resend command reused for another task")
+                return self._view(existing)
+            task = db.execute("SELECT revision,stage,blocker,owner,spec FROM tasks WHERE task_id=?",
+                              (task_id,)).fetchone()
+            if (not task or task["revision"] != expected_revision or task["owner"]
+                    or task["stage"] != "NEEDS_USER_ACTION" or task["blocker"] != "otp_waiting"):
+                raise RuntimeError("stale or inactive OTP wait")
+            current = db.execute("SELECT * FROM auth_attempts WHERE task_id=? AND current=1",
+                                 (task_id,)).fetchone()
+            now = self.queue.clock()
+            if (not current or current["send_outcome"] not in {"CLICK_OBSERVED", "SEND_UNKNOWN"}
+                    or not current["cooldown_until"] or current["cooldown_until"] > now):
+                raise RuntimeError("resend cooldown or prior send proof unavailable")
+            db.execute("UPDATE auth_attempts SET current=0,updated=? WHERE attempt_id=?",
+                       (now, current["attempt_id"]))
+            attempt_id = uuid.uuid4().hex
+            db.execute("""INSERT INTO auth_attempts
+                (attempt_id,task_id,origin,return_target_digest,mode,phone_fact_ref,
+                 send_outcome,requested_at,deadline,cooldown_until,resend_parent_id,
+                 resend_command_id,current,created,updated)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (attempt_id, task_id, current["origin"], current["return_target_digest"],
+                 "sms", "identity.phone", "PREPARED", None, None, None,
+                 current["attempt_id"], command_id, 1, now, now))
+            self.queue._resume_in_tx(db, task_id, expected_revision=expected_revision)
             return self._view(db.execute("SELECT * FROM auth_attempts WHERE attempt_id=?",
                                          (attempt_id,)).fetchone())
 

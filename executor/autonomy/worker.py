@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -113,6 +114,54 @@ class Worker:
         self.answers_lock = threading.RLock()
         self.answer_store = TaskAnswerStore(queue)
         self.active = None
+        self._otp_watch_lock = threading.RLock()
+        self._otp_watchers = set()
+        self._otp_watch_retry_after = {}
+
+    def _watch_late_otp(self):
+        """Listen after the short browser wait without holding a task lease."""
+        if not self.relay or not self.relay.enabled:
+            return
+        for task in self.queue.tasks():
+            if task["stage"] != "NEEDS_USER_ACTION" or task["blocker"] != "otp_waiting":
+                continue
+            tid = task["task_id"]
+            attempt = self.broker.attempts.valid_wait(tid)
+            if not attempt:
+                continue
+            aid = attempt["attempt_id"]
+            with self._otp_watch_lock:
+                if (aid in self._otp_watchers or
+                        time.monotonic() < self._otp_watch_retry_after.get(aid, 0)):
+                    continue
+                self._otp_watchers.add(aid)
+
+            def listen(task_id=tid, attempt_id=aid, origin=attempt["origin"],
+                       requested_at=attempt["requested_at"], deadline=attempt["deadline"]):
+                try:
+                    remaining = min(300, max(1, int(deadline - self.queue.clock())))
+                    result = self.relay.wait_for_code(
+                        origin, timeout_seconds=remaining, attempt_id=attempt_id,
+                        requested_at=requested_at)
+                    if (self.stop_event.is_set() or not isinstance(result, dict)
+                            or result.get("attempt_id") != attempt_id
+                            or result.get("origin") != origin):
+                        return
+                    accepted = self.broker.push(task_id=task_id, attempt_id=attempt_id,
+                                                message=str(result.get("code") or ""))
+                    if accepted["accepted"]:
+                        current = self.queue.get(task_id)
+                        if not current["owner"] and current["stage"] == "NEEDS_USER_ACTION":
+                            self.queue.resume(task_id)
+                except (OSError, RuntimeError, ValueError, KeyError):
+                    # A disconnected source leaves the task at a visible wait.
+                    pass
+                finally:
+                    with self._otp_watch_lock:
+                        self._otp_watchers.discard(attempt_id)
+                        self._otp_watch_retry_after[attempt_id] = time.monotonic() + 15
+
+            threading.Thread(target=listen, daemon=True).start()
 
     def _runner_settings(self):
         settings = copy.deepcopy(self.settings)
@@ -206,6 +255,7 @@ class Worker:
         task = self.queue.claim("worker-" + str(os.getpid()))
         if not task:
             self.broker.expire()
+            self._watch_late_otp()
             return False
         tid, owner, spec = task["task_id"], task["owner"], task["spec"]
         done, lost = threading.Event(), threading.Event()
