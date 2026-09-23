@@ -6,6 +6,7 @@ from typing import Any
 
 from .models import ApplicationPlan, FieldResolution, utc_now
 from .profile import masked_preview
+from .facts.answers import ExecutionAnswerStore
 
 
 ROOT = Path.home() / "Job-Application-Executor" / "applications"
@@ -57,6 +58,7 @@ class AuditStore:
             pass
         self.actions_path = self.root / "actions.jsonl"
         self.user_answers_path = self.root / "user-answers.json"
+        self.answer_store = ExecutionAnswerStore(self.root)
 
     def save_plan(self, plan: ApplicationPlan) -> Path:
         path = self.root / "plan.json"
@@ -71,32 +73,30 @@ class AuditStore:
         return ApplicationPlan.model_validate_json(path.read_text(encoding="utf-8"))
 
     def load_user_answers(self) -> list[dict[str, Any]]:
-        if not self.user_answers_path.is_file():
-            return []
-        data = json.loads(self.user_answers_path.read_text(encoding="utf-8"))
-        items = data.get("answers") if isinstance(data, dict) else None
-        return items if isinstance(items, list) else []
+        if self.user_answers_path.is_file():
+            data = json.loads(self.user_answers_path.read_text(encoding="utf-8"))
+            items = data.get("answers") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                raise ValueError("legacy execution answers are malformed")
+            for item in items:
+                self.answer_store.save(item)
+            # Only remove the raw predecessor after every value is readable
+            # from the encrypted journal. A crash before unlink retries safely.
+            loaded = self.answer_store.load()
+            expected = {
+                self.answer_store._match_key(item): item for item in items
+            }
+            observed = {
+                self.answer_store._match_key(item): item for item in loaded
+            }
+            if any(observed.get(key) != value for key, value in expected.items()):
+                raise RuntimeError("execution answer migration incomplete")
+            self.user_answers_path.unlink()
+        return self.answer_store.load()
 
     def add_user_answer(self, answer: dict[str, Any]) -> Path:
-        items = self.load_user_answers()
-        selector = answer.get("selector")
-        field_id = answer.get("field_id")
-        canonical_key = answer.get("canonical_key")
-        items = [
-            item for item in items
-            if not (
-                (selector and item.get("selector") == selector)
-                or (not selector and field_id and item.get("field_id") == field_id)
-                or (not selector and not field_id and canonical_key and item.get("canonical_key") == canonical_key)
-            )
-        ]
-        items.append(answer)
-        self.user_answers_path.write_text(
-            json.dumps({"answers": items}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        self.user_answers_path.chmod(0o600)
-        return self.user_answers_path
+        self.load_user_answers()
+        return self.answer_store.save(answer)
 
     def record_action(self, action: dict[str, Any]) -> None:
         item = redact_secrets({"at": utc_now(), **action})

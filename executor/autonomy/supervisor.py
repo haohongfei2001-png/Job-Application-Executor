@@ -187,12 +187,13 @@ class Supervisor:
                     self.worker.answers.pop(command.task_id, None)
             return receipt
 
-    def run_local_fact(self, task_id, field_key, value, revision):
+    def run_local_fact(self, task_id, field_key, value, revision, *, remember=False):
         with self._command_lock:
             if self.mutation_fenced():
                 raise RuntimeError("update in progress")
             updated = self.worker.user_input(task_id, {field_key: value},
-                                             expected_revision=revision)
+                                             expected_revision=revision,
+                                             remember=remember)
             return {"status": "accepted", "task": safe_task_view(updated)}
 
     def dispatch(self, method, path, data):
@@ -424,7 +425,10 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/user-input":
                         data = self._read_json()
-                        if set(data) != {"task_id", "field_key", "value", "expected_revision"}:
+                        if set(data) not in (
+                            {"task_id", "field_key", "value", "expected_revision"},
+                            {"task_id", "field_key", "value", "expected_revision", "remember"},
+                        ):
                             raise ValueError("invalid local fact envelope")
                         tid, key = data["task_id"], data["field_key"]
                         if not isinstance(tid, str) or not isinstance(key, str):
@@ -432,7 +436,11 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         revision = data["expected_revision"]
                         if type(revision) is not int or revision < 0:
                             raise ValueError("expected revision required")
-                        result = supervisor.run_local_fact(tid, key, data["value"], revision)
+                        remember = data.get("remember", False)
+                        if type(remember) is not bool:
+                            raise ValueError("invalid fact scope")
+                        result = supervisor.run_local_fact(
+                            tid, key, data["value"], revision, remember=remember)
                         self._send_json(200, result)
                         return
                     self._send_json(404, {"error": "not_found"})

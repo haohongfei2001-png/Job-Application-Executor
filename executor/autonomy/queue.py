@@ -599,6 +599,7 @@ class TaskQueue:
                     "validation",
                     "user_paused_from_session_unavailable",
                     "user_paused_from_validation",
+                    "profile_changed",
                 }
             )
             attempts = 0 if (human_wait or recoverable_block) else row["attempts"]
@@ -608,6 +609,24 @@ class TaskQueue:
         if command_id:
             return receipt
         return self.get(tid)
+
+    def invalidate_profile_reviews(self, profile_ref: str) -> list[str]:
+        """A confirmed profile change revokes every stale ready certificate."""
+        canonical = str(Path(profile_ref).expanduser().resolve())
+        invalidated = []
+        with self.tx() as db:
+            rows = db.execute("SELECT task_id,spec FROM tasks WHERE stage='READY_TO_SUBMIT'").fetchall()
+            for row in rows:
+                candidate = json.loads(row["spec"]).get("profile_ref", "")
+                if str(Path(candidate).expanduser().resolve()) != canonical:
+                    continue
+                tid = row["task_id"]
+                db.execute("""UPDATE tasks SET stage='BLOCKED',checkpoint='DISCOVERED',
+                    blocker='profile_changed',details='{}',owner=NULL,lease_until=NULL,
+                    updated=? WHERE task_id=?""", (self.clock(), tid))
+                self._event(db, tid, "profile_changed", "BLOCKED")
+                invalidated.append(tid)
+        return invalidated
 
     def pause(self, tid, *, command_id=None, expected_revision=None):
         """Pause a task at its last safe checkpoint without cancelling it.

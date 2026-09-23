@@ -15,6 +15,7 @@ from ..resolver import DeepSeekMapper
 from ..discovery.core import DiscoveryRequest, DiscoveryResult
 from ..discovery.service import discover
 from ..settings import load_settings
+from ..profile import DEFAULT_ALIASES
 from ..target_resolver import is_oppo_campus_landing, resolve_known_landing
 from .queue import TaskQueue, TaskSpec
 
@@ -81,6 +82,8 @@ def safe_task_view(task: dict[str, Any]) -> dict[str, Any]:
         "checkpoint": str(task.get("checkpoint") or ""),
         "blocker": str(task.get("blocker") or ""),
         "unresolved_keys": unresolved,
+        "reusable_keys": [key for key in unresolved if key in DEFAULT_ALIASES
+                          and not key.startswith("policy.")],
         "attempts": int(task.get("attempts") or 0),
     }
 

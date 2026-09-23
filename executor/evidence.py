@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
+import os
 import re
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -115,10 +119,11 @@ ANNOTATION_RE = re.compile(r"（[^）]*(?:确认|未变|按此顺序)[^）]*）"
 
 
 def _project_title(text: str) -> bool:
-    return "｜" in text and not text.startswith(("•", "-", "·"))
+    return bool(re.search(r"\s*[｜|]\s*\S", text)) and not text.startswith(("•", "-", "·"))
 
 
-def _parse_project_lines(lines: list[str], source_kind: str) -> list[dict[str, Any]]:
+def _parse_project_lines(lines: list[str], source_kind: str,
+                         *, category: str = "unspecified") -> list[dict[str, Any]]:
     projects: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     last_bullet = False
@@ -129,12 +134,13 @@ def _parse_project_lines(lines: list[str], source_kind: str) -> list[dict[str, A
         if _project_title(line):
             if current:
                 projects.append(current)
-            parts = [x.strip() for x in line.split("｜") if x.strip()]
+            parts = [x.strip() for x in re.split(r"\s*[｜|]\s*", line) if x.strip()]
             current = {
                 "title": parts[0],
                 "metadata": parts[1:],
                 "bullets": [],
                 "source_kind": source_kind,
+                "category": category,
             }
             last_bullet = False
             continue
@@ -159,17 +165,25 @@ def _parse_project_lines(lines: list[str], source_kind: str) -> list[dict[str, A
 
 def _merge_projects(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = [dict(x) for x in existing]
-    def project_key(value: Any) -> str:
-        return re.sub(r"\s+", "", str(value or "")).casefold()
+    def project_key(item: dict) -> str:
+        # Same title is not identity: date, institution, and context can differ.
+        parts = [item.get("category", "unspecified"), item.get("title", ""),
+                 *(item.get("metadata") or [])]
+        return "|".join(re.sub(r"\s+", "", str(part)).casefold() for part in parts)
 
-    index = {project_key(x.get("title", "")): i for i, x in enumerate(out)}
+    def stable_id(item: dict) -> str:
+        return "project-" + hashlib.sha256(project_key(item).encode()).hexdigest()[:16]
+
+    for item in out:
+        item.setdefault("id", stable_id(item))
+    index = {project_key(item): i for i, item in enumerate(out)}
     for item in incoming:
-        key = project_key(item.get("title", ""))
+        key = project_key(item)
         if not key:
             continue
         if key not in index:
             index[key] = len(out)
-            out.append(dict(item))
+            out.append({**item, "id": stable_id(item)})
             continue
         old = out[index[key]]
         old_meta = list(old.get("metadata") or [])
@@ -186,6 +200,37 @@ def _merge_projects(existing: list[dict[str, Any]], incoming: list[dict[str, Any
         sources.add(item.get("source_kind"))
         old["sources"] = sorted(x for x in sources if x)
     return out
+
+
+def _resume_projects(text: str, source_kind: str) -> tuple[list[dict[str, Any]], str]:
+    lines = [" ".join(line.split()).strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return [], "EMPTY_SOURCE"
+    groups: list[tuple[str, list[str]]] = []
+    current: list[str] | None = None
+    saw_section = False
+    for line in lines:
+        heading = re.sub(r"^[一二三四五六七八九十0-9]+[、.．]\s*", "", line).strip(" ：:")
+        if heading in {"产品项目", "项目经历", "项目经验"}:
+            current = []
+            groups.append(("project", current))
+            saw_section = True
+            continue
+        if heading in {"科研经历", "研究经历", "科研项目"}:
+            current = []
+            groups.append(("research", current))
+            saw_section = True
+            continue
+        if heading in {"技能与语言", "教育背景", "实习经历", "工作经历", "获奖荣誉"}:
+            current = None
+            continue
+        if current is not None:
+            current.append(line)
+    records: list[dict[str, Any]] = []
+    for category, group in groups:
+        records.extend(_parse_project_lines(group, source_kind, category=category))
+    return records, ("PARSED" if records else "UNPARSED_SECTION" if saw_section
+                     else "NO_MATCHING_SECTION")
 
 def file_sha256(path: str | Path) -> str:
     h = hashlib.sha256()
@@ -340,7 +385,11 @@ class ProfileBuilder:
                     self.add_field("education.bachelor.rank_band", band_match.group(1).strip(), src)
 
         self.profile.collections["projects_from_max"] = project_lines
-        parsed_max = _parse_project_lines([x["text"] for x in project_lines], "max_docx")
+        parsed_max = _parse_project_lines([x["text"] for x in project_lines], "max_docx",
+                                          category="project_or_research")
+        self.profile.collections["max_project_parse_status"] = (
+            "PARSED" if parsed_max else "UNPARSED_SECTION" if project_lines else "EMPTY_SECTION"
+        )
         self.profile.collections["projects"] = _merge_projects(
             self.profile.collections.get("projects") or [],
             parsed_max,
@@ -409,22 +458,14 @@ class ProfileBuilder:
             )
             if text.strip():
                 self.profile.collections["resume_text_snapshot"] = text.strip()
-                lines = [x.strip() for x in text.splitlines() if x.strip()]
-                relevant: list[str] = []
-                section = None
-                for line in lines:
-                    if line in {"产品项目", "科研经历"}:
-                        section = line
-                        continue
-                    if line == "技能与语言":
-                        section = None
-                    if section:
-                        relevant.append(line)
-                parsed_resume = _parse_project_lines(relevant, kind)
+                parsed_resume, parse_status = _resume_projects(text, kind)
+                self.profile.collections["resume_project_parse_status"] = parse_status
                 self.profile.collections["projects"] = _merge_projects(
                     self.profile.collections.get("projects") or [],
                     parsed_resume,
                 )
+            else:
+                self.profile.collections["resume_project_parse_status"] = "EMPTY_SOURCE"
             self.profile.assets["resume"] = AssetRef(
                 path=str(path), kind=kind, sha256=file_sha256(path),
                 source=EvidenceRef(kind=kind, path=str(path)),
@@ -448,21 +489,16 @@ class ProfileBuilder:
         )
         if text.strip():
             self.profile.collections["resume_text_snapshot"] = text.strip()
-            lines = [x.strip() for x in text.splitlines() if x.strip()]
-            relevant: list[str] = []
-            section = None
-            for line in lines:
-                if line in {"产品项目", "科研经历"}:
-                    section = line
-                    continue
-                if line == "技能与语言":
-                    section = None
-                if section:
-                    relevant.append(line)
-            parsed_resume = _parse_project_lines(relevant, "resume_pdf")
+            parsed_resume, parse_status = _resume_projects(text, "resume_pdf")
+            self.profile.collections["resume_project_parse_status"] = parse_status
             self.profile.collections["projects"] = _merge_projects(
                 self.profile.collections.get("projects") or [],
                 parsed_resume,
+            )
+        else:
+            self.profile.collections["resume_project_parse_status"] = (
+                "PARSE_FAILED" if self.profile.collections.get("resume_parse_warning")
+                else "EMPTY_SOURCE"
             )
         self.profile.assets["resume"] = AssetRef(
             path=str(path), kind="resume_pdf", sha256=file_sha256(path),
@@ -518,10 +554,13 @@ class ProfileBuilder:
         path = Path(path).expanduser().resolve()
         if not path.is_file():
             return self
-        try:
-            existing = ApplicantProfile.model_validate_json(path.read_text(encoding="utf-8"))
-        except Exception:
-            return self
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or (raw and "fields" not in raw):
+            raise ValueError("existing output is not a canonical profile")
+        existing = ApplicantProfile.model_validate(raw)
+        for collection in ("profile_revisions", "profile_write_version", "fact_exclusions"):
+            if collection in existing.collections:
+                self.profile.collections[collection] = existing.collections[collection]
         for key, field in existing.fields.items():
             if not any(source.kind == "user_explicit" for source in field.sources):
                 continue
@@ -556,7 +595,43 @@ def set_user_confirmed_field(
     note: str | None = None,
 ) -> Path:
     profile_path = Path(profile_path).expanduser().resolve()
-    profile = ApplicantProfile.model_validate_json(profile_path.read_text(encoding="utf-8"))
+    with _profile_lock(profile_path):
+        return _set_user_confirmed_field_locked(profile_path, key, value, note=note)
+
+
+def set_project_exclusion(profile_path: str | Path, task_id: str,
+                          project_id: str, reason: str) -> Path:
+    """Record an explicit per-application omission without deleting inventory."""
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,120}", task_id):
+        raise ValueError("invalid task scope")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+        raise ValueError("explicit exclusion reason required")
+    path = Path(profile_path).expanduser().resolve()
+    with _profile_lock(path):
+        profile = ApplicantProfile.model_validate_json(path.read_text(encoding="utf-8"))
+        projects = profile.collections.get("projects") or []
+        if not any(isinstance(item, dict) and item.get("id") == project_id for item in projects):
+            raise ValueError("project identity not in canonical inventory")
+        scopes = profile.collections.setdefault("fact_exclusions", {})
+        decisions = scopes.setdefault(task_id, {})
+        decisions[project_id] = {
+            "reason": reason.strip(), "source": "user_explicit_task", "at": _now(),
+        }
+        return _write_profile_locked(profile, path)
+
+
+def projects_for_task(profile: ApplicantProfile, task_id: str) -> list[dict[str, Any]]:
+    excluded = (profile.collections.get("fact_exclusions") or {}).get(task_id, {})
+    return [item for item in (profile.collections.get("projects") or [])
+            if item.get("id") not in excluded]
+
+
+def _set_user_confirmed_field_locked(profile_path: Path, key: str, value: Any,
+                                     *, note: str | None) -> Path:
+    original = json.loads(profile_path.read_text(encoding="utf-8"))
+    if not isinstance(original, dict) or (original and "fields" not in original):
+        raise ValueError("reusable fact requires a canonical profile")
+    profile = ApplicantProfile.model_validate(original)
     previous = profile.fields.get(key)
     verified_at = _now()
     revisions = profile.collections.setdefault("profile_revisions", [])
@@ -564,6 +639,9 @@ def set_user_confirmed_field(
         "key": key,
         "at": verified_at,
         "previous_source_kinds": [x.kind for x in previous.sources] if previous else [],
+        "previous_value": previous.value if previous else None,
+        "confirmed_value": value,
+        "source": "user_explicit",
         "note": note,
     })
     sources = list(previous.sources) if previous else []
@@ -584,12 +662,66 @@ def set_user_confirmed_field(
         user_confirmed=True,
         sensitive=is_sensitive_key(key),
     )
-    return write_profile(profile, profile_path)
+    return _write_profile_locked(profile, profile_path)
+
+
+@contextmanager
+def _profile_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a+") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def write_profile(profile: ApplicantProfile, path: str | Path) -> Path:
     path = Path(path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(profile.model_dump_json(indent=2), encoding="utf-8")
-    path.chmod(0o600)
+    with _profile_lock(path):
+        return _write_profile_locked(profile, path)
+
+
+def _write_profile_locked(profile: ApplicantProfile, path: Path) -> Path:
+    if path.exists():
+        # An unreadable canonical profile must never be replaced by an import.
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or (raw and "fields" not in raw):
+            raise ValueError("existing output is not a canonical profile")
+        on_disk = ApplicantProfile.model_validate(raw)
+        current_version = int(on_disk.collections.get("profile_write_version", 0))
+        incoming_version = int(profile.collections.get("profile_write_version", 0))
+        if incoming_version != current_version:
+            raise RuntimeError("stale canonical profile version")
+        path.chmod(0o600)
+        snapshot = path.with_name(path.name + ".pre-jcr04")
+        try:
+            os.link(path, snapshot)
+        except FileExistsError:
+            pass
+    updated = profile.model_copy(deep=True)
+    updated.collections["profile_write_version"] = (
+        int(updated.collections.get("profile_write_version", 0)) + 1
+    )
+    payload = updated.model_dump_json(indent=2).encode("utf-8")
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".profile-write-")
+    temporary = Path(name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as file:
+            file.write(payload)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+        profile.collections["profile_write_version"] = updated.collections["profile_write_version"]
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
     return path

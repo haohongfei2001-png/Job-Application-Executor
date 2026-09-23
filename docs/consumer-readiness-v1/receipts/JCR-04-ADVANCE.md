@@ -1,0 +1,19 @@
+# JCR-04 advance receipt — durable private facts
+
+Canonical package: `JAE-CONSUMER-READINESS-v1`. Proposed status after exact-head CI and merge: **ADVANCE_ALLOWED_WITH_DEFERRED**, not consumer certification. JCR-05 may proceed independently of final owner/private evidence DFG-004/005 and the separate JCR-02/JCR-03 engineering debts.
+
+## Authority and automatic evidence
+
+- Base remote main: `7be271f709a31db2bddc32ba877aeaa1fba9758f`, with JCR-03 exact-main CI 35914239049 successful. Sole writer branch: `feat/jcr04-durable-facts`; PR #14. JCR-04's E-01–E-09 matrix and round contract govern this scope.
+- Task answers are encrypted in a private, versioned SQLite journal keyed to one task. The private key and DB are mode 0600 under the 0700 runtime directory. No values enter task rows, queue events, logs, diagnostics or DeepSeek. Restarted workers load the journal before resolving a form; another task has no access to that answer. A missing/corrupt key fails closed. OTP/authentication keys and policy/legal one-time declarations are excluded from reusable facts.
+- The local task card defaults to task-only answers. Its checkbox makes reuse explicit only for known canonical keys. An opt-in saves a user-confirmed canonical field with source, time, revision and prior value before the task resumes. The local headless browser tests both the default and checked paths. A changed profile revokes earlier READY review certificates for tasks using that profile.
+- Canonical profile writes are guarded by a file lock, version check, one-time pre-JCR-04 hard-link snapshot, fsynced temporary file, atomic replace and directory fsync. A simulated failed replace leaves the previous complete JSON; concurrent confirmations retain both changes; a stale import is rejected. Noncanonical or malformed output is never silently overwritten.
+- The old CLI `answer` continuation now uses the same encrypted/versioned private answer contract; synthetic legacy `user-answers.json` values migrate and the raw predecessor is removed only after readback. A pre-JCR-04 executable cannot safely continue writing migrated answers; rollback is read-only or uses a compatible reader that preserves the journal.
+- Project/research imports accept full-width and ASCII separators, assign stable IDs from title/category/context, preserve same-title projects with different contexts, and report `UNPARSED_SECTION` versus `NO_MATCHING_SECTION` rather than claiming a complete parse. Explicit per-task project exclusions preserve the canonical inventory and reason. Site select choices require an exact observed option or a unique explicit reversible mapping; a mismatch remains unresolved without changing the canonical value.
+- Synthetic regressions cover restart, task isolation, explicit consent, privacy canaries, conflict history, concurrent and failed writes, legacy answer migration, project identity and exclusion scope, parser failure classification, site representation, and stale READY review invalidation. Historical safety regressions retain no automated final submit, protected target, browser isolation, OTP and no-model-private-fact assertions.
+
+## Deferred evidence and limitations
+
+- E-01–E-09 and F-class final-live cases are **NOT_RUN** on a real applicant. No real MAX, resume, Chrome profile, account, SMS, CAPTCHA or application side effect was accessed. DFG-004/005 hold owner/private review and real migration; they do not block JCR-05 engineering.
+- Task-local answers remain available after a task reaches READY for crash diagnosis and explicit local retention decisions; they do not cross task boundaries. Future consumer deletion/export controls belong in later final-review/update surfaces.
+- `receipts/JCR-04-MAIN-INTEGRATION.md` will record final PR head, exact-head CI, review closure, merge SHA, exact-main CI and remote STATUS readback. This pre-merge receipt makes no early CI/merge claim.

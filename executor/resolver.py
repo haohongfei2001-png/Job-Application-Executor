@@ -11,6 +11,7 @@ from typing import Any
 
 from .models import FieldResolution, ResolutionStatus, WebField
 from .profile import aliases_for, get_field, is_sensitive_key, profile_keys
+from .facts.representation import represent_choice
 
 
 PRIVACY_PATTERNS = (
@@ -384,10 +385,23 @@ class FieldResolver:
             profile_field = get_field(self.profile, key)
             if profile_field and _nonempty(profile_field.value):
                 source = "user_confirmed_profile" if profile_field.user_confirmed else "evidence_profile"
+                represented = profile_field.value
+                if field.input_type == "select" and field.options:
+                    choice = represent_choice(profile_field.value, field.options)
+                    if choice is None:
+                        return FieldResolution(
+                            field_id=field.field_id, selector=field.selector,
+                            label=field.label, canonical_key=key,
+                            status=ResolutionStatus.UNRESOLVED,
+                            reason="site option representation is unverified",
+                            required=field.required,
+                            sensitive=profile_field.sensitive or is_sensitive_key(key),
+                        )
+                    represented = choice.site_value
                 return FieldResolution(
                     field_id=field.field_id, selector=field.selector, label=field.label,
                     canonical_key=key, status=ResolutionStatus.RESOLVED,
-                    value=profile_field.value, source=source,
+                    value=represented, source=source,
                     confidence=min(confidence or 0.9, profile_field.confidence),
                     reason=reason, required=field.required,
                     sensitive=profile_field.sensitive or is_sensitive_key(key),

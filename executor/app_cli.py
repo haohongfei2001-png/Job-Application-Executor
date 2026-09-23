@@ -148,6 +148,8 @@ def _answer(args) -> int:
     item = matches[0]
     value = _parse_value(args.value_json)
     canonical_key = args.canonical_key or item.canonical_key
+    if args.promote_profile and not canonical_key:
+        raise RuntimeError("--promote-profile requires a canonical key")
     scope = "profile" if args.promote_profile else "execution"
     answer = {
         "field_id": item.field_id,
@@ -161,8 +163,6 @@ def _answer(args) -> int:
     store.add_user_answer(answer)
 
     if args.promote_profile:
-        if not canonical_key:
-            raise RuntimeError("--promote-profile requires a canonical key")
         profile_path = _profile_path(args.profile)
         set_user_confirmed_field(
             profile_path,

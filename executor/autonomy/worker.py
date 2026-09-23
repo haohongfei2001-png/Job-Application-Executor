@@ -13,6 +13,9 @@ from ..application import ApplicationExecutor
 from ..models import ApplicationStage
 from ..protected_targets import assert_target_not_protected
 from ..settings import load_settings
+from ..evidence import set_user_confirmed_field
+from ..profile import DEFAULT_ALIASES
+from ..facts.answers import TaskAnswerStore
 from .otp import BrokerBridge, OtpBroker
 from .queue import RUNTIME, STOPPED, private_dir, IDENTIFIER
 
@@ -108,6 +111,7 @@ class Worker:
         self.stop_event = threading.Event()
         self.answers = {}
         self.answers_lock = threading.RLock()
+        self.answer_store = TaskAnswerStore(queue)
         self.active = None
 
     def _runner_settings(self):
@@ -117,7 +121,7 @@ class Worker:
             settings.setdefault("deepseek", {})["enabled"] = False
         return settings
 
-    def user_input(self, tid, answers, *, expected_revision=None):
+    def user_input(self, tid, answers, *, expected_revision=None, remember=False):
         task = self.queue.get(tid)
         if expected_revision is None:
             expected_revision = task["revision"]
@@ -134,17 +138,24 @@ class Worker:
             raise ValueError("invalid answer value")
         if any(any(x in k.lower() for x in ("password", "cookie", "token", "otp", "secret")) for k in answers):
             raise ValueError("use OTP ingestion for authentication")
+        if type(remember) is not bool:
+            raise ValueError("explicit fact scope required")
+        if remember and any(key.startswith(("policy.", "declaration.", "legal.")) for key in answers):
+            raise ValueError("one-time declarations cannot become reusable facts")
+        if remember and any(key not in DEFAULT_ALIASES for key in answers):
+            raise ValueError("reusable fact requires a known canonical key")
+        # Save before making the task runnable. A crash at either boundary
+        # leaves a private task-scoped answer available on the next process.
+        self.answer_store.save(tid, answers, expected_revision=expected_revision)
+        if remember:
+            for key, value in answers.items():
+                set_user_confirmed_field(task["spec"]["profile_ref"], key, value,
+                                         note="explicit local reusable-fact consent")
+            self.queue.invalidate_profile_reviews(task["spec"]["profile_ref"])
+        resumed = self.queue.resume(tid, expected_revision=expected_revision)
         with self.answers_lock:
-            previous = dict(self.answers.get(tid, {}))
             self.answers.setdefault(tid, {}).update(answers)
-            try:
-                return self.queue.resume(tid, expected_revision=expected_revision)
-            except BaseException:
-                if previous:
-                    self.answers[tid] = previous
-                else:
-                    self.answers.pop(tid, None)
-                raise
+        return resumed
 
     def run_once(self):
         task = self.queue.claim("worker-" + str(os.getpid()))
@@ -226,8 +237,10 @@ class Worker:
                 runner.browser_document_set = lambda target_id, document_epoch: self.queue.record_browser_document(
                     tid, owner, session_epoch, target_id, document_epoch,
                 )
-            with self.answers_lock:
-                runner.user_answers = [{"canonical_key": k, "field_id": k, "value": v} for k, v in self.answers.get(tid, {}).items()]
+            runner.user_answers = [
+                {"canonical_key": key, "field_id": key, "value": value}
+                for key, value in self.answer_store.load(tid).items()
+            ]
             runner.plan.metadata["recovered_from_stage"] = task["checkpoint"]
             if spec["attachment_refs"]:
                 for key, path in spec["attachment_refs"].items():
