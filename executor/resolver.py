@@ -505,10 +505,23 @@ class FieldResolver:
         if ai_key and ai_conf >= 0.80:
             profile_field = get_field(self.profile, ai_key)
             if profile_field and _nonempty(profile_field.value) and field_is_current(profile_field) and not has_unresolved_conflict(self.profile, ai_key):
+                represented = profile_field.value
+                if field.input_type == "select" and field.options:
+                    choice = represent_choice(profile_field.value, field.options)
+                    if choice is None:
+                        return FieldResolution(
+                            field_id=field.field_id, selector=field.selector,
+                            label=field.label, canonical_key=ai_key,
+                            status=ResolutionStatus.UNRESOLVED,
+                            reason="site option representation is unverified",
+                            required=field.required,
+                            sensitive=profile_field.sensitive or is_sensitive_key(ai_key),
+                        )
+                    represented = choice.site_value
                 return FieldResolution(
                     field_id=field.field_id, selector=field.selector, label=field.label,
                     canonical_key=ai_key, status=ResolutionStatus.RESOLVED,
-                    value=profile_field.value, source="ai_mapping_only",
+                    value=represented, source="ai_mapping_only",
                     confidence=min(ai_conf, profile_field.confidence),
                     reason=ai_reason, required=field.required,
                     sensitive=profile_field.sensitive or is_sensitive_key(ai_key),

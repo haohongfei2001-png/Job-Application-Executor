@@ -599,6 +599,7 @@ class TaskQueue:
                 "user_paused_from_session_unavailable",
                 "user_paused_from_validation",
                 "profile_changed",
+                "profile_promotion_pending",
             }
         )
         attempts = 0 if (human_wait or recoverable_block) else row["attempts"]
@@ -615,13 +616,16 @@ class TaskQueue:
             return receipt
         return self.get(tid)
 
-    def invalidate_profile_reviews(self, profile_ref: str) -> list[str]:
-        """A confirmed profile change revokes every stale ready certificate."""
+    def invalidate_profile_reviews(self, profile_ref: str, *, except_task_id: str | None = None) -> list[str]:
+        """Fence every other nonterminal task before a canonical profile write."""
         canonical = str(Path(profile_ref).expanduser().resolve())
         invalidated = []
         with self.tx() as db:
-            rows = db.execute("SELECT task_id,spec FROM tasks WHERE stage='READY_TO_SUBMIT'").fetchall()
+            rows = db.execute("""SELECT task_id,spec FROM tasks
+                WHERE stage NOT IN ('SUBMITTED','VERIFIED','CANCELLED')""").fetchall()
             for row in rows:
+                if row["task_id"] == except_task_id:
+                    continue
                 candidate = json.loads(row["spec"]).get("profile_ref", "")
                 if str(Path(candidate).expanduser().resolve()) != canonical:
                     continue

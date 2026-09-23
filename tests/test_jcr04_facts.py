@@ -200,12 +200,15 @@ def test_reusable_fact_promotion_retries_without_duplicate_revision(tmp_path, mo
     monkeypatch.setattr(worker.answer_store, "mark_reuse_applied", crash_after_profile_write)
     result = worker.user_input(tid, {"identity.current_city": "Synthetic City"}, remember=True)
     assert result["fact_reuse_status"] == "PENDING"
-    assert queue.get(tid)["stage"] == "DISCOVERED"
+    assert queue.get(tid)["stage"] == "BLOCKED"
+    assert queue.get(tid)["blocker"] == "profile_promotion_pending"
+    assert queue.claim("other-worker") is None
     version = ApplicantProfile.model_validate_json(profile.read_text()).collections["profile_write_version"]
     monkeypatch.setattr(worker.answer_store, "mark_reuse_applied", real_mark)
     restarted = Worker(TaskQueue(queue.root), settings={"deepseek": {"enabled": False}})
     assert restarted._promote_pending_facts(tid, str(profile))
     assert restarted.answer_store.pending_reuse(tid) == []
+    assert queue.get(tid)["stage"] == "DISCOVERED"
     assert ApplicantProfile.model_validate_json(profile.read_text()).collections["profile_write_version"] == version
 
 
@@ -269,6 +272,47 @@ def test_one_same_title_exclusion_cannot_hide_another_project():
     assert project_coverage_review(profile.model_dump(), plan)["uncovered_projects"] == []
 
 
+def test_two_same_title_projects_need_two_distinct_form_rows():
+    from executor.review import project_coverage_review
+    from executor.models import FieldResolution
+
+    profile = ApplicantProfile()
+    profile.collections["projects"] = [
+        {"id": "project-a", "title": "Shared title", "metadata": ["2024"]},
+        {"id": "project-b", "title": "Shared title", "metadata": ["2025"]},
+    ]
+    plan = ApplicationPlan(execution_id="synthetic-review",
+                           target_url="https://example.test/jobs/1", site_id="synthetic")
+    one = FieldResolution(field_id="project_name_1", selector="#project-1",
+                          label="项目名称", status=ResolutionStatus.RESOLVED,
+                          value="Shared title")
+    two = FieldResolution(field_id="project_name_2", selector="#project-2",
+                          label="项目名称", status=ResolutionStatus.RESOLVED,
+                          value="Shared title")
+    plan.fields = [one]
+    assert project_coverage_review(profile.model_dump(), plan)["uncovered_projects"] == ["Shared title"]
+    plan.fields = [one, two]
+    assert project_coverage_review(profile.model_dump(), plan)["uncovered_projects"] == []
+
+
+def test_profile_promotion_fences_claimed_peer_before_writing(tmp_path):
+    profile = tmp_path / "synthetic-profile.json"
+    write_profile(ApplicantProfile(), profile)
+    queue = TaskQueue(tmp_path / "runtime")
+    pending = _task(queue, tmp_path, "pending")
+    _wait_for_fact(queue, pending, "identity.current_city")
+    active = _task(queue, tmp_path, "active")
+    claimed = queue.claim("active-worker")
+    assert claimed["task_id"] == active
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    worker.user_input(pending, {"identity.current_city": "Synthetic City"}, remember=True)
+    assert queue.get(active)["stage"] == "BLOCKED"
+    assert queue.get(active)["blocker"] == "profile_changed"
+    assert queue.get(active)["owner"] is None
+    with pytest.raises(RuntimeError, match="lease"):
+        queue.checkpoint(active, claimed["owner"], "READY_TO_SUBMIT", release=True)
+
+
 def test_resume_sections_distinguish_research_from_unparsed_or_absent_projects():
     from executor.evidence import _resume_projects
     records, status = _resume_projects(
@@ -326,6 +370,22 @@ def test_site_representation_requires_observed_unique_reversible_option():
     resolved = FieldResolver(profile.model_dump(), {"deepseek": {"enabled": False}}).resolve(field)
     assert resolved.status == ResolutionStatus.RESOLVED
     assert resolved.value == "北京市"
+
+
+def test_ai_mapped_select_also_requires_observed_reversible_option(monkeypatch):
+    from executor.resolver import FieldResolver
+    profile = ApplicantProfile(fields={"identity.current_city": ProfileField(
+        value="北京市", user_confirmed=True)})
+    resolver = FieldResolver(profile.model_dump(), {"deepseek": {"enabled": False}})
+    monkeypatch.setattr(resolver.ai, "map_field",
+                        lambda *_: ("identity.current_city", 0.95, "synthetic mapping"))
+    field = WebField(field_id="opaque", selector="#opaque", label="Opaque location token",
+                     input_type="select", options=["北京", "上海"], required=True)
+    item = resolver.resolve(field)
+    assert item.status == ResolutionStatus.UNRESOLVED
+    assert "representation" in item.reason
+    field.options = ["北京市", "上海市"]
+    assert resolver.resolve(field).value == "北京市"
 
 
 def test_local_browser_requires_explicit_checkbox_for_reusable_fact(tmp_path):

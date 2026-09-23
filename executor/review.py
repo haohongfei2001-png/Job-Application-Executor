@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -25,32 +26,24 @@ def canonical_project_titles(profile: dict[str, Any]) -> list[str]:
         if not isinstance(project, dict):
             continue
         title = str(project.get("title") or "").strip()
-        if title and title not in titles:
+        if title:
             titles.append(title)
     return titles
 
 
 def structured_project_names(fields: list[FieldResolution]) -> list[str]:
     names: list[str] = []
+    seen_fields: set[tuple[str, str]] = set()
     for item in fields:
         label = str(item.label or "")
         if not PROJECT_NAME_PATTERN.search(label):
             continue
         value = item.value
-        if isinstance(value, str) and value.strip() and value.strip() not in names:
+        identity = (item.field_id, item.selector)
+        if isinstance(value, str) and value.strip() and identity not in seen_fields:
             names.append(value.strip())
+            seen_fields.add(identity)
     return names
-
-
-def _covered(title: str, names: list[str]) -> bool:
-    nt = _norm(title)
-    if not nt:
-        return False
-    for name in names:
-        nn = _norm(name)
-        if nn and nt == nn:
-            return True
-    return False
 
 
 def project_coverage_review(
@@ -79,18 +72,24 @@ def project_coverage_review(
                 if title not in exclusions:
                     exclusions.append(title)
 
-    def fully_excluded_duplicate(title: str) -> bool:
-        matches = [record for record in records if _norm(record["title"]) == _norm(title)]
-        return len(matches) > 1 and all(record.get("id") in scoped_ids for record in matches)
-
-    uncovered = [
-        title for title in canonical
-        if (
-            (sum(_norm(record["title"]) == _norm(title) for record in records) > 1
-             and not fully_excluded_duplicate(title))
-            or (not _covered(title, structured) and not _covered(title, exclusions))
-        )
-    ]
+    # A title is not a record identity. Match each non-excluded canonical
+    # occurrence to one distinct structured title field, so two real records
+    # with the same title require two separate form rows.
+    available = Counter(_norm(name) for name in structured)
+    title_counts = Counter(_norm(record["title"]) for record in records)
+    uncovered = []
+    legacy_exclusions = {_norm(title) for title in (plan.metadata.get("project_exclusions") or [])}
+    for record in records:
+        title = str(record["title"]).strip()
+        normalized = _norm(title)
+        if record.get("id") in scoped_ids:
+            continue
+        if title_counts[normalized] == 1 and normalized in legacy_exclusions:
+            continue
+        if available[normalized]:
+            available[normalized] -= 1
+        else:
+            uncovered.append(title)
     return {
         "canonical_projects": canonical,
         "structured_projects": structured,

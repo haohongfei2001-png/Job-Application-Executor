@@ -129,7 +129,14 @@ class TaskAnswerStore:
         self._validate(answers)
         with self.queue.tx() as db:
             self._save_in_tx(db, task_id, answers, expected_revision, remember=remember)
-            self.queue._resume_in_tx(db, task_id, expected_revision=expected_revision)
+            if remember:
+                # Keep the task unclaimable until the canonical write finishes.
+                # A process crash leaves the encrypted answer available for retry.
+                db.execute("""UPDATE tasks SET stage='BLOCKED',blocker='profile_promotion_pending',
+                    updated=? WHERE task_id=?""", (self.queue.clock(), task_id))
+                self.queue._event(db, task_id, "profile_promotion_pending", "BLOCKED")
+            else:
+                self.queue._resume_in_tx(db, task_id, expected_revision=expected_revision)
         return self.queue.get(task_id)
 
     def load(self, task_id: str) -> dict:
