@@ -71,6 +71,28 @@ def test_consumer_launch_repairs_reversible_runtime_and_opens_ui(
     assert opened == [(tmp_path / "runtime", 9344)]
 
 
+def test_consumer_launch_uses_final_healthy_service_after_start_timeout(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "browser_mode", lambda: "live")
+    monkeypatch.setattr(cli, "ensure_chrome", lambda: None)
+
+    def fake_lifecycle(action, root, port):
+        calls.append(action)
+        return {"ok": action == "health", "reason": "health_timeout" if action == "start" else None}
+
+    monkeypatch.setattr(cli, "lifecycle", fake_lifecycle)
+    monkeypatch.setattr(preflight, "collect_live_preflight", _ready_preflight)
+    monkeypatch.setattr(cli, "open_ui", lambda *args: {"ok": True, "opened": True})
+
+    result = cli.launch_consumer(tmp_path / "runtime", 9344)
+
+    assert calls == ["start", "health"]
+    assert result["ok"] is True
+    assert result["opened"] is True
+    assert result["ready_for_live_e2e"] is True
+    assert result["message"] == "已就绪"
+
+
 def test_consumer_launch_opens_bootstrap_when_model_is_not_ready(
     tmp_path, monkeypatch
 ):

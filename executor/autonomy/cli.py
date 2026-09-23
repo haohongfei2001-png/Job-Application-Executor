@@ -120,7 +120,7 @@ def launch_consumer(root, port):
     started = lifecycle("start", root, port)
     health = lifecycle("health", root, port)
     result = collect_live_preflight(
-        supervisor_running=bool(started.get("ok") and health.get("ok")),
+        supervisor_running=bool(health.get("ok")),
     )
     if not health.get("ok"):
         from .bootstrap import open_bootstrap

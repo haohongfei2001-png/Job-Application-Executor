@@ -7,7 +7,7 @@ Status: `ADVANCE_ALLOWED_WITH_DEFERRED`, **not COMPLETE and not consumer certifi
 ## Authority and writer
 
 - Remote main base: `f09f419af4eb6d9cda7b4a5efd0641b8eaf790c7` after JCR-01 merge and exact-main CI.
-- Sole writer: draft PR [#12](https://github.com/haohongfei2001-png/Job-Application-Executor/pull/12), `feat/jcr02-owned-browser-recovery`. No parallel JCR-02 PR.
+- Sole writer: PR [#12](https://github.com/haohongfei2001-png/Job-Application-Executor/pull/12), `feat/jcr02-owned-browser-recovery`. No parallel JCR-02 PR.
 - Contract: JCR-02 in `05_ROUNDS.md`, browser/recovery ADRs in `02_ARCHITECTURE.md`, G-01–G-13 in `04_ACCEPTANCE_MATRIX.md`, and continuous-execution policy in `06_EXECUTION_PROTOCOL.md`.
 - Final PR head, merge SHA and exact-main readback are recorded in the following main-integration receipt once they exist; this receipt does not claim them early.
 
@@ -19,7 +19,8 @@ Status: `ADVANCE_ALLOWED_WITH_DEFERRED`, **not COMPLETE and not consumer certifi
 - A read-only observer can report continuity of the bound page without navigation, filling or submission. Its result always says draft identity and write outcome are unverified and replay is disallowed.
 - The consumer launcher opens an authenticated local panel despite missing model, profile or Chrome. If the supervisor fails, an independent loopback bootstrap page reports a safe cause/version and can retry the owned service through a token/origin-protected action. The panel distinguishes service liveness from live readiness.
 - Diagnostics no longer call an unreadable Git checkout clean. Existing task IDs and pre-migration backup survive the additive attempt/binding schema; new metadata does not contain field values or OTP.
-- Local complete isolated/headless suite: **298 passed in 49.09 seconds**. A real temporary-profile Chromium CDP test plus loopback SyntheticATS persists one server-side draft write across worker lease expiry and browser kill/restart: same task ID, one draft value, one total write, zero submits, no blind replay. The independent bootstrap service restart and pause race have separate targeted coverage.
+- Local complete isolated/headless suite after review repair: **301 passed in 48.70 seconds**. A real temporary-profile Chromium CDP test plus loopback SyntheticATS persists one server-side draft write across worker lease expiry and browser kill/restart: same task ID, one draft value, one total write, zero submits, no blind replay. The independent bootstrap service restart and pause race have separate targeted coverage.
+- Review feedback on PR #12 is addressed with regression tests: an unmatched select option remains a deterministic fill failure without a browser write; final service health, rather than a stale start timeout, decides launcher readiness. First live navigation also rejects a cross-origin successor before using it.
 - PR #12 earlier exact heads `34639e9`, `99e4bb3`, `60114c2`, `731d297`, `414c084` and `da5418b` passed foundation and full test CI. Exact-head CI for this receipt/status commit must pass before merge.
 
 ## Deferred acceptance and rollback

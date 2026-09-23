@@ -193,6 +193,17 @@ def test_city_select_rerender_cannot_claim_validated(tmp_path):
         assert any("selected option" in error for error in result.errors)
 
 
+def test_unmatched_select_is_a_prewrite_failure_not_unknown_outcome(tmp_path):
+    html = tmp_path / "select.html"
+    html.write_text('<label>城市<select id="city"><option value="bj">北京</option></select></label>')
+    expected = FieldResolution(field_id="city", selector="#city", label="城市",
+                               status=ResolutionStatus.RESOLVED, value="上海")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([expected])
+        assert actions == [{"field_id": "city", "ok": False, "reason": "no_matching_select_option"}]
+        assert adapter.page.locator("#city").input_value() == "bj"
+
+
 def test_missing_field_check_only_covers_current_page(monkeypatch):
     adapter = GenericWebAdapter("https://jobs.example.test/apply")
     monkeypatch.setattr(adapter, "discover_fields", lambda: [

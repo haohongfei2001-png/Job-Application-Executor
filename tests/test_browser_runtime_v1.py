@@ -156,6 +156,39 @@ def test_bound_live_connect_selects_only_the_recorded_tab(monkeypatch):
             task_binding=binding, session_epoch="epoch12345")
 
 
+def test_first_live_navigation_rejects_cross_origin_redirect(monkeypatch):
+    target = "https://jobs.example.test/apply"
+    page = FakePage("about:blank")
+    page.goto = lambda *_args, **_kwargs: setattr(page, "url", "https://other.example.test/login")
+    ctx = FakeContext([])
+    ctx.new_page = lambda: ctx.pages.append(page) or page
+
+    class Browser:
+        contexts = [ctx]
+
+        def connect_over_cdp(self, *_args, **_kwargs):
+            return self
+
+    class Playwright:
+        chromium = Browser()
+
+        def start(self):
+            return self
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser_module, "owned_cdp_session", lambda: True)
+    monkeypatch.setattr(browser_module, "sync_playwright", lambda: Playwright())
+    monkeypatch.setattr(browser_module, "page_target_id", lambda ctx, page: "target12345")
+    bound = []
+    with pytest.raises(browser_module.BrowserOwnershipError, match="verified origin"):
+        browser_module.connect(target, existing_only=True,
+            session_epoch="epoch12345", bind_page=lambda target_id: bound.append(target_id))
+    assert bound == ["target12345"]
+
+
 def test_browser_binding_persists_and_fences_popup_transition(tmp_path):
     runtime = tmp_path / "runtime"
     queue = TaskQueue(runtime)

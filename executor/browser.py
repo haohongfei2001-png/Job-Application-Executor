@@ -266,6 +266,8 @@ def connect(
                     raise BrowserOwnershipError("task browser epoch unavailable")
                 bind_page(page_target_id(ctx, page))
             page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+            if owned_page_after_action(ctx, page, target_url) is not page:
+                raise BrowserOwnershipError("new task page opened an unbound successor")
         else:
             page = pages[-1] if pages else ctx.new_page()
         return pw, browser, ctx, page

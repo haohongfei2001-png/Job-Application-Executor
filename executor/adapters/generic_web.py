@@ -332,7 +332,8 @@ class GenericWebAdapter(SiteAdapter):
                 elif tag == "select":
                     getattr(self, "mutation_guard", lambda: None)()
                     if not self._fill_select(element, value):
-                        raise ValueError("no matching select option")
+                        actions.append({"field_id": resolution.field_id, "ok": False, "reason": "no_matching_select_option"})
+                        continue
                 elif input_type in {"checkbox", "radio"}:
                     desired = bool(value)
                     if element.is_checked() != desired:
