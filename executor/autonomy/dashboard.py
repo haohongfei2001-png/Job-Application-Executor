@@ -163,6 +163,7 @@ async function startUpdate(){
         worker_active:'当前正在执行真实任务，请等任务停在安全节点后再更新。',
         runnable_task_pending:'还有可立即执行的任务，请先暂停或等它停在安全节点。',
         otp_in_flight:'正在等待或处理短信验证码，此时不能更新。',
+        update_in_progress:'已经有一次更新正在进行，不会重复启动。',
         not_on_main:'当前代码不在 main 分支，已拒绝自动更新。',
         tracked_changes_present:'本地有未提交代码修改，已拒绝自动更新。',
         unexpected_origin:'GitHub 来源不符合预期，已拒绝自动更新。'
