@@ -232,7 +232,7 @@ class Supervisor:
         if method == "POST" and parts == ["v1", "ui-ticket"] and not data:
             return {"ticket": self.issue_ui_ticket()}
         if method == "POST" and parts == ["v1", "otp"]:
-            if set(data) - {"message", "task_id", "hint"} or "message" not in data:
+            if set(data) - {"message", "task_id", "hint", "attempt_id"} or "message" not in data:
                 raise ValueError("invalid OTP envelope")
             result = self.worker.broker.push(**data)
             if result["accepted"]:
@@ -243,7 +243,11 @@ class Supervisor:
         if len(parts) >= 3 and parts[:2] == ["v1", "tasks"]:
             tid = parts[2]
             if method == "GET" and len(parts) == 3:
-                return self.queue.get(tid)
+                task = self.queue.get(tid)
+                if task["blocker"] == "otp_waiting":
+                    attempt = self.worker.broker.attempts.valid_wait(tid)
+                    task["auth_attempt_id"] = attempt["attempt_id"] if attempt else None
+                return task
             if method == "GET" and len(parts) == 4 and parts[3] == "observe":
                 return self.observe_task(tid)
             if method == "POST" and len(parts) == 4:

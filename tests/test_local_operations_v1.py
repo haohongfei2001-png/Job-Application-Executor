@@ -15,6 +15,7 @@ from executor.autonomy.manager import ManagerController, ManagerTurn
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.supervisor import Supervisor, create_server
 from executor.autonomy.worker import Worker
+from executor.auth.attempts import AuthAttemptStore
 
 
 class _UnavailableProvider:
@@ -72,6 +73,11 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
         profile_ref=str(tmp_path / "private-profile.json"),
     ))
     claimed = q.claim("diagnostic-worker")
+    attempts = AuthAttemptStore(q)
+    attempt = attempts.begin(task["task_id"], claimed["owner"], "jobs.example.test",
+                             task["spec"]["target_url"])
+    attempts.record_send_intent(attempt["attempt_id"], task["task_id"], claimed["owner"])
+    attempts.record_send_result(attempt["attempt_id"], outcome="CLICK_OBSERVED")
     q.checkpoint(
         task["task_id"],
         claimed["owner"],
@@ -80,7 +86,8 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
         release=True,
     )
     code = "48291357"
-    pushed = worker.broker.push(message="验证码 " + code, task_id=task["task_id"])
+    pushed = worker.broker.push(message="验证码 " + code, task_id=task["task_id"],
+                                attempt_id=attempt["attempt_id"])
     assert pushed["accepted"] is True
 
     monkeypatch.setattr(diagnostics.browser, "browser_mode", lambda: "live")

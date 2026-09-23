@@ -9,6 +9,7 @@ import pytest
 from executor import browser
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.otp import OtpBroker, extract_code
+from executor.auth.attempts import AuthAttemptStore
 from executor.autonomy.supervisor import Supervisor, create_server, local_token
 from executor.autonomy.worker import Worker, ProcessLock
 from executor.models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus
@@ -25,6 +26,11 @@ def waiting(q, tmp_path, suffix=''):
     s = spec(tmp_path).model_copy(update={'target_url': 'https://example.test/apply' + suffix})
     t = q.enqueue(s)
     claimed = q.claim('worker')
+    attempts = AuthAttemptStore(q)
+    attempt = attempts.begin(t['task_id'], claimed['owner'], 'example.test',
+                             s.target_url)
+    attempts.record_send_intent(attempt['attempt_id'], t['task_id'], claimed['owner'])
+    attempts.record_send_result(attempt['attempt_id'], outcome='CLICK_OBSERVED')
     q.checkpoint(t['task_id'], claimed['owner'], 'NEEDS_USER_ACTION', blocker='otp_waiting', release=True)
     return t['task_id']
 
@@ -229,10 +235,12 @@ def test_otp_expiry_single_consumption_and_no_persistence(tmp_path, capsys):
     tid = waiting(q, tmp_path)
     now = [0.]
     broker = OtpBroker(q, clock=lambda: now[0])
-    assert broker.push(message='验证码 48291357', task_id=tid)['accepted']
+    attempt_id = broker.attempts.current(tid)['attempt_id']
+    assert broker.push(message='验证码 48291357', task_id=tid,
+                       attempt_id=attempt_id)['accepted']
     assert broker.consume(tid) == '48291357'
     assert broker.consume(tid) is None
-    broker.push(message='OTP 72941836', hint='example.test')
+    broker.push(message='OTP 72941836', hint='example.test', attempt_id=attempt_id)
     now[0] = 300
     assert broker.consume(tid) is None
     # Use high-entropy 8-digit canaries when scanning raw SQLite bytes. A short
@@ -250,8 +258,10 @@ def test_ambiguous_match_never_guesses(tmp_path):
     tid = waiting(q, tmp_path)
     waiting(q, tmp_path, '/other')
     broker = OtpBroker(q)
-    assert not broker.push(message='OTP 482913', hint='example.test')['accepted']
-    assert not broker.push(message='OTP 482913')['accepted']
+    attempt_id = broker.attempts.current(tid)['attempt_id']
+    assert not broker.push(message='OTP 482913', hint='example.test',
+                           attempt_id=attempt_id)['accepted']
+    assert not broker.push(message='OTP 482913', attempt_id=attempt_id)['accepted']
     assert broker.consume(tid) is None
     assert all(t['stage'] == 'NEEDS_USER_ACTION' for t in q.tasks())
 
@@ -440,13 +450,19 @@ def test_otp_ingestion_resumes_and_replay_is_rejected(tmp_path):
     q = TaskQueue(tmp_path / 'runtime')
     tid = waiting(q, tmp_path)
     supervisor = Supervisor(q, token='x'*40)
-    response = supervisor.dispatch('POST', '/v1/otp', {'task_id':tid, 'message':'验证码 482913'})
+    attempt_id = supervisor.worker.broker.attempts.current(tid)['attempt_id']
+    assert not supervisor.dispatch('POST', '/v1/otp',
+                                   {'task_id':tid, 'message':'验证码 482913'})['accepted']
+    response = supervisor.dispatch('POST', '/v1/otp',
+                                   {'task_id':tid, 'attempt_id':attempt_id,
+                                    'message':'验证码 482913'})
     assert response['accepted']
     assert q.get(tid)['stage'] == 'DISCOVERED'
     assert supervisor.worker.broker.consume(tid) == '482913'
     t = q.claim('still-waiting')
     q.checkpoint(tid, t['owner'], 'NEEDS_USER_ACTION', blocker='otp_waiting', release=True)
-    assert not supervisor.worker.broker.push(task_id=tid, message='OTP 482913')['accepted']
+    assert not supervisor.worker.broker.push(task_id=tid, attempt_id=attempt_id,
+                                              message='OTP 482913')['accepted']
 
 
 def test_worker_exception_text_never_persisted_and_retries_bounded(tmp_path):
@@ -571,8 +587,11 @@ def test_daemon_subprocess_api_otp_input_restart_end_to_end(tmp_path):
         child, port = start()
         s = spec(tmp_path).model_copy(update={'target_url':f'http://127.0.0.1:{site.server_address[1]}/apply'})
         tid = request(root,port,'/v1/tasks',s.model_dump())['task_id']
-        assert wait_for(port,tid,'NEEDS_USER_ACTION')['blocker']=='otp_waiting'
-        assert request(root,port,'/v1/otp',{'task_id':tid,'message':'验证码 482913'})['accepted']
+        waiting_task = wait_for(port,tid,'NEEDS_USER_ACTION')
+        assert waiting_task['blocker']=='otp_waiting'
+        assert request(root,port,'/v1/otp',{'task_id':tid,
+                                          'attempt_id':waiting_task['auth_attempt_id'],
+                                          'message':'验证码 482913'})['accepted']
         wait_for(port,tid,'NEEDS_USER_INPUT')
         request(root,port,'/v1/tasks/'+tid+'/user-input',{'answers':{'unknown_fact':'FAKE_PRIVATE_ANSWER'}})
         wait_for(port,tid,'READY_TO_SUBMIT')

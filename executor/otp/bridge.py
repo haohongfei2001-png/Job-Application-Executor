@@ -33,10 +33,19 @@ class OtpBridge:
 
     @property
     def enabled(self) -> bool:
+        return self.relay_enabled or self.local_messages_enabled
+
+    @property
+    def relay_enabled(self) -> bool:
         return bool(self.config.get("enabled") and self.config.get("endpoint") and self.config.get("token"))
 
+    @property
+    def local_messages_enabled(self) -> bool:
+        return bool(self.config.get("mac_messages_enabled") or
+                    (self.relay_enabled and self.config.get("mac_messages_fallback", True)))
+
     def _post(self, action: str, **payload):
-        if not self.enabled:
+        if not self.relay_enabled:
             raise OtpBridgeError("OTP bridge is not configured")
         body = json.dumps({"action": action, **payload}).encode("utf-8")
         request = urllib.request.Request(
@@ -56,9 +65,13 @@ class OtpBridge:
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise OtpBridgeError(f"OTP relay unavailable: {type(exc).__name__}") from exc
 
-    def request(self, site: str, ttl_seconds: int | None = None):
+    def request(self, site: str, ttl_seconds: int | None = None,
+                *, attempt_id: str | None = None):
         ttl = int(ttl_seconds or self.config.get("timeout_seconds") or 180)
-        return self._post("request", site=site, ttl_seconds=ttl)
+        payload = {"site": site, "ttl_seconds": ttl}
+        if attempt_id:
+            payload["attempt_id"] = attempt_id
+        return self._post("request", **payload)
 
     def claim(self, request_id: str):
         return self._post("claim", request_id=request_id)
@@ -74,40 +87,64 @@ class OtpBridge:
         host = (urlparse(site).hostname or site).casefold()
         return dict(rules.get(site) or rules.get(host) or {})
 
-    def wait_for_code(self, site: str, timeout_seconds: int | None = None):
+    def wait_for_code(self, site: str, timeout_seconds: int | None = None,
+                      *, attempt_id: str | None = None,
+                      requested_at: float | None = None):
         if not self.enabled:
             return None
         timeout = int(timeout_seconds or self.config.get("timeout_seconds") or 180)
         poll = max(0.25, float(self.config.get("poll_interval_seconds") or 1.0))
         start = time.time()
-        request = self.request(site, timeout)
-        request_id = request.get("request_id")
-        if not request_id:
-            raise OtpBridgeError("OTP relay did not return a request id")
+        request_id = None
+        if self.relay_enabled:
+            try:
+                request = self.request(site, timeout, attempt_id=attempt_id)
+                request_id = request.get("request_id")
+                if not request_id:
+                    raise OtpBridgeError("OTP relay did not return a request id")
+            except OtpBridgeError:
+                if not self.local_messages_enabled:
+                    raise
         rule = self._rule_for(site)
-        local_fallback = self.config.get("mac_messages_fallback", True)
 
         try:
             while time.time() - start < timeout:
-                response = self.claim(request_id)
-                if response.get("status") == "received" and response.get("code"):
-                    return {"code": str(response["code"]), "source": "iphone_relay"}
-                if response.get("status") in {"expired", "missing", "consumed"}:
-                    return None
-                if local_fallback:
+                if request_id:
+                    try:
+                        response = self.claim(request_id)
+                    except OtpBridgeError:
+                        if not self.local_messages_enabled:
+                            raise
+                        request_id = None
+                        response = {}
+                    if response.get("status") == "received" and response.get("code"):
+                        if attempt_id and response.get("attempt_id") != attempt_id:
+                            return None
+                        result = {"code": str(response["code"]), "source": "iphone_relay"}
+                        if attempt_id:
+                            result.update({"attempt_id": attempt_id, "origin": site.casefold()})
+                        return result
+                    if response.get("status") in {"expired", "missing", "consumed"}:
+                        return None
+                if self.local_messages_enabled:
                     try:
                         hit = self.messages_finder(
                             window_seconds=min(timeout, 300),
                             sender_hint=rule.get("sender_hint"),
                             body_keyword=rule.get("body_keyword"),
-                            not_before=start - 3,
+                            not_before=(requested_at if requested_at is not None else start) - 3,
                         )
                     except (OSError, PermissionError):
                         hit = None
                     if hit and hit.get("code"):
-                        self.cancel(request_id)
-                        return {"code": str(hit["code"]), "source": "mac_messages"}
+                        if request_id:
+                            self.cancel(request_id)
+                        result = {"code": str(hit["code"]), "source": "mac_messages"}
+                        if attempt_id:
+                            result.update({"attempt_id": attempt_id, "origin": site.casefold()})
+                        return result
                 time.sleep(poll)
         finally:
-            self.cancel(request_id)
+            if request_id:
+                self.cancel(request_id)
         return None

@@ -470,6 +470,8 @@ class GenericWebAdapter(SiteAdapter):
         phone: str | None,
         *,
         allow_standard_auth_terms: bool = False,
+        before_send=None,
+        after_send=None,
     ) -> str:
         """Prepare one conservative SMS-login request before waiting for the OTP.
 
@@ -644,7 +646,14 @@ class GenericWebAdapter(SiteAdapter):
             ):
                 return "ambiguous"
             getattr(self, "mutation_guard", lambda: None)()
+            if before_send is not None:
+                try:
+                    before_send()
+                except (RuntimeError, ValueError):
+                    return "send_outcome_unknown"
             send.click()
+            if after_send is not None:
+                after_send()
             self._otp_request_prepared = True
             self.page.wait_for_timeout(800)
             self._adopt_owned_page()

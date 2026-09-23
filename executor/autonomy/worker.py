@@ -268,7 +268,8 @@ class Worker:
                     checkpoint("BLOCKED", blocker="session_unavailable", release=True)
                     return True
             audit = OperationalAudit(self.queue.root, tid, checkpoint, guard)
-            bridge = BrokerBridge(self.broker, tid, self.queue, owner, guard, relay=self.relay)
+            bridge = BrokerBridge(self.broker, tid, self.queue, owner, guard,
+                                  relay=self.relay, target_url=spec["target_url"])
             runner = self.runner_factory(spec["target_url"], spec["profile_ref"], self._runner_settings(), execution_id=tid,
                 otp_bridge=bridge, audit_store=audit, guard=guard,
                 resume_url=task.get("checkpoint_url"), existing_browser_only=True)
