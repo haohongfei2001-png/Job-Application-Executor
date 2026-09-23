@@ -93,17 +93,27 @@ def test_existing_task_database_migrates_without_changing_identity(tmp_path):
         """)
         db.execute("INSERT INTO tasks(task_id,idempotency_key,spec,stage,checkpoint,created,updated) "
                    "VALUES('existing-task','old-key','{}','DISCOVERED','DISCOVERED',1,1)")
+        db.execute("INSERT INTO tasks(task_id,idempotency_key,spec,stage,checkpoint,attempts,blocker,created,updated) "
+                   "VALUES('paused-task','paused-key','{}','BLOCKED','FORM_FILLED',2,'user_paused_from_input',1,2)")
+        db.execute("INSERT INTO events(task_id,at,kind,stage) VALUES('paused-task',2,'paused','BLOCKED')")
     queue = TaskQueue(root)
     existing = queue.get("existing-task")
     assert existing["task_id"] == "existing-task"
     assert existing["phase"] == "DISCOVERED"
     assert existing["revision"] == 0
     assert existing["run_state"] == "RUNNABLE"
+    paused = queue.get("paused-task")
+    assert paused["stage"] == "BLOCKED"
+    assert paused["checkpoint"] == "FORM_FILLED"
+    assert paused["attempts"] == 2
+    assert paused["paused_from"] == "NEEDS_USER_INPUT"
+    assert paused["run_state"] == "PAUSED"
+    assert queue.events()[0]["task_id"] == "paused-task"
     backup = root / "tasks.sqlite3.pre-jcr01.sqlite3"
     assert backup.exists()
     assert backup.stat().st_mode & 0o077 == 0
     with sqlite3.connect(backup) as old:
-        assert old.execute("SELECT task_id FROM tasks").fetchone()[0] == "existing-task"
+        assert {row[0] for row in old.execute("SELECT task_id FROM tasks")} == {"existing-task", "paused-task"}
         assert "revision" not in {row[1] for row in old.execute("PRAGMA table_info(tasks)")}
 
 
