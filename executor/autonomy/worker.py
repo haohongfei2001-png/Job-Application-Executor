@@ -155,6 +155,7 @@ class Worker:
         done, lost = threading.Event(), threading.Event()
         self.active = tid
         session_epoch = None
+        attempt_id = None
 
         def guard():
             if self.stop_event.is_set() or lost.is_set():
@@ -212,9 +213,11 @@ class Worker:
                     # References become assets in the existing profile/attachment resolver.
                     runner.profile.setdefault("assets", {})[key] = {"path": path, "kind": key}
                     runner.plan.attachments[key] = path
+            attempt_id = self.queue.begin_run_attempt(tid, owner)
             plan = runner.run()
             stage, blocker = outcome(plan)
             checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields]}, release=True)
+            self.queue.finish_run_attempt(attempt_id, "RETURNED_UNVERIFIED")
             if blocker == "otp_waiting" and self.broker.pending(tid):
                 self.queue.resume(tid)
             if stage in STOPPED:
@@ -222,15 +225,27 @@ class Worker:
                     self.answers.pop(tid, None)
                 self.broker.discard(tid)
         except browser.BrowserOwnershipError:
+            if attempt_id is not None:
+                self.queue.finish_run_attempt(attempt_id, "UNKNOWN_OUTCOME")
             try:
                 checkpoint("BLOCKED", blocker="browser_ownership_unknown", release=True)
             except RuntimeError:
                 pass
         except LeaseLost:
+            if attempt_id is not None:
+                self.queue.finish_run_attempt(attempt_id, "UNKNOWN_OUTCOME")
             pass  # Cancellation/stop fences the next operation; stale lease is recoverable.
         except Exception:
+            if attempt_id is not None:
+                try:
+                    self.queue.finish_run_attempt(attempt_id, "UNKNOWN_OUTCOME")
+                except RuntimeError:
+                    pass
             try:
-                checkpoint("ERROR", blocker="retry_pending" if task["attempts"] < spec["max_attempts"] else "retry_exhausted", release=True)
+                checkpoint("BLOCKED" if attempt_id is not None else "ERROR",
+                           blocker="unknown_outcome" if attempt_id is not None else
+                           ("retry_pending" if task["attempts"] < spec["max_attempts"] else "retry_exhausted"),
+                           release=True)
             except RuntimeError:
                 pass
         finally:

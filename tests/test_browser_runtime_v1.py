@@ -123,6 +123,7 @@ def test_unknown_browser_owner_blocks_replay_even_after_pause(tmp_path):
     blocked = queue.get(created["task_id"])
     assert blocked["stage"] == "BLOCKED"
     assert blocked["blocker"] == "browser_ownership_unknown"
+    assert queue.run_attempts(created["task_id"])[0]["outcome"] == "UNKNOWN_OUTCOME"
     assert worker.run_once() is False
     with pytest.raises(ValueError, match="read-only reconciliation"):
         queue.resume(created["task_id"])
@@ -154,6 +155,29 @@ def test_worker_fences_changed_owned_browser_process_epoch(tmp_path, monkeypatch
     worker = Worker(queue, runner_factory=Runner, settings={"deepseek": {"enabled": False}})
     assert worker.run_once()
     assert queue.get(created["task_id"])["blocker"] == "browser_ownership_unknown"
+
+
+def test_expired_lease_with_unanswered_external_attempt_does_not_replay(tmp_path):
+    now = [100.0]
+    queue = TaskQueue(tmp_path / "runtime", clock=lambda: now[0])
+    created = queue.enqueue(TaskSpec(
+        company="Synthetic", role="Engineer",
+        target_url="https://jobs.example.test/apply?postId=crash-1",
+        profile_ref=str(tmp_path / "synthetic-profile.json"),
+    ))
+    claimed = queue.claim("crashing-worker", lease_seconds=10)
+    attempt_id = queue.begin_run_attempt(created["task_id"], claimed["owner"])
+    assert queue.run_attempts(created["task_id"])[0]["outcome"] == "ATTEMPTED"
+    now[0] += 11
+    recovered = TaskQueue(queue.root, clock=lambda: now[0])
+    assert recovered.claim("replacement-worker") is None
+    blocked = recovered.get(created["task_id"])
+    assert blocked["stage"] == "BLOCKED"
+    assert blocked["blocker"] == "unknown_outcome"
+    assert recovered.run_attempts(created["task_id"])[0]["attempt_id"] == attempt_id
+    assert recovered.run_attempts(created["task_id"])[0]["outcome"] == "UNKNOWN_OUTCOME"
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        recovered.resume(created["task_id"])
 
 
 def test_cleanup_live_pages_only_closes_owned_junk():

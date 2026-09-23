@@ -127,6 +127,9 @@ class TaskQueue:
             db.execute('''CREATE TABLE IF NOT EXISTS commands (
                 command_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
                 action TEXT NOT NULL, receipt TEXT NOT NULL, created REAL NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS run_attempts (
+                attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner TEXT NOT NULL,
+                outcome TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL)''')
         self.path.chmod(0o600)
 
     @contextmanager
@@ -313,6 +316,40 @@ class TaskQueue:
         rows.reverse()
         return rows
 
+    def begin_run_attempt(self, tid: str, owner: str) -> str:
+        """Persist intent before the runner can make an external write."""
+        with self.tx() as db:
+            row = db.execute("SELECT owner,lease_until FROM tasks WHERE task_id=?", (tid,)).fetchone()
+            if row is None or row["owner"] != owner or row["lease_until"] <= self.clock():
+                raise RuntimeError("lease lost before action attempt")
+            unresolved = db.execute(
+                "SELECT 1 FROM run_attempts WHERE task_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
+                (tid,),
+            ).fetchone()
+            if unresolved:
+                raise RuntimeError("previous external outcome requires reconciliation")
+            attempt_id = uuid.uuid4().hex
+            db.execute("INSERT INTO run_attempts VALUES(?,?,?,?,?,?)",
+                       (attempt_id, tid, owner, "ATTEMPTED", self.clock(), self.clock()))
+            return attempt_id
+
+    def finish_run_attempt(self, attempt_id: str, outcome: str) -> None:
+        if outcome not in {"RETURNED_UNVERIFIED", "UNKNOWN_OUTCOME"}:
+            raise ValueError("invalid run outcome")
+        with self.tx() as db:
+            row = db.execute("SELECT outcome FROM run_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if row is None or row["outcome"] not in {"ATTEMPTED", outcome}:
+                raise RuntimeError("run attempt outcome conflict")
+            db.execute("UPDATE run_attempts SET outcome=?,updated=? WHERE attempt_id=?",
+                       (outcome, self.clock(), attempt_id))
+
+    def run_attempts(self, tid: str) -> list[dict]:
+        with self.tx() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT attempt_id,task_id,outcome,created,updated FROM run_attempts WHERE task_id=? ORDER BY created",
+                (tid,),
+            )]
+
     def claim(self, worker, lease_seconds=60):
         now = self.clock()
         with self.tx() as db:
@@ -326,6 +363,17 @@ class TaskQueue:
                 spec = json.loads(row["spec"])
                 runnable = row["stage"] in SAFE_STAGES or (row["stage"] == "ERROR" and row["blocker"] == "retry_pending")
                 if not runnable:
+                    continue
+                uncertain = db.execute(
+                    "SELECT attempt_id,outcome FROM run_attempts WHERE task_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
+                    (row["task_id"],),
+                ).fetchone()
+                if uncertain:
+                    db.execute("UPDATE run_attempts SET outcome='UNKNOWN_OUTCOME',updated=? WHERE attempt_id=?",
+                               (now, uncertain["attempt_id"]))
+                    db.execute("UPDATE tasks SET stage='BLOCKED',blocker='unknown_outcome',owner=NULL,lease_until=NULL,updated=? WHERE task_id=?",
+                               (now, row["task_id"]))
+                    self._event(db, row["task_id"], "unknown_outcome", "BLOCKED")
                     continue
                 if row["attempts"] >= spec["max_attempts"]:
                     db.execute("UPDATE tasks SET stage='ERROR',blocker='retry_exhausted',owner=NULL,lease_until=NULL,updated=? WHERE task_id=?", (now, row["task_id"]))
@@ -351,7 +399,7 @@ class TaskQueue:
             safe[key] = [k for k in details.get(key, []) if isinstance(k, str) and IDENTIFIER.fullmatch(k)]
         if stage == "READY_TO_SUBMIT":
             safe["final_review"] = {"final_click_actor": "user", "validated": True, "review_ref": tid, "manual_final_click_required": True}
-        if blocker not in {None, "unknown_facts", "security_challenge", "otp_waiting", "otp_ambiguous", "validation", "retry_pending", "retry_exhausted", "live_not_authorized", "session_unavailable", "protected_target", "target_mismatch", "isolated_external_target", "browser_ownership_unknown"}:
+        if blocker not in {None, "unknown_facts", "security_challenge", "otp_waiting", "otp_ambiguous", "validation", "retry_pending", "retry_exhausted", "live_not_authorized", "session_unavailable", "protected_target", "target_mismatch", "isolated_external_target", "browser_ownership_unknown", "unknown_outcome"}:
             raise ValueError("invalid blocker type")
         with self.tx() as db:
             row = db.execute("SELECT * FROM tasks WHERE task_id=? AND owner=? AND lease_until>? AND stage NOT IN ('CANCELLED','READY_TO_SUBMIT','SUBMITTED','VERIFIED')", (tid, owner, self.clock())).fetchone()
@@ -380,7 +428,7 @@ class TaskQueue:
                 raise ValueError("task active or at immutable human boundary")
             if row["attempts"] >= json.loads(row["spec"])["max_attempts"] and row["stage"] == "ERROR":
                 raise ValueError("retry budget exhausted")
-            if row["blocker"] in {"browser_ownership_unknown", "user_paused_from_browser_ownership_unknown"}:
+            if row["blocker"] in {"browser_ownership_unknown", "user_paused_from_browser_ownership_unknown", "unknown_outcome", "user_paused_from_unknown_outcome"}:
                 raise ValueError("browser outcome requires read-only reconciliation")
             assert_target_not_protected(json.loads(row["spec"])["target_url"])
             # Human input/action waits do not consume retry budget. If such a
@@ -452,6 +500,7 @@ class TaskQueue:
                 "user_paused_from_session_unavailable",
                 "user_paused_from_validation",
                 "user_paused_from_browser_ownership_unknown",
+                "user_paused_from_unknown_outcome",
             }
             if row["stage"] == "BLOCKED" and row["blocker"] in preserved_pause_markers:
                 pause_blocker = row["blocker"]
@@ -459,6 +508,7 @@ class TaskQueue:
                 "session_unavailable",
                 "validation",
                 "browser_ownership_unknown",
+                "unknown_outcome",
             }:
                 pause_blocker = "user_paused_from_" + row["blocker"]
             elif row["stage"] == "NEEDS_USER_ACTION" and row["blocker"] in {

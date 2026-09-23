@@ -16,6 +16,8 @@ Status: IMPLEMENTING. This is a checkpoint, not round certification.
 - A live worker also binds its lease to a fingerprint of the owned CDP listener PID, process start time and dedicated profile inode. A changed process epoch fences the next browser mutation as `browser_ownership_unknown`; synthetic process stubs verify this without opening or touching user Chrome.
 - Unit tests cover unrelated tabs, unique popup, ambiguous popup, closed page, cross-origin successor and no blind replay. A real isolated headless Chromium test opened an owned popup from a loopback HTTP fixture while an unrelated tab was newer.
 - The first JCR-02 local full isolated regression after page-lineage replacement passed 279 tests in 45.66 seconds. With the process-epoch fence and its two new regressions, the full isolated suite passed 281 tests in 44.62 seconds. Exact-head CI remains pending.
+- A durable `run_attempts` journal now persists `ATTEMPTED` before the runner can write externally. A normal return is recorded as `RETURNED_UNVERIFIED`; a thrown ownership/unknown error or a replacement worker seeing an expired lease with an unfinished attempt becomes `UNKNOWN_OUTCOME` and blocks automatic replay/resume. The new table is additive and keeps task IDs and existing command receipts. Crash recovery and pause-after-unknown regressions pass. The full isolated suite with this change passed 282 tests in 44.69 seconds.
+- PR [#12](https://github.com/haohongfei2001-png/Job-Application-Executor/pull/12) is the sole draft writer. Its initial head `b53a305` passed foundation and full test CI; the journal follow-up still needs a new exact-head run.
 - Real user Chrome profile, real account/job, SMS, upload and final submit: not accessed or modified.
 
 ## Outstanding JCR-02 work

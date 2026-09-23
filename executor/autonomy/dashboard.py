@@ -98,6 +98,8 @@ const blockerText={
   isolated_external_target:'隔离测试模式只支持本地合成站',
   browser_ownership_unknown:'浏览器页面归属不明，等待安全核对',
   user_paused_from_browser_ownership_unknown:'浏览器页面归属不明，等待安全核对',
+  unknown_outcome:'上次写入结果不明，等待只读核对',
+  user_paused_from_unknown_outcome:'上次写入结果不明，等待只读核对',
   validation:'需要检查表单',
   retry_pending:'正在重试',
   retry_exhausted:'需要处理后再继续',
