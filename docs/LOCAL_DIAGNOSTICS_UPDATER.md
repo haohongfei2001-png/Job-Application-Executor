@@ -1,0 +1,96 @@
+# Local Diagnostics + One-Click Update v1
+
+This package reduces dependence on direct desktop-control access. Runtime execution
+stays local, while code remains GitHub-backed.
+
+## Copy-safe diagnostics
+
+The consumer dashboard exposes **复制诊断**. It returns only operational metadata:
+
+- local Git version and branch;
+- whether the tracked worktree is clean;
+- supervisor / worker / Chrome CDP / DeepSeek availability;
+- OTP state as counts only;
+- task company, role, target hostname, stage, blocker and attempt count;
+- a bounded list of recent transition events;
+- the permanent manual-final-click safety flags.
+
+The diagnostic report never includes applicant profile values, profile paths,
+phone numbers, OTP values, cookies, API keys, browser credentials, full target
+URLs or query parameters.
+
+The report is designed to be pasted into ChatGPT for debugging when direct local
+computer access is unavailable.
+
+## One-click update
+
+The dashboard exposes **检查并更新**. Update is intentionally fail-closed.
+
+Before any Git mutation, the local updater requires:
+
+- current branch is exactly `main`;
+- no tracked local code changes;
+- `origin` is the expected Job-Application-Executor GitHub repository;
+- no active worker;
+- no immediately runnable task;
+- no OTP wait/ambiguity in progress.
+
+Only one updater process may exist at a time. A process-level file lock is
+acquired before the detached updater is launched and remains held by that child
+until it exits. Update-state JSON is written to a private temporary file and
+atomically replaced, so the supervisor's mutation fence never disappears during
+a partial write. If the machine or updater process dies while a busy state is
+persisted, the next supervisor read reconciles that state against the actual
+file lock. A stale `checking` state is released as a failed check because Git
+has not entered its mutation phase. A stale `updating` or `restarting` state
+becomes `restart_required`, keeping application mutations fenced until the
+user retries update/restart and proves the loaded service matches the checkout.
+
+All admitted state-changing requests share one local mutation lock with update
+startup. An update waits for an already-running manager/chat mutation to finish,
+then rechecks queue safety before the updater is launched. Once update state is
+claimed, new chat/task/OTP mutations are fenced until the updated service is
+loaded. A post-merge restart failure remains `restart_required`: normal task
+mutations stay fenced, while the update control remains available to retry only
+the restart.
+
+The updater also treats active and paused OTP waits as update-sensitive because
+the code is intentionally memory-only.
+
+The updater then executes an HTTP/1.1 fetch of `origin/main`. This intentionally
+avoids the HTTP/2 framing failure observed on the local Mac. If the current HEAD
+is already latest, no restart happens.
+
+If an update exists, the updater requires the current HEAD to be an ancestor of
+`origin/main`; only a fast-forward is permitted. It rechecks runtime safety
+after fetch and before merge, and revalidates branch, HEAD, expected origin,
+tracked-worktree cleanliness, and the fetched `origin/main` again immediately
+before mutation. Divergence, a dirty tracked worktree, a branch/HEAD race, an
+unexpected remote or any runtime race aborts the update.
+
+After a successful fast-forward, the updater safely stops the localhost
+supervisor, starts the updated version, and opens a fresh authenticated UI. If
+the code update succeeded but stop/start did not, the durable
+`restart_required` state makes the next button press retry the restart even
+when local HEAD already equals `origin/main`.
+
+## Runtime/update separation
+
+The updater runs in a detached helper process. This avoids modifying Python source
+files inside the same process that is serving the current UI.
+
+Update state is stored under the private gitignored runtime directory. Logs go to
+private runtime diagnostics and are not committed.
+
+## Safety invariants
+
+Updating does not:
+
+- upload local runtime state to GitHub;
+- copy applicant data, Chrome state or OTP values into Git;
+- create, resume, cancel or submit an application;
+- cross READY_TO_SUBMIT;
+- add any final-submit endpoint.
+
+Application execution remains local. GitHub remains the software source of truth,
+not the personal runtime database.

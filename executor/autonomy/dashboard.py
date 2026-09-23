@@ -11,8 +11,10 @@ DASHBOARD_HTML = r"""<!doctype html>
 *{box-sizing:border-box}body{margin:0}.shell{display:grid;grid-template-columns:320px 1fr;min-height:100vh}
 aside{background:#fff;border-right:1px solid #e5e7eb;padding:20px;overflow:auto}
 main{display:grid;grid-template-rows:auto 1fr auto;min-height:100vh}
-header{padding:18px 22px;background:#fff;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;justify-content:space-between}
-h1{font-size:18px;margin:0}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#16a34a;margin-right:7px}
+header{padding:18px 22px;background:#fff;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;justify-content:space-between;gap:14px}
+h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#16a34a;margin-right:7px}
+.headerbtn{border:1px solid #d7dce2;background:#fff;color:#111;padding:7px 11px;border-radius:9px;font-weight:600;font-size:13px}
+.headerbtn:hover{background:#f8fafc}.headerbtn:disabled{opacity:.45;cursor:default}
 .metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:16px 0}
 .metric{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
@@ -22,7 +24,7 @@ h1{font-size:18px;margin:0}.dot{display:inline-block;width:8px;height:8px;border
 .composer{background:#fff;border-top:1px solid #e5e7eb;padding:14px 20px;display:flex;gap:10px}
 textarea{flex:1;min-height:52px;max-height:160px;resize:vertical;border:1px solid #cbd5e1;border-radius:12px;padding:12px;font:inherit}
 button{border:0;border-radius:10px;background:#111;color:#fff;padding:0 18px;font-weight:600;cursor:pointer}
-button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b91c1c}
+button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b91c1c}.toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
 @media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:none}}
 </style>
 </head>
@@ -41,7 +43,11 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 <main>
 <header>
   <h1>AI 投递经理</h1>
-  <div><span class="dot"></span><span id="health">本地服务</span></div>
+  <div class="statusbar">
+    <div><span class="dot"></span><span id="health">本地服务</span></div>
+    <button id="diagnostics" class="headerbtn" type="button">复制诊断</button>
+    <button id="update" class="headerbtn" type="button">检查并更新</button>
+  </div>
 </header>
 <div id="chat" class="chat">
   <div class="bubble ai">把职位链接发给我并说“投递这个岗位”，或者直接说“继续”“暂停”“取消”。我会处理能自动完成的步骤；遇到需要你决定或安全验证的地方会停下来。最终提交由你确认。</div>
@@ -52,8 +58,9 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 </div>
 </main>
 </div>
+<div id="toast" class="toast"></div>
 <script>
-const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send');
+const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const stageText={
   DISCOVERED:'已加入',
@@ -104,11 +111,118 @@ function render(state){
       <span class="stage">${esc(humanStage(t.stage))}</span>
     </div>`).join('');
 }
+function notify(text){
+  toast.textContent=text;toast.style.display='block';
+  clearTimeout(notify.timer);notify.timer=setTimeout(()=>{toast.style.display='none'},4200);
+}
+function updateLabel(update){
+  const status=(update||{}).status||'idle';
+  const busy=['checking','updating','restarting'].includes(status);
+  const restartRequired=status==='restart_required';
+  updateBtn.disabled=busy;
+  msg.disabled=busy||restartRequired;
+  send.disabled=busy||restartRequired;
+  if(busy){
+    updateBtn.textContent=status==='checking'?'正在检查…':status==='updating'?'正在更新…':'正在重启…';
+  }else if(restartRequired){
+    updateBtn.textContent='重试重启';
+  }else{
+    updateBtn.textContent='检查并更新';
+  }
+}
+async function copyDiagnostics(){
+  diagnosticsBtn.disabled=true;
+  try{
+    const r=await fetch('/ui/api/diagnostics',{credentials:'same-origin'});
+    const data=await r.json();
+    if(!r.ok)throw new Error();
+    const text=JSON.stringify(data,null,2);
+    try{
+      await navigator.clipboard.writeText(text);
+    }catch(copyError){
+      const helper=document.createElement('textarea');
+      helper.value=text;helper.setAttribute('readonly','');helper.style.position='fixed';helper.style.opacity='0';
+      document.body.appendChild(helper);helper.select();
+      if(!document.execCommand('copy'))throw copyError;
+      helper.remove();
+    }
+    notify('诊断信息已复制。可以直接粘贴给 ChatGPT。');
+  }catch(e){
+    notify('复制诊断失败；现有任务未被修改。');
+  }finally{diagnosticsBtn.disabled=false}
+}
+async function startUpdate(){
+  updateBtn.disabled=true;updateBtn.textContent='正在检查…';
+  try{
+    const r=await fetch('/ui/api/update',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',
+      body:'{}'
+    });
+    const data=await r.json();
+    if(!r.ok){
+      const reason={
+        worker_active:'当前正在执行真实任务，请等任务停在安全节点后再更新。',
+        runnable_task_pending:'还有可立即执行的任务，请先暂停或等它停在安全节点。',
+        otp_in_flight:'正在等待或处理短信验证码，此时不能更新。',
+        update_in_progress:'已经有一次更新正在进行，不会重复启动。',
+        stale_update_recovered:'检测到上次更新被中断，已解除锁定；可以重新检查更新。',
+        not_on_main:'当前代码不在 main 分支，已拒绝自动更新。',
+        tracked_changes_present:'本地有未提交代码修改，已拒绝自动更新。',
+        unexpected_origin:'GitHub 来源不符合预期，已拒绝自动更新。'
+      }[data.reason]||'当前不能安全更新。';
+      notify(reason);updateBtn.disabled=false;updateBtn.textContent='检查并更新';return;
+    }
+    notify('正在检查 GitHub 并安全更新。若有新版本，服务会自动重启并重新打开面板。');
+    setTimeout(pollUpdate,900);
+  }catch(e){
+    notify('更新请求失败；当前版本和任务均保持不变。');
+    updateBtn.disabled=false;updateBtn.textContent='检查并更新';
+  }
+}
+async function pollUpdate(){
+  try{
+    const r=await fetch('/ui/api/update-status',{credentials:'same-origin'});
+    if(!r.ok)throw new Error();
+    const data=await r.json();updateLabel(data);
+    if(['checking','updating','restarting'].includes(data.status)){
+      setTimeout(pollUpdate,1000);return;
+    }
+    if(data.status==='up_to_date')notify('已经是最新版本。');
+    if(data.status==='success')notify('更新完成，正在打开新版本。');
+    if(data.status==='restart_required'){
+      notify('代码已更新，但本地服务还需要重新启动。点击“重试重启”即可继续。');
+    }
+    if(data.status==='failed'){
+      const reason={
+        worker_active:'更新取消：当前仍有任务在执行。',
+        runnable_task_pending:'更新取消：还有可立即执行的任务。',
+        otp_in_flight:'更新取消：短信验证码流程正在进行。',
+        not_on_main:'更新取消：当前不在 main 分支。',
+        tracked_changes_present:'更新取消：本地有未提交的代码修改。',
+        unexpected_origin:'更新取消：GitHub 来源不符合预期。',
+        repository_changed_during_update:'更新取消：检查期间本地代码状态发生了变化。',
+        remote_changed_during_update:'更新取消：检查期间远端 main 又发生了变化。',
+        stale_update_recovered:'检测到上次更新被中断，已解除更新锁定。',
+        fast_forward_required:'更新取消：远端无法安全快进到本地。',
+        service_stop_failed:'代码已检查，但服务没有安全停止。',
+        service_start_failed:'代码已更新，但服务未能自动重启；重新打开 AI 投递经理即可重试启动。'
+      }[data.reason]||'更新没有完成；当前任务和已有版本保持安全。';
+      notify(reason);
+    }
+  }catch(e){
+    // During a successful restart this old session disappears. The updater
+    // opens a new authenticated UI, so no destructive retry is attempted here.
+  }
+}
+diagnosticsBtn.onclick=copyDiagnostics;
+updateBtn.onclick=startUpdate;
 async function state(){
   try{
     const r=await fetch('/ui/api/state',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
-    render(await r.json());
+    const data=await r.json();render(data);updateLabel(data.update);
   }catch(e){document.getElementById('health').textContent='连接异常'}
 }
 function bubble(text,kind,actions){
@@ -125,7 +239,14 @@ async function submit(){
     if(!r.ok)throw new Error(data.error||'request failed');
     bubble(data.reply||'已处理。','ai',data.actions||[]);render(data);
   }catch(e){bubble('请求失败；现有任务未被修改。','ai')}
-  finally{send.disabled=false;msg.focus()}
+  finally{
+    try{
+      const r=await fetch('/ui/api/update-status',{credentials:'same-origin'});
+      const update=r.ok?await r.json():{status:'idle'};
+      updateLabel(update);
+    }catch(e){send.disabled=false;msg.disabled=false}
+    msg.focus();
+  }
 }
 send.onclick=submit;msg.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit()}});
 state();setInterval(state,2500);

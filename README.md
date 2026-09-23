@@ -224,6 +224,14 @@ The equivalent developer command is:
 
 See [Consumer Entry v1](docs/CONSUMER_ENTRY.md).
 
+The dashboard also provides **复制诊断** and **检查并更新**. Diagnostics are
+copy-safe operational metadata with applicant values, OTPs, credentials and
+profile paths excluded. The updater only fast-forwards a clean local `main`
+from the expected GitHub `origin/main`, uses HTTP/1.1 for fetch reliability,
+refuses updates during active/runnable/OTP-sensitive work, then safely restarts
+the local supervisor. See
+[Local Diagnostics + One-Click Update v1](docs/LOCAL_DIAGNOSTICS_UPDATER.md).
+
 For lower-level development/debugging, start the daemon and open the UI directly:
 
     .venv/bin/python -m executor.autonomy.cli start
