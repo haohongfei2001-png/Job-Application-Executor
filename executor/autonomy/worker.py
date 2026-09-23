@@ -47,6 +47,8 @@ class ProcessLock:
 
 def outcome(plan):
     if plan.stage == ApplicationStage.BLOCKED:
+        if plan.metadata.get("block_reason") == "draft persistence unverified":
+            return "BLOCKED", "draft_persistence_unverified"
         if plan.metadata.get("auth_kind"):
             if plan.metadata["auth_kind"] in {
                     "return_target_unverified", "account_identity_unverified"}:

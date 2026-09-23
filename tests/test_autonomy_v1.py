@@ -319,7 +319,7 @@ def test_security_challenge_maps_to_user_action(tmp_path, monkeypatch, kind):
     assert q.get(tid)['blocker'] == 'security_challenge'
 
 
-def test_synthetic_browser_e2e_pause_resume_review_no_click_or_pii(tmp_path, monkeypatch):
+def test_synthetic_browser_e2e_blocks_unpersisted_draft_no_click_or_pii(tmp_path, monkeypatch):
     def forbidden(*_a, **_kw):
         raise AssertionError('must never touch live 9333')
     monkeypatch.setattr(browser, 'ensure_chrome', forbidden)
@@ -340,9 +340,10 @@ def test_synthetic_browser_e2e_pause_resume_review_no_click_or_pii(tmp_path, mon
     worker.user_input(t['task_id'], {'unknown_fact': answer})
     assert worker.run_once()
     task = q.get(t['task_id'])
-    assert task['stage'] == 'READY_TO_SUBMIT'
+    assert task['stage'] == 'BLOCKED'
+    assert task['blocker'] == 'draft_persistence_unverified'
     assert task['owner'] is None
-    assert task['details']['final_review']['final_click_actor'] == 'user'
+    assert 'final_review' not in task['details']
     assert not worker.run_once()
     with pytest.raises(ValueError):
         q.resume(t['task_id'])
@@ -594,11 +595,11 @@ def test_daemon_subprocess_api_otp_input_restart_end_to_end(tmp_path):
                                           'message':'验证码 482913'})['accepted']
         wait_for(port,tid,'NEEDS_USER_INPUT')
         request(root,port,'/v1/tasks/'+tid+'/user-input',{'answers':{'unknown_fact':'FAKE_PRIVATE_ANSWER'}})
-        wait_for(port,tid,'READY_TO_SUBMIT')
+        assert wait_for(port,tid,'BLOCKED')['blocker'] == 'draft_persistence_unverified'
         child.terminate()
         child.wait(timeout=10)
         child, port = start()
-        assert request(root,port,'/v1/tasks/'+tid)['stage']=='READY_TO_SUBMIT'
+        assert request(root,port,'/v1/tasks/'+tid)['stage']=='BLOCKED'
         assert request(root,port,'/health')['final_click_actor']=='user'
         assert fixture['submits']==0
         assert fixture['authenticated']

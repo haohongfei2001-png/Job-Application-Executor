@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from datetime import date
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
@@ -309,6 +310,10 @@ class GenericWebAdapter(SiteAdapter):
             validation_error_count=int(signals.get("validationErrors") or 0),
         )
 
+    def await_form_render(self) -> None:
+        """Wait for controlled component redraw without claiming save success."""
+        self.page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
     @staticmethod
     def _control_text(value, input_type: str = "text", label: str = "") -> str:
         if isinstance(value, list):
@@ -328,6 +333,25 @@ class GenericWebAdapter(SiteAdapter):
         if input_type == "date" and re.match(r"^\d{4}-\d{2}-\d{2}", text):
             return text[:10]
         return text
+
+    @staticmethod
+    def _date_precision_supported(value, input_type: str) -> bool:
+        if input_type not in {"date", "month"}:
+            return True
+        text = str(value)
+        if input_type == "date":
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                return False
+            try:
+                date.fromisoformat(text)
+            except ValueError:
+                return False
+            return True
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return GenericWebAdapter._date_precision_supported(text, "date")
+        if not re.fullmatch(r"\d{4}-\d{2}", text):
+            return False
+        return 1 <= int(text[5:7]) <= 12
 
     def _fill_select(self, element, value) -> bool:
         candidates = value if isinstance(value, list) else [value]
@@ -372,8 +396,13 @@ class GenericWebAdapter(SiteAdapter):
                 tag = element.evaluate("e=>e.tagName.toLowerCase()")
                 value = resolution.value
                 if input_type == "file":
-                    getattr(self, "mutation_guard", lambda: None)()
-                    element.set_input_files(str(value))
+                    # A browser file input only proves that a local file was
+                    # selected. Generic sites provide no trustworthy upload
+                    # completion or server draft receipt. A site driver must
+                    # own that effect and its readback before it can be used.
+                    actions.append({"field_id": resolution.field_id, "ok": False,
+                                    "reason": "upload_receipt_unsupported"})
+                    continue
                 elif tag == "select":
                     getattr(self, "mutation_guard", lambda: None)()
                     if not self._fill_select(element, value):
@@ -385,6 +414,10 @@ class GenericWebAdapter(SiteAdapter):
                         getattr(self, "mutation_guard", lambda: None)()
                         element.click()
                 else:
+                    if not self._date_precision_supported(value, input_type):
+                        actions.append({"field_id": resolution.field_id, "ok": False,
+                                        "reason": "date_precision_unsupported"})
+                        continue
                     desired = self._control_text(value, input_type, resolution.label)
                     current = str(element.input_value() or "")
                     if current != desired:
@@ -401,12 +434,27 @@ class GenericWebAdapter(SiteAdapter):
         missing: list[str] = []
         errors: list[str] = []
         warnings: list[str] = []
-        current_fields = self.discover_fields()
+        # Let controlled components commit and redraw before reading page
+        # state. This is synchronization with the page render, not proof that
+        # a network autosave completed.
+        try:
+            self.await_form_render()
+            observation = self.observe_form()
+        except Exception:
+            return ValidationResult(ok=False, errors=["form observation unavailable after fill"])
+        current_fields = list(observation.fields)
+        if observation.unsafe_structure:
+            errors.append("form structure changed or contains unsupported required controls")
+        if observation.validation_error_count:
+            errors.append("site validation errors remain visible")
         page_selectors = plan.metadata.get("current_page_selectors")
         current_scope = set(page_selectors) if isinstance(page_selectors, list) else None
         by_selector = {item.selector: item for item in plan.fields
                        if current_scope is None or item.selector in current_scope}
         observed_selectors = {item.selector for item in current_fields}
+        if current_scope is not None:
+            for selector in observed_selectors - current_scope:
+                errors.append("new field appeared after fill; plan requires re-observation")
         for selector, expected in by_selector.items():
             if expected.status == ResolutionStatus.RESOLVED and selector not in observed_selectors:
                 errors.append(f"{expected.label or expected.field_id}: field was not observed after fill")
@@ -423,9 +471,7 @@ class GenericWebAdapter(SiteAdapter):
             if not expected or expected.status != ResolutionStatus.RESOLVED:
                 continue
             if field.input_type == "file":
-                expected_name = Path(str(expected.value)).name
-                if expected_name and expected_name not in str(actual or ""):
-                    errors.append(f"{label}: attachment mismatch")
+                errors.append(f"{label}: upload completion and draft receipt unverified")
             elif field.input_type in {"checkbox", "radio"}:
                 if bool(actual) != bool(expected.value):
                     errors.append(f"{label}: boolean value mismatch")
@@ -1091,6 +1137,14 @@ class GenericWebAdapter(SiteAdapter):
         self.page.wait_for_timeout(800)
         self._adopt_owned_page()
         return True
+
+    def verify_draft_persistence(self, plan: ApplicationPlan) -> dict | None:
+        """Site drivers must prove a retained draft by independent readback.
+
+        DOM values, a clicked save button, and a fixed wait are insufficient.
+        The generic adapter has no authenticated site contract for this proof.
+        """
+        return None
 
     def advance(self) -> bool:
         getattr(self, "mutation_guard", lambda: None)()

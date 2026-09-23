@@ -91,6 +91,9 @@ class FillPlan:
         observed = {item.selector for item in observation.fields}
         if any(action.selector not in observed for action in selected):
             raise ValueError("fill plan references unobserved field")
-        if observation.unsafe_structure:
+        # Hidden required controls may become visible after a parent choice.
+        # They must be re-observed before readiness, but should not prevent a
+        # proven unique parent control from being filled.
+        if observation.unsupported_component_count or observation.ambiguous_selector_count:
             raise ValueError("fill plan requires supported unique form structure")
         return cls(observation.structure_digest, selected)

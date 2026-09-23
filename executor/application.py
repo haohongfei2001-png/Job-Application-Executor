@@ -486,7 +486,8 @@ class ApplicationExecutor:
                 if not fields and adapter.start_application():
                     self.audit.record_action({"type": "start_application", "page_index": page_index})
                     continue
-                if observation and (observation.unsafe_structure or (
+                if observation and ((observation.unsupported_component_count
+                                     or observation.ambiguous_selector_count) or (
                         not fields and adapter.final_submit_control())):
                     self.plan.stage = ApplicationStage.BLOCKED
                     self.plan.metadata["block_reason"] = "form structure unsupported or incomplete"
@@ -511,13 +512,47 @@ class ApplicationExecutor:
                 actions = adapter.apply_resolutions(resolutions)
                 for action in actions:
                     self.audit.record_action({"type": "fill", **action})
+                if observation and not any(not action.get("ok", False) for action in actions):
+                    # A parent control can reveal child fields. Rebind each new
+                    # field against a fresh DOM observation; never replay the
+                    # old selector or silently omit newly mandatory controls.
+                    known = set(self.plan.metadata["current_page_selectors"])
+                    for _ in range(4):
+                        await_render = getattr(adapter, "await_form_render", None)
+                        if callable(await_render):
+                            await_render()
+                        updated = observe_form()
+                        self.plan.metadata["form_observation"] = updated.safe_summary()
+                        if updated.unsupported_component_count or updated.ambiguous_selector_count:
+                            break
+                        added = [field for field in updated.fields if field.selector not in known]
+                        if not added:
+                            break
+                        new_resolutions = self._resolve_page(added)
+                        FillPlan.bind(updated, new_resolutions)
+                        self.plan.fields.extend(new_resolutions)
+                        self.plan.unresolved_fields.extend(item for item in new_resolutions
+                            if item.status in {ResolutionStatus.UNRESOLVED,
+                                               ResolutionStatus.USER_CONFIRMATION})
+                        resolutions.extend(new_resolutions)
+                        known.update(item.selector for item in added)
+                        self.plan.metadata["current_page_selectors"].extend(
+                            item.selector for item in added)
+                        self.audit.save_plan(self.plan)
+                        new_actions = adapter.apply_resolutions(new_resolutions)
+                        actions.extend(new_actions)
+                        for action in new_actions:
+                            self.audit.record_action({"type": "fill", **action})
+                        if any(not action.get("ok", False) for action in new_actions):
+                            break
                 self.plan.stage = ApplicationStage.FORM_FILLED
                 self.audit.save_plan(self.plan)
 
                 fill_failures = [action for action in actions if not action.get("ok", False)]
                 if fill_failures:
                     if getattr(adapter, "save_draft", lambda: False)():
-                        self.audit.record_action({"type": "save_draft", "page_index": page_index})
+                        self.audit.record_action({"type": "save_draft_requested", "page_index": page_index,
+                                                  "outcome": "UNVERIFIED"})
                     self.plan.stage = ApplicationStage.BLOCKED
                     self.plan.metadata["block_reason"] = "resolved field could not be filled"
                     self.plan.metadata["fill_failures"] = fill_failures
@@ -527,7 +562,8 @@ class ApplicationExecutor:
                 blocking = self._blocking_unresolved(resolutions)
                 if blocking:
                     if getattr(adapter, "save_draft", lambda: False)():
-                        self.audit.record_action({"type": "save_draft", "page_index": page_index})
+                        self.audit.record_action({"type": "save_draft_requested", "page_index": page_index,
+                                                  "outcome": "UNVERIFIED"})
                     self.plan.stage = ApplicationStage.BLOCKED
                     self.plan.metadata["block_reason"] = "unresolved fields require user input"
                     self.audit.save_plan(self.plan)
@@ -541,7 +577,8 @@ class ApplicationExecutor:
                 self.plan.metadata["validation"] = validation.model_dump(mode="json")
                 if not validation.ok:
                     if getattr(adapter, "save_draft", lambda: False)():
-                        self.audit.record_action({"type": "save_draft", "page_index": page_index})
+                        self.audit.record_action({"type": "save_draft_requested", "page_index": page_index,
+                                                  "outcome": "UNVERIFIED"})
                     self.plan.stage = ApplicationStage.BLOCKED
                     self.plan.metadata["block_reason"] = "validation failed"
                     self.audit.save_plan(self.plan)
@@ -555,7 +592,8 @@ class ApplicationExecutor:
                 self.plan.metadata["profile_consistency"] = consistency
                 if not consistency["ok"]:
                     if getattr(adapter, "save_draft", lambda: False)():
-                        self.audit.record_action({"type": "save_draft", "page_index": page_index})
+                        self.audit.record_action({"type": "save_draft_requested", "page_index": page_index,
+                                                  "outcome": "UNVERIFIED"})
                     self.plan.stage = ApplicationStage.BLOCKED
                     self.plan.metadata["block_reason"] = "profile consistency audit failed"
                     self.audit.save_plan(self.plan)
@@ -564,6 +602,25 @@ class ApplicationExecutor:
                 self.plan.stage = ApplicationStage.VALIDATED
                 final_control = adapter.final_submit_control()
                 if final_control:
+                    verify_draft = getattr(adapter, "verify_draft_persistence", None)
+                    if callable(verify_draft):
+                        draft_evidence = verify_draft(self.plan)
+                        if not isinstance(draft_evidence, dict) or draft_evidence.get("verified") is not True:
+                            self.plan.stage = ApplicationStage.BLOCKED
+                            self.plan.metadata["block_reason"] = "draft persistence unverified"
+                            self.plan.metadata["draft_persistence"] = "UNVERIFIED"
+                            self.audit.save_plan(self.plan)
+                            return self.plan
+                        # The driver's receipt may include site payloads. Only
+                        # copy the fixed, non-personal proof fields to audit.
+                        self.plan.metadata["draft_persistence"] = {
+                            "verified": True,
+                            "level": "server_readback" if draft_evidence.get("level") == "server_readback"
+                                     else "site_draft_readback",
+                            "revision": int(draft_evidence["revision"])
+                                        if isinstance(draft_evidence.get("revision"), int)
+                                        and draft_evidence["revision"] >= 0 else None,
+                        }
                     review = build_final_review(self.profile, self.plan, final_control)
                     self.plan.metadata["final_review"] = review
                     if review["project_coverage"]["uncovered_projects"]:

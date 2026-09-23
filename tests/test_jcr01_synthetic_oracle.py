@@ -12,6 +12,7 @@ from executor.autonomy.manager import ManagerAction, ManagerController, ManagerD
 from executor.autonomy.queue import TaskQueue
 from executor.autonomy.supervisor import Supervisor, create_server
 from executor.autonomy.worker import Worker
+from executor.adapters.generic_web import GenericWebAdapter
 
 
 class SyntheticATS(BaseHTTPRequestHandler):
@@ -45,6 +46,7 @@ class SyntheticATS(BaseHTTPRequestHandler):
             return
         if self.path == "/oracle":
             body = json.dumps({"draft": self.server.draft,
+                               "revision": self.server.revision,
                                "submit_count": self.server.submit_count}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -59,6 +61,7 @@ class SyntheticATS(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if data["field"] in {"full_name", "email"}:
                 self.server.draft[data["field"]] = data["value"]
+                self.server.revision += 1
         elif self.path == "/submit":
             self.server.submit_count += 1
         else:
@@ -81,12 +84,12 @@ class Proposal:
         ])
 
 
-def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path):
+def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path, monkeypatch):
     manifest = json.loads((Path(__file__).parent / "fixtures/syntheticats-v1.manifest.json").read_text())
     assert manifest["origin_class"] == "SYNTHETIC"
     assert manifest["network_allowlist"] == ["127.0.0.1"]
     ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
-    ats.draft, ats.submit_count = {}, 0
+    ats.draft, ats.submit_count, ats.revision = {}, 0, 0
     ats_thread = threading.Thread(target=ats.serve_forever, daemon=True)
     ats_thread.start()
     local = None
@@ -94,6 +97,17 @@ def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path):
         target_url = f"http://127.0.0.1:{ats.server_port}/apply?postId=synthetic-01"
         profile = tmp_path / "profile.json"
         golden = manifest["golden_expected_outcome"]["draft"]
+        class SyntheticATSAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, _plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                if actual["draft"] != golden or actual["revision"] < 2:
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "revision": actual["revision"]}
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: SyntheticATSAdapter(url))
         profile.write_text(json.dumps({"fields": {
             "identity.full_name": {"value": golden["full_name"], "confidence": 1.0},
             "identity.email": {"value": golden["email"], "confidence": 1.0},
@@ -119,6 +133,9 @@ def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path):
         assert actual["draft"] == golden
         assert actual["submit_count"] == manifest["golden_expected_outcome"]["submit_count"]
         assert queue.get(tid)["stage"] == "READY_TO_SUBMIT"
+        # Fault canary: the same page state must not certify a wrong server draft.
+        ats.draft["email"] = "wrong@example.test"
+        assert SyntheticATSAdapter(target_url).verify_draft_persistence(None) is None
     finally:
         if local is not None:
             local.shutdown()

@@ -7,7 +7,7 @@ from executor.application import ApplicationExecutor
 from executor.models import ApplicationStage, ResolutionStatus
 
 
-def test_generic_browser_fills_known_fields_and_stops_before_submit(tmp_path, monkeypatch):
+def test_generic_browser_blocks_unproven_upload_before_submit(tmp_path, monkeypatch):
     html = tmp_path / "application.html"
     html.write_text('''<!doctype html><meta charset="utf-8"><body>
       <label>姓名 <input id="name" name="full_name" required value="Stale Wrong Name"></label>
@@ -35,7 +35,10 @@ def test_generic_browser_fills_known_fields_and_stops_before_submit(tmp_path, mo
         {"deepseek": {"enabled": False}},
     )
     plan = runner.run(max_pages=1)
-    assert plan.stage == ApplicationStage.READY_TO_SUBMIT
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "resolved field could not be filled"
+    assert any(item["reason"] == "upload_receipt_unsupported"
+               for item in plan.metadata["fill_failures"])
     resolved = {
         item.canonical_key
         for item in plan.fields

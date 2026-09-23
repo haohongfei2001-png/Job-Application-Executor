@@ -206,10 +206,14 @@ def test_unmatched_select_is_a_prewrite_failure_not_unknown_outcome(tmp_path):
 
 def test_missing_field_check_only_covers_current_page(monkeypatch):
     adapter = GenericWebAdapter("https://jobs.example.test/apply")
-    monkeypatch.setattr(adapter, "discover_fields", lambda: [
+    current_fields = [
         WebField(field_id="city", selector="#city", label="City",
                  current_value="Beijing"),
-    ])
+    ]
+    from executor.forms import FormObservation
+    monkeypatch.setattr(adapter, "await_form_render", lambda: None)
+    monkeypatch.setattr(adapter, "observe_form", lambda: FormObservation.from_fields(
+        adapter.target_url, "synthetic-document", current_fields))
     old = FieldResolution(field_id="name", selector="#name", label="Name",
                           status=ResolutionStatus.RESOLVED, value="Synthetic")
     current = FieldResolution(field_id="city", selector="#city", label="City",
