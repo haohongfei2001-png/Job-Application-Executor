@@ -62,6 +62,70 @@ def test_page_lineage_fails_closed_on_ambiguous_or_cross_origin_successor():
         owned_page_after_action(ctx, task_page, target)
 
 
+def test_live_connect_never_adopts_or_closes_an_unbound_tab(monkeypatch):
+    target = "https://jobs.example.test/apply"
+    unrelated = FakePage("about:blank")
+
+    class Browser:
+        def __init__(self):
+            self.contexts = [FakeContext([unrelated])]
+
+        def connect_over_cdp(self, *_args, **_kwargs):
+            return self
+
+    class Playwright:
+        def __init__(self, browser):
+            self.chromium = browser
+            self.stopped = False
+
+        def start(self):
+            return self
+
+        def stop(self):
+            self.stopped = True
+
+    browser = Browser()
+    pw = Playwright(browser)
+    fresh = FakePage("about:blank")
+    fresh.goto = lambda url, **_kwargs: setattr(fresh, "url", url)
+    browser.contexts[0].new_page = lambda: browser.contexts[0].pages.append(fresh) or fresh
+    monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser_module, "owned_cdp_session", lambda: True)
+    monkeypatch.setattr(browser_module, "sync_playwright", lambda: pw)
+    _, _, _, page = browser_module.connect(target, existing_only=True)
+    assert page is fresh
+    assert unrelated.is_closed() is False
+    assert unrelated.url == "about:blank"
+
+    with pytest.raises(browser_module.BrowserOwnershipError, match="not bound"):
+        browser_module.connect(target, existing_only=True)
+    assert fresh.is_closed() is False
+    assert pw.stopped is True
+
+
+def test_second_live_run_waits_for_tab_reconciliation(tmp_path, monkeypatch):
+    queue = TaskQueue(tmp_path / "runtime")
+    task = queue.enqueue(TaskSpec(
+        company="Synthetic", role="Engineer",
+        target_url="https://jobs.example.test/apply?postId=live-2",
+        profile_ref=str(tmp_path / "profile.json"), live_authorized=True,
+    ))
+    claimed = queue.claim("first")
+    attempt = queue.begin_run_attempt(task["task_id"], claimed["owner"])
+    queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    queue.checkpoint(task["task_id"], claimed["owner"], "NEEDS_USER_ACTION",
+                     blocker="security_challenge", release=True)
+    queue.resume(task["task_id"])
+    monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser_module, "owned_cdp_fingerprint", lambda: "synthetic-epoch")
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("unbound live task must not create a second tab")
+    assert Worker(queue, runner_factory=forbidden).run_once() is True
+    blocked = queue.get(task["task_id"])
+    assert blocked["stage"] == "BLOCKED"
+    assert blocked["blocker"] == "browser_ownership_unknown"
+
+
 def test_real_headless_popup_lineage_does_not_adopt_unrelated_tab(monkeypatch):
     class Site(BaseHTTPRequestHandler):
         def log_message(self, *_):

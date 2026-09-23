@@ -196,6 +196,11 @@ class Worker:
                 if not spec["live_authorized"]:
                     checkpoint("BLOCKED", blocker="live_not_authorized", release=True)
                     return True
+                # Until a durable task-to-tab binding is observed, a prior
+                # runner return cannot justify a second live browser write.
+                if self.queue.run_attempts(tid):
+                    checkpoint("BLOCKED", blocker="browser_ownership_unknown", release=True)
+                    return True
                 session_epoch = browser.owned_cdp_fingerprint()
                 if session_epoch is None:
                     checkpoint("BLOCKED", blocker="session_unavailable", release=True)

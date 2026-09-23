@@ -845,6 +845,12 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
         thread.join()
 
 
+def test_diagnostics_do_not_claim_clean_checkout_when_git_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(diagnostics, "_git", lambda *args, **kwargs: None)
+    state = diagnostics.repository_state(tmp_path)
+    assert state == {"version": "unknown", "branch": "unknown", "worktree_clean": None}
+
+
 def test_supervisor_fences_mutations_while_update_is_running(
     tmp_path, monkeypatch
 ):

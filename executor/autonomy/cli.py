@@ -110,15 +110,15 @@ def launch_consumer(root, port):
     from .consumer import humanize_preflight
     from .preflight import collect_live_preflight
 
-    started = lifecycle("start", root, port)
-    health = lifecycle("health", root, port)
     live_mode = browser_mode() not in {"test", "isolated", "headless"}
-    if live_mode and started.get("ok") and health.get("ok"):
+    if live_mode:
         try:
             # Browser startup is a repair attempt, not a gate to the local UI.
             ensure_chrome()
         except Exception:
             pass
+    started = lifecycle("start", root, port)
+    health = lifecycle("health", root, port)
     result = collect_live_preflight(
         supervisor_running=bool(started.get("ok") and health.get("ok")),
     )

@@ -213,17 +213,20 @@ def connect(target_url: str | None = None, *, existing_only: bool = False):
     pw = sync_playwright().start()
     browser = pw.chromium.connect_over_cdp(CDP, no_defaults=True)
     ctx = browser.contexts[0]
-    cleanup_live_pages(ctx, target_url)
-
     pages = [page for page in ctx.pages if not page.is_closed()]
     if target_url:
         exact = [page for page in pages if page.url == target_url]
         if exact:
-            page = exact[-1]
-        else:
-            blanks = [page for page in pages if page.url in BLANK_URLS]
-            page = blanks[-1] if blanks else ctx.new_page()
+            pw.stop()
+            raise BrowserOwnershipError("existing target tab is not bound to this task")
+        # A new tab is owned by this operation. Never adopt or close an
+        # arbitrary existing tab, including a blank or duplicate target tab.
+        try:
+            page = ctx.new_page()
             page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+        except BaseException:
+            pw.stop()
+            raise
     else:
         page = pages[-1] if pages else ctx.new_page()
     return pw, browser, ctx, page

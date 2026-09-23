@@ -10,7 +10,7 @@ from ..resolver import DeepSeekMapper
 from .manager import safe_task_view
 
 
-def _git(repo: Path, *args: str, timeout: int = 5) -> str:
+def _git(repo: Path, *args: str, timeout: int = 5) -> str | None:
     try:
         result = subprocess.run(
             ["git", *args],
@@ -22,7 +22,7 @@ def _git(repo: Path, *args: str, timeout: int = 5) -> str:
         )
         return result.stdout.strip()
     except Exception:
-        return ""
+        return None
 
 
 def repository_state(repo_root: str | Path) -> dict[str, Any]:
@@ -31,9 +31,9 @@ def repository_state(repo_root: str | Path) -> dict[str, Any]:
     branch = _git(repo, "branch", "--show-current")
     dirty = _git(repo, "status", "--porcelain", "--untracked-files=no")
     return {
-        "version": sha[:12] if re.fullmatch(r"[0-9a-fA-F]{40}", sha) else "unknown",
+        "version": sha[:12] if re.fullmatch(r"[0-9a-fA-F]{40}", sha or "") else "unknown",
         "branch": branch if re.fullmatch(r"[A-Za-z0-9._/-]{1,120}", branch or "") else "unknown",
-        "worktree_clean": dirty == "",
+        "worktree_clean": None if dirty is None else dirty == "",
     }
 
 

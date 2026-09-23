@@ -67,7 +67,7 @@ def test_consumer_launch_repairs_reversible_runtime_and_opens_ui(
     assert result["opened"] is True
     assert result["message"] == "已就绪"
     assert result["submit_capability"] is False
-    assert calls == ["start", "health", "chrome"]
+    assert calls == ["chrome", "start", "health"]
     assert opened == [(tmp_path / "runtime", 9344)]
 
 
