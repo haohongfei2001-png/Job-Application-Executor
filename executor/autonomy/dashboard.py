@@ -31,10 +31,10 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 <aside>
   <h1>任务</h1>
   <div class="metrics">
-    <div class="metric"><span>运行/待处理</span><b id="running">0</b></div>
+    <div class="metric"><span>进行中</span><b id="running">0</b></div>
     <div class="metric"><span>需要你</span><b id="need">0</b></div>
-    <div class="metric"><span>待提交</span><b id="ready">0</b></div>
-    <div class="metric"><span>完成/取消</span><b id="done">0</b></div>
+    <div class="metric"><span>等你确认</span><b id="ready">0</b></div>
+    <div class="metric"><span>已结束</span><b id="done">0</b></div>
   </div>
   <div id="tasks" class="empty">正在读取任务…</div>
 </aside>
@@ -44,10 +44,10 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <div><span class="dot"></span><span id="health">本地服务</span></div>
 </header>
 <div id="chat" class="chat">
-  <div class="bubble ai">你可以直接说：继续某个岗位、取消某个岗位、回答一个待确认字段，或粘贴精确职位链接开始申请。最终提交永远由你本人完成。</div>
+  <div class="bubble ai">把职位链接发给我并说“投递这个岗位”，或者直接说“继续”“暂停”“取消”。我会处理能自动完成的步骤；遇到需要你决定或安全验证的地方会停下来。最终提交由你确认。</div>
 </div>
 <div class="composer">
-  <textarea id="message" placeholder="给 DeepSeek 投递经理下达指令…"></textarea>
+  <textarea id="message" placeholder="告诉我你想投哪个岗位，或直接说“继续这个岗位”…"></textarea>
   <button id="send">发送</button>
 </div>
 </main>
@@ -55,6 +55,35 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 <script>
 const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send');
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const stageText={
+  DISCOVERED:'已加入',
+  PROFILE_RESOLVED:'正在准备资料',
+  FORM_FILLED:'正在填写',
+  VALIDATED:'正在检查',
+  NEEDS_USER_INPUT:'需要你回答',
+  NEEDS_USER_ACTION:'需要你操作',
+  BLOCKED:'已暂停',
+  ERROR:'需要处理',
+  READY_TO_SUBMIT:'等你最终确认',
+  SUBMITTED:'已提交',
+  VERIFIED:'已完成',
+  CANCELLED:'已取消'
+};
+const blockerText={
+  security_challenge:'需要安全验证',
+  otp_waiting:'正在等待验证码',
+  otp_ambiguous:'验证码需要确认',
+  sms_setup:'正在准备短信验证',
+  unknown_facts:'需要补充信息',
+  session_unavailable:'浏览器连接中断',
+  live_not_authorized:'尚未授权实时执行',
+  validation:'需要检查表单',
+  retry_pending:'正在重试',
+  retry_exhausted:'需要处理后再继续',
+  user_paused:'你已暂停'
+};
+function humanStage(stage){return stageText[stage]||stage||''}
+function humanBlocker(blocker){return blockerText[blocker]||blocker||''}
 function stageGroup(stage){
   if(['NEEDS_USER_INPUT','NEEDS_USER_ACTION','BLOCKED','ERROR'].includes(stage))return 'need';
   if(stage==='READY_TO_SUBMIT')return 'ready';
@@ -65,14 +94,14 @@ function render(state){
   const counts={running:0,need:0,ready:0,done:0};
   (state.tasks||[]).forEach(t=>counts[stageGroup(t.stage)]++);
   Object.entries(counts).forEach(([k,v])=>document.getElementById(k).textContent=v);
-  document.getElementById('health').textContent=state.final_click_actor==='user'?'运行中 · 最终提交由你完成':'本地服务';
+  document.getElementById('health').textContent=state.final_click_actor==='user'?'已就绪 · 最终提交由你确认':'本地服务';
   if(!(state.tasks||[]).length){tasksEl.className='empty';tasksEl.textContent='暂无任务';return}
   tasksEl.className='';
   tasksEl.innerHTML=(state.tasks||[]).map(t=>`
     <div class="task">
       <div class="title">${esc(t.company)} · ${esc(t.role)}</div>
-      <div class="meta">${esc(t.target_host||'')} ${t.blocker?'· '+esc(t.blocker):''}</div>
-      <span class="stage">${esc(t.stage)}</span>
+      <div class="meta">${esc(t.target_host||'')} ${t.blocker?'· '+esc(humanBlocker(t.blocker)):''}</div>
+      <span class="stage">${esc(humanStage(t.stage))}</span>
     </div>`).join('');
 }
 async function state(){
