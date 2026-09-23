@@ -70,6 +70,7 @@ class FieldResolution(BaseModel):
     selector: str
     label: str
     canonical_key: str | None = None
+    record_id: str | None = None
     status: ResolutionStatus
     value: Any = None
     source: str | None = None

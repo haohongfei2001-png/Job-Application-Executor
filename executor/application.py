@@ -655,7 +655,7 @@ class ApplicationExecutor:
                         }
                     review = build_final_review(self.profile, self.plan, final_control)
                     self.plan.metadata["final_review"] = review
-                    if review["project_coverage"]["uncovered_projects"]:
+                    if review["project_coverage"]["status"] == "REVIEW_REQUIRED":
                         self.plan.stage = ApplicationStage.BLOCKED
                         self.plan.metadata["block_reason"] = "structured project coverage unproven"
                         self.audit.save_plan(self.plan)

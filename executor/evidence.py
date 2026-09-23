@@ -256,17 +256,22 @@ def _resume_projects(text: str, source_kind: str) -> tuple[list[dict[str, Any]],
     saw_section = False
     for line in lines:
         heading = re.sub(r"^[一二三四五六七八九十0-9]+[、.．]\s*", "", line).strip(" ：:")
-        if heading in {"产品项目", "项目经历", "项目经验"}:
+        normalized_heading = heading.casefold()
+        if normalized_heading in {"产品项目", "项目经历", "项目经验",
+                                  "projects", "project experience", "product projects"}:
             current = []
             groups.append(("project", current))
             saw_section = True
             continue
-        if heading in {"科研经历", "研究经历", "科研项目"}:
+        if normalized_heading in {"科研经历", "研究经历", "科研项目",
+                                  "research", "research experience", "research projects"}:
             current = []
             groups.append(("research", current))
             saw_section = True
             continue
-        if heading in {"技能与语言", "教育背景", "实习经历", "工作经历", "获奖荣誉"}:
+        if normalized_heading in {"技能与语言", "教育背景", "实习经历", "工作经历", "获奖荣誉",
+                                  "skills", "education", "internships", "work experience",
+                                  "awards"}:
             current = None
             continue
         if current is not None:

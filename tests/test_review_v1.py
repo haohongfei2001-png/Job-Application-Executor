@@ -59,6 +59,16 @@ def test_explicit_project_exclusion_closes_coverage_gap():
     assert review["status"] == "COVERED_OR_EXPLICITLY_EXCLUDED"
 
 
+def test_unparsed_resume_research_section_blocks_coverage_even_without_records():
+    plan = ApplicationPlan(execution_id="unparsed", target_url="https://example.test/apply",
+                           site_id="generic_web")
+    review = project_coverage_review({"collections": {
+        "projects": [], "resume_project_parse_status": "UNPARSED_SECTION"}}, plan)
+    assert review["uncovered_projects"] == []
+    assert review["resume_parse_status"] == "UNPARSED_SECTION"
+    assert review["status"] == "REVIEW_REQUIRED"
+
+
 def test_final_review_requires_user_click_and_parser_audit():
     plan = ApplicationPlan(
         execution_id="review-final",

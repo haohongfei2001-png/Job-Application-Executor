@@ -182,6 +182,23 @@ def test_uncovered_project_blocks_false_ready(tmp_path, monkeypatch):
     assert fake.submit_calls == 0
 
 
+def test_unparsed_resume_research_section_blocks_false_ready(tmp_path, monkeypatch):
+    profile = tmp_path / "unparsed-profile.json"
+    profile.write_text(json.dumps({"fields": {"identity.full_name": {
+        "value": "Synthetic Applicant", "confidence": 1.0}},
+        "collections": {"projects": [], "resume_project_parse_status": "UNPARSED_SECTION"}}))
+    fake = FakeAdapter([WebField(field_id="name", selector="#name", label="姓名",
+                                 required=True)], final="Submit application")
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: fake)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    plan = ApplicationExecutor("https://example.test/apply", profile,
+                               {"deepseek": {"enabled": False}}).run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "structured project coverage unproven"
+    assert plan.metadata["final_review"]["project_coverage"]["status"] == "REVIEW_REQUIRED"
+    assert fake.submit_calls == 0
+
+
 def test_submit_authorized_still_requires_manual_final_click(tmp_path, monkeypatch):
     fake = FakeAdapter([
         WebField(field_id="name", selector="#name", label="姓名", required=True),

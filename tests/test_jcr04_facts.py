@@ -392,10 +392,14 @@ def test_two_same_title_projects_need_two_distinct_form_rows():
                            target_url="https://example.test/jobs/1", site_id="synthetic")
     one = FieldResolution(field_id="project_name_1", selector="#project-1",
                           label="项目名称", status=ResolutionStatus.RESOLVED,
-                          value="Shared title")
+                          value="Shared title", record_id="project-a")
     two = FieldResolution(field_id="project_name_2", selector="#project-2",
                           label="项目名称", status=ResolutionStatus.RESOLVED,
-                          value="Shared title")
+                          value="Shared title", record_id="project-b")
+    plan.fields = [one.model_copy(update={"record_id": None}),
+                   two.model_copy(update={"record_id": None})]
+    assert project_coverage_review(profile.model_dump(), plan)["uncovered_projects"] == [
+        "Shared title", "Shared title"]
     plan.fields = [one]
     assert project_coverage_review(profile.model_dump(), plan)["uncovered_projects"] == ["Shared title"]
     plan.fields = [one, two]
@@ -429,6 +433,12 @@ def test_resume_sections_distinguish_research_from_unparsed_or_absent_projects()
     assert len(records) == 1 and records[0]["category"] == "research"
     assert records[0]["title"] == "研究平台"
     assert _resume_projects("科研经历\n研究平台\n• 无分隔符项目", "resume_docx")[1] == "UNPARSED_SECTION"
+    english, english_status = _resume_projects(
+        "Education\nSynthetic University\nResearch Projects\nSynthetic Study | 2025.01-2025.06\n"
+        "• Controlled synthetic evidence\nWork Experience\nSynthetic Company", "resume_docx")
+    assert english_status == "PARSED"
+    assert len(english) == 1 and english[0]["category"] == "research"
+    assert _resume_projects("Research Projects\nUnstructured Study", "resume_docx")[1] == "UNPARSED_SECTION"
     assert _resume_projects("教育背景\nSynthetic University", "resume_docx")[1] == "NO_MATCHING_SECTION"
 
 
