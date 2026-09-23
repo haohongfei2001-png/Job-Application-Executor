@@ -207,7 +207,24 @@ localhost chat dashboard. The user-facing model is simple: one task panel plus
 one conversation with the AI application manager. Queueing, checkpoints, OTP,
 browser adapters and the manual final-submit boundary stay behind that surface.
 
-Start the daemon and open the UI:
+### Consumer entry on macOS
+
+For ordinary use, install the thin local launcher once:
+
+    .venv/bin/python -m executor.autonomy.cli install-app
+
+Then open `~/Applications/AI 投递经理.app` from Finder, Spotlight or the Dock.
+The app automatically prepares the dedicated Chrome session, starts/reuses the
+localhost supervisor, runs the fail-closed preflight and opens the authenticated
+dashboard. Opening the app itself never creates a task or submits anything.
+
+The equivalent developer command is:
+
+    .venv/bin/python -m executor.autonomy.cli launch
+
+See [Consumer Entry v1](docs/CONSUMER_ENTRY.md).
+
+For lower-level development/debugging, start the daemon and open the UI directly:
 
     .venv/bin/python -m executor.autonomy.cli start
     .venv/bin/python -m executor.autonomy.cli ui
