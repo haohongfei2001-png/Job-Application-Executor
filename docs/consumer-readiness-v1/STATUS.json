@@ -44,12 +44,12 @@
     },
     {
       "id": "JCR-02",
-      "status": "IMPLEMENTING",
+      "status": "ADVANCE_ALLOWED_WITH_DEFERRED",
       "authorized": true
     },
     {
       "id": "JCR-03",
-      "status": "NOT_STARTED",
+      "status": "READY",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "Continue JCR-02 on feat/jcr02-owned-browser-recovery after JCR-01 PR #11 merge and exact-main CI success. Complete owned task/tab/process/session lineage, safe bootstrap and recovery, UNKNOWN_OUTCOME reconciliation, G-01 through G-13 automatic evidence, review/CI/merge/readback. DFG-001 durable facts remain JCR-04 work; DFG-002 browser ownership uncertainty blocks only blind replay, not independent engineering.",
+  "next_action": "Finish sole JCR-02 PR #12 exact-head CI/review/merge and exact-main readback, then begin JCR-03 independent discovery/target work. JCR-02 is ADVANCE_ALLOWED_WITH_DEFERRED, not COMPLETE: DFG-002 still blocks unknown/unverified live-write replay and G-01 through G-13 certification. Continue JCR-04 facts and later independent engineering while resolving DFG-002 before final consumer certification; DFG-001 remains JCR-04 durable fact work.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

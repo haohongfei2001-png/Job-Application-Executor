@@ -9,6 +9,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -112,6 +113,7 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
                     ticket = request(root, service_port, "/v1/ui-ticket", {})["ticket"]
                     target = f"http://127.0.0.1:{service_port}/ui-login?ticket={urllib.parse.quote(ticket)}"
                     self.respond(303, "", location=target)
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
                 except (KeyError, OSError, urllib.error.URLError):
                     pass

@@ -255,6 +255,48 @@ def test_live_worker_persists_browser_binding_before_runner_return(tmp_path, mon
     assert binding["document_epoch"] == "123456.78"
 
 
+def test_pause_during_possible_write_fences_second_action_and_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr(browser_module, "browser_mode", lambda: "isolated")
+    queue = TaskQueue(tmp_path / "runtime")
+    created = queue.enqueue(TaskSpec(
+        company="Synthetic", role="Engineer",
+        target_url="https://jobs.example.test/apply?postId=pause-race",
+        profile_ref=str(tmp_path / "profile.json"),
+    ))
+    entered = threading.Event()
+    release = threading.Event()
+    second_action = []
+
+    class PausedRunner:
+        def __init__(self, *_args, guard, **_kwargs):
+            self.guard = guard
+            self.plan = SimpleNamespace(metadata={})
+
+        def run(self):
+            self.guard()
+            entered.set()
+            assert release.wait(5)
+            self.guard()
+            second_action.append(True)
+            raise AssertionError("second write must never be reached")
+
+    worker = Worker(queue, runner_factory=PausedRunner,
+                    settings={"deepseek": {"enabled": False}})
+    thread = threading.Thread(target=worker.run_once)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        queue.pause(created["task_id"])
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert second_action == []
+    assert queue.run_attempts(created["task_id"])[0]["outcome"] == "UNKNOWN_OUTCOME"
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        queue.resume(created["task_id"])
+
+
 def test_readonly_observation_never_starts_or_replays_browser_work(monkeypatch):
     monkeypatch.setattr(browser_module, "browser_mode", lambda: "live")
     monkeypatch.setattr(browser_module, "connect", lambda *args, **kwargs: (_ for _ in ()).throw(

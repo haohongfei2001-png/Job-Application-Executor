@@ -499,6 +499,11 @@ class TaskQueue:
                 raise ValueError("retry budget exhausted")
             if row["blocker"] in {"browser_ownership_unknown", "user_paused_from_browser_ownership_unknown", "unknown_outcome", "user_paused_from_unknown_outcome"}:
                 raise ValueError("browser outcome requires read-only reconciliation")
+            if db.execute(
+                "SELECT 1 FROM run_attempts WHERE task_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
+                (tid,),
+            ).fetchone():
+                raise ValueError("external outcome requires read-only reconciliation")
             assert_target_not_protected(json.loads(row["spec"])["target_url"])
             # Human input/action waits do not consume retry budget. If such a
             # wait was paused, pause() records that origin in the blocker so the

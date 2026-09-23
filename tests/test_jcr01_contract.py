@@ -149,6 +149,13 @@ def test_existing_task_database_migrates_without_changing_identity(tmp_path):
     assert paused["paused_from"] == "NEEDS_USER_INPUT"
     assert paused["run_state"] == "PAUSED"
     assert queue.events()[0]["task_id"] == "paused-task"
+    with sqlite3.connect(path) as migrated:
+        assert {row[1] for row in migrated.execute("PRAGMA table_info(browser_bindings)")} == {
+            "task_id", "process_epoch", "target_id", "updated", "document_epoch"
+        }
+        assert {row[1] for row in migrated.execute("PRAGMA table_info(run_attempts)")} == {
+            "attempt_id", "task_id", "owner", "outcome", "created", "updated"
+        }
     backup = root / "tasks.sqlite3.pre-jcr01.sqlite3"
     assert backup.exists()
     assert backup.stat().st_mode & 0o077 == 0
