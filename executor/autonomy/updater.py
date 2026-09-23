@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -76,8 +78,26 @@ def write_update_state(
         "reason": safe_reason if status == "failed" else "",
     }
     path = _state_path(root)
-    path.write_text(json.dumps(payload, ensure_ascii=False))
-    path.chmod(0o600)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=root,
+            prefix=".update-state-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            os.chmod(temp_path, 0o600)
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        path.chmod(0o600)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
 
 
 def read_update_state(runtime: str | Path) -> dict:
@@ -138,10 +158,18 @@ def _tasks_safe_for_update(tasks: list[dict], *, now: float | None = None) -> tu
         "VALIDATED",
     }
     for task in tasks:
-        if task.get("stage") == "NEEDS_USER_ACTION" and task.get("blocker") in {
-            "otp_waiting",
-            "otp_ambiguous",
-        }:
+        if (
+            task.get("stage") == "NEEDS_USER_ACTION"
+            and task.get("blocker") in {"otp_waiting", "otp_ambiguous"}
+        ) or (
+            task.get("stage") == "BLOCKED"
+            and task.get("blocker") in {
+                "user_paused_from_otp_waiting",
+                "user_paused_from_otp_ambiguous",
+                # Legacy generic human-action pauses may have originated from OTP.
+                "user_paused_from_action",
+            }
+        ):
             return False, "otp_in_flight"
         if task.get("owner") and (
             now is None or float(task.get("lease_until") or 0) > now
@@ -171,6 +199,27 @@ def runtime_safe_to_update(runtime: str | Path) -> tuple[bool, str]:
         return False, "runtime_state_unavailable"
 
 
+def _update_lock_path(runtime: Path) -> Path:
+    return runtime / "update.lock"
+
+
+def acquire_update_lock(runtime: str | Path) -> int | None:
+    root = Path(runtime).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root.chmod(0o700)
+    fd = os.open(_update_lock_path(root), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def spawn_update(
     *,
     repo_root: str | Path,
@@ -180,38 +229,54 @@ def spawn_update(
 ) -> dict:
     repo = Path(repo_root).expanduser().resolve()
     runtime_path = Path(runtime).expanduser().resolve()
-    pre = repository_update_preconditions(repo)
-    if not pre.get("ok"):
-        return {"ok": False, "status": "denied", "reason": pre["reason"]}
+    lock_fd = acquire_update_lock(runtime_path)
+    if lock_fd is None:
+        return {"ok": False, "status": "denied", "reason": "update_in_progress"}
+    try:
+        pre = repository_update_preconditions(repo)
+        if not pre.get("ok"):
+            return {"ok": False, "status": "denied", "reason": pre["reason"]}
 
-    write_update_state(runtime_path, "checking", old_version=pre["head"])
-    log = runtime_path / "updater.log"
-    runtime_path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with log.open("ab") as stream:
-        log.chmod(0o600)
-        subprocess.Popen(
-            [
-                python_executable or sys.executable,
-                "-m",
-                "executor.autonomy.updater",
-                "--repo",
-                str(repo),
-                "--runtime",
-                str(runtime_path),
-                "--port",
-                str(port),
-            ],
-            cwd=repo,
-            stdin=subprocess.DEVNULL,
-            stdout=stream,
-            stderr=stream,
-            start_new_session=True,
+        write_update_state(runtime_path, "checking", old_version=pre["head"])
+        log = runtime_path / "updater.log"
+        runtime_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with log.open("ab") as stream:
+            log.chmod(0o600)
+            subprocess.Popen(
+                [
+                    python_executable or sys.executable,
+                    "-m",
+                    "executor.autonomy.updater",
+                    "--repo",
+                    str(repo),
+                    "--runtime",
+                    str(runtime_path),
+                    "--port",
+                    str(port),
+                    "--lock-fd",
+                    str(lock_fd),
+                ],
+                cwd=repo,
+                stdin=subprocess.DEVNULL,
+                stdout=stream,
+                stderr=stream,
+                start_new_session=True,
+                pass_fds=(lock_fd,),
+            )
+        return {
+            "ok": True,
+            "status": "started",
+            "old_version": pre["head"][:12],
+        }
+    except Exception:
+        write_update_state(
+            runtime_path,
+            "failed",
+            reason="update_launch_failed",
         )
-    return {
-        "ok": True,
-        "status": "started",
-        "old_version": pre["head"][:12],
-    }
+        return {"ok": False, "status": "denied", "reason": "update_launch_failed"}
+    finally:
+        os.close(lock_fd)
 
 
 def perform_update(
@@ -408,9 +473,26 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--runtime", required=True)
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--lock-fd", type=int)
     args = parser.parse_args(argv)
-    time.sleep(0.8)
-    return perform_update(args.repo, args.runtime, args.port)
+
+    owned_lock = None
+    if args.lock_fd is None:
+        owned_lock = acquire_update_lock(args.runtime)
+        if owned_lock is None:
+            return 1
+    else:
+        try:
+            os.fstat(args.lock_fd)
+        except OSError:
+            return 1
+
+    try:
+        time.sleep(0.8)
+        return perform_update(args.repo, args.runtime, args.port)
+    finally:
+        if owned_lock is not None:
+            os.close(owned_lock)
 
 
 if __name__ == "__main__":
