@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 import urllib.request
 
 import pytest
@@ -241,6 +242,215 @@ def test_recent_events_returns_actual_tail_beyond_first_200(tmp_path):
     assert recent[-1]["kind"] == "diagnostic_tick"
 
 
+def test_reconciled_update_state_recovers_stale_busy_file(tmp_path):
+    runtime = tmp_path / "runtime"
+    updater.write_update_state(
+        runtime,
+        "checking",
+        old_version="a" * 40,
+    )
+
+    assert updater.update_lock_held(runtime) is False
+    state = updater.reconciled_update_state(runtime)
+
+    assert state["status"] == "failed"
+    assert state["reason"] == "stale_update_recovered"
+
+
+def test_begin_update_waits_for_inflight_mutation_to_drain(tmp_path, monkeypatch):
+    _, _, supervisor = _supervisor(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    spawned = []
+
+    def blocking_handle(_message):
+        entered.set()
+        assert release.wait(2)
+        return {"reply": "done", "actions": []}
+
+    monkeypatch.setattr(supervisor.manager, "handle", blocking_handle)
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.safe_to_update",
+        lambda sup: (True, ""),
+    )
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.spawn_update",
+        lambda **kwargs: spawned.append(kwargs) or {
+            "ok": True,
+            "status": "started",
+            "old_version": "abc123",
+        },
+    )
+
+    def mutate():
+        supervisor.run_mutation(lambda: supervisor.manager.handle("slow"))
+        finished.set()
+
+    mutation_thread = threading.Thread(target=mutate)
+    mutation_thread.start()
+    assert entered.wait(1)
+
+    update_result = {}
+
+    def update():
+        update_result.update(supervisor.begin_update(9344))
+
+    update_thread = threading.Thread(target=update)
+    update_thread.start()
+    time.sleep(0.05)
+
+    assert spawned == []
+    assert update_thread.is_alive()
+
+    release.set()
+    mutation_thread.join(2)
+    update_thread.join(2)
+
+    assert finished.is_set()
+    assert update_result["status"] == "started"
+    assert len(spawned) == 1
+
+
+def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
+    tmp_path, monkeypatch
+):
+    old = "a" * 40
+    new = "b" * 40
+    preconditions = [
+        {"ok": True, "head": old},
+        {"ok": True, "head": old},
+        {"ok": False, "reason": "tracked_changes_present"},
+    ]
+    git_calls = []
+
+    monkeypatch.setattr(
+        updater,
+        "runtime_safe_to_update",
+        lambda runtime: (True, ""),
+    )
+    monkeypatch.setattr(
+        updater,
+        "repository_update_preconditions",
+        lambda repo: preconditions.pop(0),
+    )
+
+    def fake_run(repo, args, **kwargs):
+        git_calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(updater, "_run", fake_run)
+    monkeypatch.setattr(
+        updater,
+        "_git",
+        lambda repo, *args, **kwargs: new
+        if args == ("rev-parse", "origin/main")
+        else (_ for _ in ()).throw(AssertionError(args)),
+    )
+
+    rc = updater.perform_update(
+        tmp_path / "repo",
+        tmp_path / "runtime",
+        9344,
+    )
+
+    assert rc == 1
+    assert ["git", "merge", "--ff-only", "origin/main"] not in git_calls
+    state = updater.read_update_state(tmp_path / "runtime")
+    assert state["status"] == "failed"
+    assert state["reason"] == "tracked_changes_present"
+
+
+def test_restart_required_can_be_retried_when_code_is_already_current(
+    tmp_path, monkeypatch
+):
+    old = "a" * 40
+    runtime = tmp_path / "runtime"
+    updater.write_update_state(
+        runtime,
+        "restart_required",
+        old_version=old,
+        new_version=old,
+        reason="service_stop_failed",
+    )
+    assert updater.read_update_state(runtime)["reason"] == "service_stop_failed"
+
+    monkeypatch.setattr(
+        updater,
+        "runtime_safe_to_update",
+        lambda runtime: (True, ""),
+    )
+    monkeypatch.setattr(
+        updater,
+        "repository_update_preconditions",
+        lambda repo: {"ok": True, "head": old},
+    )
+    monkeypatch.setattr(
+        updater,
+        "_run",
+        lambda repo, args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_git",
+        lambda repo, *args, **kwargs: old
+        if args == ("rev-parse", "origin/main")
+        else (_ for _ in ()).throw(AssertionError(args)),
+    )
+
+    service_calls = []
+
+    def fake_service(args, **kwargs):
+        service_calls.append(args[-1])
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            service_calls.append(args[-1])
+
+    monkeypatch.setattr(updater.subprocess, "run", fake_service)
+    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
+
+    rc = updater.perform_update(
+        tmp_path / "repo",
+        runtime,
+        9344,
+        python_executable="/private/python",
+        restart_only=True,
+    )
+
+    assert rc == 0
+    assert service_calls == ["stop", "start", "ui"]
+    state = updater.read_update_state(runtime)
+    assert state["status"] == "success"
+
+
+def test_restart_failure_persists_restart_required_state(tmp_path, monkeypatch):
+    old = "a" * 40
+    calls = []
+
+    def fake_service(args, **kwargs):
+        calls.append(args[-1])
+        return subprocess.CompletedProcess(args, 1 if args[-1] == "stop" else 0, "", "")
+
+    monkeypatch.setattr(updater.subprocess, "run", fake_service)
+
+    rc = updater._restart_service(
+        tmp_path / "repo",
+        tmp_path / "runtime",
+        9344,
+        "/private/python",
+        old_version=old,
+        new_version=old,
+    )
+
+    assert rc == 1
+    assert calls == ["stop"]
+    state = updater.read_update_state(tmp_path / "runtime")
+    assert state["status"] == "restart_required"
+    assert state["reason"] == "service_stop_failed"
+
+
 def test_update_check_uses_http11_and_leaves_code_unchanged_when_current(
     tmp_path, monkeypatch
 ):
@@ -435,6 +645,22 @@ def test_supervisor_fences_mutations_while_update_is_running(
         },
     )
 
+    with pytest.raises(RuntimeError):
+        supervisor.dispatch(
+            "POST",
+            "/v1/tasks/" + task["task_id"] + "/resume",
+            {},
+        )
+
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.reconciled_update_state",
+        lambda root: {
+            "status": "restart_required",
+            "old_version": "a" * 12,
+            "new_version": "b" * 12,
+            "reason": "service_start_failed",
+        },
+    )
     with pytest.raises(RuntimeError):
         supervisor.dispatch(
             "POST",
