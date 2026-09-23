@@ -128,21 +128,45 @@ def repository_update_preconditions(repo_root: str | Path) -> dict:
     return {"ok": True, "head": head}
 
 
-def safe_to_update(supervisor) -> tuple[bool, str]:
-    if supervisor.worker.active:
-        return False, "worker_active"
+def _tasks_safe_for_update(tasks: list[dict], *, now: float | None = None) -> tuple[bool, str]:
     runnable = {
         "DISCOVERED",
         "PROFILE_RESOLVED",
         "FORM_FILLED",
         "VALIDATED",
     }
-    for task in supervisor.queue.tasks():
+    for task in tasks:
+        if task.get("stage") == "NEEDS_USER_ACTION" and task.get("blocker") in {
+            "otp_waiting",
+            "otp_ambiguous",
+        }:
+            return False, "otp_in_flight"
+        if task.get("owner") and (
+            now is None or float(task.get("lease_until") or 0) > now
+        ):
+            return False, "worker_active"
         if task.get("stage") in runnable:
             return False, "runnable_task_pending"
         if task.get("stage") == "ERROR" and task.get("blocker") == "retry_pending":
             return False, "runnable_task_pending"
     return True, ""
+
+
+def safe_to_update(supervisor) -> tuple[bool, str]:
+    if supervisor.worker.active:
+        return False, "worker_active"
+    return _tasks_safe_for_update(
+        supervisor.queue.tasks(),
+        now=supervisor.queue.clock(),
+    )
+
+
+def runtime_safe_to_update(runtime: str | Path) -> tuple[bool, str]:
+    try:
+        queue = TaskQueue(Path(runtime).expanduser().resolve())
+        return _tasks_safe_for_update(queue.tasks(), now=queue.clock())
+    except Exception:
+        return False, "runtime_state_unavailable"
 
 
 def spawn_update(
@@ -199,6 +223,11 @@ def perform_update(
     runtime_path = Path(runtime).expanduser().resolve()
     python = python_executable or sys.executable
 
+    safe, safety_reason = runtime_safe_to_update(runtime_path)
+    if not safe:
+        write_update_state(runtime_path, "failed", reason=safety_reason)
+        return 1
+
     pre = repository_update_preconditions(repo)
     if not pre.get("ok"):
         write_update_state(runtime_path, "failed", reason=pre["reason"])
@@ -231,6 +260,17 @@ def perform_update(
                 new_version=remote,
             )
             return 0
+
+        safe, safety_reason = runtime_safe_to_update(runtime_path)
+        if not safe:
+            write_update_state(
+                runtime_path,
+                "failed",
+                old_version=old,
+                new_version=remote,
+                reason=safety_reason,
+            )
+            return 1
 
         ancestor = _run(
             repo,
