@@ -90,6 +90,18 @@ def test_manager_report_is_read_only(tmp_path):
     assert "target_host" not in provider.seen["tasks"][0]
 
 
+def test_chat_apply_without_created_task_gives_local_form_guidance(tmp_path):
+    q, _, provider, manager = controller(
+        tmp_path, ManagerTurn(reply="我已经开始投递。", decisions=[]),
+    )
+    result = manager.handle("请申请 https://jobs.example.test/roles/role-1")
+    assert result["actions"] == []
+    assert not q.tasks()
+    assert "未创建任务" in result["reply"]
+    assert "左侧" in result["reply"]
+    assert "jobs.example.test/roles" not in provider.seen["message"]
+
+
 def test_cancel_requires_explicit_user_intent(tmp_path):
     turn = ManagerTurn(reply="建议取消。", decisions=[
         ManagerDecision(action=ManagerAction.CANCEL, task_id="placeholder")

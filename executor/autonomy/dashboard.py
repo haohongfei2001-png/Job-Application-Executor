@@ -63,7 +63,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <div class="bubble ai">请在左侧填写明确岗位；任务控制可在任务卡片操作，私人资料也请在任务卡片本地填写。遇到需要你决定或安全验证的地方会停下来，最终提交由你本人完成。</div>
 </div>
 <div class="composer">
-  <textarea id="message" placeholder="告诉我你想投哪个岗位，或直接说“继续这个岗位”…"></textarea>
+  <textarea id="message" placeholder="查看任务状态；添加岗位请使用左侧表单，私人资料请在任务卡片填写…"></textarea>
   <button id="send">发送</button>
 </div>
 </main>

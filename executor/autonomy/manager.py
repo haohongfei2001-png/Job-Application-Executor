@@ -751,6 +751,11 @@ class ManagerController:
                 + (f"（{item['reason']}）" if item.get("reason") else "")
                 for item in actions
             ) + "。"
+        if _APPLY_RE.search(message) and not any(
+            item["action"] == "CREATE_TASK" and item["status"] == "accepted"
+            for item in actions
+        ):
+            reply = "系统未创建任务。请在左侧填写公司、岗位和完整岗位链接；目标核验前不会自动写入招聘网站。"
         return {
             "reply": reply,
             "actions": actions,
