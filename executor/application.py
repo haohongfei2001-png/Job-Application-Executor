@@ -87,6 +87,10 @@ class ApplicationExecutor:
         # Private, process-local last readback for the authenticated review UI.
         self.private_review_snapshot = None
         self.private_review_profile_version = None
+        self.private_review_certificate = None
+        self.private_review_expected_account = None
+        self.private_review_expected_rows = None
+        self.private_review_expected_attachments = None
 
     @staticmethod
     def _auth_kind(adapter) -> str | None:
@@ -1091,6 +1095,10 @@ class ApplicationExecutor:
                         return self.plan
                     self.private_review_snapshot = fresh_snapshot
                     self.private_review_profile_version = profile_version
+                    self.private_review_certificate = certificate
+                    self.private_review_expected_account = account_identity_digest
+                    self.private_review_expected_rows = expected_rows
+                    self.private_review_expected_attachments = expected_attachments
                     self.plan.metadata["review_certificate"] = certificate.safe_summary()
                     self.plan.stage = ApplicationStage.READY_TO_SUBMIT
                     self.plan.metadata["final_submit_control"] = final_control
