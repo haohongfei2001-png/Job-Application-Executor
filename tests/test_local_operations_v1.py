@@ -98,6 +98,7 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
             self.available = True
 
     monkeypatch.setattr(diagnostics, "DeepSeekMapper", FakeMapper)
+    supervisor.release_identity = {"status": "verified", "source_sha256": "a" * 64}
     report = diagnostics.collect_diagnostics(
         supervisor,
         repo_root=tmp_path,
@@ -105,6 +106,9 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
     serialized = json.dumps(report, ensure_ascii=False)
 
     assert report["format"] == "application-executor-diagnostics-v1"
+    assert report["loaded_source"] == {
+        "verified_at_start": True, "sha256": "a" * 64
+    }
     assert report["system"]["cdp_alive"] is True
     assert report["system"]["deepseek_available"] is True
     assert report["system"]["otp_waiting_tasks"] == 1
