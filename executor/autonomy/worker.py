@@ -12,11 +12,11 @@ from urllib.parse import urlsplit
 
 from .. import browser
 from ..application import ApplicationExecutor
-from ..models import ApplicationStage
+from ..models import ApplicationStage, ResolutionStatus
 from ..protected_targets import assert_target_not_protected
 from ..settings import load_settings
 from ..evidence import BOOL_KEYS, set_user_confirmed_field
-from ..profile import DEFAULT_ALIASES
+from ..profile import DEFAULT_ALIASES, get_field
 from ..facts.answers import TaskAnswerStore
 from .otp import BrokerBridge, OtpBroker
 from .queue import RUNTIME, STOPPED, private_dir, IDENTIFIER
@@ -149,11 +149,75 @@ class Worker:
         self.stop_event = threading.Event()
         self.answers = {}
         self.answers_lock = threading.RLock()
+        self.review_lock = threading.RLock()
+        self.review_cache = {}
         self.answer_store = TaskAnswerStore(queue)
         self.active = None
         self._otp_watch_lock = threading.RLock()
         self._otp_watchers = set()
         self._otp_watch_retry_after = {}
+
+    def _remember_private_review(self, tid, runner, plan, revision):
+        snapshot = getattr(runner, "private_review_snapshot", None)
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("fields"), list):
+            return
+        expected = [field for field in plan.fields if field.status in {
+            ResolutionStatus.RESOLVED, ResolutionStatus.KEEP_EXISTING}
+            and not (field.canonical_key or "").startswith("assets.")]
+        actual = snapshot["fields"]
+        if len(expected) != len(actual):
+            return
+        fields = [{
+            "key": field.canonical_key or field.field_id,
+            "label": field.label,
+            "required": field.required,
+            "expected": field.model_dump(mode="json")["value"],
+            "observed": observed.get("value"),
+        } for field, observed in zip(expected, actual) if isinstance(observed, dict)]
+        if len(fields) != len(expected):
+            return
+        assets = runner.profile.get("assets") or {}
+        attachments = [{
+            "slot": slot,
+            "filename": Path(str((assets.get(slot) or {}).get("path") or "")).name,
+            "canonical_sha256": (assets.get(slot) or {}).get("sha256"),
+            "observed_sha256": digest,
+        } for slot, digest in (snapshot.get("attachments") or {}).items()]
+        account = {}
+        for key in ("identity.email", "identity.phone", "identity.full_name"):
+            field = get_field(runner.profile, key)
+            if field is not None and field.value not in (None, ""):
+                account = {"key": key, "canonical_value": field.value,
+                           "active_account_matched": True}
+                break
+        payload = {
+            "target_url": plan.target_url,
+            "account": account,
+            "fields": fields,
+            "attachments": attachments,
+            "rows": copy.deepcopy(snapshot.get("rows") or {}),
+            "project_coverage": copy.deepcopy(
+                (plan.metadata.get("final_review") or {}).get("project_coverage") or {}),
+            "source": "last_certified_server_readback",
+            "current_site_state_unverified": True,
+        }
+        with self.review_lock:
+            self.review_cache[tid] = {
+                "revision": revision, "expires_at": time.monotonic() + 3600,
+                "payload": payload,
+            }
+
+    def private_review(self, tid, revision):
+        with self.review_lock:
+            row = self.review_cache.get(tid)
+            if not row or row["revision"] != revision or row["expires_at"] <= time.monotonic():
+                self.review_cache.pop(tid, None)
+                return None
+            return copy.deepcopy(row["payload"])
+
+    def discard_private_review(self, tid):
+        with self.review_lock:
+            self.review_cache.pop(tid, None)
 
     def _watch_late_otp(self):
         """Listen after the short browser wait without holding a task lease."""
@@ -411,6 +475,10 @@ class Worker:
             stage, blocker = outcome(plan)
             checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields], "review_certificate": plan.metadata.get("review_certificate")}, release=True)
             self.queue.finish_run_attempt(attempt_id, "RETURNED_UNVERIFIED")
+            if stage == "READY_TO_SUBMIT":
+                self._remember_private_review(tid, runner, plan, self.queue.get(tid)["revision"])
+            else:
+                self.discard_private_review(tid)
             if blocker == "otp_waiting" and self.broker.pending(tid):
                 self.queue.resume(tid)
             if stage in STOPPED:
