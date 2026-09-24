@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from executor.autonomy.bootstrap import _version
+
 from executor.autonomy.release import (
     MANIFEST_NAME,
     copy_source_candidate,
@@ -48,6 +50,17 @@ def test_release_source_snapshot_is_independent_and_detects_candidate_drift(tmp_
     assert read_release_identity(candidate) == {
         "status": "unverified", "source_sha256": ""
     }
+
+
+def test_recovery_version_uses_verified_packaged_source(tmp_path):
+    repo = _source(tmp_path)
+    candidate = tmp_path / "candidate"
+    manifest = copy_source_candidate(repo, candidate)
+    assert _version(candidate) == manifest["source_sha256"][:12]
+    (candidate / "executor" / "autonomy" / "cli.py").write_text(
+        "VERSION = 'tampered'\\n", encoding="utf-8"
+    )
+    assert _version(candidate) == "unknown"
 
 
 def test_release_candidate_rejects_added_file_and_symlink(tmp_path):
