@@ -129,9 +129,13 @@ class Supervisor:
                     }
                 else:
                     task["review_summary"] = {"status": "unavailable"}
+                available = getattr(self.worker, "private_review_available", None)
+                task["review_values_available"] = bool(
+                    callable(available) and available(task["task_id"], task["revision"]))
                 task["can_confirm_submission"] = bool(
                     task["can_confirm_submission"]
-                    and task["review_summary"]["status"] == "last_verified")
+                    and task["review_summary"]["status"] == "last_verified"
+                    and task["review_values_available"])
                 continue
             if task.get("stage") != "NEEDS_USER_ACTION" or task.get("blocker") != "otp_waiting":
                 continue
@@ -202,13 +206,28 @@ class Supervisor:
         )
         return {"ok": True, "task_id": tid, **observed}
 
+    def review_values(self, tid: str):
+        """Return full values only to the authenticated local UI session."""
+        task = self.queue.get(tid)
+        if task["stage"] != "READY_TO_SUBMIT" or task["owner"]:
+            raise ValueError("task is not at the human review boundary")
+        review = self.worker.private_review(tid, task["revision"])
+        if review is None:
+            raise ValueError("private review has expired or the service restarted")
+        return {"ok": True, "task_id": tid, "revision": task["revision"],
+                "review": review}
+
     def confirm_human_submission(self, tid: str, expected_revision: int):
         """Accept only a local user's after-the-fact confirmation."""
+        task_before = self.queue.get(tid)
+        if not self.worker.private_review_available(tid, task_before["revision"]):
+            raise ValueError("private review has expired or the service restarted")
         observed = self.observe_submission(tid)
         task = self.queue.confirm_human_submission(
             tid, expected_revision=expected_revision, user_confirmed=True,
             observation=observed,
         )
+        self.worker.discard_private_review(tid)
         submission = task["details"]["submission"]
         return {
             "ok": True, "task_id": tid, "stage": task["stage"],
@@ -474,6 +493,10 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                     if self.command == "GET" and parsed.path == "/ui/api/observe":
                         task_id = parse_qs(parsed.query).get("task_id", [""])[0]
                         self._send_json(200, supervisor.observe_task(task_id))
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/review-values":
+                        task_id = parse_qs(parsed.query).get("task_id", [""])[0]
+                        self._send_json(200, supervisor.review_values(task_id))
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/submission-observation":
                         task_id = parse_qs(parsed.query).get("task_id", [""])[0]
