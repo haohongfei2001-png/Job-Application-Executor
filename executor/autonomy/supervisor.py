@@ -184,6 +184,16 @@ class Supervisor:
         )
         return {"ok": True, "task_id": tid, **observed}
 
+    def observe_submission(self, tid: str):
+        """Inspect the already-owned task tab after a possible human submit."""
+        task = self.queue.get(tid)
+        if task["stage"] != "READY_TO_SUBMIT" or task["owner"]:
+            raise ValueError("task is not at the human submit boundary")
+        observed = browser.observe_bound_submission(
+            task["spec"]["target_url"], self.queue.browser_binding(tid),
+        )
+        return {"ok": True, "task_id": tid, **observed}
+
     def update_state(self):
         return reconciled_update_state(self.queue.root)
 
@@ -441,6 +451,10 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                     if self.command == "GET" and parsed.path == "/ui/api/observe":
                         task_id = parse_qs(parsed.query).get("task_id", [""])[0]
                         self._send_json(200, supervisor.observe_task(task_id))
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/submission-observation":
+                        task_id = parse_qs(parsed.query).get("task_id", [""])[0]
+                        self._send_json(200, supervisor.observe_submission(task_id))
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/diagnostics":
                         self._send_json(200, supervisor.diagnostics())
