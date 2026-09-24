@@ -137,7 +137,7 @@ def certify_review(
                 or observed.get("selector") != field.selector
                 or observed.get("field_id") != field.field_id
                 or observed.get("required") is not field.required
-                or observed.get("value") != field.value):
+                or json.dumps(observed.get("value"), ensure_ascii=False, sort_keys=True, allow_nan=False) != json.dumps(field.model_dump(mode="json")["value"], ensure_ascii=False, sort_keys=True, allow_nan=False)):
             raise ReviewUnverified("current draft field differs from canonical plan")
         if field.status == ResolutionStatus.KEEP_EXISTING and observed.get(
                 "default_confirmed") is not True:
