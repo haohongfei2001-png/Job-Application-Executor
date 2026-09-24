@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from collections import Counter
 from datetime import date
@@ -11,7 +12,7 @@ from urllib.parse import urlparse
 from .base import SiteAdapter
 from ..browser import BrowserOwnershipError, connect, owned_page_after_action, page_document_epoch, page_target_id
 from ..field_classifier import is_final_submit, is_initial_apply, is_next
-from ..forms import FormObservation
+from ..forms import FormObservation, ObservedRow
 from ..models import (
     ApplicationPlan,
     FieldResolution,
@@ -219,6 +220,11 @@ class GenericWebAdapter(SiteAdapter):
               : (e.getAttribute('type') || tag).toLowerCase();
             const name = e.getAttribute('name') || '';
             const id = e.id || '';
+            const row = e.closest('[data-record-id], [data-row-id]');
+            const rowAttribute = row?.hasAttribute('data-record-id') ? 'data-record-id' : 'data-row-id';
+            const rowToken = row?.getAttribute(rowAttribute) || '';
+            const rowUnique = !!rowToken && [...document.querySelectorAll('[' + rowAttribute + ']')]
+              .filter(node => node.getAttribute(rowAttribute) === rowToken).length === 1;
             let cssSelector = '__field_index__:' + index;
             if (id) cssSelector = '#' + CSS.escape(id);
             else if (name) cssSelector = tag + '[name=' + JSON.stringify(name) + ']';
@@ -247,6 +253,9 @@ class GenericWebAdapter(SiteAdapter):
               accept: e.getAttribute('accept') || '',
               multiple: !!e.multiple,
               maxSize: e.getAttribute('data-max-size') || e.getAttribute('data-max-file-size') || '',
+              rowToken,
+              rowAttribute: rowToken ? rowAttribute : '',
+              rowUnique,
               selector: cssSelector,
               fieldId: name || id || ('field-' + index),
               section: section(e),
@@ -276,6 +285,11 @@ class GenericWebAdapter(SiteAdapter):
                     "accept": item.get("accept") or "",
                     "multiple": bool(item.get("multiple")),
                     "max_size": item.get("maxSize") or "",
+                    "row_key": hashlib.sha256(
+                        (str(item.get("rowAttribute") or "") + ":" +
+                         str(item.get("rowToken") or "")).encode()).hexdigest()[:20]
+                        if item.get("rowToken") else "",
+                    "row_identity_proven": bool(item.get("rowUnique")),
                 },
             )
             for item in snapshot
@@ -323,11 +337,25 @@ class GenericWebAdapter(SiteAdapter):
             raise BrowserOwnershipError("form structure observation unavailable") from None
         selector_counts = Counter(item.selector for item in fields)
         ambiguous = sum(count - 1 for count in selector_counts.values() if count > 1)
+        grouped: dict[str, list[WebField]] = {}
+        for item in fields:
+            key = str(item.metadata.get("row_key") or "")
+            if key:
+                grouped.setdefault(key, []).append(item)
+        rows = tuple(ObservedRow(
+            section=str(items[0].metadata.get("section") or ""),
+            row_key=key,
+            field_selectors=tuple(item.selector for item in items),
+            identity_proven=all(bool(item.metadata.get("row_identity_proven"))
+                                for item in items),
+        ) for key, items in grouped.items())
         return FormObservation.from_fields(
             self.page.url, epoch, fields,
+            rows=rows,
             hidden_required_count=int(signals.get("hiddenRequired") or 0),
             unsupported_component_count=int(signals.get("unsupported") or 0),
             ambiguous_selector_count=ambiguous,
+            ambiguous_row_count=sum(not row.identity_proven for row in rows),
             validation_error_count=int(signals.get("validationErrors") or 0),
         )
 

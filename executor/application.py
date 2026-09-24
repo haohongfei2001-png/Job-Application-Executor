@@ -530,7 +530,8 @@ class ApplicationExecutor:
                     self.audit.record_action({"type": "start_application", "page_index": page_index})
                     continue
                 if observation and ((observation.unsupported_component_count
-                                     or observation.ambiguous_selector_count) or (
+                                     or observation.ambiguous_selector_count
+                                     or observation.ambiguous_row_count) or (
                         not fields and adapter.final_submit_control())):
                     self.plan.stage = ApplicationStage.BLOCKED
                     self.plan.metadata["block_reason"] = "form structure unsupported or incomplete"
@@ -566,7 +567,8 @@ class ApplicationExecutor:
                             await_render()
                         updated = observe_form()
                         self.plan.metadata["form_observation"] = updated.safe_summary()
-                        if updated.unsupported_component_count or updated.ambiguous_selector_count:
+                        if (updated.unsupported_component_count or updated.ambiguous_selector_count
+                                or updated.ambiguous_row_count):
                             break
                         added = [field for field in updated.fields if field.selector not in known]
                         if not added:

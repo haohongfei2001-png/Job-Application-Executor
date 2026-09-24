@@ -79,6 +79,29 @@ def test_duplicate_locator_never_writes_first_repeated_row(tmp_path):
             "elements => elements.map(e => e.value)") == ["", ""]
 
 
+def test_repeated_rows_are_observed_without_exposing_site_record_tokens(tmp_path):
+    html = tmp_path / "rows.html"
+    html.write_text("""<!doctype html><body>
+      <div data-record-id='PRIVATE_ROW_ALPHA'><input name='school'></div>
+      <div data-record-id='PRIVATE_ROW_BETA'><input name='school'></div>
+    """, encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        observed = adapter.observe_form()
+        assert len(observed.rows) == 2
+        assert all(row.identity_proven for row in observed.rows)
+        assert observed.ambiguous_selector_count == 1
+        assert "PRIVATE_ROW" not in json.dumps(observed.safe_summary())
+        assert "PRIVATE_ROW" not in repr(observed)
+    html.write_text("""<!doctype html><body>
+      <div data-record-id='REUSED'><input name='school'></div>
+      <div data-record-id='REUSED'><input name='school'></div>
+    """, encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        observed = adapter.observe_form()
+        assert observed.ambiguous_row_count == 1
+        assert observed.unsafe_structure
+
+
 def test_dynamic_required_field_is_reobserved_after_fill(tmp_path, monkeypatch):
     runner, _html = _runner(tmp_path, monkeypatch, """
       <label>姓名<input id='name' name='full_name' required></label>
