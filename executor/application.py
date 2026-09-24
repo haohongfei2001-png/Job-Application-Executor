@@ -686,6 +686,25 @@ class ApplicationExecutor:
                         pass
                     return self.plan
 
+                next_control = getattr(adapter, "next_control", None)
+                if callable(next_control) and next_control():
+                    verify_draft = getattr(adapter, "verify_draft_persistence", None)
+                    draft_evidence = verify_draft(self.plan) if callable(verify_draft) else None
+                    if not isinstance(draft_evidence, dict) or draft_evidence.get("verified") is not True:
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "draft persistence unverified before navigation"
+                        self.plan.metadata["draft_persistence"] = "UNVERIFIED"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
+                    self.plan.metadata.setdefault("page_draft_receipts", []).append({
+                        "page_index": page_index,
+                        "level": "server_readback" if draft_evidence.get("level") == "server_readback"
+                                 else "site_draft_readback",
+                        "revision": int(draft_evidence["revision"])
+                                    if isinstance(draft_evidence.get("revision"), int)
+                                    and draft_evidence["revision"] >= 0 else None,
+                    })
+                    self.audit.save_plan(self.plan)
                 if adapter.advance():
                     self.audit.record_action({"type": "advance", "page_index": page_index})
                     continue

@@ -1243,6 +1243,11 @@ class GenericWebAdapter(SiteAdapter):
                 return True
         return False
 
+    def next_control(self) -> bool:
+        """Read-only navigation preflight; a draft must be proven before leaving it."""
+        return any(is_next(text) and not is_final_submit(text)
+                   for _, text in self._buttons())
+
     def final_submit_control(self) -> str | None:
         matches = [text for _, text in self._buttons() if is_final_submit(text)]
         return matches[0] if len(matches) == 1 else None
