@@ -645,7 +645,8 @@ def test_dashboard_uses_consumer_facing_status_language():
     assert "/ui/api/readiness" in DASHBOARD_HTML
     assert '<form id="newtask"' in DASHBOARD_HTML
     assert '添加岗位请使用左侧表单' in DASHBOARD_HTML
-    assert "复制诊断" in DASHBOARD_HTML
+    assert "查看诊断" in DASHBOARD_HTML
+    assert "复制报告" in DASHBOARD_HTML
     assert "检查并更新" in DASHBOARD_HTML
     assert "/ui/api/diagnostics" in DASHBOARD_HTML
     assert "/ui/api/update" in DASHBOARD_HTML
