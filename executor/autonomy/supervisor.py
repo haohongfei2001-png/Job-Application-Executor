@@ -132,6 +132,8 @@ class Supervisor:
                 available = getattr(self.worker, "private_review_available", None)
                 task["review_values_available"] = bool(
                     callable(available) and available(task["task_id"], task["revision"]))
+                if not task["review_values_available"]:
+                    task["review_summary"] = {"status": "unavailable"}
                 task["can_confirm_submission"] = bool(
                     task["can_confirm_submission"]
                     and task["review_summary"]["status"] == "last_verified"
