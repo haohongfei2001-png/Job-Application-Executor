@@ -27,6 +27,14 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _json_value(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ReviewUnverified("draft answer is not JSON") from exc
+
+
 def canonical_account_digest(profile: dict[str, Any], *, live: bool) -> str:
     """Bind the observed active account to one canonical identity value.
 
@@ -137,7 +145,8 @@ def certify_review(
                 or observed.get("selector") != field.selector
                 or observed.get("field_id") != field.field_id
                 or observed.get("required") is not field.required
-                or json.dumps(observed.get("value"), ensure_ascii=False, sort_keys=True, allow_nan=False) != json.dumps(field.model_dump(mode="json")["value"], ensure_ascii=False, sort_keys=True, allow_nan=False)):
+                or _json_value(observed.get("value")) != _json_value(
+                    field.model_dump(mode="json")["value"])):
             raise ReviewUnverified("current draft field differs from canonical plan")
         if field.status == ResolutionStatus.KEEP_EXISTING and observed.get(
                 "default_confirmed") is not True:
