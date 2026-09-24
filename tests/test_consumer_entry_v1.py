@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import shlex
 import socket
 import stat
 import subprocess
@@ -408,6 +409,61 @@ def test_macos_consumer_app_rejects_untrusted_existing_bundle(tmp_path):
     assert previous.is_dir()
     assert not (apps / ".AI 投递经理.app.failed").exists()
 
+
+
+
+def test_macos_consumer_app_upgrades_and_rolls_back_exact_legacy_bundle(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    app = apps / "AI 投递经理.app"
+    macos = app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    executable = macos / "AIApplicationManager"
+    repo_q = shlex.quote(str(repo))
+    old_launcher = f"""#!/bin/zsh
+set -u
+REPO_ROOT={repo_q}
+PYTHON="$REPO_ROOT/.venv/bin/python"
+LOG_DIR="$HOME/Library/Logs/AI投递经理"
+LOG_FILE="$LOG_DIR/launcher.log"
+/bin/mkdir -p "$LOG_DIR"
+
+if [[ ! -x "$PYTHON" ]]; then
+  /usr/bin/osascript -e 'display dialog "AI 投递经理缺少运行环境。请重新安装本地入口。" buttons {{"好"}} default button "好" with icon caution'
+  exit 1
+fi
+
+cd "$REPO_ROOT" || exit 1
+"$PYTHON" -m executor.autonomy.cli launch >>"$LOG_FILE" 2>&1
+STATUS=$?
+if [[ $STATUS -ne 0 ]]; then
+  /usr/bin/osascript -e 'display dialog "AI 投递经理没有成功就绪。现有任务不会被提交或丢失。请在 ChatGPT 中检查启动状态。" buttons {{"好"}} default button "好" with icon caution'
+fi
+exit $STATUS
+"""
+    executable.write_text(old_launcher, encoding="utf-8")
+    executable.chmod(0o755)
+    with (app / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump({
+            "CFBundleIdentifier": "com.local.job-application-executor.ai-application-manager",
+            "CFBundleExecutable": "AIApplicationManager",
+        }, handle)
+
+    installed = install_macos_app(repo, destination=apps, platform="darwin")
+    assert installed["ok"] is True
+    assert installed["replaced"] is True
+    previous = apps / ".AI 投递经理.app.previous"
+    assert (previous / "Contents" / "MacOS" / "AIApplicationManager").read_text() == old_launcher
+    assert verify_source_candidate(app / "Contents" / "Resources" / "release")
+
+    restored = rollback_macos_app(apps)
+    assert restored["ok"] is True
+    assert executable.read_text() == old_launcher
+    assert (apps / ".AI 投递经理.app.failed").is_dir()
 
 
 def test_macos_consumer_app_preserves_tampered_release_on_install_and_rollback(tmp_path):
