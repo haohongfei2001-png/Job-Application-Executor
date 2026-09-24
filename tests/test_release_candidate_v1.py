@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -83,3 +91,62 @@ def test_release_candidate_rejects_added_file_and_symlink(tmp_path):
     with pytest.raises(ValueError, match="release_source_symlink"):
         copy_source_candidate(repo, tmp_path / "refused")
     assert not (tmp_path / "refused").exists()
+
+
+def test_packaged_candidate_starts_on_loopback_and_answers_health_without_fqdn(tmp_path):
+    source = Path(__file__).resolve().parents[1]
+    candidate = tmp_path / "candidate"
+    copy_source_candidate(source, candidate)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+
+    script = (
+        "import pathlib,runpy,socket,sys;"
+        "socket.getfqdn=lambda *_: (_ for _ in ()).throw("
+        "AssertionError('FQDN lookup during service startup'));"
+        f"sys.path.insert(0,{str(candidate)!r});"
+        "sys.argv=['executor.autonomy.cli','--runtime',sys.argv[1],"
+        "'--port',sys.argv[2],'serve'];"
+        "runpy.run_module('executor.autonomy.cli',run_name='__main__')"
+    )
+    log_path = tmp_path / "candidate-service.log"
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", script, str(runtime), str(port)],
+            cwd=candidate, env={**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"},
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        )
+    try:
+        health = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and process.poll() is None:
+            token_path = runtime / "auth.token"
+            if token_path.exists():
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/health",
+                    headers={"Authorization": "Bearer " + token_path.read_text().strip()},
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=1) as response:
+                        health = json.load(response)
+                    break
+                except (OSError, urllib.error.URLError):
+                    pass
+            time.sleep(0.05)
+        assert health == {
+            "ok": True,
+            "worker_active": False,
+            "final_click_actor": "user",
+        }, log_path.read_text(errors="replace")[-4000:]
+        assert process.poll() is None
+        assert verify_source_candidate(candidate)
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
