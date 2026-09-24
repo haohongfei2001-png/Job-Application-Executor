@@ -454,7 +454,7 @@ def test_macos_consumer_app_rejects_symlinked_release_directory(tmp_path):
     release = resources / "release"
     release.rename(resources / "release-original")
     release.symlink_to("release-original", target_is_directory=True)
-    assert verify_source_candidate(release)
+    assert not verify_source_candidate(release)
 
     refused = install_macos_app(repo, destination=apps, platform="darwin")
     assert refused["ok"] is False
