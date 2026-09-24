@@ -355,6 +355,9 @@ class Worker:
             runner = self.runner_factory(spec["target_url"], spec["profile_ref"], self._runner_settings(), execution_id=tid,
                 otp_bridge=bridge, audit_store=audit, guard=guard,
                 resume_url=task.get("checkpoint_url"), existing_browser_only=True)
+            if self.runner_factory is ApplicationExecutor:
+                runner.attachment_manifest_path = (self.queue.root / "attachment_manifests"
+                                                    / f"{tid}.json")
             if session_epoch is not None:
                 runner.browser_session_epoch = session_epoch
                 runner.browser_binding_get = lambda: self.queue.browser_binding(tid)

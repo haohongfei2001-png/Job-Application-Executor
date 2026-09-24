@@ -12,6 +12,9 @@ from .browser import BrowserOwnershipError, browser_mode
 from .audit import AuditStore
 from .forms import FillPlan, FormObservationError
 from .forms.attachments import verify_attachment_readback
+from .forms.attachment_manifest import (AttachmentManifestError,
+                                        load_attachment_manifest,
+                                        save_attachment_manifest)
 from .models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus, WebField
 from .otp.bridge import OtpBridge, OtpBridgeError
 from .profile import get_field, is_sensitive_key, load_profile
@@ -61,6 +64,7 @@ class ApplicationExecutor:
         self.guard = guard or (lambda: None)
         self.resume_url = resume_url
         self.existing_browser_only = existing_browser_only
+        self.attachment_manifest_path: Path | None = None
         self.user_answers = self.audit.load_user_answers()
         self.otp_bridge = otp_bridge or OtpBridge()
 
@@ -475,6 +479,26 @@ class ApplicationExecutor:
 
     def run(self, max_pages: int = 15) -> ApplicationPlan:
         self.guard()
+        attachment_binding = None
+        attachment_selections: list[FieldResolution] = []
+        if self.attachment_manifest_path:
+            try:
+                manifest = load_attachment_manifest(
+                    self.attachment_manifest_path, target_url=self.target_url,
+                    execution_id=self.plan.execution_id,
+                    assets=self.profile.get("assets") or {})
+            except AttachmentManifestError:
+                self.plan.stage = ApplicationStage.BLOCKED
+                self.plan.metadata["block_reason"] = "attachment draft receipt unverified"
+                self.plan.metadata["attachment_persistence"] = "UNVERIFIED"
+                self.audit.save_plan(self.plan)
+                return self.plan
+            if manifest:
+                attachment_binding = (manifest["draft_id_digest"], manifest["revision"])
+                attachment_selections = [FieldResolution(
+                    field_id=slot, selector=f"#prior-{slot}", label=slot,
+                    canonical_key=f"assets.{slot}", status=ResolutionStatus.RESOLVED,
+                    source="prior_server_receipt") for slot in manifest["slots"]]
         adapter = adapter_for_url(self.target_url)
         def guarded_browser_mutation():
             self.guard()
@@ -493,8 +517,6 @@ class ApplicationExecutor:
                 raise RuntimeError("checkpoint origin differs from exact target")
             assert_target_not_protected(self.resume_url)
             adapter.target_url = self.resume_url
-        attachment_binding = None
-        attachment_selections: list[FieldResolution] = []
         with adapter:
             for page_index in range(max_pages):
                 self.guard()
@@ -550,6 +572,17 @@ class ApplicationExecutor:
                     self.audit.save_plan(self.plan)
                     return self.plan
                 resolutions = self._resolve_page(fields)
+                if attachment_binding and any(
+                        item.canonical_key in {x.canonical_key for x in attachment_selections}
+                        for item in resolutions if item.status == ResolutionStatus.RESOLVED):
+                    # A recovered page with a previous upload cannot select
+                    # the file again until a site-specific read-only observer
+                    # reconciles that prior effect.
+                    self.plan.stage = ApplicationStage.BLOCKED
+                    self.plan.metadata["block_reason"] = "attachment draft receipt unverified"
+                    self.plan.metadata["attachment_persistence"] = "UNVERIFIED"
+                    self.audit.save_plan(self.plan)
+                    return self.plan
                 if observation:
                     FillPlan.bind(observation, resolutions)
                 self.plan.metadata["current_page_selectors"] = [item.selector for item in resolutions]
@@ -650,6 +683,23 @@ class ApplicationExecutor:
                         self.plan.metadata["attachment_persistence"] = "UNVERIFIED"
                         self.audit.save_plan(self.plan)
                         return self.plan
+                    if self.attachment_manifest_path:
+                        try:
+                            self.guard()
+                            save_attachment_manifest(
+                                self.attachment_manifest_path, target_url=self.target_url,
+                                execution_id=self.plan.execution_id,
+                                assets=self.profile.get("assets") or {},
+                                slots=tuple(item.canonical_key.removeprefix("assets.")
+                                            for item in selected_assets),
+                                draft_id_digest=new_binding,
+                                revision=proof["minimum_draft_revision"])
+                        except AttachmentManifestError:
+                            self.plan.stage = ApplicationStage.BLOCKED
+                            self.plan.metadata["block_reason"] = "attachment draft receipt unverified"
+                            self.plan.metadata["attachment_persistence"] = "UNVERIFIED"
+                            self.audit.save_plan(self.plan)
+                            return self.plan
                     attachment_binding = (new_binding, proof["minimum_draft_revision"])
                     attachment_selections.extend(selected_assets)
                     self.plan.metadata["attachment_persistence"] = proof

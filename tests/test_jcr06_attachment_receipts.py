@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import stat
 import threading
 import time
 import urllib.request
@@ -15,6 +16,8 @@ import pytest
 from executor.application import ApplicationExecutor
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.browser import BrowserOwnershipError
+from executor.forms.attachment_manifest import (AttachmentManifestError,
+                                                load_attachment_manifest)
 from executor.autonomy.worker import outcome
 from executor.models import ApplicationStage, ValidationResult, WebField
 
@@ -343,3 +346,73 @@ def test_real_browser_file_inputs_require_independent_upload_oracle(tmp_path, mo
     assert dropped.metadata["block_reason"] == "attachment draft receipt unverified"
     assert "photo" not in upload_site.attachments
     assert upload_site.submit_count == 0
+
+
+def test_restart_uses_private_attachment_manifest_without_reupload(tmp_path, monkeypatch, upload_site):
+    resume, photo = tmp_path / "resume.pdf", tmp_path / "photo.png"
+    resume.write_bytes(b"%PDF-1.4 restart")
+    photo.write_bytes(b"\x89PNG restart")
+    profile = tmp_path / "profile.json"
+    assets = {
+        "resume": {"path": str(resume), "kind": "resume_pdf",
+                   "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()},
+        "photo": {"path": str(photo), "kind": "photo_png",
+                  "sha256": hashlib.sha256(photo.read_bytes()).hexdigest()},
+    }
+    profile.write_text(json.dumps({"assets": assets}))
+    target = f"http://127.0.0.1:{upload_site.server_port}/apply"
+    manifest_path = tmp_path / "private" / "task-attachment.json"
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: TwoPageUploadAdapter(url, upload_site,
+                                                         lose_photo=False))
+    first = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}},
+                                execution_id="synthetic-task")
+    first.attachment_manifest_path = manifest_path
+    assert first.run(max_pages=1).stage == ApplicationStage.BLOCKED
+    assert set(upload_site.attachments) == {"resume", "photo"}
+    raw_manifest = manifest_path.read_text()
+    assert str(resume) not in raw_manifest and str(photo) not in raw_manifest
+    assert "server-draft-one" not in raw_manifest
+    assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(manifest_path.parent.stat().st_mode) == 0o700
+    assert load_attachment_manifest(manifest_path, target_url=target,
+                                    execution_id="synthetic-task", assets=assets)
+    with pytest.raises(AttachmentManifestError, match="scope"):
+        load_attachment_manifest(manifest_path, target_url=target,
+                                 execution_id="another-task", assets=assets)
+    changed_assets = {**assets, "photo": {**assets["photo"], "sha256": digest("changed")}}
+    with pytest.raises(AttachmentManifestError, match="canonical hash"):
+        load_attachment_manifest(manifest_path, target_url=target,
+                                 execution_id="synthetic-task", assets=changed_assets)
+
+    def at_page_two(url):
+        adapter = TwoPageUploadAdapter(url, upload_site, lose_photo=False)
+        adapter.page_index = 1
+        return adapter
+
+    monkeypatch.setattr("executor.application.adapter_for_url", at_page_two)
+    second = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}},
+                                 execution_id="synthetic-task")
+    second.attachment_manifest_path = manifest_path
+    before = upload_site.revision
+    assert second.run(max_pages=1).stage == ApplicationStage.READY_TO_SUBMIT
+    assert upload_site.revision == before  # Read-only restart, no second upload.
+    assert upload_site.submit_count == 0
+
+    upload_site.attachments.pop("photo")
+    upload_site.revision += 1
+    missing = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}},
+                                  execution_id="synthetic-task")
+    missing.attachment_manifest_path = manifest_path
+    assert missing.run(max_pages=1).metadata["block_reason"] == "attachment draft receipt unverified"
+
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: TwoPageUploadAdapter(url, upload_site,
+                                                         lose_photo=False))
+    replay = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}},
+                                 execution_id="synthetic-task")
+    replay.attachment_manifest_path = manifest_path
+    before = upload_site.revision
+    assert replay.run(max_pages=1).stage == ApplicationStage.BLOCKED
+    assert upload_site.revision == before
