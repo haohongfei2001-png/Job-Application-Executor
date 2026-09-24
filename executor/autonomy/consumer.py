@@ -7,6 +7,8 @@ import stat
 import sys
 from pathlib import Path
 
+from .release import copy_source_candidate, verify_source_candidate
+
 
 APP_NAME = "AI 投递经理"
 BUNDLE_ID = "com.local.job-application-executor.ai-application-manager"
@@ -96,12 +98,23 @@ def install_macos_app(
 
     macos = staging / "Contents" / "MacOS"
     macos.mkdir(parents=True)
+    release = staging / "Contents" / "Resources" / "release"
+    try:
+        copy_source_candidate(repo, release)
+    except (OSError, ValueError):
+        shutil.rmtree(staging)
+        return {
+            "ok": False,
+            "reason": "source_snapshot_failed",
+            "message": "无法准备完整的新版本；现有应用没有被替换。",
+        }
     executable = macos / "AIApplicationManager"
     repo_q = shlex.quote(str(repo))
 
     launcher = f"""#!/bin/zsh
 set -u
 REPO_ROOT={repo_q}
+RELEASE_ROOT="$(cd "$(dirname "$0")/../Resources/release" && pwd -P)"
 PYTHON="$REPO_ROOT/.venv/bin/python"
 LOG_DIR="$HOME/Library/Logs/AI投递经理"
 LOG_FILE="$LOG_DIR/launcher.log"
@@ -112,7 +125,8 @@ if [[ ! -x "$PYTHON" ]]; then
   exit 1
 fi
 
-cd "$REPO_ROOT" || exit 1
+cd "$RELEASE_ROOT" || exit 1
+export PYTHONPATH="$RELEASE_ROOT"
 "$PYTHON" -m executor.autonomy.cli launch >>"$LOG_FILE" 2>&1
 STATUS=$?
 if [[ $STATUS -ne 0 ]]; then
@@ -144,7 +158,7 @@ exit $STATUS
     with (staging / "Contents" / "Info.plist").open("wb") as handle:
         plistlib.dump(info, handle, sort_keys=True)
 
-    if not _trusted_bundle(staging):
+    if not _trusted_bundle(staging) or not verify_source_candidate(release):
         shutil.rmtree(staging)
         return {
             "ok": False,
