@@ -533,14 +533,47 @@ class TaskQueue:
         safe = {}
         for key in ("unresolved_keys", "filled_keys"):
             safe[key] = [k for k in details.get(key, []) if isinstance(k, str) and IDENTIFIER.fullmatch(k)]
-        if stage == "READY_TO_SUBMIT":
-            safe["final_review"] = {"final_click_actor": "user", "validated": True, "review_ref": tid, "manual_final_click_required": True}
         if blocker not in {None, "unknown_facts", "security_challenge", "otp_waiting", "otp_ambiguous", "validation", "retry_pending", "retry_exhausted", "live_not_authorized", "session_unavailable", "protected_target", "target_mismatch", "isolated_external_target"} | RECONCILIATION_REQUIRED:
             raise ValueError("invalid blocker type")
         with self.tx() as db:
             row = db.execute("SELECT * FROM tasks WHERE task_id=? AND owner=? AND lease_until>? AND stage NOT IN ('CANCELLED','READY_TO_SUBMIT','SUBMITTED','VERIFIED')", (tid, owner, self.clock())).fetchone()
             if not row:
                 raise RuntimeError("lease lost or task stopped")
+            if stage == "READY_TO_SUBMIT":
+                certificate = details.get("review_certificate")
+                checks = certificate.get("checks") if isinstance(certificate, dict) else None
+                required_checks = {
+                    "target_account_draft", "complete_fields_defaults",
+                    "structured_rows", "attachments", "validation_save",
+                    "manual_submit_boundary",
+                }
+                target = json.loads(row["spec"])["target_url"]
+                target_digest = hashlib.sha256(target.encode("utf-8")).hexdigest()
+                if (safe["unresolved_keys"]
+                        or not isinstance(certificate, dict)
+                        or certificate.get("target_sha256") != target_digest
+                        or not isinstance(certificate.get("draft_id_digest"), str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", certificate["draft_id_digest"])
+                        or type(certificate.get("revision")) is not int
+                        or certificate["revision"] < 1
+                        or certificate.get("final_click_actor") != "user"
+                        or not isinstance(checks, dict)
+                        or set(checks) != required_checks
+                        or set(checks.values()) != {"PASS"}):
+                    raise ValueError("READY requires a current independent review certificate")
+                safe["final_review"] = {
+                    "final_click_actor": "user",
+                    "validated": True,
+                    "manual_final_click_required": True,
+                    "certificate": {
+                        key: certificate[key] for key in (
+                            "target_sha256", "draft_id_digest", "revision",
+                            "document_epoch_sha256", "driver_version",
+                            "field_count", "attachment_count", "row_count",
+                            "checks", "final_click_actor")
+                        if key in certificate
+                    },
+                }
             if page_url:
                 try:
                     TaskSpec.safe_url(page_url)
