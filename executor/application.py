@@ -84,6 +84,8 @@ class ApplicationExecutor:
         self.row_journal_path: Path | None = None
         self.user_answers = self.audit.load_user_answers()
         self.otp_bridge = otp_bridge or OtpBridge()
+        # Private, process-local last readback for the authenticated review UI.
+        self.private_review_snapshot = None
 
     @staticmethod
     def _auth_kind(adapter) -> str | None:
@@ -1061,9 +1063,10 @@ class ApplicationExecutor:
                         )
                         # A second read-only observation catches a draft or
                         # document change between initial review and READY.
+                        fresh_snapshot = observer(self.plan) if callable(observer) else None
                         recheck_review(
                             certificate, self.profile, self.plan,
-                            observer(self.plan) if callable(observer) else None,
+                            fresh_snapshot,
                             expected_account_identity_digest=account_identity_digest,
                             expected_rows=expected_rows,
                             expected_attachments=expected_attachments,
@@ -1085,6 +1088,7 @@ class ApplicationExecutor:
                         self.plan.metadata["review_certificate"] = "UNVERIFIED"
                         self.audit.save_plan(self.plan)
                         return self.plan
+                    self.private_review_snapshot = fresh_snapshot
                     self.plan.metadata["review_certificate"] = certificate.safe_summary()
                     self.plan.stage = ApplicationStage.READY_TO_SUBMIT
                     self.plan.metadata["final_submit_control"] = final_control
