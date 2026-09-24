@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -53,6 +54,8 @@ class RowInventory:
     revision: int
     complete: bool
     rows: tuple[SiteRow, ...]
+    target_sha256: str
+    draft_id_digest: str
 
 
 @dataclass(frozen=True)
@@ -149,8 +152,14 @@ class RowActionJournal:
 
 class RowReconciler:
     def __init__(self, driver: RowDriver, journal: RowActionJournal,
-                 *, mutation_guard: Callable[[], None] | None = None):
+                 *, target_sha256: str, draft_id_digest: str,
+                 mutation_guard: Callable[[], None] | None = None):
+        if (not re.fullmatch(r"[0-9a-f]{64}", target_sha256)
+                or not re.fullmatch(r"[0-9a-f]{64}", draft_id_digest)):
+            raise RowReconciliationBlocked("row target or draft binding missing")
         self.driver, self.journal = driver, journal
+        self.target_sha256 = target_sha256
+        self.draft_id_digest = draft_id_digest
         self.mutation_guard = mutation_guard
 
     def _read(self) -> RowInventory:
@@ -159,6 +168,8 @@ class RowReconciler:
         except Exception:
             raise RowReconciliationBlocked("row inventory unavailable") from None
         if (not inventory.complete or inventory.revision < 0
+                or inventory.target_sha256 != self.target_sha256
+                or inventory.draft_id_digest != self.draft_id_digest
                 or len({row.record_id for row in inventory.rows}) != len(inventory.rows)
                 or len({row.site_row_id for row in inventory.rows}) != len(inventory.rows)
                 or any(not row.record_id or not row.site_row_id or

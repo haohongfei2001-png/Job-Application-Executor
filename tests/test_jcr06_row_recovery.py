@@ -26,6 +26,15 @@ def digest(value):
                                      separators=(",", ":")).encode()).hexdigest()
 
 
+TARGET_DIGEST = digest("synthetic-target")
+DRAFT_DIGEST = digest("synthetic-draft")
+
+
+def reconciler(driver, journal, *, guard=None):
+    return RowReconciler(driver, journal, target_sha256=TARGET_DIGEST,
+                         draft_id_digest=DRAFT_DIGEST, mutation_guard=guard)
+
+
 class RowSite(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -35,7 +44,9 @@ class RowSite(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         self._json({"rows": self.server.rows, "revision": self.server.revision,
-                    "complete": self.server.complete})
+                    "complete": self.server.complete,
+                    "target_sha256": self.server.target_sha256,
+                    "draft_id_digest": self.server.draft_id_digest})
 
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -80,7 +91,8 @@ class RowHttpDriver:
         return RowInventory(result["revision"], result["complete"], tuple(
             SiteRow(row["record_id"], row["site_row_id"],
                     digest(row["values"]), row["managed"])
-            for row in result["rows"]))
+            for row in result["rows"]), result["target_sha256"],
+            result["draft_id_digest"])
 
     def _post(self, path, value):
         request = urllib.request.Request(self.base + path,
@@ -104,6 +116,7 @@ class RowHttpDriver:
 def row_site():
     server = ThreadingHTTPServer(("127.0.0.1", 0), RowSite)
     server.rows, server.revision, server.complete = [], 0, True
+    server.target_sha256, server.draft_id_digest = TARGET_DIGEST, DRAFT_DIGEST
     server.add_count = server.delete_count = server.reorder_count = 0
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -125,19 +138,19 @@ def test_reconcile_explicit_delete_add_reorder_and_repeat_without_duplicate(tmp_
     desired = (DesiredRow("B", {"school": "B School"}),
                DesiredRow("A", {"school": "A School"}))
     journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
-    receipt = RowReconciler(driver, journal, mutation_guard=lambda: None).reconcile(
+    receipt = reconciler(driver, journal, guard=lambda: None).reconcile(
         desired, delete_ids=frozenset({"C"}))
     assert (receipt.add_count, receipt.delete_count, receipt.reorder_count) == (1, 1, 1)
     assert [(row["record_id"], row["values"]) for row in server.rows] == [
         ("B", {"school": "B School"}), ("A", {"school": "A School"})]
     assert (server.add_count, server.delete_count, server.reorder_count) == (1, 1, 1)
-    repeat = RowReconciler(driver, RowActionJournal(journal.path, scope=SCOPE)).reconcile(desired)
+    repeat = reconciler(driver, RowActionJournal(journal.path, scope=SCOPE)).reconcile(desired)
     assert (repeat.add_count, repeat.delete_count, repeat.reorder_count) == (0, 0, 0)
     assert (server.add_count, server.delete_count, server.reorder_count) == (1, 1, 1)
     assert "B School".encode() not in journal.path.read_bytes()
     server.revision = 0
     with pytest.raises(RowReconciliationBlocked, match="revision regressed"):
-        RowReconciler(driver, RowActionJournal(journal.path, scope=SCOPE)).reconcile(desired)
+        reconciler(driver, RowActionJournal(journal.path, scope=SCOPE)).reconcile(desired)
 
 
 def test_pending_add_after_crash_reconciles_only_from_readback(tmp_path, row_site):
@@ -161,7 +174,7 @@ os._exit(23)
     assert child.returncode == 23, child.stderr.decode(errors="replace")
     # The process died after site commit but before journal completion. A new
     # reconciler may settle read-only; it must not replay the non-idempotent add.
-    receipt = RowReconciler(driver, RowActionJournal(journal_path, scope=SCOPE)).reconcile(desired)
+    receipt = reconciler(driver, RowActionJournal(journal_path, scope=SCOPE)).reconcile(desired)
     assert receipt.add_count == 0
     assert server.add_count == 1
     assert not RowActionJournal(journal_path, scope=SCOPE).pending()
@@ -170,7 +183,7 @@ os._exit(23)
     RowActionJournal(absent_path, scope=SCOPE).begin("add", digest("MISSING"), digest({"school": "M"}),
                                         server.revision)
     with pytest.raises(RowOutcomeUnknown, match="replay disabled"):
-        RowReconciler(driver, RowActionJournal(absent_path, scope=SCOPE)).reconcile(
+        reconciler(driver, RowActionJournal(absent_path, scope=SCOPE)).reconcile(
             (DesiredRow("B", {"school": "B School"}),
              DesiredRow("MISSING", {"school": "M"})))
     assert server.add_count == 1
@@ -181,7 +194,7 @@ def test_lost_response_and_unmanaged_extra_are_safe(tmp_path, row_site):
     driver.fail_after_add = True
     desired = (DesiredRow("A", {"school": "A School"}),)
     journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
-    receipt = RowReconciler(driver, journal, mutation_guard=lambda: None).reconcile(desired)
+    receipt = reconciler(driver, journal, guard=lambda: None).reconcile(desired)
     assert receipt.add_count == 1
     assert server.add_count == 1
 
@@ -189,7 +202,7 @@ def test_lost_response_and_unmanaged_extra_are_safe(tmp_path, row_site):
                         "values": {"school": "Other School"}, "managed": False})
     server.revision += 1
     with pytest.raises(RowReconciliationBlocked, match="unbound or unmanaged"):
-        RowReconciler(driver, journal).reconcile(desired)
+        reconciler(driver, journal).reconcile(desired)
     assert server.add_count == 1
     assert server.delete_count == 0
 
@@ -225,7 +238,7 @@ def test_read_only_row_recovery_settles_effect_without_site_write(tmp_path, row_
     journal.begin("add", digest("A"), desired.values_digest, 0)
     driver.add_row(desired)  # A prior process completed the external effect.
     assert server.add_count == 1
-    observed = RowReconciler(driver, journal).reconcile_pending_read_only()
+    observed = reconciler(driver, journal).reconcile_pending_read_only()
     assert observed.revision == 1
     assert journal.pending() == ()
     assert server.add_count == 1
@@ -243,12 +256,12 @@ def test_revoked_row_lease_after_intent_never_calls_site(tmp_path, row_site):
             raise RuntimeError("lease revoked")
 
     with pytest.raises(RuntimeError, match="lease revoked"):
-        RowReconciler(driver, journal, mutation_guard=guard).reconcile(
+        reconciler(driver, journal, guard=guard).reconcile(
             (DesiredRow("A", {"school": "A School"}),))
     assert server.add_count == 0
     assert len(journal.pending()) == 1
     with pytest.raises(RowOutcomeUnknown, match="replay disabled"):
-        RowReconciler(driver, journal).reconcile_pending_read_only()
+        reconciler(driver, journal).reconcile_pending_read_only()
     assert server.add_count == 0
 
 
@@ -256,7 +269,18 @@ def test_row_write_requires_explicit_task_mutation_guard(tmp_path, row_site):
     server, driver = row_site
     journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
     with pytest.raises(RowReconciliationBlocked, match="mutation guard unavailable"):
-        RowReconciler(driver, journal).reconcile(
+        reconciler(driver, journal).reconcile(
+            (DesiredRow("A", {"school": "A School"}),))
+    assert server.add_count == 0
+    assert journal.pending() == ()
+
+
+def test_row_inventory_wrong_draft_blocks_before_intent_or_site_write(tmp_path, row_site):
+    server, driver = row_site
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    server.draft_id_digest = digest("another-draft")
+    with pytest.raises(RowReconciliationBlocked, match="inventory incomplete"):
+        reconciler(driver, journal, guard=lambda: None).reconcile(
             (DesiredRow("A", {"school": "A School"}),))
     assert server.add_count == 0
     assert journal.pending() == ()
