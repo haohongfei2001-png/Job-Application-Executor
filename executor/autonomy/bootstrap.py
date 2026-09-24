@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .queue import private_dir
+from .release import read_release_identity
 
 
 def _state_path(root: str | Path) -> Path:
@@ -33,10 +34,14 @@ def _reason(code: str) -> str:
     }.get(code, "本地服务暂时不可用。现有任务没有被修改。")
 
 
-def _version() -> str:
+def _version(root: str | Path | None = None) -> str:
+    source = Path(root).resolve() if root is not None else Path(__file__).resolve().parents[2]
+    identity = read_release_identity(source)
+    if identity.get("status") == "verified":
+        return identity["source_sha256"][:12]
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2],
+            ["git", "rev-parse", "HEAD"], cwd=source,
             capture_output=True, text=True, timeout=3,
         )
         sha = result.stdout.strip()
