@@ -1069,6 +1069,8 @@ class ApplicationExecutor:
                             expected_attachments=expected_attachments,
                             profile_version=profile_version,
                         )
+                        if hashlib.sha256(self.profile_path.read_bytes()).hexdigest() != profile_version:
+                            raise ReviewUnverified("profile changed during review")
                     except BrowserOwnershipError:
                         raise
                     except (ReviewUnverified, OSError, ValueError, TypeError):
