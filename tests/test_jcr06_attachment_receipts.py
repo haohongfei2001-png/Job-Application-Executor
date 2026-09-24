@@ -520,7 +520,7 @@ def test_browser_upload_and_rows_share_one_draft_across_pages_and_restart(
             if self.page_index == 1:
                 driver.capabilities = frozenset()  # Returning page is read-only.
             return RowExecutionContract(driver, desired, digest("server-draft-one"),
-                                        "education_records")
+                                        "education_records", "synthetic-browser-v1")
 
         def next_control(self):
             return self.page_index == 0

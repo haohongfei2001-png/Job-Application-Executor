@@ -632,6 +632,9 @@ class ApplicationExecutor:
                         draft_ids = {item.draft_id_digest for item in contracts}
                         if (len(draft_ids) != 1
                                 or any(item.collection_key not in collection_keys
+                                       or not isinstance(item.driver_version, str)
+                                       or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",
+                                                           item.driver_version)
                                        or not isinstance(item.delete_ids, frozenset)
                                        or any(not isinstance(rid, str) or not rid
                                               for rid in item.delete_ids)
@@ -653,7 +656,8 @@ class ApplicationExecutor:
                                 f"{self.row_journal_path.suffix}")
                             journal = RowActionJournal(journal_path,
                                 scope=f"{target_hash}:{self.plan.execution_id}:"
-                                      f"{contract.draft_id_digest}:{contract.collection_key}")
+                                      f"{contract.draft_id_digest}:{contract.collection_key}:"
+                                      f"{contract.driver_version}")
                             reconciler = RowReconciler(
                                 contract.driver, journal, target_sha256=target_hash,
                                 draft_id_digest=contract.draft_id_digest,
@@ -661,7 +665,10 @@ class ApplicationExecutor:
                             receipt = reconciler.reconcile(
                                 contract.desired, delete_ids=contract.delete_ids)
                             self.plan.metadata.setdefault("row_reconciliation", []).append({
-                                "page_index": page_index, "revision": receipt.revision,
+                                "page_index": page_index,
+                                "collection_key": contract.collection_key,
+                                "driver_version": contract.driver_version,
+                                "revision": receipt.revision,
                                 "row_count": receipt.row_count, "add_count": receipt.add_count,
                                 "delete_count": receipt.delete_count,
                                 "reorder_count": receipt.reorder_count})

@@ -75,6 +75,7 @@ class RowExecutionContract:
     desired: tuple[DesiredRow, ...] = field(repr=False)
     draft_id_digest: str
     collection_key: str
+    driver_version: str
     delete_ids: frozenset[str] = frozenset()
 
 

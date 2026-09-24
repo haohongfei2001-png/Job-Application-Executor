@@ -412,7 +412,7 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
             if server.corrupt_contract:
                 desired = (DesiredRow("A", {"school": "Invented School"}),) + desired[1:]
             return RowExecutionContract(driver, desired, DRAFT_DIGEST,
-                                        "education_records")
+                                        "education_records", "synthetic-api-v1")
 
         def discover_fields(self):
             return [WebField(field_id="full_name", selector="#name",
@@ -459,6 +459,7 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
     first = run()
     assert first.stage == ApplicationStage.READY_TO_SUBMIT
     assert first.metadata["row_reconciliation"][0]["add_count"] == 2
+    assert first.metadata["row_reconciliation"][0]["driver_version"] == "synthetic-api-v1"
     assert server.add_count == 2 and server.submit_count == 0
     second = run()
     assert second.stage == ApplicationStage.READY_TO_SUBMIT
@@ -514,6 +515,7 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
     projects.rows, projects.revision, projects.complete = [], 0, True
     projects.draft_id_digest = DRAFT_DIGEST
     projects.wrong_contract = False
+    projects.version_changed = False
     projects.rows = [{"record_id": "project-b", "site_row_id": "prior-project-b",
                       "values": {"title": "Project B", "category": "project"},
                       "managed": True}]
@@ -562,6 +564,8 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
                      if key != "projects" or record["id"] != "project-b")),
                     digest("wrong-project-draft") if key == "projects" and
                     projects.wrong_contract else DRAFT_DIGEST, key,
+                    "synthetic-api-v2" if key == "projects" and
+                    projects.version_changed else "synthetic-api-v1",
                     delete_ids=frozenset({"project-b"}) if key == "projects"
                     else frozenset())
                     for key, driver in (("education_records", education_driver),
@@ -639,6 +643,11 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
         assert journal.with_name("task-rows.education_records.sqlite3").exists()
         assert journal.with_name("task-rows.projects.sqlite3").exists()
         assert run().stage == ApplicationStage.READY_TO_SUBMIT
+        assert education.add_count == projects.add_count == projects.delete_count == 1
+        projects.version_changed = True
+        changed_driver = run()
+        assert changed_driver.stage == ApplicationStage.BLOCKED
+        assert changed_driver.metadata["block_reason"] == "row reconciliation unverified"
         assert education.add_count == projects.add_count == projects.delete_count == 1
     finally:
         projects.shutdown()

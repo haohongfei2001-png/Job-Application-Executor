@@ -50,6 +50,8 @@ Project row values now include the canonical `project` or `research` category in
 
 The generic observer now flags form controls inside an open shadow root and visible opaque custom elements as unsupported; a visible iframe remains unsupported as before. Actual isolated browser fixtures confirm a required input exists inside the shadow root and iframe, yet neither can disappear from observation and yield false READY. A site driver is required to support either component. The affected form, React/Vue, attachment, row and historical privacy set passed **62 isolated/headless tests**.
 
+The certified row contract now carries a fixed site-driver version in the task/target/draft/collection journal scope and redacted row receipt. A changed driver cannot reuse an old intent journal: an isolated two-collection rerun blocks before another site action, preserving the prior draft for read-only migration/review. Journals created by an earlier draft checkpoint without a version also fail closed. The focused row and combined browser attachment set passed **19 tests**.
+
 ## Still open
 
 D-01–D-22 are not certified as a set. The row reconciler is integrated with the application and a certified synthetic driver; no real ATS row driver or complete worker browser/draft recovery is proven. Virtualized list support, unannotated site dependency drivers, external site upload completion receipts, broader multi-page recovery and per-action fault injections remain. The generic unsupported paths are blocked. DFG-002 browser write reconciliation is engineering debt; it is not a final-live owner item. DFG-007 records real applicant/site draft evidence as FINAL_LIVE while this engineering continues. No owner action or automated final submit is authorized by this checkpoint.
