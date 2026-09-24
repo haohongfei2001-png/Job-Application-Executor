@@ -405,7 +405,7 @@ class Worker:
             attempt_id = self.queue.begin_run_attempt(tid, owner)
             plan = runner.run()
             stage, blocker = outcome(plan)
-            checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields]}, release=True)
+            checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields], "review_certificate": plan.metadata.get("review_certificate")}, release=True)
             self.queue.finish_run_attempt(attempt_id, "RETURNED_UNVERIFIED")
             if blocker == "otp_waiting" and self.broker.pending(tid):
                 self.queue.resume(tid)
