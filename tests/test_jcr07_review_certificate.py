@@ -181,6 +181,11 @@ def test_missing_observer_and_unconfirmed_default_fail_closed():
     with pytest.raises(ReviewUnverified, match="unconfirmed site default"):
         certify_review(profile, plan, observation,
                        expected_account_identity_digest=digest("account"))
+    observation["fields"][0]["default_confirmed"] = True
+    observation["fields"][0]["value"] = 1
+    with pytest.raises(ReviewUnverified, match="current draft field"):
+        certify_review(profile, plan, observation,
+                       expected_account_identity_digest=digest("account"))
 
 
 def test_project_row_identity_and_values_must_match_current_inventory():
