@@ -123,11 +123,14 @@ def read_update_state(runtime: str | Path) -> dict:
         "failed",
     }:
         status = "failed"
+    old_version = data.get("old_version")
+    new_version = data.get("new_version")
+    reason = data.get("reason")
     return {
         "status": status,
-        "old_version": str(data.get("old_version") or "")[:12],
-        "new_version": str(data.get("new_version") or "")[:12],
-        "reason": str(data.get("reason") or "")[:80],
+        "old_version": old_version if isinstance(old_version, str) and re.fullmatch(r"[0-9a-fA-F]{1,12}", old_version) else "",
+        "new_version": new_version if isinstance(new_version, str) and re.fullmatch(r"[0-9a-fA-F]{1,12}", new_version) else "",
+        "reason": reason if isinstance(reason, str) and re.fullmatch(r"[a-z_]{0,80}", reason) else "state_invalid",
     }
 
 
