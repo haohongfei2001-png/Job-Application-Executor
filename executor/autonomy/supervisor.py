@@ -97,6 +97,25 @@ class Supervisor:
     def ui_state(self):
         state = self.manager.state()
         for task in state.get("tasks", []):
+            if task.get("stage") == "READY_TO_SUBMIT":
+                details = self.queue.get(task["task_id"]).get("details") or {}
+                review = details.get("final_review") or {}
+                certificate = review.get("certificate") if isinstance(review, dict) else None
+                checks = certificate.get("checks") if isinstance(certificate, dict) else None
+                if (review.get("validated") is True
+                        and review.get("final_click_actor") == "user"
+                        and isinstance(checks, dict) and checks
+                        and all(value == "PASS" for value in checks.values())):
+                    task["review_summary"] = {
+                        "status": "last_verified",
+                        "field_count": certificate["field_count"],
+                        "attachment_count": certificate["attachment_count"],
+                        "row_count": certificate["row_count"],
+                        "check_count": len(checks),
+                    }
+                else:
+                    task["review_summary"] = {"status": "unavailable"}
+                continue
             if task.get("stage") != "NEEDS_USER_ACTION" or task.get("blocker") != "otp_waiting":
                 continue
             attempt = self.worker.broker.attempts.valid_wait(task["task_id"])
