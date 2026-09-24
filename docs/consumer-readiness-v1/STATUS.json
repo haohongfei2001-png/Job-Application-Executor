@@ -64,12 +64,12 @@
     },
     {
       "id": "JCR-06",
-      "status": "IN_PROGRESS",
+      "status": "ADVANCE_ALLOWED_WITH_DEFERRED",
       "authorized": true
     },
     {
       "id": "JCR-07",
-      "status": "NOT_STARTED",
+      "status": "READY",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-05 PR #15 merged as remote main 476d19de4f4c6750cd1a46beeda20cbbd556579e; exact-head CI 35931676896 and exact-main CI 35931971776 both passed, three review findings were resolved, and the remote STATUS readback confirmed JCR-06 READY. The sole JCR-06 writer feat/jcr06-structured-forms is implementing FormObservation/FillPlan, structured rows/components, attachment and save proof, negative oracles and safe recovery under D-01 through D-22. Continue all independent engineering through later rounds. DFG-006 final-live remains NOT_RUN; consumer certification remains NOT_CERTIFIED and final submit user-only.",
+  "next_action": "JCR-06 PR #16 is the sole candidate for a bounded synthetic structured-form capability. Its final-tree local isolated/headless suite passed 448 tests; exact-head CI, review, merge and main readback remain required. Unsupported generic row/upload/embedded/virtualized controls and unknown browser/draft effects stay blocked under DFG-002/008. D-class real-site evidence remains NOT_RUN under DFG-007. After PR #16 is merged and its exact-main CI passes, start JCR-07 independent final review engineering while continuing safely isolated JCR-06 debt. Consumer certification remains NOT_CERTIFIED and final submit user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

@@ -131,6 +131,19 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 - **Related acceptance IDs:** D-01 through D-22; G-class browser recovery where the same real draft is involved.
 - **Evidence / PR / commit:** JCR-06 draft PR #16; final-live NOT_RUN.
 
+### DFG-008 — JCR-06 unsupported form capability and question context
+
+- **Source round:** JCR-06
+- **Type / status:** `ENGINEERING_DEBT` / `MITIGATED_FOR_ENGINEERING`
+- **Blocking scope:** Claiming general ATS structured-form compatibility, asking an unknown site question through a context-free key, or continuing an uncertain browser/draft write as if it succeeded. These paths cannot contribute D-class PASS or a consumer READY certificate.
+- **Non-blocked work:** JCR-07 independent review and certificate, JCR-08 app/release engineering, JCR-09 synthetic/fault certification, and supported synthetic JCR-06 drivers.
+- **Safe degradation:** Generic repeated rows, file uploads, iframe/open-shadow/custom controls and virtualized choices remain unsupported unless a certified site driver supplies exact identity and readback. Unknown task answers bind to target/page/question digests, preventing cross-field reuse; a consumer UI must present the local question context before accepting one. Unknown browser/draft effects stay blocked under DFG-002.
+- **Existing evidence:** PR #16 implements scoped row journals, independent draft and attachment receipts, a composed browser/API fixture, exact target and question answer binding, auth-field refusal and 448 passing isolated/headless local tests. `receipts/JCR-06-WIP.md` lists the synthetic scope and negative cases.
+- **Missing final evidence:** A contextual local unknown-question workbench, worker-level read-only browser/draft recovery with per-action outcome, and the declared supported-driver matrix with complete automatic D-case evidence. Unsupported external site components need a capability decision and fixtures before support is claimed.
+- **Final convergence condition:** Resolve automatable debt and run affected D/G/H-class safety and fault tests by JCR-09; leave any still unproven external component explicitly unsupported. Real applicant/site evidence is separately DFG-007 and cannot resolve this engineering debt.
+- **Related acceptance IDs:** D-03 through D-11, D-15, D-16, D-17 through D-22; G-01/G-02/G-10/G-11.
+- **Evidence / PR / commit:** PR #16 candidate; automatic subevidence only, no D-class aggregate PASS.
+
 ## Invariants
 
 1. A deferred item is never silently converted to PASS.
