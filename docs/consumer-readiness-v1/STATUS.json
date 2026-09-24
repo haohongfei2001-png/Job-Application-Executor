@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-06 PR #16 is the sole candidate for a bounded synthetic structured-form capability. Its final-tree local isolated/headless suite passed 448 tests; exact-head CI, review, merge and main readback remain required. Unsupported generic row/upload/embedded/virtualized controls and unknown browser/draft effects stay blocked under DFG-002/008. D-class real-site evidence remains NOT_RUN under DFG-007. After PR #16 is merged and its exact-main CI passes, start JCR-07 independent final review engineering while continuing safely isolated JCR-06 debt. Consumer certification remains NOT_CERTIFIED and final submit user-only.",
+  "next_action": "JCR-06 PR #16 merged at 842eb7ed9482c485208d0829ebe4f0836d373c57 after final-head CI 35952943115 and exact-main CI 35954793093 succeeded. See receipts/JCR-06-MAIN-INTEGRATION.md. Start JCR-07 as the sole writer: independent current-draft review, certificate invalidation and human final-submit boundary. DFG-002/008 remain automatable engineering debt; DFG-007 remains FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,
