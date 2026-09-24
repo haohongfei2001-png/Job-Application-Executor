@@ -407,6 +407,8 @@ class GenericWebAdapter(SiteAdapter):
         return 1 <= int(text[5:7]) <= 12
 
     def _fill_select(self, element, value) -> bool:
+        if element.get_attribute("multiple") is not None:
+            return False
         candidates = value if isinstance(value, list) else [value]
         expanded = []
         for candidate in candidates:
@@ -418,17 +420,23 @@ class GenericWebAdapter(SiteAdapter):
                 expanded.append(candidate)
         opts = element.locator("option")
         normalized = [str(x).strip().casefold().removesuffix("市") for x in expanded]
+        if not normalized or any(not target for target in normalized):
+            return False
+        matches = []
         for i in range(opts.count()):
             opt = opts.nth(i)
             text = (opt.inner_text() or "").strip()
             val = opt.get_attribute("value") or ""
             hay = {text.casefold().removesuffix("市"), val.casefold()}
-            for target in normalized:
-                if target in hay:
-                    getattr(self, "mutation_guard", lambda: None)()
-                    element.select_option(value=val)
-                    return True
-        return False
+            if any(target in hay for target in normalized):
+                matches.append(i)
+        if len(matches) != 1:
+            return False
+        getattr(self, "mutation_guard", lambda: None)()
+        element.select_option(index=matches[0])
+        if not element.evaluate("(e, index) => e.selectedIndex === index", matches[0]):
+            raise BrowserOwnershipError("select choice outcome unknown")
+        return True
 
     def _fill_combobox(self, element, selector: str, value) -> bool:
         if not isinstance(value, (str, int, float)):

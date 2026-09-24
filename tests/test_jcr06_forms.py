@@ -119,6 +119,40 @@ def test_unique_dom_row_ids_do_not_prove_canonical_record_binding(tmp_path, monk
     assert plan.fields == []
 
 
+def test_duplicate_exact_select_labels_block_before_choice(tmp_path):
+    html = tmp_path / "duplicate-options.html"
+    html.write_text("""<!doctype html><body>
+      <label>城市<select id='city'>
+        <option value=''>Choose</option>
+        <option value='city-one'>Synthetic City</option>
+        <option value='city-two'>Synthetic City</option>
+      </select></label>
+    """)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert actions == [{"field_id": "city", "ok": False,
+                            "reason": "no_matching_select_option"}]
+        assert adapter.page.locator("#city").input_value() == ""
+
+
+def test_generic_multiple_select_requires_a_component_driver(tmp_path):
+    html = tmp_path / "multi-select.html"
+    html.write_text("""<!doctype html><body><label>城市
+      <select id='cities' multiple>
+        <option value='a'>City A</option><option value='b'>City B</option>
+      </select></label>""")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="cities", selector="#cities", label="Cities",
+            status=ResolutionStatus.RESOLVED, value=["City A", "City B"])])
+        assert actions == [{"field_id": "cities", "ok": False,
+                            "reason": "no_matching_select_option"}]
+        assert adapter.page.locator("#cities").evaluate(
+            "e => [...e.selectedOptions].length") == 0
+
+
 def test_explicit_dependent_select_is_filled_after_parent_redraw(tmp_path):
     html = tmp_path / "dependent.html"
     html.write_text("""<!doctype html><body>
