@@ -118,6 +118,10 @@ class RowActionJournal:
             return tuple(db.execute("""SELECT action_id,kind,record_key,target_digest,before_revision
                 FROM row_actions WHERE outcome='ATTEMPTED' ORDER BY rowid"""))
 
+    def latest_observed_revision(self) -> int | None:
+        with self._connect() as db:
+            return db.execute("SELECT MAX(after_revision) FROM row_actions").fetchone()[0]
+
     def begin(self, kind: str, record_key: str, target_digest: str,
               before_revision: int) -> str:
         action_id = uuid.uuid4().hex
@@ -209,6 +213,9 @@ class RowReconciler:
                 or delete_ids.intersection(ids)):
             raise RowReconciliationBlocked("canonical row identity ambiguous")
         inventory = self._read()
+        latest = self.journal.latest_observed_revision()
+        if latest is not None and inventory.revision < latest:
+            raise RowReconciliationBlocked("draft row revision regressed")
         self._settle_pending(inventory)
         by_id = {row.record_id: row for row in inventory.rows}
         unknown = set(by_id) - set(ids) - set(delete_ids)

@@ -135,6 +135,9 @@ def test_reconcile_explicit_delete_add_reorder_and_repeat_without_duplicate(tmp_
     assert (repeat.add_count, repeat.delete_count, repeat.reorder_count) == (0, 0, 0)
     assert (server.add_count, server.delete_count, server.reorder_count) == (1, 1, 1)
     assert "B School".encode() not in journal.path.read_bytes()
+    server.revision = 0
+    with pytest.raises(RowReconciliationBlocked, match="revision regressed"):
+        RowReconciler(driver, RowActionJournal(journal.path, scope=SCOPE)).reconcile(desired)
 
 
 def test_pending_add_after_crash_reconciles_only_from_readback(tmp_path, row_site):
