@@ -215,3 +215,47 @@ def test_project_row_identity_and_values_must_match_current_inventory():
     with pytest.raises(ReviewUnverified, match="structured row values"):
         certify_review(profile, plan, snapshot, expected_rows=expected,
                        expected_account_identity_digest=digest("account"))
+
+
+
+def test_attachment_receipt_must_match_canonical_asset_hash():
+    profile = {"generated_at": "v1", "assets": {
+        "resume": {"sha256": digest("canonical-resume")}}}
+    plan = ApplicationPlan(
+        execution_id="attachment-review",
+        target_url="https://example.test/apply",
+        site_id="synthetic",
+        attachments={"resume": "/private/CANARY_RESUME.pdf"},
+        fields=[FieldResolution(
+            field_id="resume", selector="#resume", label="Resume",
+            canonical_key="assets.resume", status=ResolutionStatus.RESOLVED,
+            value="/private/CANARY_RESUME.pdf")],
+    )
+    snapshot = {
+        "source": "server_readback",
+        "target_sha256": digest(plan.target_url),
+        "draft_id_digest": digest("attachment-draft"),
+        "revision": 2,
+        "account_verified": True,
+        "account_identity_digest": digest("account"),
+        "complete_pages": True,
+        "complete_required": True,
+        "save_status": "VERIFIED",
+        "validation_error_count": 0,
+        "hidden_required_count": 0,
+        "unverified_default_count": 0,
+        "document_epoch": "attachment-page",
+        "driver_version": "synthetic-v1",
+        "fields": [],
+        "attachments": {"resume": digest("wrong-file")},
+        "rows": {},
+    }
+    with pytest.raises(ReviewUnverified, match="attachment readback"):
+        certify_review(profile, plan, snapshot,
+                       expected_account_identity_digest=digest("account"))
+    snapshot["attachments"]["resume"] = digest("canonical-resume")
+    certificate = certify_review(
+        profile, plan, snapshot,
+        expected_account_identity_digest=digest("account"))
+    assert certificate.attachment_count == 1
+    assert "CANARY_RESUME" not in json.dumps(certificate.safe_summary())
