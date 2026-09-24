@@ -351,7 +351,9 @@ class Supervisor:
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
         if method == "GET" and parts == ["health"]:
-            return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user"}
+            return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user",
+                    "loaded_source_sha256": self.release_identity.get("source_sha256", "")
+                    if self.release_identity.get("status") == "verified" else ""}
         if method == "GET" and parts == ["v1", "tasks"]:
             return {"tasks": self.queue.tasks()}
         if method == "GET" and len(parts) == 3 and parts[:2] == ["v1", "commands"]:
