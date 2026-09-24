@@ -130,7 +130,9 @@ def certify_review(
             or not isinstance(version, str)
             or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", version)):
         raise ReviewUnverified("review observer version or session unavailable")
-    if plan.unresolved_fields:
+    if (plan.unresolved_fields or any(
+            field.status not in {ResolutionStatus.RESOLVED, ResolutionStatus.KEEP_EXISTING}
+            for field in plan.fields)):
         raise ReviewUnverified("unresolved application fields")
 
     actual = snapshot.get("fields")
