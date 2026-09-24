@@ -409,6 +409,38 @@ def test_macos_consumer_app_rejects_untrusted_existing_bundle(tmp_path):
     assert not (apps / ".AI 投递经理.app.failed").exists()
 
 
+
+def test_macos_consumer_app_preserves_tampered_release_on_install_and_rollback(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    current_cli = app / "Contents" / "Resources" / "release" / "executor" / "autonomy" / "cli.py"
+    current_cli.write_text("VERSION = 'tampered'\n", encoding="utf-8")
+
+    refused = install_macos_app(repo, destination=apps, platform="darwin")
+    assert refused["ok"] is False
+    assert refused["reason"] == "untrusted_app_path"
+    assert current_cli.read_text() == "VERSION = 'tampered'\n"
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+
+    # A retained rollback copy must pass the same source-integrity gate.
+    current_cli.write_text("VERSION = 'fixture'\n", encoding="utf-8")
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    previous = apps / ".AI 投递经理.app.previous"
+    previous_cli = previous / "Contents" / "Resources" / "release" / "executor" / "autonomy" / "cli.py"
+    previous_cli.write_text("VERSION = 'tampered'\n", encoding="utf-8")
+    rollback = rollback_macos_app(apps)
+    assert rollback["ok"] is False
+    assert rollback["reason"] == "rollback_unavailable"
+    assert previous_cli.read_text() == "VERSION = 'tampered'\n"
+    assert app.is_dir()
+
+
 def test_macos_consumer_app_rejects_invalid_staging_before_replacement(
     tmp_path, monkeypatch
 ):
