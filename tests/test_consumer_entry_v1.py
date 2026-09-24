@@ -152,6 +152,31 @@ def test_packaged_launch_keeps_stale_daemon_out_of_consumer_ui(tmp_path, monkeyp
     assert calls == ["start", "health", "restart", "health"]
 
 
+def test_packaged_launch_refuses_unverified_source_before_service_start(tmp_path, monkeypatch):
+    source = tmp_path / "release"
+    module = source / "executor" / "autonomy" / "cli.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# fixture\\n")
+    (source / "release-source-manifest.json").write_bytes(bytes((0xff, 0xfe)))
+    monkeypatch.setattr(cli, "__file__", str(module))
+    monkeypatch.setattr(cli, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(release, "read_release_identity", lambda _: {
+        "status": "unverified", "source_sha256": ""
+    })
+    monkeypatch.setattr(cli, "lifecycle", lambda *_: pytest.fail("unverified app must not start"))
+    monkeypatch.setattr(preflight, "collect_live_preflight", lambda **kwargs: {
+        "ready_for_live_e2e": False, "remediation": [], "submit_capability": False
+    })
+    monkeypatch.setattr(bootstrap, "open_bootstrap", lambda *args: {
+        "ok": True, "opened": True
+    })
+    monkeypatch.setattr(cli, "open_ui", lambda *_: pytest.fail("unverified UI must not open"))
+
+    result = cli.launch_consumer(tmp_path / "runtime", 9344)
+    assert result["bootstrap_reason"] == "release_unverified"
+    assert result["submit_capability"] is False
+
+
 def test_consumer_launch_uses_final_healthy_service_after_start_timeout(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "browser_mode", lambda: "live")
