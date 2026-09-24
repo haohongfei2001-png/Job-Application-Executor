@@ -115,7 +115,7 @@ def test_packaged_candidate_starts_on_loopback_and_answers_health_without_fqdn(t
     log_path = tmp_path / "candidate-service.log"
     with log_path.open("wb") as log:
         process = subprocess.Popen(
-            [sys.executable, "-I", "-c", script, str(runtime), str(port)],
+            [sys.executable, "-I", "-B", "-c", script, str(runtime), str(port)],
             cwd=candidate, env={**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"},
             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
         )
