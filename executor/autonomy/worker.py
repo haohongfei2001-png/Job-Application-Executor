@@ -86,6 +86,10 @@ def outcome(plan):
             return "NEEDS_USER_INPUT", "unknown_facts"
         return "BLOCKED", "validation"
     stage = str(plan.stage)
+    if stage == "READY_TO_SUBMIT" and (
+            plan.unresolved_fields
+            or not isinstance(plan.metadata.get("review_certificate"), dict)):
+        return "BLOCKED", "validation"
     if stage in {"SUBMITTED", "VERIFIED"}:
         raise RuntimeError("worker cannot submit")
     return stage, None
