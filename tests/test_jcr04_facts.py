@@ -1,4 +1,5 @@
 import json
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -9,6 +10,34 @@ from executor.evidence import (ProfileBuilder, projects_for_task, set_project_ex
                                set_user_confirmed_field, write_profile)
 from executor.models import (ApplicantProfile, ApplicationPlan, ApplicationStage,
                              EvidenceRef, ProfileField, ResolutionStatus, WebField)
+from executor.review_certificate import certify_review
+
+
+def _synthetic_review_certificate(plan):
+    digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
+    snapshot = {
+        "source": "server_readback",
+        "target_sha256": digest(plan.target_url),
+        "draft_id_digest": digest("synthetic-draft"),
+        "revision": 1,
+        "account_verified": True,
+        "account_identity_digest": digest("synthetic-account"),
+        "complete_pages": True,
+        "complete_required": True,
+        "save_status": "VERIFIED",
+        "validation_error_count": 0,
+        "hidden_required_count": 0,
+        "unverified_default_count": 0,
+        "document_epoch": "synthetic-session",
+        "driver_version": "synthetic-v1",
+        "fields": [],
+        "attachments": {},
+        "rows": {},
+    }
+    return certify_review(
+        {"generated_at": "synthetic-v1"}, plan, snapshot,
+        expected_account_identity_digest=digest("synthetic-account"),
+    ).safe_summary()
 
 
 def _task(queue, tmp_path, suffix="1"):
@@ -58,6 +87,7 @@ def test_task_answer_survives_worker_restart_without_cross_task_reuse(tmp_path):
         def run(self):
             assert self.user_answers == [{"canonical_key": "family.primary.role",
                                           "field_id": "family.primary.role", "value": canary}]
+            self.plan.metadata["review_certificate"] = _synthetic_review_certificate(self.plan)
             self.plan.stage = ApplicationStage.READY_TO_SUBMIT
             return self.plan
 
@@ -165,7 +195,17 @@ def test_explicit_reuse_updates_canonical_and_revokes_prior_ready_review(tmp_pat
     queue = TaskQueue(tmp_path / "runtime")
     ready = _task(queue, tmp_path, "ready")
     claimed = queue.claim("synthetic-worker")
-    queue.checkpoint(ready, claimed["owner"], "READY_TO_SUBMIT", release=True)
+    ready_plan = ApplicationPlan(
+        execution_id=ready,
+        target_url=queue.get(ready)["spec"]["target_url"],
+        site_id="synthetic",
+    )
+    queue.checkpoint(
+        ready, claimed["owner"], "READY_TO_SUBMIT",
+        details={"unresolved_keys": [],
+                 "review_certificate": _synthetic_review_certificate(ready_plan)},
+        release=True,
+    )
     pending = _task(queue, tmp_path, "pending")
     _wait_for_fact(queue, pending, "identity.current_city")
     worker = Worker(queue, settings={"deepseek": {"enabled": False}})
