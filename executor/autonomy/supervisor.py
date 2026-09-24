@@ -98,7 +98,12 @@ class Supervisor:
         state = self.manager.state()
         for task in state.get("tasks", []):
             if task.get("stage") == "READY_TO_SUBMIT":
-                details = self.queue.get(task["task_id"]).get("details") or {}
+                queue_task = self.queue.get(task["task_id"])
+                spec = queue_task.get("spec") or {}
+                task["can_confirm_submission"] = bool(
+                    spec.get("target_verified") is True
+                    and spec.get("tenant") and spec.get("job_id"))
+                details = queue_task.get("details") or {}
                 review = details.get("final_review") or {}
                 if not isinstance(review, dict):
                     review = {}
