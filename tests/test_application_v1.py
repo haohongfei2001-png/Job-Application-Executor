@@ -257,6 +257,36 @@ def test_draft_change_between_review_and_ready_blocks(tmp_path, monkeypatch):
     assert fake.submit_calls == 0
 
 
+def test_profile_change_during_review_blocks_ready(tmp_path, monkeypatch):
+    profile_path = _profile_file(tmp_path)
+
+    class ChangingProfile(FakeAdapter):
+        review_reads = 0
+
+        def observe_review_draft(self, plan):
+            observed = super().observe_review_draft(plan)
+            self.review_reads += 1
+            if self.review_reads == 2:
+                updated = json.loads(profile_path.read_text(encoding="utf-8"))
+                updated["fields"]["identity.full_name"]["value"] = "Changed Applicant"
+                profile_path.write_text(json.dumps(updated), encoding="utf-8")
+            return observed
+
+    fake = ChangingProfile([
+        WebField(field_id="name", selector="#name", label="姓名", required=True),
+    ], final="Submit application")
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: fake)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    plan = ApplicationExecutor(
+        "https://example.test/apply", profile_path,
+        {"deepseek": {"enabled": False}},
+    ).run(max_pages=1)
+    assert fake.review_reads == 2
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["review_certificate"] == "UNVERIFIED"
+    assert fake.submit_calls == 0
+
+
 def test_uncovered_project_blocks_false_ready(tmp_path, monkeypatch):
     profile = tmp_path / "project-profile.json"
     profile.write_text(json.dumps({"fields": {"identity.full_name": {
