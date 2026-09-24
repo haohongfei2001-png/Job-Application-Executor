@@ -118,6 +118,8 @@ def _candidate_starts(python: Path, release: Path) -> bool:
         "import importlib,pathlib,sys;sys.dont_write_bytecode=True;"
         f"root=pathlib.Path({str(release)!r}).resolve();"
         "sys.path.insert(0,str(root));"
+        "from executor.autonomy.release import installed_dependencies_match;"
+        "assert installed_dependencies_match(root);"
         "module=importlib.import_module('executor.autonomy.cli');"
         "assert pathlib.Path(module.__file__).resolve().is_relative_to(root)"
     )
