@@ -5,6 +5,7 @@ import http.cookiejar
 import json
 import threading
 import urllib.request
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -31,10 +32,11 @@ class SyntheticATS(BaseHTTPRequestHandler):
                 self.server.page_two_reads += 1
             field = "email" if second else "full_name"
             label = "Email" if second else "Full name"
+            retained = escape(self.server.draft.get(field, ""), quote=True)
             control = ("<button type='button'>Submit application</button>" if second
                        else "<button type='button' onclick=\"location.href='/apply-second'\">Next</button>")
             body = f'''<!doctype html><meta charset="utf-8"><body>
-              <label>{label}<input id="{field}" name="{field}" required></label>
+              <label>{label}<input id="{field}" name="{field}" value="{retained}" required></label>
               {control}
               <script>
               document.querySelector('input').addEventListener('input', event => {{
@@ -204,6 +206,12 @@ def test_multipage_navigation_requires_independent_draft_readback(tmp_path, monk
             "page_index": 0, "level": "server_readback", "revision": 1}]
         assert ats.draft == {"full_name": "Synthetic Person", "email": "synthetic@example.test"}
         assert ats.submit_count == 0
+        # Re-enter both pages in fresh isolated browser contexts. Browser DOM
+        # values must be restored from the independent server draft.
+        with GenericWebAdapter(target) as first_reentry:
+            assert first_reentry.page.locator("#full_name").input_value() == "Synthetic Person"
+        with GenericWebAdapter(f"http://127.0.0.1:{ats.server_port}/apply-second") as second_reentry:
+            assert second_reentry.page.locator("#email").input_value() == "synthetic@example.test"
 
         ats.draft, ats.revision, ats.page_two_reads, ats.accept_draft = {}, 0, 0, False
         blocked = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=2)
