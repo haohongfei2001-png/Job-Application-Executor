@@ -7,6 +7,7 @@
 <p>JCR-01～08 以及 JCR-09 的自动部分不因真人、权限、付费、真实账号、真实短信、真实设备或外部服务证据缺失而等待。所有这类事项进入 <code>DEFERRED_FINAL_GATES.md</code>，相关 case 保持 UNVERIFIED/NOT_RUN，但其他开发继续。</p>
 <p>进入 final convergence 前必须先耗尽所有可自动工作：包括 production implementation、synthetic/isolated E2E、AUTO/AUTO_MAC/PUBLIC、migration/rollback、fault injection、release/update/recovery、公开 drift、privacy/no-submit/protected invariants，以及可自动解决的全部 <code>ENGINEERING_DEBT</code>。只有剩余集合全部是不可由无人工程合法完成的 owner/live/external evidence 时，才进入 <code>REAL_ACCEPTANCE_PENDING</code>。</p>
 <p>24h soak 和 5-day normal-use observation 都是最终认证门槛，不是中途开发停机点。候选满足条件后尽早启动 soak，并在其运行期间继续其他独立工作；5-day observation 只在 PERSONAL_RC 之后按真实日用自然发生。</p>
+<p><strong>Cadence note：</strong>100 golden、1000 state sequences、fault 重复、24h soak、完整 Mac/release 矩阵是最终自动认证集合，不再作为 JCR-06～08 每个开发增量的重复门槛。它们仍必须在 JCR-09 final convergence 完成，不能因为前期少跑而从最终证书中删除。</p>
 <h2 id="07_final_certification-2-最后叫-owner-前必须完成">2. 最后叫 owner 前必须完成</h2>
 <p>所有核心AUTO矩阵通过；100完整黄金任务由独立oracle验证；1000状态序列和关键fault重复；Macapp启动、session、更新/回退真实进程认证；24hsoak；privacy/submit/protected invariants通过；公开站点drift已查；exact candidate SHA/builddigest锁定；具体3种平台机制与真实目标候选范围准备好；脱敏诊断/安全停止/回退已经可用。</p>
 <p>严禁先让owner投一个岗位看看，再以“真实反馈”替代这些门槛。可用的公共网页、旧已脱敏案例、合成framework fixtures应先用尽。</p>

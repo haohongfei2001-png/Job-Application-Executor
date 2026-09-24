@@ -35,11 +35,13 @@
 
 <h2 id="06_execution_protocol-7-test-policy">7. Test policy</h2>
 <p>保留原有效回归；历史 bug 加 direct production-path regression，不只复制源码片段。UI 测试从 actual consumer 入口走，oracle 读取真实 fixture 结果。所有 GitHub 证据默认 synthetic/copy-safe。</p>
+<p><strong>未完成轮次采用 risk-based cadence：</strong>每个开发增量先跑受影响 targeted tests/oracle；draft GitHub CI 只承担 foundation privacy/no-submit、编译与基本 contract 门。相关的一组表单/恢复/driver 能力完成后再做 batch browser/fault checkpoint；一个 JCR round 稳定准备合并时才跑一次完整 suite。100 golden、1000 state sequence、重复 fault、24h soak 等广覆盖证据集中到 JCR-09 final convergence。</p>
+<p>错误目标、自动最终提交、secret/privacy、未经授权事实/声明、UNKNOWN_OUTCOME blind replay、错误账号/OTP attempt、不可逆数据损坏等受影响安全边界不得因为 cadence 变轻而延期验证；这些改动必须当轮有 direct regression/oracle。</p>
 <p>允许变更已被批准取代的旧产品合同，但必须说明旧断言问题、新契约和安全等价证明。禁止无理由降级、skip 历史安全测试、降低真实性要求、通过改 expected 迎合错误实现，或把 deferred 证据写成 PASS。</p>
-<p>未来轮次尚未完成的 case 保持 NOT_RUN 并有责任轮次；测试 flaky 要定位，不以反复重跑挑成功。</p>
+<p>未来轮次尚未完成的 case 保持 NOT_RUN 并有责任轮次；测试 flaky 要定位，不以反复重跑挑成功。已完成 JCR-01～05 不因 cadence amendment 重新认证。</p>
 
 <h2 id="06_execution_protocol-8-round-advance">8. Round closure 与继续推进</h2>
-<p>一个 round 只有在 objective 实际成立、对应自动 gate 通过、历史不变量通过、migration/rollback 可重复、exact-head CI 与 main 集成证据成立、receipt/STATUS 远端回读后，才标记 <code>COMPLETE</code>。</p>
+<p>一个 round 只有在 objective 实际成立、受影响 targeted/oracle 回归通过、稳定 exact-head 的 full round-closure suite 通过、必要 migration/rollback 可重复、main 集成证据成立、receipt/STATUS 远端回读后，才标记 <code>COMPLETE</code> 或按 deferred 协议 advance。完整 suite 只要求在稳定 round candidate 上跑一次，不要求每个中间 commit 重跑。</p>
 <p>若仅剩 FINAL_LIVE / EXTERNAL 等最终证据，或存在已安全隔离且不影响后续独立工作的 deferred 项，可以保持 <code>IN_PROGRESS_WITH_DEFERRED</code> / <code>ADVANCE_ALLOWED_WITH_DEFERRED</code>，并继续后续可执行工作；不得为了线性状态漂亮而让整个 package 停住。</p>
 <p>若没有合并权限，保留 READY_TO_MERGE 并继续所有不依赖该 merge 的安全工作。若 CI 被额度/外部服务阻塞，记录 gate 未完成并继续其他工作；不得给 release 签证。</p>
 

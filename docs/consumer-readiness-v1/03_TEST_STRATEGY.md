@@ -136,7 +136,9 @@
 <p>转换规则：移除秘密/账号/真实申请号、phone/email/address、隐藏输入中的 token、data 属性、script 内嵌 JSON、截图中的文字和二维码；将所有 endpoint 改为本地模拟服务；禁止残留脚本访问真实域。自动扫描后人工或独立工具复核脱敏结果。对无法可靠脱敏的资料，保留私有本地 fixture 或重新构造同结构合成案例，不上传 Git。</p>
 <p>捕获静态 DOM 不能模拟完整 React 生命周期，因此必须补 controlled-state implementation 和 fake API。不要把保存的截图或 HTML 可打开当作该站点合同已认证。</p>
 <h2 id="03_test_strategy-8-ci-分层预算与失败证据">8. CI 分层、预算与失败证据</h2>
-<p>PR 层：deterministic + state + impacted browser contracts + privacy + safety + migration兼容 + golden journeys；不要求每次跑一遍昂贵真站。main 集成层：完整合成 E2E、所有历史安全回归、完整 contract fixtures、真实服务更新/恢复。release 层：macOS app install/start/upgrade/rollback、实际载入版本验证、100 条完整黄金任务和可靠性 soak。公开只读 smoke 可日常/发布前执行，外站不可达记外部阻塞，不把失败隐藏。</p>
+<p><strong>2026-09-24 cadence amendment（仅适用于尚未完成的轮次）：</strong>开发期不再在每个 draft push 上重跑完整 400+ 测试。Inner loop 由执行器运行受影响的 deterministic/state/browser/oracle 回归；GitHub draft CI 只保留 task/privacy/no-submit foundation、编译与 diff 基础门。一个 JCR 轮次的实现稳定、准备合并时才将 PR 标记 Ready，并在 exact head 跑一次完整 suite；合并到 main 后保留集成证据。</p>
+<p>JCR-06～08 的广覆盖矩阵应批量到轮次收口：不因每新增一个控件/driver 就重跑所有历史 fixture。错误目标、自动最终提交、秘密外泄、事实伪造、未验证外部写重放、错误账号/attempt 等安全硬门仍需在受影响改动发生时立即用 targeted regression 验证，不能后移。</p>
+<p>JCR-09 final convergence 才集中执行 100 条完整黄金任务、1,000 状态序列、关键 fault 重复、24h soak、完整公开 drift、macOS update/recovery 与最终 release 候选矩阵。真实账号/短信/设备仍按 07 的集中验收处理。已完成 JCR-01～05 的证据不因本 amendment 重跑。</p>
 <p>所有失败保留：exact SHA、环境/seed、用例 ID、预期 vs 实际、最后成功动作、safe error、合成 trace、最小复现。不能只给“18 failed，请 owner 看看”。定位旧 locator 失效与真实行为回归再修；禁止整批 skip、把 expected 改成当前错误值。</p>
 <p>测试本身必须有 fault canary：故意换错城市/项目/目标/上传失败应让 oracle 报错。若 broken implementation 仍全绿，判据无效，不能认证。</p>
 <h2 id="03_test_strategy-9-拟定自动门槛不是当前实测指标">9. 拟定自动门槛（不是当前实测指标）</h2>
