@@ -55,7 +55,7 @@ def test_server_draft_certificate_and_fault_canaries():
         "validation_error_count": 0,
         "hidden_required_count": 0,
         "unverified_default_count": 0,
-        "document_epoch": "page-epoch-1",
+        "document_epoch": "CANARY_PRIVATE_SESSION_EPOCH",
         "driver_version": "synthetic-v1",
         "fields": [{"index": 0, "field_id": "full_name", "selector": "#name",
                     "required": True, "value": "Synthetic Applicant"}],
@@ -75,6 +75,8 @@ def test_server_draft_certificate_and_fault_canaries():
         safe = certificate.safe_summary()
         assert set(safe["checks"].values()) == {"PASS"}
         assert "Synthetic Applicant" not in json.dumps(safe)
+        assert "CANARY_PRIVATE_SESSION_EPOCH" not in json.dumps(safe)
+        assert safe["document_epoch_sha256"] == digest("CANARY_PRIVATE_SESSION_EPOCH")
         assert safe["final_click_actor"] == "user"
         assert recheck_review(
             certificate, profile, plan, read(),
