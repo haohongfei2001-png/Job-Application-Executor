@@ -7,7 +7,7 @@ import secrets
 import threading
 import time
 from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -15,6 +15,7 @@ from .. import browser
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
+from .loopback_http import LoopbackHTTPServer
 from .manager import ManagerController, safe_task_view
 from .queue import TaskQueue, TaskSpec, private_dir
 from .release import read_release_identity
@@ -654,6 +655,6 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
         do_GET = handle_request
         do_POST = handle_request
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = LoopbackHTTPServer((host, port), Handler)
     server.daemon_threads = True
     return server
