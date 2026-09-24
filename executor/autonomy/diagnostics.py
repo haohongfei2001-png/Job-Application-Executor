@@ -90,7 +90,8 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
         deepseek_available = False
 
     try:
-        browser_mode_value = browser.browser_mode()
+        candidate_mode = browser.browser_mode()
+        browser_mode_value = candidate_mode if candidate_mode in {"live", "isolated", "test", "headless"} else "unknown"
     except Exception:
         browser_mode_value = "unknown"
     try:
