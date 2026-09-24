@@ -25,6 +25,10 @@ def _minimal_source(repo):
     package.mkdir()
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "consumer_entry.py").write_text("VERSION = 'fixture'\n", encoding="utf-8")
+    autonomy = package / "autonomy"
+    autonomy.mkdir()
+    (autonomy / "__init__.py").write_text("", encoding="utf-8")
+    (autonomy / "cli.py").write_text("VERSION = 'fixture'\n", encoding="utf-8")
     (repo / "requirements.txt").write_text("pydantic==2.13.0\n", encoding="utf-8")
 
 
@@ -237,8 +241,7 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\nexit 0\n")
-    python.chmod(0o755)
+    python.symlink_to(sys.executable)
     _minimal_source(repo)
     apps = tmp_path / "Applications"
 
@@ -299,8 +302,7 @@ def test_macos_consumer_app_rollback_failure_preserves_current(tmp_path, monkeyp
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\nexit 0\n")
-    python.chmod(0o755)
+    python.symlink_to(sys.executable)
     _minimal_source(repo)
     apps = tmp_path / "Applications"
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
@@ -327,8 +329,7 @@ def test_macos_consumer_app_activation_failure_restores_known_good(tmp_path, mon
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\nexit 0\n")
-    python.chmod(0o755)
+    python.symlink_to(sys.executable)
     _minimal_source(repo)
     apps = tmp_path / "Applications"
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
@@ -354,8 +355,7 @@ def test_macos_consumer_app_rejects_untrusted_existing_bundle(tmp_path):
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\nexit 0\n")
-    python.chmod(0o755)
+    python.symlink_to(sys.executable)
     _minimal_source(repo)
     apps = tmp_path / "Applications"
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
@@ -399,8 +399,7 @@ def test_macos_consumer_app_rejects_invalid_staging_before_replacement(
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\nexit 0\n")
-    python.chmod(0o755)
+    python.symlink_to(sys.executable)
     _minimal_source(repo)
     apps = tmp_path / "Applications"
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
@@ -416,6 +415,29 @@ def test_macos_consumer_app_rejects_invalid_staging_before_replacement(
     assert result["ok"] is False
     assert result["reason"] == "candidate_invalid"
     assert marker.read_text(encoding="utf-8") == "preserve"
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+    assert not (apps / ".AI 投递经理.app.installing").exists()
+
+
+def test_macos_consumer_app_rejects_unstartable_candidate_before_activation(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    previous_version = app / "Contents" / "Resources" / "release" / "executor" / "autonomy" / "cli.py"
+    assert previous_version.read_text() == "VERSION = 'fixture'\\n"
+
+    (repo / "executor" / "autonomy" / "cli.py").write_text(
+        "import deliberately_missing_release_dependency\\n", encoding="utf-8"
+    )
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert result["ok"] is False
+    assert result["reason"] == "candidate_start_failed"
+    assert previous_version.read_text() == "VERSION = 'fixture'\\n"
     assert not (apps / ".AI 投递经理.app.previous").exists()
     assert not (apps / ".AI 投递经理.app.installing").exists()
 
