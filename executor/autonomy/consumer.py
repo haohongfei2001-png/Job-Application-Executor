@@ -36,6 +36,27 @@ def humanize_preflight(result: dict) -> str:
     return " ".join(messages)
 
 
+def _trusted_bundle(app: Path) -> bool:
+    """Accept only an existing app bundle with our identity and executable."""
+    if app.is_symlink() or not app.is_dir():
+        return False
+    info_path = app / "Contents" / "Info.plist"
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    if info_path.is_symlink() or executable.is_symlink() or not executable.is_file():
+        return False
+    try:
+        with info_path.open("rb") as handle:
+            info = plistlib.load(handle)
+        return (
+            isinstance(info, dict)
+            and info.get("CFBundleIdentifier") == BUNDLE_ID
+            and info.get("CFBundleExecutable") == "AIApplicationManager"
+            and bool(executable.stat().st_mode & stat.S_IXUSR)
+        )
+    except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
+        return False
+
+
 def install_macos_app(
     repo_root: str | Path,
     *,
@@ -124,11 +145,18 @@ exit $STATUS
         plistlib.dump(info, handle, sort_keys=True)
 
     rollback = apps_dir / f".{APP_NAME}.app.previous"
-    if app.is_symlink() or rollback.exists() or rollback.is_symlink():
+    if (app.exists() or app.is_symlink()) and not _trusted_bundle(app):
         shutil.rmtree(staging)
         return {
             "ok": False,
-            "reason": "untrusted_app_path" if app.is_symlink() else "rollback_pending",
+            "reason": "untrusted_app_path",
+            "message": "现有应用包无法核对；没有替换或删除任何应用。",
+        }
+    if rollback.exists() or rollback.is_symlink():
+        shutil.rmtree(staging)
+        return {
+            "ok": False,
+            "reason": "rollback_pending",
             "message": "旧版应用或回退副本需要先核对；现有应用没有被替换。",
         }
     replaced = app.exists()
@@ -171,8 +199,8 @@ def rollback_macos_app(destination: str | Path) -> dict:
     app = apps_dir / f"{APP_NAME}.app"
     previous = apps_dir / f".{APP_NAME}.app.previous"
     failed = apps_dir / f".{APP_NAME}.app.failed"
-    if (app.is_symlink() or previous.is_symlink() or failed.is_symlink()
-            or not app.is_dir() or not previous.is_dir() or failed.exists()):
+    if (not _trusted_bundle(app) or not _trusted_bundle(previous)
+            or failed.exists() or failed.is_symlink()):
         return {
             "ok": False,
             "reason": "rollback_unavailable",
