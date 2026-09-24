@@ -69,7 +69,7 @@ jobs:
       - name: Hosted Mac candidate, activation and rollback tests
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
-        run: python -m pytest -q tests/test_release_candidate_v1.py tests/test_consumer_entry_v1.py -k 'release_candidate or recovery_version or macos_consumer_app'
+        run: python -m pytest -q tests/test_release_candidate_v1.py tests/test_consumer_entry_v1.py
 
   test:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
