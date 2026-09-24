@@ -194,6 +194,21 @@ class Supervisor:
         )
         return {"ok": True, "task_id": tid, **observed}
 
+    def confirm_human_submission(self, tid: str, expected_revision: int):
+        """Accept only a local user's after-the-fact confirmation."""
+        observed = self.observe_submission(tid)
+        task = self.queue.confirm_human_submission(
+            tid, expected_revision=expected_revision, user_confirmed=True,
+            observation=observed,
+        )
+        submission = task["details"]["submission"]
+        return {
+            "ok": True, "task_id": tid, "stage": task["stage"],
+            "revision": task["revision"], "level": submission["level"],
+            "page_signal": submission["page_signal"],
+            "server_verified": False,
+        }
+
     def update_state(self):
         return reconciled_update_state(self.queue.root)
 
@@ -498,6 +513,18 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         if "task_id" in result:
                             response.update(task_id=result["task_id"], revision=result["revision"])
                         self._send_json(200, response)
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/human-submission":
+                        data = self._read_json()
+                        if set(data) != {"task_id", "expected_revision", "user_confirmed"}:
+                            raise ValueError("invalid human submission envelope")
+                        if (not isinstance(data["task_id"], str)
+                                or type(data["expected_revision"]) is not int
+                                or data["user_confirmed"] is not True):
+                            raise ValueError("explicit human confirmation required")
+                        result = supervisor.run_mutation(lambda: supervisor.confirm_human_submission(
+                            data["task_id"], data["expected_revision"]))
+                        self._send_json(200, result)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/command":
                         command = CommandEnvelope.model_validate(self._read_json())
