@@ -19,7 +19,8 @@ from executor.autonomy.manager import (
 )
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.supervisor import Supervisor, create_server
-from executor.autonomy.worker import Worker
+from executor.autonomy.worker import Worker, outcome
+from executor.models import ApplicationPlan, ApplicationStage
 
 
 def spec(tmp_path: Path, *, url="https://jobs.example.test/apply?postId=role-1"):
@@ -274,6 +275,16 @@ def test_create_task_accepts_ascii_sentence_punctuation(tmp_path, suffix):
     result = manager.handle("Apply " + url + suffix)
     assert result["actions"][0]["status"] == "accepted"
     assert q.get(result["actions"][0]["task_id"])["spec"]["target_url"] == url
+
+
+def test_worker_rejects_uncertified_ready_plan():
+    plan = ApplicationPlan(
+        execution_id="uncertified-ready",
+        target_url="https://example.test/apply",
+        site_id="synthetic",
+        stage=ApplicationStage.READY_TO_SUBMIT,
+    )
+    assert outcome(plan) == ("BLOCKED", "validation")
 
 
 def test_resume_ready_to_submit_is_never_allowed(tmp_path):
