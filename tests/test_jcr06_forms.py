@@ -69,6 +69,29 @@ def test_no_observed_fields_cannot_become_ready(tmp_path, monkeypatch):
     assert plan.metadata["capability_limitations"] == ["empty_final_form_unverified"]
 
 
+@pytest.mark.parametrize("embedded", [
+    '<iframe srcdoc="<input required aria-label=\'Hidden ATS field\'>"></iframe>',
+    '<application-form id="shadow-host"></application-form>'
+    '<script>document.getElementById("shadow-host").attachShadow({mode:"open"})'
+    '.innerHTML="<input required aria-label=\\"Shadow ATS field\\">"</script>',
+])
+def test_embedded_form_controls_are_explicitly_unsupported(
+        tmp_path, monkeypatch, embedded):
+    runner, html = _runner(tmp_path, monkeypatch,
+        "<label>姓名<input id='name' name='full_name' required></label>"
+        + embedded + "<button type='button'>Submit application</button>")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        if "shadow-host" in embedded:
+            assert adapter.page.locator("#shadow-host").evaluate(
+                "e => Boolean(e.shadowRoot?.querySelector('input[required]'))")
+        observed = adapter.observe_form()
+        assert observed.unsupported_component_count > 0
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert "component_driver_unavailable" in plan.metadata["capability_limitations"]
+    assert plan.fields == []
+
+
 def test_form_observation_error_blocks_before_any_fill(tmp_path, monkeypatch):
     runner, _html = _runner(tmp_path, monkeypatch,
         "<label>姓名<input id='name' name='full_name' required></label>"

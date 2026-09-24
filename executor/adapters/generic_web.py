@@ -325,12 +325,20 @@ class GenericWebAdapter(SiteAdapter):
                 if (e.getAttribute('role') === 'listbox' && controlled.has(e.id)) return false;
                 return true;
               });
+              // Standard DOM queries do not traverse shadow roots. Treat
+              // form controls inside an open root and opaque custom elements
+              // as unsupported until a site driver proves their semantics.
+              const shadowOrOpaque = [...document.querySelectorAll('*')].filter(e => {
+                if (e.shadowRoot) return !!e.shadowRoot.querySelector(
+                  'input, textarea, select, [role="combobox"], [contenteditable="true"]');
+                return e.tagName.includes('-') && visible(e);
+              });
               const errors = [...document.querySelectorAll(
                 '[aria-invalid="true"], [role="alert"], .error-message, [data-error]')]
                 .filter(visible);
               return {
                 hiddenRequired: required.filter(e => !visible(e)).length,
-                unsupported: unsupported.length,
+                unsupported: unsupported.length + shadowOrOpaque.length,
                 validationErrors: errors.length,
               };
             }""") or {}
