@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,6 +13,8 @@ from pathlib import Path
 import pytest
 
 from executor.application import ApplicationExecutor
+from executor.adapters.generic_web import GenericWebAdapter
+from executor.browser import BrowserOwnershipError
 from executor.autonomy.worker import outcome
 from executor.models import ApplicationStage, ValidationResult, WebField
 
@@ -41,6 +44,30 @@ class UploadATS(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self.path == "/apply":
+            body = b"""<!doctype html><meta charset='utf-8'><body>
+              <label>Resume<input id='resume' type='file' accept='.pdf' required></label>
+              <label>Photo<input id='photo' type='file' accept='.png' required></label>
+              <button type='button'>Submit application</button>
+              <script>
+              for (const slot of ['resume', 'photo']) {
+                document.getElementById(slot).addEventListener('change', async event => {
+                  const file = event.target.files[0];
+                  const reader = new FileReader();
+                  reader.onload = async () => {
+                    await fetch('/upload', {method:'POST', headers:{'Content-Type':'application/json'},
+                      body:JSON.stringify({slot, bytes:String(reader.result).split(',')[1]})});
+                  };
+                  reader.readAsDataURL(file);
+                });
+              }
+              </script>"""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path != "/draft":
             self.send_error(404)
             return
@@ -172,6 +199,37 @@ class TwoPageUploadAdapter(CertifiedUploadAdapter):
         return True
 
 
+class BrowserUploadAdapter(GenericWebAdapter):
+    """Synthetic site-specific upload driver using actual browser file inputs."""
+    def __init__(self, target_url):
+        super().__init__(target_url)
+        self.base = target_url.removesuffix("/apply")
+        self.mismatch = False
+
+    _draft = CertifiedUploadAdapter._draft
+    verify_attachment_receipts = CertifiedUploadAdapter.verify_attachment_receipts
+    verify_draft_persistence = CertifiedUploadAdapter.verify_draft_persistence
+
+    def apply_resolutions(self, resolutions):
+        actions = []
+        for item in resolutions:
+            slot = item.canonical_key.removeprefix("assets.")
+            before = self._draft()["revision"]
+            self.mutation_guard()
+            try:
+                self.page.locator(item.selector).set_input_files(item.value)
+            except Exception:
+                raise BrowserOwnershipError("upload selection outcome unknown") from None
+            deadline = time.monotonic() + 3
+            while self._draft()["revision"] <= before and time.monotonic() < deadline:
+                time.sleep(.02)
+            actions.append({"field_id": item.field_id, "ok": True})
+        return actions
+
+    def validate(self, _plan):
+        return ValidationResult(ok=True)
+
+
 def test_two_uploads_need_retained_same_draft_receipts(tmp_path, monkeypatch, upload_site):
     resume, photo = tmp_path / "resume.pdf", tmp_path / "photo.png"
     resume.write_bytes(b"%PDF-1.4 synthetic canary")
@@ -252,4 +310,36 @@ def test_next_page_rechecks_earlier_attachments_before_ready(tmp_path, monkeypat
     retained = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=2)
     assert retained.stage == ApplicationStage.READY_TO_SUBMIT
     assert retained.metadata["attachment_persistence"]["slot_count"] == 2
+    assert upload_site.submit_count == 0
+
+
+def test_real_browser_file_inputs_require_independent_upload_oracle(tmp_path, monkeypatch, upload_site):
+    resume, photo = tmp_path / "resume.pdf", tmp_path / "photo.png"
+    resume.write_bytes(b"%PDF-1.4 browser upload")
+    photo.write_bytes(b"\x89PNG browser upload")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"assets": {
+        "resume": {"path": str(resume), "kind": "resume_pdf",
+                   "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()},
+        "photo": {"path": str(photo), "kind": "photo_png",
+                  "sha256": hashlib.sha256(photo.read_bytes()).hexdigest()},
+    }}))
+    target = f"http://127.0.0.1:{upload_site.server_port}/apply"
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: BrowserUploadAdapter(url))
+    ready = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=1)
+    assert ready.stage == ApplicationStage.READY_TO_SUBMIT
+    assert set(upload_site.attachments) == {"resume", "photo"}
+    assert upload_site.attachments["resume"]["file_sha256"] == hashlib.sha256(resume.read_bytes()).hexdigest()
+    assert upload_site.attachments["photo"]["file_sha256"] == hashlib.sha256(photo.read_bytes()).hexdigest()
+    assert upload_site.submit_count == 0
+
+    upload_site.attachments.clear()
+    upload_site.revision = 0
+    upload_site.drop_slot = "photo"
+    dropped = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=1)
+    assert dropped.stage == ApplicationStage.BLOCKED
+    assert dropped.metadata["block_reason"] == "attachment draft receipt unverified"
+    assert "photo" not in upload_site.attachments
     assert upload_site.submit_count == 0
