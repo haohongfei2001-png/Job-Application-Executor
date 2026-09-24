@@ -14,7 +14,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 
 class RowReconciliationBlocked(RuntimeError):
@@ -148,8 +148,10 @@ class RowActionJournal:
 
 
 class RowReconciler:
-    def __init__(self, driver: RowDriver, journal: RowActionJournal):
+    def __init__(self, driver: RowDriver, journal: RowActionJournal,
+                 *, mutation_guard: Callable[[], None] | None = None):
         self.driver, self.journal = driver, journal
+        self.mutation_guard = mutation_guard
 
     def _read(self) -> RowInventory:
         try:
@@ -185,12 +187,27 @@ class RowReconciler:
                 raise RowOutcomeUnknown("row write outcome unknown; replay disabled")
             self.journal.observed(action_id, inventory.revision)
 
+    def reconcile_pending_read_only(self) -> RowInventory:
+        """Resolve prior uncertain effects from inventory, without site writes."""
+        inventory = self._read()
+        latest = self.journal.latest_observed_revision()
+        if latest is not None and inventory.revision < latest:
+            raise RowReconciliationBlocked("draft row revision regressed")
+        self._settle_pending(inventory)
+        return inventory
+
     def _act(self, kind: str, record_id: str, target_digest: str,
              before: RowInventory, call) -> RowInventory:
         if kind not in getattr(self.driver, "capabilities", frozenset()):
             raise RowReconciliationBlocked("row action unsupported by site driver")
+        if self.mutation_guard is None:
+            raise RowReconciliationBlocked("row mutation guard unavailable")
+        self.mutation_guard()
         action_id = self.journal.begin(kind, _digest(record_id), target_digest,
                                        before.revision)
+        # The lease may have been revoked while the intent was committed.
+        # Leave that intent pending for read-only recovery; never call site.
+        self.mutation_guard()
         try:
             call()
         except Exception:
@@ -212,11 +229,7 @@ class RowReconciler:
                 or any(not rid for rid in delete_ids)
                 or delete_ids.intersection(ids)):
             raise RowReconciliationBlocked("canonical row identity ambiguous")
-        inventory = self._read()
-        latest = self.journal.latest_observed_revision()
-        if latest is not None and inventory.revision < latest:
-            raise RowReconciliationBlocked("draft row revision regressed")
-        self._settle_pending(inventory)
+        inventory = self.reconcile_pending_read_only()
         by_id = {row.record_id: row for row in inventory.rows}
         unknown = set(by_id) - set(ids) - set(delete_ids)
         if unknown or any(not by_id[rid].managed for rid in delete_ids if rid in by_id):

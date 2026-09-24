@@ -125,7 +125,7 @@ def test_reconcile_explicit_delete_add_reorder_and_repeat_without_duplicate(tmp_
     desired = (DesiredRow("B", {"school": "B School"}),
                DesiredRow("A", {"school": "A School"}))
     journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
-    receipt = RowReconciler(driver, journal).reconcile(
+    receipt = RowReconciler(driver, journal, mutation_guard=lambda: None).reconcile(
         desired, delete_ids=frozenset({"C"}))
     assert (receipt.add_count, receipt.delete_count, receipt.reorder_count) == (1, 1, 1)
     assert [(row["record_id"], row["values"]) for row in server.rows] == [
@@ -181,7 +181,7 @@ def test_lost_response_and_unmanaged_extra_are_safe(tmp_path, row_site):
     driver.fail_after_add = True
     desired = (DesiredRow("A", {"school": "A School"}),)
     journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
-    receipt = RowReconciler(driver, journal).reconcile(desired)
+    receipt = RowReconciler(driver, journal, mutation_guard=lambda: None).reconcile(desired)
     assert receipt.add_count == 1
     assert server.add_count == 1
 
@@ -216,3 +216,47 @@ def test_concurrent_row_intents_cannot_both_start(tmp_path):
     with pytest.raises(RowReconciliationBlocked, match="stale"):
         RowActionJournal(path, scope=SCOPE).begin("add", digest("A"),
                                                  digest({"school": "A School"}), 0)
+
+
+def test_read_only_row_recovery_settles_effect_without_site_write(tmp_path, row_site):
+    server, driver = row_site
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    desired = DesiredRow("A", {"school": "A School"})
+    journal.begin("add", digest("A"), desired.values_digest, 0)
+    driver.add_row(desired)  # A prior process completed the external effect.
+    assert server.add_count == 1
+    observed = RowReconciler(driver, journal).reconcile_pending_read_only()
+    assert observed.revision == 1
+    assert journal.pending() == ()
+    assert server.add_count == 1
+
+
+def test_revoked_row_lease_after_intent_never_calls_site(tmp_path, row_site):
+    server, driver = row_site
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    checks = 0
+
+    def guard():
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise RuntimeError("lease revoked")
+
+    with pytest.raises(RuntimeError, match="lease revoked"):
+        RowReconciler(driver, journal, mutation_guard=guard).reconcile(
+            (DesiredRow("A", {"school": "A School"}),))
+    assert server.add_count == 0
+    assert len(journal.pending()) == 1
+    with pytest.raises(RowOutcomeUnknown, match="replay disabled"):
+        RowReconciler(driver, journal).reconcile_pending_read_only()
+    assert server.add_count == 0
+
+
+def test_row_write_requires_explicit_task_mutation_guard(tmp_path, row_site):
+    server, driver = row_site
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    with pytest.raises(RowReconciliationBlocked, match="mutation guard unavailable"):
+        RowReconciler(driver, journal).reconcile(
+            (DesiredRow("A", {"school": "A School"}),))
+    assert server.add_count == 0
+    assert journal.pending() == ()
