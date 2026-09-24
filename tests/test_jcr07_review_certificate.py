@@ -11,6 +11,7 @@ from urllib.request import urlopen
 import pytest
 
 from executor.audit import safe_plan
+from executor.adapters.generic_web import GenericWebAdapter
 from executor.models import ApplicationPlan, FieldResolution, ResolutionStatus
 from executor.review_certificate import ReviewUnverified, certify_review, recheck_review
 
@@ -259,3 +260,31 @@ def test_attachment_receipt_must_match_canonical_asset_hash():
         expected_account_identity_digest=digest("account"))
     assert certificate.attachment_count == 1
     assert "CANARY_RESUME" not in json.dumps(certificate.safe_summary())
+
+
+
+@pytest.mark.parametrize("human_trigger", ["click", "enter"])
+def test_continue_that_submits_remains_human_only(tmp_path, human_trigger):
+    html = tmp_path / "ambiguous-continue.html"
+    html.write_text(
+        """<!doctype html><meta charset="utf-8"><body>
+        <form onsubmit="window.submitCount++; event.preventDefault()">
+          <label>Name <input id="name" value="Synthetic Applicant"></label>
+          <button id="continue" type="submit">Continue</button>
+        </form>
+        <script>window.submitCount = 0</script>
+        </body>""",
+        encoding="utf-8",
+    )
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        assert adapter.next_control() is True
+        assert adapter.advance() is False
+        with pytest.raises(RuntimeError, match="user click required"):
+            adapter.submit()
+        assert adapter.page.evaluate("window.submitCount") == 0
+        if human_trigger == "click":
+            adapter.page.locator("#continue").click()
+        else:
+            adapter.page.locator("#name").focus()
+            adapter.page.keyboard.press("Enter")
+        assert adapter.page.evaluate("window.submitCount") == 1
