@@ -8,6 +8,7 @@ import stat
 import threading
 import time
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from executor.adapters.generic_web import GenericWebAdapter
 from executor.browser import BrowserOwnershipError
 from executor.forms.attachment_manifest import (AttachmentManifestError,
                                                 load_attachment_manifest)
+from executor.forms import (DesiredRow, RowExecutionContract, RowInventory,
+                            SiteRow)
 from executor.autonomy.worker import outcome
 from executor.models import ApplicationStage, ValidationResult, WebField
 
@@ -31,6 +34,16 @@ class UploadATS(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
+        if self.path == "/add-row":
+            value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            self.server.rows.append({"record_id": value["record_id"],
+                                     "site_row_id": uuid.uuid4().hex,
+                                     "values": value["values"]})
+            self.server.row_add_count += 1
+            self.server.revision += 1
+            self.send_response(204)
+            self.end_headers()
+            return
         if self.path != "/upload":
             self.send_error(404)
             return
@@ -47,6 +60,17 @@ class UploadATS(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self.path == "/rows":
+            body = json.dumps({"rows": self.server.rows,
+                               "revision": self.server.revision,
+                               "target_sha256": self.server.target_sha256,
+                               "draft_id_digest": digest("server-draft-one")}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/apply":
             body = b"""<!doctype html><meta charset='utf-8'><body>
               <label>Resume<input id='resume' type='file' accept='.pdf' required></label>
@@ -94,6 +118,7 @@ def upload_site():
     server.attachments, server.revision, server.submit_count = {}, 0, 0
     server.drop_slot = None
     server.corrupt_photo_readback = False
+    server.rows, server.row_add_count, server.target_sha256 = [], 0, ""
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         yield server
@@ -416,3 +441,136 @@ def test_restart_uses_private_attachment_manifest_without_reupload(tmp_path, mon
     before = upload_site.revision
     assert replay.run(max_pages=1).stage == ApplicationStage.BLOCKED
     assert upload_site.revision == before
+
+
+def test_browser_upload_and_rows_share_one_draft_across_pages_and_restart(
+        tmp_path, monkeypatch, upload_site):
+    """Actual isolated file controls and a non-idempotent row API share one draft."""
+    resume, photo = tmp_path / "resume.pdf", tmp_path / "photo.png"
+    resume.write_bytes(b"%PDF-1.4 integrated fixture")
+    photo.write_bytes(b"\x89PNG integrated fixture")
+    assets = {slot: {"path": str(path), "kind": kind,
+                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+              for slot, path, kind in (("resume", resume, "resume_pdf"),
+                                       ("photo", photo, "photo_png"))}
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"assets": assets, "collections": {
+        "education_records": [
+            {"id": "school-a", "fields": {"school": {"value": "School A"}}},
+            {"id": "school-b", "fields": {"school": {"value": "School B"}}},
+        ]}}))
+    target = f"http://127.0.0.1:{upload_site.server_port}/apply"
+    upload_site.target_sha256 = digest(target)
+    base = f"http://127.0.0.1:{upload_site.server_port}"
+
+    class RowsOnDraft:
+        capabilities = frozenset({"add"})
+
+        def read_rows(self):
+            data = json.load(urllib.request.urlopen(base + "/rows"))
+            return RowInventory(data["revision"], True, tuple(SiteRow(
+                row["record_id"], row["site_row_id"], hashlib.sha256(
+                    json.dumps(row["values"], sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":")).encode()).hexdigest(), True)
+                for row in data["rows"]), data["target_sha256"],
+                data["draft_id_digest"])
+
+        def add_row(self, row):
+            request = urllib.request.Request(base + "/add-row", data=json.dumps({
+                "record_id": row.record_id, "values": dict(row.values)}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(request).read()
+
+    class IntegratedAdapter(BrowserUploadAdapter):
+        def __init__(self, url, *, start_page=0, lose_row=False):
+            super().__init__(url)
+            self.page_index = start_page
+            self.lose_row = lose_row
+
+        def __enter__(self):
+            super().__enter__()
+            if self.page_index == 1:
+                self._show_review_page()
+            return self
+
+        def _show_review_page(self):
+            self.page.locator("input[type=file]").evaluate_all(
+                "items => items.forEach(item => item.closest('label').remove())")
+            self.page.evaluate("""() => {
+                const label = document.createElement('label');
+                label.textContent = 'Review token';
+                const input = document.createElement('input');
+                input.id = 'review-token';
+                input.value = 'synthetic-review';
+                label.appendChild(input);
+                document.body.appendChild(label);
+            }""")
+
+        def apply_resolutions(self, resolutions):
+            if self.page_index == 1:
+                return []
+            return super().apply_resolutions(resolutions)
+
+        def structured_row_contract(self, applicant_profile):
+            records = applicant_profile["collections"]["education_records"]
+            desired = tuple(DesiredRow(record["id"], {
+                "school": record["fields"]["school"]["value"]})
+                for record in records)
+            driver = RowsOnDraft()
+            if self.page_index == 1:
+                driver.capabilities = frozenset()  # Returning page is read-only.
+            return RowExecutionContract(driver, desired, digest("server-draft-one"),
+                                        "education_records")
+
+        def next_control(self):
+            return self.page_index == 0
+
+        def final_submit_control(self):
+            return "Submit" if self.page_index == 1 else None
+
+        def advance(self):
+            if self.page_index != 0:
+                return False
+            self.page_index = 1
+            self._show_review_page()
+            if self.lose_row:
+                upload_site.rows.pop()
+                upload_site.revision += 1
+            return True
+
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: IntegratedAdapter(url))
+    manifest = tmp_path / "private" / "attachments.json"
+    journal = tmp_path / "private" / "rows.sqlite3"
+
+    def run(pages=2):
+        runner = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}},
+                                     execution_id="integrated-task")
+        runner.attachment_manifest_path = manifest
+        runner.row_journal_path = journal
+        return runner.run(max_pages=pages)
+
+    first = run()
+    assert first.stage == ApplicationStage.READY_TO_SUBMIT, first.metadata.get("block_reason")
+    assert [(row["record_id"], row["values"]) for row in upload_site.rows] == [
+        ("school-a", {"school": "School A"}),
+        ("school-b", {"school": "School B"})]
+    assert set(upload_site.attachments) == {"resume", "photo"}
+    assert upload_site.row_add_count == 2 and upload_site.submit_count == 0
+    assert "School A" not in journal.read_bytes().decode(errors="replace")
+
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: IntegratedAdapter(url, start_page=1))
+    before = upload_site.revision
+    returned = run(pages=1)
+    assert returned.stage == ApplicationStage.READY_TO_SUBMIT
+    assert upload_site.revision == before
+    assert upload_site.row_add_count == 2 and upload_site.submit_count == 0
+
+    upload_site.rows.pop()
+    upload_site.revision += 1
+    lost = run(pages=1)
+    assert lost.stage == ApplicationStage.BLOCKED
+    assert lost.metadata["block_reason"] == "row reconciliation unverified"
+    assert upload_site.row_add_count == 2 and upload_site.submit_count == 0

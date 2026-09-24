@@ -217,6 +217,16 @@ class RowReconciler:
         self._settle_pending(inventory)
         return inventory
 
+    def verify_rows_read_only(self, desired: tuple[DesiredRow, ...]) -> RowInventory:
+        """Reobserve the complete canonical collection before final readiness."""
+        inventory = self.reconcile_pending_read_only()
+        if (tuple(row.record_id for row in inventory.rows) !=
+                tuple(row.record_id for row in desired)
+                or any(not row.managed or row.values_digest != expected.values_digest
+                       for row, expected in zip(inventory.rows, desired))):
+            raise RowReconciliationBlocked("final row inventory differs from canonical records")
+        return inventory
+
     def _act(self, kind: str, record_id: str, target_digest: str,
              before: RowInventory, call) -> RowInventory:
         if kind not in getattr(self.driver, "capabilities", frozenset()):

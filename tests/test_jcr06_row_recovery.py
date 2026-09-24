@@ -298,6 +298,8 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
     server.submit_count = 0
     server.corrupt_contract = False
     server.omit_record = False
+    server.lose_rows_before_final = False
+    server.wrong_draft_receipt = False
     profile = tmp_path / "profile.json"
     profile.write_text(json.dumps({
         "fields": {"identity.full_name": {"value": "Synthetic Person",
@@ -345,6 +347,10 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
             return ValidationResult(ok=server.full_name == "Synthetic Person")
 
         def final_submit_control(self):
+            if server.lose_rows_before_final:
+                server.rows.pop()
+                server.revision += 1
+                server.lose_rows_before_final = False
             return "Submit"
 
         def verify_draft_persistence(self, _plan):
@@ -353,7 +359,9 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
                         ("A", {"school": "A School"}), ("B", {"school": "B School"})]):
                 return None
             return {"verified": True, "level": "server_readback",
-                    "revision": server.revision}
+                    "revision": server.revision,
+                    "draft_id_digest": digest("wrong-draft")
+                        if server.wrong_draft_receipt else server.draft_id_digest}
 
         def screenshot(self, _path):
             pass
@@ -377,6 +385,19 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
     assert second.stage == ApplicationStage.READY_TO_SUBMIT
     assert second.metadata["row_reconciliation"][0]["add_count"] == 0
     assert server.add_count == 2
+
+    server.wrong_draft_receipt = True
+    wrong_receipt = run()
+    assert wrong_receipt.stage == ApplicationStage.BLOCKED
+    assert wrong_receipt.metadata["block_reason"] == "draft persistence unverified"
+    assert server.add_count == 2 and server.submit_count == 0
+    server.wrong_draft_receipt = False
+
+    server.lose_rows_before_final = True
+    lost_row = run()
+    assert lost_row.stage == ApplicationStage.BLOCKED
+    assert lost_row.metadata["block_reason"] == "row reconciliation unverified"
+    assert server.add_count == 2 and server.submit_count == 0
 
     server.draft_id_digest = digest("wrong-draft")
     wrong = run()
