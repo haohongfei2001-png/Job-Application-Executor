@@ -110,20 +110,20 @@ def launch_consumer(root, port):
     from .consumer import humanize_preflight
     from .preflight import collect_live_preflight
 
-    live_mode = browser_mode() not in {"test", "isolated", "headless"}
-    if live_mode:
-        try:
-            # Browser startup is a repair attempt, not a gate to the local UI.
-            ensure_chrome()
-        except Exception:
-            pass
-    # A packaged app with a broken source manifest must not start a service.
-    # Development checkouts have no release manifest and retain their normal path.
+    # A packaged app with a broken source manifest must not start any owned
+    # browser or service. Development checkouts have no release manifest.
     from .release import MANIFEST_NAME, read_release_identity
     source = Path(__file__).resolve().parents[2]
     identity = read_release_identity(source)
     expected = identity.get("source_sha256") if identity.get("status") == "verified" else ""
     packaged = (source / MANIFEST_NAME).exists() or (source / MANIFEST_NAME).is_symlink()
+    live_mode = browser_mode() not in {"test", "isolated", "headless"}
+    if live_mode and (not packaged or expected):
+        try:
+            # Browser startup is a repair attempt, not a gate to the local UI.
+            ensure_chrome()
+        except Exception:
+            pass
     if packaged and not expected:
         started = {"ok": False, "reason": "release_unverified"}
         health = {"ok": False}
