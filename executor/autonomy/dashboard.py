@@ -171,7 +171,7 @@ function render(state){
       ${t.blocker==='auth_return_unverified'?'<div class="otpnote">系统无法证明登录后仍在原岗位。请核对页面；此任务不会自动重发短信或继续写入。</div>':''}
       ${t.blocker==='account_identity_unverified'?'<div class="otpnote">系统无法证明当前账号属于申请人。此站点表单保持只读，直到有受验证的站点账号识别能力。</div>':''}
       <div class="taskcontrols">
-        ${t.stage==='READY_TO_SUBMIT'&&t.review_values_available?`<button type="button" data-review-values="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">查看完整复核值</button>`:''}
+        ${t.stage==='READY_TO_SUBMIT'&&t.review_values_available?`<button type="button" data-review-values="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}" aria-expanded="false" aria-controls="review-${esc(t.task_id)}">查看完整复核值</button>`:''}
         ${t.stage==='READY_TO_SUBMIT'?`<button type="button" data-observe-submission="true" data-task="${esc(t.task_id)}">只读查看提交结果</button>`:''}
         ${t.stage==='READY_TO_SUBMIT'&&t.can_confirm_submission?`<button type="button" data-confirm-submission="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">我已在招聘网站亲自提交</button>`:''}
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
@@ -179,14 +179,16 @@ function render(state){
       ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown','auth_return_unverified','account_identity_unverified','draft_persistence_unverified'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
         ${!['SUBMITTED','VERIFIED','CANCELLED','READY_TO_SUBMIT'].includes(t.stage)?`<button type="button" data-action="CANCEL" data-task="${esc(t.task_id)}" data-revision="${t.revision}">取消</button>`:''}
       </div>
-      ${t.stage==='READY_TO_SUBMIT'?'<div class="review private-review" data-private-review-panel hidden></div>':''}
+      ${t.stage==='READY_TO_SUBMIT'?'<div id="review-${esc(t.task_id)}" class="review private-review" data-private-review-panel role="region" aria-label="完整申请复核" tabindex="-1" hidden></div>':''}
     </div>`).join('');
 }
 tasksEl.addEventListener('click',event=>{
   const button=event.target.closest('button[data-close-private-review]');if(!button)return;
   const panel=button.closest('[data-private-review-panel]');
+  const trigger=panel.closest('.task').querySelector('button[data-review-values]');
   panel.innerHTML='';panel.hidden=true;
   delete panel.dataset.privateReviewOpen;delete panel.dataset.revision;
+  trigger?.setAttribute('aria-expanded','false');trigger?.focus();
   state();
 });
 tasksEl.addEventListener('click',async event=>{
@@ -200,6 +202,8 @@ tasksEl.addEventListener('click',async event=>{
     const panel=button.closest('.task').querySelector('[data-private-review-panel]');
     panel.innerHTML=privateReviewHtml(data.review);
     panel.hidden=false;
+    button.setAttribute('aria-expanded','true');
+    panel.focus();
     panel.dataset.privateReviewOpen=button.dataset.task;
     panel.dataset.revision=button.dataset.revision;
   }catch(e){notify('完整复核值已过期或暂不可用；请勿据此提交。');await state()}
