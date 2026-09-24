@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from executor.autonomy import bootstrap, cli, preflight
+from executor.autonomy import bootstrap, cli, preflight, release
 from executor.autonomy.consumer import install_macos_app, rollback_macos_app
 from executor.autonomy.loopback_http import LoopbackHTTPServer
 from executor.autonomy.release import verify_source_candidate
@@ -104,6 +104,52 @@ def test_consumer_launch_repairs_reversible_runtime_and_opens_ui(
     assert result["submit_capability"] is False
     assert calls == ["chrome", "start", "health"]
     assert opened == [(tmp_path / "runtime", 9344)]
+
+
+def test_packaged_launch_restarts_stale_daemon_before_opening_ui(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(release, "read_release_identity", lambda _: {
+        "status": "verified", "source_sha256": "new-release"
+    })
+    def lifecycle(action, root, port):
+        calls.append(action)
+        if action == "health":
+            return {"ok": True, "loaded_source_sha256":
+                    "new-release" if "restart" in calls else "old-release"}
+        return {"ok": True}
+    monkeypatch.setattr(cli, "lifecycle", lifecycle)
+    monkeypatch.setattr(preflight, "collect_live_preflight", _ready_preflight)
+    monkeypatch.setattr(cli, "open_ui", lambda *_: {"ok": True, "opened": True})
+
+    result = cli.launch_consumer(tmp_path / "runtime", 9344)
+    assert result["ok"] is True
+    assert result["opened"] is True
+    assert calls == ["start", "health", "restart", "health"]
+
+
+def test_packaged_launch_keeps_stale_daemon_out_of_consumer_ui(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(release, "read_release_identity", lambda _: {
+        "status": "verified", "source_sha256": "new-release"
+    })
+    def lifecycle(action, root, port):
+        calls.append(action)
+        return {"ok": action != "restart", "loaded_source_sha256": "old-release"}
+    monkeypatch.setattr(cli, "lifecycle", lifecycle)
+    monkeypatch.setattr(preflight, "collect_live_preflight", lambda **kwargs: {
+        "ready_for_live_e2e": False, "remediation": [], "submit_capability": False
+    })
+    monkeypatch.setattr(bootstrap, "open_bootstrap", lambda *args: {
+        "ok": True, "opened": True
+    })
+    monkeypatch.setattr(cli, "open_ui", lambda *_: pytest.fail("stale UI must not open"))
+
+    result = cli.launch_consumer(tmp_path / "runtime", 9344)
+    assert result["bootstrap_reason"] == "release_mismatch"
+    assert result["submit_capability"] is False
+    assert calls == ["start", "health", "restart", "health"]
 
 
 def test_consumer_launch_uses_final_healthy_service_after_start_timeout(tmp_path, monkeypatch):
