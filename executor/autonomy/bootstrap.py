@@ -32,6 +32,7 @@ def _reason(code: str) -> str:
         "service_start_failed": "本地服务启动失败。现有任务没有被修改。",
         "health_timeout": "本地服务未能通过健康检查。现有任务没有被修改。",
         "worker_stopping_at_safe_checkpoint": "服务仍在等待安全停止点。请稍后重试。",
+        "release_mismatch": "新应用尚未接管旧版服务。现有任务没有被修改；请在安全停止后重试。",
     }.get(code, "本地服务暂时不可用。现有任务没有被修改。")
 
 
