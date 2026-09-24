@@ -21,6 +21,7 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
 .task .title{font-weight:650}.task .meta{font-size:12px;color:#64748b;margin-top:4px}.stage{font-size:11px;border-radius:999px;padding:3px 7px;background:#eef2ff;display:inline-block;margin-top:7px}
 .review{font-size:12px;line-height:1.5;margin-top:9px;padding:9px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0}.review.warning{background:#fff7ed;border-color:#fed7aa;color:#9a3412}
+.private-review{max-height:52vh;overflow:auto;white-space:pre-wrap}.private-review table{width:100%;border-collapse:collapse;margin-top:8px}.private-review th,.private-review td{border:1px solid #cbd5e1;padding:6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 .taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
 .factinput{display:flex;gap:5px;margin-top:8px}.factinput input,.factinput select{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.factinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}
 .factinput .remember-fact{flex:0 0 16px;width:16px;min-width:16px;padding:0}
@@ -128,6 +129,19 @@ function stageGroup(stage){
   if(['SUBMITTED','VERIFIED','CANCELLED'].includes(stage))return 'done';
   return 'running';
 }
+function privateValue(value){return typeof value==='string'?value:JSON.stringify(value)??''}
+function privateReviewHtml(review){
+  const fields=(review.fields||[]).map(f=>`<tr><th>${esc(f.label||f.key)}</th><td>${esc(privateValue(f.expected))}</td><td>${esc(privateValue(f.observed))}</td></tr>`).join('');
+  const files=(review.attachments||[]).map(a=>`<li>${esc(a.slot)}：${esc(a.filename)} · 本地 ${esc(a.canonical_sha256)} · 草稿 ${esc(a.observed_sha256)}</li>`).join('');
+  const coverage=review.project_coverage||{};
+  return `<strong>上次独立核验的完整值</strong><p>这是当时的只读快照；页面若被编辑，请重新核验，不能据此认定当前值仍相同。</p>
+    <p>目标：${esc(review.target_url)}</p>
+    <p>账号：${esc(review.account?.key||'未展示')} · ${esc(privateValue(review.account?.canonical_value||''))}（上次与活动账号匹配）</p>
+    <table><thead><tr><th>字段</th><th>申请意图</th><th>草稿实际保留值</th></tr></thead><tbody>${fields}</tbody></table>
+    <p>附件：${files?`<ul>${files}</ul>`:'无'}</p>
+    <p>项目核验：${esc(coverage.status||'未知')} · 规范项目 ${esc((coverage.canonical_projects||[]).join('、'))} · 明确排除 ${esc((coverage.explicit_exclusions||[]).join('、'))}</p>
+    <p>服务端结构化行只保存身份和摘要；请在招聘页面核对每条内容。</p>`;
+}
 function render(state){
   const counts={running:0,need:0,ready:0,done:0};
   (state.tasks||[]).forEach(t=>counts[stageGroup(t.stage)]++);
@@ -157,6 +171,7 @@ function render(state){
       ${t.blocker==='auth_return_unverified'?'<div class="otpnote">系统无法证明登录后仍在原岗位。请核对页面；此任务不会自动重发短信或继续写入。</div>':''}
       ${t.blocker==='account_identity_unverified'?'<div class="otpnote">系统无法证明当前账号属于申请人。此站点表单保持只读，直到有受验证的站点账号识别能力。</div>':''}
       <div class="taskcontrols">
+        ${t.stage==='READY_TO_SUBMIT'&&t.review_values_available?`<button type="button" data-review-values="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">查看完整复核值</button>`:''}
         ${t.stage==='READY_TO_SUBMIT'?`<button type="button" data-observe-submission="true" data-task="${esc(t.task_id)}">只读查看提交结果</button>`:''}
         ${t.stage==='READY_TO_SUBMIT'&&t.can_confirm_submission?`<button type="button" data-confirm-submission="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">我已在招聘网站亲自提交</button>`:''}
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
@@ -164,8 +179,25 @@ function render(state){
       ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown','auth_return_unverified','account_identity_unverified','draft_persistence_unverified'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
         ${!['SUBMITTED','VERIFIED','CANCELLED','READY_TO_SUBMIT'].includes(t.stage)?`<button type="button" data-action="CANCEL" data-task="${esc(t.task_id)}" data-revision="${t.revision}">取消</button>`:''}
       </div>
+      ${t.stage==='READY_TO_SUBMIT'?'<div class="review private-review" data-private-review-panel hidden></div>':''}
     </div>`).join('');
 }
+tasksEl.addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-review-values]');if(!button)return;
+  button.disabled=true;
+  try{
+    const r=await fetch('/ui/api/review-values?task_id='+encodeURIComponent(button.dataset.task),{credentials:'same-origin'});
+    if(!r.ok)throw new Error();
+    const data=await r.json();
+    if(data.revision!==Number(button.dataset.revision))throw new Error();
+    const panel=button.closest('.task').querySelector('[data-private-review-panel]');
+    panel.innerHTML=privateReviewHtml(data.review);
+    panel.hidden=false;
+    panel.dataset.privateReviewOpen=button.dataset.task;
+    panel.dataset.revision=button.dataset.revision;
+  }catch(e){notify('完整复核值已过期或暂不可用；请勿据此提交。');await state()}
+  finally{button.disabled=false}
+});
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-confirm-submission]');if(!button)return;
   if(!window.confirm('请确认你已经在招聘网站亲自点击最终提交。这里仅记录你的确认并保护该岗位，不会代你点击提交。'))return;
@@ -417,7 +449,11 @@ async function state(){
     const r=await fetch('/ui/api/state',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
     const data=await r.json();
-    if(![...tasksEl.querySelectorAll('.factinput input:not([type=checkbox]),.factinput select,.otpinput input')].some(input=>input.value))render(data);
+    const openReview=tasksEl.querySelector('[data-private-review-open]');
+    if(openReview){
+      const current=(data.tasks||[]).find(t=>t.task_id===openReview.dataset.privateReviewOpen);
+      if(!current||current.stage!=='READY_TO_SUBMIT'||current.revision!==Number(openReview.dataset.revision)||!current.review_values_available)render(data);
+    }else if(![...tasksEl.querySelectorAll('.factinput input:not([type=checkbox]),.factinput select,.otpinput input')].some(input=>input.value))render(data);
     updateLabel(data.update);
   }catch(e){document.getElementById('health').textContent='连接异常'}
 }
