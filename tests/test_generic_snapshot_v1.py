@@ -1,5 +1,5 @@
 from executor.adapters.generic_web import GenericWebAdapter
-from executor.browser import BrowserOwnershipError
+from executor.forms import FormObservationError
 import pytest
 
 
@@ -62,6 +62,6 @@ def test_failed_observation_is_not_reported_as_an_empty_form():
             raise RuntimeError("synthetic private page detail")
 
     adapter.page = BrokenPage()
-    with pytest.raises(BrowserOwnershipError, match="observation unavailable") as caught:
+    with pytest.raises(FormObservationError, match="observation unavailable") as caught:
         adapter.discover_fields()
     assert "private page detail" not in str(caught.value)

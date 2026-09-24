@@ -335,9 +335,11 @@ def test_synthetic_browser_e2e_blocks_unpersisted_draft_no_click_or_pii(tmp_path
     task = q.get(t['task_id'])
     assert task['stage'] == 'NEEDS_USER_INPUT'
     assert task['checkpoint'] == 'FORM_FILLED'
-    assert 'unknown_fact' in task['details']['unresolved_keys']
+    assert len(task['details']['unresolved_keys']) == 1
+    answer_key = task['details']['unresolved_keys'][0]
+    assert answer_key.startswith('site_field.')
     answer = 'CANARY_PRIVATE_VALUE'
-    worker.user_input(t['task_id'], {'unknown_fact': answer})
+    worker.user_input(t['task_id'], {answer_key: answer})
     assert worker.run_once()
     task = q.get(t['task_id'])
     assert task['stage'] == 'BLOCKED'
@@ -593,8 +595,10 @@ def test_daemon_subprocess_api_otp_input_restart_end_to_end(tmp_path):
         assert request(root,port,'/v1/otp',{'task_id':tid,
                                           'attempt_id':waiting_task['auth_attempt_id'],
                                           'message':'验证码 482913'})['accepted']
-        wait_for(port,tid,'NEEDS_USER_INPUT')
-        request(root,port,'/v1/tasks/'+tid+'/user-input',{'answers':{'unknown_fact':'FAKE_PRIVATE_ANSWER'}})
+        waiting_fact = wait_for(port,tid,'NEEDS_USER_INPUT')
+        answer_key = waiting_fact['details']['unresolved_keys'][0]
+        assert answer_key.startswith('site_field.')
+        request(root,port,'/v1/tasks/'+tid+'/user-input',{'answers':{answer_key:'FAKE_PRIVATE_ANSWER'}})
         assert wait_for(port,tid,'BLOCKED')['blocker'] == 'draft_persistence_unverified'
         child.terminate()
         child.wait(timeout=10)

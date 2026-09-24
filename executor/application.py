@@ -31,6 +31,17 @@ def execution_id_for(target_url: str) -> str:
 
 
 class ApplicationExecutor:
+    _AUTH_FIELD = re.compile(
+        r"password|passcode|one.?time|\botp\b|verification.?code|security.?code|"
+        r"security.?key|qr.?code|face.?id|验证码|短信码|密码|动态码|安全码|密钥|二维码|人脸",
+        re.I,
+    )
+
+    @classmethod
+    def _is_auth_field(cls, field: WebField) -> bool:
+        return (field.input_type == "password" or
+                bool(cls._AUTH_FIELD.search(f"{field.field_id} {field.label}")))
+
     def __init__(
         self,
         target_url: str,
@@ -395,6 +406,8 @@ class ApplicationExecutor:
         field: WebField,
         base: FieldResolution,
     ) -> FieldResolution | None:
+        if self._is_auth_field(field):
+            return None
         matches = [
             answer for answer in self.user_answers
             if answer.get("selector") == field.selector
@@ -700,6 +713,11 @@ class ApplicationExecutor:
                     return self.plan
                 if observation:
                     self.plan.metadata["form_observation"] = observation.safe_summary()
+                if any(self._is_auth_field(field) for field in fields):
+                    return self._block_auth(
+                        page_index, "authentication_field",
+                        "authentication field requires the dedicated human or in-memory channel",
+                    )
                 if not fields and adapter.start_application():
                     self.audit.record_action({"type": "start_application", "page_index": page_index})
                     continue

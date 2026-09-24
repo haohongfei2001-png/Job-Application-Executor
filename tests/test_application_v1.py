@@ -334,6 +334,24 @@ def test_unknown_answer_is_bound_to_question_and_page_not_reused_dom_id(tmp_path
     assert runner._resolve_page([other_question])[0].source != "user_execution_answer"
 
 
+def test_authentication_question_never_uses_persisted_task_answer(tmp_path, monkeypatch):
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    field = WebField(field_id="question", selector="#question", label="Security code",
+                     required=True, page_url="https://example.test/apply")
+    fake = FakeAdapter([field], final="Submit application")
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: fake)
+    runner = ApplicationExecutor(
+        "https://example.test/apply", _profile_file(tmp_path),
+        {"deepseek": {"enabled": False}},
+    )
+    runner.user_answers = [{"selector": "#question", "label": "Security code",
+                            "value": "123456"}]
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["auth_kind"] == "authentication_field"
+    assert fake.submit_calls == 0
+
+
 class FakeOtpBridge:
     enabled = True
 
