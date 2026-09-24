@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from importlib.metadata import version
 import socket
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from executor.autonomy.bootstrap import _version
 from executor.autonomy.release import (
     MANIFEST_NAME,
     copy_source_candidate,
+    installed_dependencies_match,
     read_release_identity,
     source_manifest,
     verify_source_candidate,
@@ -29,7 +31,7 @@ def _source(tmp_path):
     (package / "autonomy").mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "autonomy" / "cli.py").write_text("VERSION = 'one'\n", encoding="utf-8")
-    (repo / "requirements.txt").write_text("pydantic==2.13.0\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text(f"pydantic=={version('pydantic')}\n", encoding="utf-8")
     (repo / "config").mkdir()
     (repo / "config" / "private-token.json").write_text('{"secret":"never-copy"}')
     return repo
@@ -58,6 +60,20 @@ def test_release_source_snapshot_is_independent_and_detects_candidate_drift(tmp_
     assert read_release_identity(candidate) == {
         "status": "unverified", "source_sha256": ""
     }
+
+
+def test_candidate_dependency_check_rejects_missing_or_changed_versions(tmp_path):
+    repo = _source(tmp_path)
+    candidate = tmp_path / "candidate"
+    copy_source_candidate(repo, candidate)
+    assert installed_dependencies_match(candidate)
+    requirements = candidate / "requirements.txt"
+    requirements.write_text("pydantic==0.0.0\\n", encoding="utf-8")
+    assert not installed_dependencies_match(candidate)
+    requirements.write_text("missing-jae-dependency==1.0.0\\n", encoding="utf-8")
+    assert not installed_dependencies_match(candidate)
+    requirements.write_text("pydantic>=2\\n", encoding="utf-8")
+    assert not installed_dependencies_match(candidate)
 
 
 def test_recovery_version_uses_verified_packaged_source(tmp_path):
