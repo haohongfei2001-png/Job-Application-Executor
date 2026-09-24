@@ -166,7 +166,8 @@ def certify_review(
         and field.canonical_key
         and field.canonical_key.startswith("assets.")
     }
-    if (not isinstance(actual_assets, dict) or
+    if (not set(plan.attachments).issubset(expected_assets)
+            or not isinstance(actual_assets, dict) or
             set(actual_assets) != set(expected_assets) or
             any(not isinstance(sha, str) or not _SHA256.fullmatch(sha)
                 or actual_assets.get(slot) != sha
