@@ -7,6 +7,7 @@ import pytest
 from executor.autonomy.release import (
     MANIFEST_NAME,
     copy_source_candidate,
+    read_release_identity,
     source_manifest,
     verify_source_candidate,
 )
@@ -34,6 +35,9 @@ def test_release_source_snapshot_is_independent_and_detects_candidate_drift(tmp_
     assert actual["format"] == "jae-release-source-v1"
     assert len(actual["source_sha256"]) == 64
     assert verify_source_candidate(candidate)
+    assert read_release_identity(candidate) == {
+        "status": "verified", "source_sha256": expected["source_sha256"]
+    }
     assert not (candidate / "config").exists()
     assert json.loads((candidate / MANIFEST_NAME).read_text()) == expected
 
@@ -41,6 +45,9 @@ def test_release_source_snapshot_is_independent_and_detects_candidate_drift(tmp_
     assert verify_source_candidate(candidate)
     (candidate / "executor" / "autonomy" / "cli.py").write_text("VERSION = 'tampered'\n")
     assert not verify_source_candidate(candidate)
+    assert read_release_identity(candidate) == {
+        "status": "unverified", "source_sha256": ""
+    }
 
 
 def test_release_candidate_rejects_added_file_and_symlink(tmp_path):
