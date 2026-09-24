@@ -203,9 +203,16 @@ class Supervisor:
         task = self.queue.get(tid)
         if task["stage"] != "READY_TO_SUBMIT" or task["owner"]:
             raise ValueError("task is not at the human submit boundary")
+        binding = self.queue.browser_binding(tid)
         observed = browser.observe_bound_submission(
-            task["spec"]["target_url"], self.queue.browser_binding(tid),
+            task["spec"]["target_url"], binding,
         )
+        expected = self.worker.private_review_expectations(tid, task["revision"])
+        if expected:
+            verified = browser.observe_bound_submission_receipt(
+                task["spec"]["target_url"], binding, expected)
+            if verified is not None:
+                observed = verified
         return {"ok": True, "task_id": tid, **observed}
 
     def review_values(self, tid: str):
@@ -246,7 +253,7 @@ class Supervisor:
             "ok": True, "task_id": tid, "stage": task["stage"],
             "revision": task["revision"], "level": submission["level"],
             "page_signal": submission["page_signal"],
-            "server_verified": False,
+            "server_verified": submission["server_verified"],
         }
 
     def update_state(self):
