@@ -441,6 +441,29 @@ def test_macos_consumer_app_preserves_tampered_release_on_install_and_rollback(t
     assert app.is_dir()
 
 
+
+def test_macos_consumer_app_rejects_symlinked_release_directory(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    resources = apps / "AI 投递经理.app" / "Contents" / "Resources"
+    release = resources / "release"
+    release.rename(resources / "release-original")
+    release.symlink_to("release-original", target_is_directory=True)
+    assert verify_source_candidate(release)
+
+    refused = install_macos_app(repo, destination=apps, platform="darwin")
+    assert refused["ok"] is False
+    assert refused["reason"] == "untrusted_app_path"
+    assert release.is_symlink()
+    assert (resources / "release-original").is_dir()
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+
+
 def test_macos_consumer_app_rejects_invalid_staging_before_replacement(
     tmp_path, monkeypatch
 ):
