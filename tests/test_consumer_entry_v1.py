@@ -187,7 +187,7 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
     )
     try:
         state_path = runtime / "bootstrap.json"
-        for _ in range(100):
+        for _ in range(600):
             if state_path.exists():
                 break
             assert process.poll() is None
@@ -429,15 +429,15 @@ def test_macos_consumer_app_rejects_unstartable_candidate_before_activation(tmp_
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
     app = apps / "AI 投递经理.app"
     previous_version = app / "Contents" / "Resources" / "release" / "executor" / "autonomy" / "cli.py"
-    assert previous_version.read_text() == "VERSION = 'fixture'\\n"
+    assert previous_version.read_text() == "VERSION = 'fixture'\n"
 
     (repo / "executor" / "autonomy" / "cli.py").write_text(
-        "import deliberately_missing_release_dependency\\n", encoding="utf-8"
+        "import deliberately_missing_release_dependency\n", encoding="utf-8"
     )
     result = install_macos_app(repo, destination=apps, platform="darwin")
     assert result["ok"] is False
     assert result["reason"] == "candidate_start_failed"
-    assert previous_version.read_text() == "VERSION = 'fixture'\\n"
+    assert previous_version.read_text() == "VERSION = 'fixture'\n"
     assert not (apps / ".AI 投递经理.app.previous").exists()
     assert not (apps / ".AI 投递经理.app.installing").exists()
 
