@@ -326,6 +326,48 @@ def test_macos_consumer_app_activation_failure_restores_known_good(tmp_path, mon
     assert not (apps / ".AI 投递经理.app.previous").exists()
 
 
+def test_macos_consumer_app_rejects_untrusted_existing_bundle(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\\nexit 0\\n")
+    python.chmod(0o755)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    info_path = app / "Contents" / "Info.plist"
+    original = info_path.read_bytes()
+    with info_path.open("rb") as handle:
+        info = plistlib.load(handle)
+    info["CFBundleIdentifier"] = "com.example.untrusted"
+    with info_path.open("wb") as handle:
+        plistlib.dump(info, handle)
+    tampered = info_path.read_bytes()
+
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert result["ok"] is False
+    assert result["reason"] == "untrusted_app_path"
+    assert info_path.read_bytes() == tampered
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+    assert not (apps / ".AI 投递经理.app.installing").exists()
+
+    info_path.write_bytes(original)
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    previous = apps / ".AI 投递经理.app.previous"
+    previous_info = previous / "Contents" / "Info.plist"
+    with previous_info.open("rb") as handle:
+        info = plistlib.load(handle)
+    info["CFBundleIdentifier"] = "com.example.untrusted"
+    with previous_info.open("wb") as handle:
+        plistlib.dump(info, handle)
+    result = rollback_macos_app(apps)
+    assert result["ok"] is False
+    assert result["reason"] == "rollback_unavailable"
+    assert app.is_dir()
+    assert previous.is_dir()
+    assert not (apps / ".AI 投递经理.app.failed").exists()
+
+
 def test_macos_consumer_app_refuses_missing_virtualenv(tmp_path):
     result = install_macos_app(
         tmp_path / "missing-repo",
