@@ -85,7 +85,7 @@ def lifecycle(action, root, port):
         log = Path(root) / "service.log"
         with log.open("ab") as stream:
             log.chmod(0o600)
-            child = subprocess.Popen([sys.executable, "-m", "executor.autonomy.cli", "--runtime", str(Path(root).resolve()), "--port", str(port), "serve"],
+            child = subprocess.Popen([sys.executable, "-B", "-m", "executor.autonomy.cli", "--runtime", str(Path(root).resolve()), "--port", str(port), "serve"],
                 cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL, stdout=stream, stderr=stream, start_new_session=True)
         for _ in range(50):
             if child.poll() is not None:
