@@ -11,7 +11,7 @@ Canonical package: `JAE-CONSUMER-READINESS-v1`. Sole writer: draft PR #16, `feat
 - A generic DOM value or clicked save button does not certify persistence. The loopback SyntheticATS test compares a server draft and revision against a golden draft, and a wrong-value canary fails. A missing proof creates `draft_persistence_unverified`, which cannot be resumed blindly after restart.
 - General standing consent flags no longer authorize unseen statement text or another target. A default checked declaration without exact user-confirmed text and target digests blocks.
 
-Local isolated/headless full suite after the typed salary and record binding changes: **404 passed**. The additional attachment read-error classification passed its focused regression. GitHub exact-head CI and review status must be read from PR #16 for the current head; earlier heads passed both CI jobs.
+Local isolated/headless full suite after the typed salary, record binding and repeated-row observation changes: **405 passed**. The attachment read-error classification passed its focused regression. GitHub exact-head CI and review status must be read from PR #16 for the current head; earlier heads passed both CI jobs.
 
 ## Still open
 
