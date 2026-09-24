@@ -6,6 +6,9 @@ from urllib.parse import urlparse
 
 class SiteAdapter(ABC):
     site_id = "base"
+    # A unique DOM marker is not a canonical applicant record binding. A site
+    # driver may opt in only with independent row inventory and reconciliation.
+    repeated_rows_certified = False
 
     def __init__(self, target_url: str):
         self.target_url = target_url

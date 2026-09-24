@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -13,6 +14,7 @@ from .models import FieldResolution, ResolutionStatus, WebField
 from .profile import (aliases_for, field_is_current, get_field, has_unresolved_conflict,
                       is_sensitive_key, profile_keys)
 from .facts.representation import represent_choice
+from .forms.typed import represent_scoped_salary
 
 
 PRIVACY_PATTERNS = (
@@ -176,6 +178,19 @@ def _standing_policy_key(label: str) -> str | None:
     if _matches_any(label, LEGAL_COMPLIANCE_PATTERNS):
         return "policy.auto_decide_company_legal_compliance"
     return None
+
+
+def _scoped_policy_approved(policy_field, field: WebField) -> bool:
+    """A general policy flag cannot authorize new site text or a new target."""
+    if not policy_field or not policy_field.user_confirmed or policy_field.value is not True:
+        return False
+    if not field.page_url:
+        return False
+    scope = policy_field.normalization or {}
+    text_hash = hashlib.sha256(_norm(field.label).encode("utf-8")).hexdigest()
+    target_hash = hashlib.sha256(field.page_url.encode("utf-8")).hexdigest()
+    return (scope.get("approved_text_sha256") == text_hash
+            and scope.get("approved_target_sha256") == target_hash)
 
 
 def _rule_key(label: str) -> tuple[str | None, float, str]:
@@ -375,6 +390,29 @@ class FieldResolver:
                 status=ResolutionStatus.UNRESOLVED, reason="untrusted field instruction",
                 required=field.required,
             )
+        if re.search(r"salary|薪资|薪酬|期望年薪|期望月薪", field.label, re.I):
+            salary = get_field(self.profile, "preferences.expected_salary")
+            represented = (represent_scoped_salary(
+                salary.value, salary.normalization.get("salary") or {},
+                field.metadata.get("salary") or {}, field.page_url)
+                if salary and salary.user_confirmed and field_is_current(salary) else None)
+            if represented is not None:
+                return FieldResolution(
+                    field_id=field.field_id, selector=field.selector,
+                    label=field.label,
+                    scope_sha256=hashlib.sha256(field.page_url.encode()).hexdigest(),
+                    canonical_key="preferences.expected_salary",
+                    status=ResolutionStatus.RESOLVED, value=represented,
+                    source="user_confirmed_scoped_salary", confidence=1.0,
+                    reason="exact target, currency, period and tax basis; explicit unit conversion",
+                    required=field.required,
+                )
+            return FieldResolution(
+                field_id=field.field_id, selector=field.selector,
+                label=field.label, canonical_key="preferences.expected_salary",
+                status=ResolutionStatus.USER_CONFIRMATION, required=field.required,
+                reason="salary target or typed representation requires confirmation",
+            )
         key, confidence, reason = _contextual_rule_key(field)
         if not key:
             key, confidence, reason = _rule_key(field.label)
@@ -424,8 +462,9 @@ class FieldResolver:
             policy_key = _standing_policy_key(field.label)
             policy_field = get_field(self.profile, policy_key) if policy_key else None
             policy_enabled = bool(policy_field and policy_field.user_confirmed and policy_field.value is True)
+            scoped_approval = _scoped_policy_approved(policy_field, field)
 
-            if policy_enabled and policy_key in {
+            if scoped_approval and policy_key in {
                 "policy.auto_accept_privacy_terms",
                 "policy.auto_accept_truth_submission_declarations",
             }:
@@ -449,6 +488,14 @@ class FieldResolver:
 
             if policy_enabled and policy_key == "policy.auto_decide_company_legal_compliance":
                 if _matches_any(field.label, LEGAL_ASSENT_PATTERNS):
+                    if not scoped_approval:
+                        return FieldResolution(
+                            field_id=field.field_id, selector=field.selector,
+                            label=field.label, canonical_key=policy_key,
+                            status=ResolutionStatus.USER_CONFIRMATION,
+                            reason="new legal assent text or target requires explicit approval",
+                            required=field.required,
+                        )
                     policy_value = True
                     if field.input_type == "select" and field.options:
                         choice = represent_choice(True, field.options)

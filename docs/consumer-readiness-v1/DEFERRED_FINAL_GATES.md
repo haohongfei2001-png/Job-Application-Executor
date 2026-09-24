@@ -112,11 +112,37 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 - **Blocking scope:** Claiming real-account SMS delivery, Mac Messages permission, owner-enabled relay identity, CAPTCHA/password/QR/face/security-key handoff, or a real return to an intended job after authentication.
 - **Non-blocked work:** Durable non-secret AuthAttempt metadata, attempt-bound in-memory OTP, fake SMS and relay transport fixtures, isolated browser login, explicit resend and cooldown contract, crash recovery, handoff UI, return-target checks and all later independent engineering.
 - **Safe degradation:** No real SMS, account, private Messages database, new permission or security challenge is used during unattended development. Local push requires a current task/attempt token; relay responses without matching attempt and origin are ignored. Mac Messages is read only when private configuration explicitly enables it and provides site-specific sender and body rules; a configured source is never reported as proven online. Wrong-job return blocks direct resume. A live form write without certified active-account identity proof is blocked before the first field. Unsupported or ambiguous real authentication remains human-handled.
-- **Existing evidence:** JCR-05 isolated fake SMS, guarded resend, late-source, local UI, secret exit-scan and wrong-job tests are recorded in `receipts/JCR-05-ENGINEERING.md`; exact-head/main integration evidence is pending this round.
+- **Existing evidence:** JCR-05 isolated fake SMS, guarded resend, late-source, local UI, secret exit-scan and wrong-job tests are recorded in `receipts/JCR-05-ENGINEERING.md`. PR #15 final head `5318d590`, merge `476d19d`, exact-head CI 35931676896 and exact-main CI 35931971776 passed; see `receipts/JCR-05-MAIN-INTEGRATION.md`.
 - **Missing final evidence:** Authorized real account/phone, existing or owner-enabled transport and device permission, ordinary delivered SMS matched to one attempt, real security handoff and same-job return proof.
 - **Final convergence condition:** In JCR-09, the owner enables or confirms only the chosen real transport and performs unavoidable security actions on the real site; the system records redacted attempt and return-target evidence without retaining code or granting automated final submit.
 - **Related acceptance IDs:** C-01 through C-15 and G-class auth recovery cases.
-- **Evidence / PR / commit:** JCR-05 sole writer `feat/jcr05-auth-attempts`; final-live NOT_RUN.
+- **Evidence / PR / commit:** PR #15 merged as `476d19de4f4c6750cd1a46beeda20cbbd556579e`; final-live NOT_RUN.
+
+### DFG-007 — Real applicant structured-form and draft evidence
+
+- **Source round:** JCR-06
+- **Type / status:** `FINAL_LIVE` / `MITIGATED_FOR_ENGINEERING`
+- **Blocking scope:** Claiming that an authenticated real applicant's fields, repeated records, attachments, autosave, multi-page draft and site validation satisfy D-01 through D-22 on a real target. No real applicant profile, account, job application or upload is used for unattended proof.
+- **Non-blocked work:** Production form drivers, typed representation, row recovery, isolated React/Vue and fake-service fixtures, independent server draft oracles, fault injection, rollback and later independent engineering rounds.
+- **Safe degradation:** The generic driver blocks unproven upload, unsupported components, ambiguous repeated rows and drafts without independent readback. A failed or unknown intermediate save cannot advance or blindly Resume. No automated final submit is available.
+- **Existing evidence:** JCR-06 draft PR #16 has isolated synthetic structural, attachment-preflight, dependency, multi-page and server-draft tests; `receipts/JCR-06-WIP.md` records exact local results. These are AUTO subevidence only, not final-live PASS.
+- **Missing final evidence:** Owner-authorized real session and exact target, applicant fact/record review, permitted file/version proof, site-specific saved draft and attachment readback, and per-case D-01 through D-22 real-site results. Engineering gaps listed in the JCR-06 WIP receipt remain engineering work and are not deferred by this entry.
+- **Final convergence condition:** After automatable JCR-06 engineering and later rounds are complete, the owner performs only unavoidable real account, file, draft and final acceptance actions in JCR-09. Unsupported site paths remain disabled if proof is unavailable; no false D-case PASS or automated final click is permitted.
+- **Related acceptance IDs:** D-01 through D-22; G-class browser recovery where the same real draft is involved.
+- **Evidence / PR / commit:** JCR-06 draft PR #16; final-live NOT_RUN.
+
+### DFG-008 — JCR-06 unsupported form capability and question context
+
+- **Source round:** JCR-06
+- **Type / status:** `ENGINEERING_DEBT` / `MITIGATED_FOR_ENGINEERING`
+- **Blocking scope:** Claiming general ATS structured-form compatibility, asking an unknown site question through a context-free key, or continuing an uncertain browser/draft write as if it succeeded. These paths cannot contribute D-class PASS or a consumer READY certificate.
+- **Non-blocked work:** JCR-07 independent review and certificate, JCR-08 app/release engineering, JCR-09 synthetic/fault certification, and supported synthetic JCR-06 drivers.
+- **Safe degradation:** Generic repeated rows, file uploads, iframe/open-shadow/custom controls and virtualized choices remain unsupported unless a certified site driver supplies exact identity and readback. Unknown task answers bind to target/page/question digests, preventing cross-field reuse; a consumer UI must present the local question context before accepting one. Unknown browser/draft effects stay blocked under DFG-002.
+- **Existing evidence:** PR #16 implements scoped row journals, independent draft and attachment receipts, a composed browser/API fixture, exact target and question answer binding, auth-field refusal and 448 passing isolated/headless local tests. `receipts/JCR-06-WIP.md` lists the synthetic scope and negative cases.
+- **Missing final evidence:** A contextual local unknown-question workbench, worker-level read-only browser/draft recovery with per-action outcome, and the declared supported-driver matrix with complete automatic D-case evidence. Unsupported external site components need a capability decision and fixtures before support is claimed.
+- **Final convergence condition:** Resolve automatable debt and run affected D/G/H-class safety and fault tests by JCR-09; leave any still unproven external component explicitly unsupported. Real applicant/site evidence is separately DFG-007 and cannot resolve this engineering debt.
+- **Related acceptance IDs:** D-03 through D-11, D-15, D-16, D-17 through D-22; G-01/G-02/G-10/G-11.
+- **Evidence / PR / commit:** PR #16 candidate; automatic subevidence only, no D-class aggregate PASS.
 
 ## Invariants
 

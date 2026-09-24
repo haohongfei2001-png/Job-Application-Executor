@@ -54,9 +54,42 @@ def test_explicit_project_exclusion_closes_coverage_gap():
         ],
         metadata={"project_exclusions": ["Research Beta"]},
     )
-    review = project_coverage_review(_profile(), plan)
+    # A title-only plan annotation cannot authorize omitting a canonical record.
+    unapproved = project_coverage_review(_profile(), plan)
+    assert unapproved["uncovered_projects"] == ["Research Beta"]
+    assert unapproved["status"] == "REVIEW_REQUIRED"
+    profile = _profile()
+    profile["collections"]["projects"][1]["id"] = "research-beta"
+    profile["collections"]["fact_exclusions"] = {"review-exclusion": {
+        "research-beta": {"source": "user_explicit_task",
+                          "reason": "This form has no research section"}}}
+    review = project_coverage_review(profile, plan)
     assert review["uncovered_projects"] == []
     assert review["status"] == "COVERED_OR_EXPLICITLY_EXCLUDED"
+
+
+def test_unparsed_resume_research_section_blocks_coverage_even_without_records():
+    plan = ApplicationPlan(execution_id="unparsed", target_url="https://example.test/apply",
+                           site_id="generic_web")
+    review = project_coverage_review({"collections": {
+        "projects": [], "resume_project_parse_status": "UNPARSED_SECTION"}}, plan)
+    assert review["uncovered_projects"] == []
+    assert review["resume_parse_status"] == "UNPARSED_SECTION"
+    assert review["status"] == "REVIEW_REQUIRED"
+
+
+def test_malformed_or_duplicate_project_record_cannot_disappear_from_review():
+    plan = ApplicationPlan(execution_id="malformed-projects",
+                           target_url="https://example.test/apply", site_id="synthetic")
+    missing_title = project_coverage_review({"collections": {"projects": [
+        {"id": "project-a", "metadata": ["2025"]}]}}, plan)
+    assert missing_title["canonical_count"] == 1
+    assert missing_title["malformed_record_count"] == 1
+    assert missing_title["status"] == "REVIEW_REQUIRED"
+    duplicate = project_coverage_review({"collections": {"projects": [
+        {"id": "same", "title": "A"}, {"id": "same", "title": "B"}]}}, plan)
+    assert duplicate["duplicate_id_count"] == 1
+    assert duplicate["status"] == "REVIEW_REQUIRED"
 
 
 def test_final_review_requires_user_click_and_parser_audit():

@@ -64,12 +64,12 @@
     },
     {
       "id": "JCR-06",
-      "status": "READY",
+      "status": "ADVANCE_ALLOWED_WITH_DEFERRED",
       "authorized": true
     },
     {
       "id": "JCR-07",
-      "status": "NOT_STARTED",
+      "status": "READY",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-05 sole writer PR #15 completed synthetic auth/OTP engineering with local isolated/headless 384 passing tests. Three automated review findings on hash-routed return identity, expired wait recovery and live late-code browser continuity were fixed with direct regressions; their final PR-head CI and review thread closure remain the immediate merge gates. Then merge, verify exact-main CI and remote STATUS readback, and begin JCR-06 structured forms. DFG-006 keeps real account/SMS/device/security and real job-return evidence FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
+  "next_action": "JCR-06 PR #16 is the sole candidate for a bounded synthetic structured-form capability. Its final-tree local isolated/headless suite passed 448 tests; exact-head CI, review, merge and main readback remain required. Unsupported generic row/upload/embedded/virtualized controls and unknown browser/draft effects stay blocked under DFG-002/008. D-class real-site evidence remains NOT_RUN under DFG-007. After PR #16 is merged and its exact-main CI passes, start JCR-07 independent final review engineering while continuing safely isolated JCR-06 debt. Consumer certification remains NOT_CERTIFIED and final submit user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

@@ -5,13 +5,17 @@ import http.cookiejar
 import json
 import threading
 import urllib.request
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from executor.autonomy.manager import ManagerAction, ManagerController, ManagerDecision, ManagerTurn
 from executor.autonomy.queue import TaskQueue
 from executor.autonomy.supervisor import Supervisor, create_server
-from executor.autonomy.worker import Worker
+from executor.autonomy.worker import Worker, outcome
+from executor.adapters.generic_web import GenericWebAdapter
+from executor.application import ApplicationExecutor
+from executor.models import ApplicationStage
 
 
 class SyntheticATS(BaseHTTPRequestHandler):
@@ -22,6 +26,32 @@ class SyntheticATS(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == "/apply-multipage" or self.path == "/apply-second":
+            second = self.path == "/apply-second"
+            if second:
+                self.server.page_two_reads += 1
+            field = "email" if second else "full_name"
+            label = "Email" if second else "Full name"
+            retained = escape(self.server.draft.get(field, ""), quote=True)
+            control = ("<button type='button'>Submit application</button>" if second
+                       else "<button type='button' onclick=\"location.href='/apply-second'\">Next</button>")
+            body = f'''<!doctype html><meta charset="utf-8"><body>
+              <label>{label}<input id="{field}" name="{field}" value="{retained}" required></label>
+              {control}
+              <script>
+              document.querySelector('input').addEventListener('input', event => {{
+                const request = new XMLHttpRequest();
+                request.open('POST', '/draft', false);
+                request.setRequestHeader('Content-Type', 'application/json');
+                request.send(JSON.stringify({{field:event.target.name, value:event.target.value}}));
+              }});
+              </script></body>'''.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/apply"):
             body = b'''<!doctype html><meta charset="utf-8"><body>
               <label>Full name <input id="name" name="full_name" required></label>
@@ -45,6 +75,7 @@ class SyntheticATS(BaseHTTPRequestHandler):
             return
         if self.path == "/oracle":
             body = json.dumps({"draft": self.server.draft,
+                               "revision": self.server.revision,
                                "submit_count": self.server.submit_count}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -57,8 +88,9 @@ class SyntheticATS(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/draft":
             data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            if data["field"] in {"full_name", "email"}:
+            if data["field"] in {"full_name", "email"} and getattr(self.server, "accept_draft", True):
                 self.server.draft[data["field"]] = data["value"]
+                self.server.revision += 1
         elif self.path == "/submit":
             self.server.submit_count += 1
         else:
@@ -81,12 +113,12 @@ class Proposal:
         ])
 
 
-def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path):
+def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path, monkeypatch):
     manifest = json.loads((Path(__file__).parent / "fixtures/syntheticats-v1.manifest.json").read_text())
     assert manifest["origin_class"] == "SYNTHETIC"
     assert manifest["network_allowlist"] == ["127.0.0.1"]
     ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
-    ats.draft, ats.submit_count = {}, 0
+    ats.draft, ats.submit_count, ats.revision = {}, 0, 0
     ats_thread = threading.Thread(target=ats.serve_forever, daemon=True)
     ats_thread.start()
     local = None
@@ -94,6 +126,17 @@ def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path):
         target_url = f"http://127.0.0.1:{ats.server_port}/apply?postId=synthetic-01"
         profile = tmp_path / "profile.json"
         golden = manifest["golden_expected_outcome"]["draft"]
+        class SyntheticATSAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, _plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                if actual["draft"] != golden or actual["revision"] < 2:
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "revision": actual["revision"]}
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: SyntheticATSAdapter(url))
         profile.write_text(json.dumps({"fields": {
             "identity.full_name": {"value": golden["full_name"], "confidence": 1.0},
             "identity.email": {"value": golden["email"], "confidence": 1.0},
@@ -119,9 +162,65 @@ def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path):
         assert actual["draft"] == golden
         assert actual["submit_count"] == manifest["golden_expected_outcome"]["submit_count"]
         assert queue.get(tid)["stage"] == "READY_TO_SUBMIT"
+        # Fault canary: the same page state must not certify a wrong server draft.
+        ats.draft["email"] = "wrong@example.test"
+        assert SyntheticATSAdapter(target_url).verify_draft_persistence(None) is None
     finally:
         if local is not None:
             local.shutdown()
             local.server_close()
+        ats.shutdown()
+        ats.server_close()
+
+
+def test_multipage_navigation_requires_independent_draft_readback(tmp_path, monkeypatch):
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
+    ats.draft, ats.revision, ats.submit_count, ats.page_two_reads = {}, 0, 0, 0
+    ats.accept_draft = True
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    try:
+        target = f"http://127.0.0.1:{ats.server_port}/apply-multipage"
+        profile = tmp_path / "profile.json"
+        profile.write_text(json.dumps({"fields": {
+            "identity.full_name": {"value": "Synthetic Person", "confidence": 1.0},
+            "identity.email": {"value": "synthetic@example.test", "confidence": 1.0},
+        }}))
+
+        class MultiPageAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, _plan):
+                oracle = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                expected = {"full_name": "Synthetic Person"}
+                if self.page.url.endswith("/apply-second"):
+                    expected["email"] = "synthetic@example.test"
+                if oracle["draft"] != expected or oracle["revision"] < len(expected):
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "revision": oracle["revision"]}
+
+        monkeypatch.setattr("executor.application.adapter_for_url", lambda url: MultiPageAdapter(url))
+        monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+        plan = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=2)
+        assert plan.stage == ApplicationStage.READY_TO_SUBMIT
+        assert plan.metadata["page_draft_receipts"] == [{
+            "page_index": 0, "level": "server_readback", "revision": 1}]
+        assert ats.draft == {"full_name": "Synthetic Person", "email": "synthetic@example.test"}
+        assert ats.submit_count == 0
+        # Re-enter both pages in fresh isolated browser contexts. Browser DOM
+        # values must be restored from the independent server draft.
+        with GenericWebAdapter(target) as first_reentry:
+            assert first_reentry.page.locator("#full_name").input_value() == "Synthetic Person"
+        with GenericWebAdapter(f"http://127.0.0.1:{ats.server_port}/apply-second") as second_reentry:
+            assert second_reentry.page.locator("#email").input_value() == "synthetic@example.test"
+
+        ats.draft, ats.revision, ats.page_two_reads, ats.accept_draft = {}, 0, 0, False
+        blocked = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=2)
+        assert blocked.stage == ApplicationStage.BLOCKED
+        assert blocked.metadata["block_reason"] == "draft persistence unverified"
+        assert blocked.metadata["draft_persistence_phase"] == "before_navigation"
+        assert outcome(blocked) == ("BLOCKED", "draft_persistence_unverified")
+        assert ats.page_two_reads == 0
+        assert ats.submit_count == 0
+    finally:
         ats.shutdown()
         ats.server_close()

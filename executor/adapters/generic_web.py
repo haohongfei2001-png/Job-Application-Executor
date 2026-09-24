@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import hashlib
 import re
+from collections import Counter
+from datetime import date
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
@@ -8,6 +12,7 @@ from urllib.parse import urlparse
 from .base import SiteAdapter
 from ..browser import BrowserOwnershipError, connect, owned_page_after_action, page_document_epoch, page_target_id
 from ..field_classifier import is_final_submit, is_initial_apply, is_next
+from ..forms import FormObservation, FormObservationError, ObservedRow
 from ..models import (
     ApplicationPlan,
     FieldResolution,
@@ -18,7 +23,8 @@ from ..models import (
 )
 
 
-VISIBLE_FIELD_SELECTOR = 'input:not([type="hidden"]), textarea, select'
+VISIBLE_FIELD_SELECTOR = ('input:not([type="hidden"]), textarea, select, '
+                          '[role="combobox"]:not(input):not(textarea):not(select)')
 BUTTON_SELECTOR = 'button, input[type="button"], input[type="submit"], [role="button"], a'
 OTP_HINT_RE = re.compile(
     r"(?:验证码|校验码|动态码|短信码|verification[\s_-]*code|"
@@ -148,12 +154,12 @@ class GenericWebAdapter(SiteAdapter):
             return self.page.locator(VISIBLE_FIELD_SELECTOR).nth(index)
         loc = self.page.locator(selector)
         if loc.count():
-            return loc.first
+            return loc
         if label:
             by_label = self.page.get_by_label(label, exact=False)
             if by_label.count():
-                return by_label.first
-        return loc.first
+                return by_label
+        return loc
 
     def discover_fields(self) -> list[WebField]:
         """Snapshot the whole form in one browser round-trip.
@@ -165,7 +171,7 @@ class GenericWebAdapter(SiteAdapter):
         in-page once.
         """
         script = r"""() => {
-          const selector = 'input:not([type="hidden"]), textarea, select';
+          const selector = 'input:not([type="hidden"]), textarea, select, [role="combobox"]:not(input):not(textarea):not(select)';
           const clean = s => (s || '').replace(/\s+/g, ' ').trim();
           const known = /^(个人信息|教育经历|实习经历|工作经历|项目经历|项目\/活动经历|科研经历|语言能力|证书|家庭情况|家庭成员|获奖情况|在校实践|论文\/?专著|附加信息|简历附件|personal information|education|internship|work experience|projects?|research|family|awards?)$/i;
           const visible = e => {
@@ -210,9 +216,15 @@ class GenericWebAdapter(SiteAdapter):
 
           return [...document.querySelectorAll(selector)].slice(0, 350).map((e, index) => {
             const tag = e.tagName.toLowerCase();
-            const inputType = (e.getAttribute('type') || tag).toLowerCase();
+            const inputType = e.getAttribute('role') === 'combobox' ? 'combobox'
+              : (e.getAttribute('type') || tag).toLowerCase();
             const name = e.getAttribute('name') || '';
             const id = e.id || '';
+            const row = e.closest('[data-record-id], [data-row-id]');
+            const rowAttribute = row?.hasAttribute('data-record-id') ? 'data-record-id' : 'data-row-id';
+            const rowToken = row?.getAttribute(rowAttribute) || '';
+            const rowUnique = !!rowToken && [...document.querySelectorAll('[' + rowAttribute + ']')]
+              .filter(node => node.getAttribute(rowAttribute) === rowToken).length === 1;
             let cssSelector = '__field_index__:' + index;
             if (id) cssSelector = '#' + CSS.escape(id);
             else if (name) cssSelector = tag + '[name=' + JSON.stringify(name) + ']';
@@ -225,6 +237,7 @@ class GenericWebAdapter(SiteAdapter):
               : '';
             let current = null;
             if (inputType === 'checkbox' || inputType === 'radio') current = !!e.checked;
+            else if (inputType === 'combobox') current = e.value ?? e.getAttribute('aria-valuetext') ?? clean(e.innerText);
             else if (!['submit', 'button'].includes(inputType)) current = e.value ?? '';
 
             return {
@@ -237,6 +250,13 @@ class GenericWebAdapter(SiteAdapter):
               current,
               options,
               selectedText,
+              accept: e.getAttribute('accept') || '',
+              multiple: !!e.multiple,
+              maxSize: e.getAttribute('data-max-size') || e.getAttribute('data-max-file-size') || '',
+              dependsOn: e.getAttribute('data-depends-on') || '',
+              rowToken,
+              rowAttribute: rowToken ? rowAttribute : '',
+              rowUnique,
               selector: cssSelector,
               fieldId: name || id || ('field-' + index),
               section: section(e),
@@ -246,7 +266,7 @@ class GenericWebAdapter(SiteAdapter):
         try:
             snapshot = self.page.evaluate(script) or []
         except Exception:
-            raise BrowserOwnershipError("field observation unavailable") from None
+            raise FormObservationError("field observation unavailable") from None
 
         return [
             WebField(
@@ -263,10 +283,97 @@ class GenericWebAdapter(SiteAdapter):
                     "tag": item.get("tag"),
                     "section": item.get("section") or "",
                     "selected_text": item.get("selectedText") or "",
+                    "accept": item.get("accept") or "",
+                    "multiple": bool(item.get("multiple")),
+                    "max_size": item.get("maxSize") or "",
+                    "depends_on": item.get("dependsOn") or "",
+                    "row_key": hashlib.sha256(
+                        (str(item.get("rowAttribute") or "") + ":" +
+                         str(item.get("rowToken") or "")).encode()).hexdigest()[:20]
+                        if item.get("rowToken") else "",
+                    "row_identity_proven": bool(item.get("rowUnique")),
                 },
             )
             for item in snapshot
         ]
+
+    def observe_form(self) -> FormObservation:
+        """Read form structure separately from any intended fill actions."""
+        fields = self.discover_fields()
+        try:
+            signals = self.page.evaluate(r"""() => {
+              const visible = e => {
+                const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden'
+                  && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+                  && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+              };
+              const required = [...document.querySelectorAll(
+                'input:not([type="hidden"]), textarea, select')].filter(e =>
+                  e.required || e.getAttribute('aria-required') === 'true');
+              const custom = [...document.querySelectorAll(
+                '[role="combobox"], [role="listbox"], [contenteditable="true"], iframe')]
+                .filter(visible);
+              const controlled = new Set([...document.querySelectorAll('[role="combobox"][aria-controls]')]
+                .map(e => e.getAttribute('aria-controls')).filter(Boolean));
+              const unsupported = custom.filter(e => {
+                if (e.getAttribute('role') === 'combobox') {
+                  const id = e.getAttribute('aria-controls');
+                  const list = id && document.getElementById(id);
+                  return !list || list.getAttribute('role') !== 'listbox';
+                }
+                if (e.getAttribute('role') === 'listbox' && controlled.has(e.id)) return false;
+                return true;
+              });
+              // Standard DOM queries do not traverse shadow roots. Treat
+              // form controls inside an open root and opaque custom elements
+              // as unsupported until a site driver proves their semantics.
+              const shadowOrOpaque = [...document.querySelectorAll('*')].filter(e => {
+                if (e.shadowRoot) return !!e.shadowRoot.querySelector(
+                  'input, textarea, select, [role="combobox"], [contenteditable="true"]');
+                return e.tagName.includes('-') && visible(e);
+              });
+              const errors = [...document.querySelectorAll(
+                '[aria-invalid="true"], [role="alert"], .error-message, [data-error]')]
+                .filter(visible);
+              return {
+                hiddenRequired: required.filter(e => !visible(e)).length,
+                unsupported: unsupported.length + shadowOrOpaque.length,
+                validationErrors: errors.length,
+              };
+            }""") or {}
+            epoch = page_document_epoch(self.page)
+        except Exception:
+            raise FormObservationError("form structure observation unavailable") from None
+        selector_counts = Counter(item.selector for item in fields)
+        ambiguous = sum(count - 1 for count in selector_counts.values() if count > 1)
+        grouped: dict[str, list[WebField]] = {}
+        for item in fields:
+            key = str(item.metadata.get("row_key") or "")
+            if key:
+                grouped.setdefault(key, []).append(item)
+        rows = tuple(ObservedRow(
+            section=str(items[0].metadata.get("section") or ""),
+            row_key=key,
+            field_selectors=tuple(item.selector for item in items),
+            identity_proven=all(bool(item.metadata.get("row_identity_proven"))
+                                for item in items),
+        ) for key, items in grouped.items())
+        dependencies = tuple((str(item.metadata["depends_on"]), item.selector)
+                             for item in fields if item.metadata.get("depends_on"))
+        return FormObservation.from_fields(
+            self.page.url, epoch, fields,
+            rows=rows, dependencies=dependencies,
+            hidden_required_count=int(signals.get("hiddenRequired") or 0),
+            unsupported_component_count=int(signals.get("unsupported") or 0),
+            ambiguous_selector_count=ambiguous,
+            ambiguous_row_count=sum(not row.identity_proven for row in rows),
+            validation_error_count=int(signals.get("validationErrors") or 0),
+        )
+
+    def await_form_render(self) -> None:
+        """Wait for controlled component redraw without claiming save success."""
+        self.page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
 
     @staticmethod
     def _control_text(value, input_type: str = "text", label: str = "") -> str:
@@ -288,7 +395,28 @@ class GenericWebAdapter(SiteAdapter):
             return text[:10]
         return text
 
+    @staticmethod
+    def _date_precision_supported(value, input_type: str) -> bool:
+        if input_type not in {"date", "month"}:
+            return True
+        text = str(value)
+        if input_type == "date":
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                return False
+            try:
+                date.fromisoformat(text)
+            except ValueError:
+                return False
+            return True
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return GenericWebAdapter._date_precision_supported(text, "date")
+        if not re.fullmatch(r"\d{4}-\d{2}", text):
+            return False
+        return 1 <= int(text[5:7]) <= 12
+
     def _fill_select(self, element, value) -> bool:
+        if element.get_attribute("multiple") is not None:
+            return False
         candidates = value if isinstance(value, list) else [value]
         expanded = []
         for candidate in candidates:
@@ -300,25 +428,109 @@ class GenericWebAdapter(SiteAdapter):
                 expanded.append(candidate)
         opts = element.locator("option")
         normalized = [str(x).strip().casefold().removesuffix("市") for x in expanded]
+        if not normalized or any(not target for target in normalized):
+            return False
+        matches = []
         for i in range(opts.count()):
             opt = opts.nth(i)
             text = (opt.inner_text() or "").strip()
             val = opt.get_attribute("value") or ""
             hay = {text.casefold().removesuffix("市"), val.casefold()}
-            for target in normalized:
-                if target in hay:
-                    getattr(self, "mutation_guard", lambda: None)()
-                    element.select_option(value=val)
-                    return True
-        return False
+            if any(target in hay for target in normalized):
+                matches.append(i)
+        if len(matches) != 1:
+            return False
+        getattr(self, "mutation_guard", lambda: None)()
+        element.select_option(index=matches[0])
+        if not element.evaluate("(e, index) => e.selectedIndex === index", matches[0]):
+            raise BrowserOwnershipError("select choice outcome unknown")
+        return True
+
+    def _fill_combobox(self, element, selector: str, value) -> bool:
+        if not isinstance(value, (str, int, float)):
+            return False
+        target = str(value).strip()
+        if not target:
+            return False
+        controlled_id = element.get_attribute("aria-controls")
+        if not controlled_id:
+            return False
+        listbox = self.page.locator(f'[id={json.dumps(controlled_id)}][role="listbox"]')
+        if listbox.count() != 1:
+            return False
+        getattr(self, "mutation_guard", lambda: None)()
+        element.click()
+        choices = listbox.locator('[role="option"]')
+        exact = [choices.nth(index) for index in range(choices.count())
+                 if choices.nth(index).is_visible()
+                 and (choices.nth(index).get_attribute("aria-label") or
+                      choices.nth(index).inner_text()).strip() == target]
+        if len(exact) != 1:
+            return False
+        getattr(self, "mutation_guard", lambda: None)()
+        exact[0].click()
+        self.await_form_render()
+        selected = self._locate(selector)
+        if selected.count() != 1:
+            raise BrowserOwnershipError("combobox selection outcome unknown")
+        actual = selected.evaluate("e => e.value ?? e.getAttribute('aria-valuetext') ?? (e.innerText || '').trim()")
+        if str(actual).strip() != target:
+            raise BrowserOwnershipError("combobox selection outcome unknown")
+        return True
 
     def apply_resolutions(self, resolutions: Iterable[FieldResolution]) -> list[dict]:
+        resolutions = list(resolutions)
+        # Explicit site dependency metadata permits a bounded parent-first
+        # order. The child locator is resolved after the parent's redraw.
+        # Missing or cyclic dependencies are unsupported, never guessed.
+        observed_by_selector = {item.selector: item for item in self.discover_fields()}
+        by_selector = {item.selector: item for item in resolutions}
+        ordered: list[FieldResolution] = []
+        pending = list(resolutions)
+        completed: set[str] = set()
+        while pending:
+            ready = []
+            for item in pending:
+                observed = observed_by_selector.get(item.selector)
+                dependency = str(observed.metadata.get("depends_on") or "") if observed else ""
+                if not dependency or dependency in completed or dependency not in by_selector:
+                    ready.append(item)
+            if not ready:
+                return [{"field_id": item.field_id, "ok": False,
+                         "reason": "cyclic_field_dependency"} for item in pending]
+            for item in ready:
+                observed = observed_by_selector.get(item.selector)
+                dependency = str(observed.metadata.get("depends_on") or "") if observed else ""
+                if dependency and dependency not in observed_by_selector:
+                    return [{"field_id": item.field_id, "ok": False,
+                             "reason": "missing_field_dependency"}]
+                if (dependency in by_selector and item.status == ResolutionStatus.RESOLVED
+                        and by_selector[dependency].status != ResolutionStatus.RESOLVED):
+                    return [{"field_id": item.field_id, "ok": False,
+                             "reason": "unresolved_field_dependency"}]
+                ordered.append(item)
+                completed.add(item.selector)
+                pending.remove(item)
         actions: list[dict] = []
-        for resolution in resolutions:
+        for resolution in ordered:
             getattr(self, "mutation_guard", lambda: None)()
             if resolution.status != ResolutionStatus.RESOLVED:
                 continue
+            observed = observed_by_selector.get(resolution.selector)
+            dependency = str(observed.metadata.get("depends_on") or "") if observed else ""
+            if (dependency in by_selector and any(
+                    action["field_id"] == by_selector[dependency].field_id
+                    and not action["ok"] for action in actions)):
+                actions.append({"field_id": resolution.field_id, "ok": False,
+                                "reason": "parent_field_write_failed"})
+                continue
+            if dependency:
+                self.await_form_render()
             element = self._locate(resolution.selector, resolution.label)
+            if element.count() != 1:
+                actions.append({"field_id": resolution.field_id, "ok": False,
+                                "reason": "ambiguous_or_missing_locator"})
+                continue
             if not self._visible(element):
                 actions.append({"field_id": resolution.field_id, "ok": False, "reason": "not visible"})
                 continue
@@ -327,8 +539,18 @@ class GenericWebAdapter(SiteAdapter):
                 tag = element.evaluate("e=>e.tagName.toLowerCase()")
                 value = resolution.value
                 if input_type == "file":
-                    getattr(self, "mutation_guard", lambda: None)()
-                    element.set_input_files(str(value))
+                    # A browser file input only proves that a local file was
+                    # selected. Generic sites provide no trustworthy upload
+                    # completion or server draft receipt. A site driver must
+                    # own that effect and its readback before it can be used.
+                    actions.append({"field_id": resolution.field_id, "ok": False,
+                                    "reason": "upload_receipt_unsupported"})
+                    continue
+                elif input_type == "combobox" or element.get_attribute("role") == "combobox":
+                    if not self._fill_combobox(element, resolution.selector, value):
+                        actions.append({"field_id": resolution.field_id, "ok": False,
+                                        "reason": "combobox_exact_choice_unavailable"})
+                        continue
                 elif tag == "select":
                     getattr(self, "mutation_guard", lambda: None)()
                     if not self._fill_select(element, value):
@@ -340,6 +562,10 @@ class GenericWebAdapter(SiteAdapter):
                         getattr(self, "mutation_guard", lambda: None)()
                         element.click()
                 else:
+                    if not self._date_precision_supported(value, input_type):
+                        actions.append({"field_id": resolution.field_id, "ok": False,
+                                        "reason": "date_precision_unsupported"})
+                        continue
                     desired = self._control_text(value, input_type, resolution.label)
                     current = str(element.input_value() or "")
                     if current != desired:
@@ -356,12 +582,27 @@ class GenericWebAdapter(SiteAdapter):
         missing: list[str] = []
         errors: list[str] = []
         warnings: list[str] = []
-        current_fields = self.discover_fields()
+        # Let controlled components commit and redraw before reading page
+        # state. This is synchronization with the page render, not proof that
+        # a network autosave completed.
+        try:
+            self.await_form_render()
+            observation = self.observe_form()
+        except Exception:
+            return ValidationResult(ok=False, errors=["form observation unavailable after fill"])
+        current_fields = list(observation.fields)
+        if observation.unsafe_structure:
+            errors.append("form structure changed or contains unsupported required controls")
+        if observation.validation_error_count:
+            errors.append("site validation errors remain visible")
         page_selectors = plan.metadata.get("current_page_selectors")
         current_scope = set(page_selectors) if isinstance(page_selectors, list) else None
         by_selector = {item.selector: item for item in plan.fields
                        if current_scope is None or item.selector in current_scope}
         observed_selectors = {item.selector for item in current_fields}
+        if current_scope is not None:
+            for selector in observed_selectors - current_scope:
+                errors.append("new field appeared after fill; plan requires re-observation")
         for selector, expected in by_selector.items():
             if expected.status == ResolutionStatus.RESOLVED and selector not in observed_selectors:
                 errors.append(f"{expected.label or expected.field_id}: field was not observed after fill")
@@ -378,9 +619,7 @@ class GenericWebAdapter(SiteAdapter):
             if not expected or expected.status != ResolutionStatus.RESOLVED:
                 continue
             if field.input_type == "file":
-                expected_name = Path(str(expected.value)).name
-                if expected_name and expected_name not in str(actual or ""):
-                    errors.append(f"{label}: attachment mismatch")
+                errors.append(f"{label}: upload completion and draft receipt unverified")
             elif field.input_type in {"checkbox", "radio"}:
                 if bool(actual) != bool(expected.value):
                     errors.append(f"{label}: boolean value mismatch")
@@ -1047,6 +1286,14 @@ class GenericWebAdapter(SiteAdapter):
         self._adopt_owned_page()
         return True
 
+    def verify_draft_persistence(self, plan: ApplicationPlan) -> dict | None:
+        """Site drivers must prove a retained draft by independent readback.
+
+        DOM values, a clicked save button, and a fixed wait are insufficient.
+        The generic adapter has no authenticated site contract for this proof.
+        """
+        return None
+
     def advance(self) -> bool:
         getattr(self, "mutation_guard", lambda: None)()
         for element, text in self._buttons():
@@ -1057,6 +1304,11 @@ class GenericWebAdapter(SiteAdapter):
                 self._adopt_owned_page()
                 return True
         return False
+
+    def next_control(self) -> bool:
+        """Read-only navigation preflight; a draft must be proven before leaving it."""
+        return any(is_next(text) and not is_final_submit(text)
+                   for _, text in self._buttons())
 
     def final_submit_control(self) -> str | None:
         matches = [text for _, text in self._buttons() if is_final_submit(text)]

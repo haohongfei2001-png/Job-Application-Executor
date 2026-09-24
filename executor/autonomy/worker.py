@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import fcntl
+import hashlib
 import json
 import os
 import threading
@@ -23,6 +24,25 @@ from .queue import RUNTIME, STOPPED, private_dir, IDENTIFIER
 
 class LeaseLost(RuntimeError):
     pass
+
+
+def _task_attachment_asset(name: str, path: str, previous: object) -> dict:
+    """Bind an explicit task file to bytes without replacing a trusted old hash."""
+    asset = {"path": path, "kind": name}
+    if isinstance(previous, dict) and previous.get("path") == path:
+        old_hash = previous.get("sha256")
+        if isinstance(old_hash, str) and len(old_hash) == 64:
+            return {**previous, **asset}
+    try:
+        digest = hashlib.sha256()
+        with Path(path).expanduser().open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        asset["sha256"] = digest.hexdigest()
+    except OSError:
+        # The attachment resolver will classify a missing/unreadable file.
+        pass
+    return asset
 
 
 class ProcessLock:
@@ -47,6 +67,14 @@ class ProcessLock:
 
 def outcome(plan):
     if plan.stage == ApplicationStage.BLOCKED:
+        if plan.metadata.get("block_reason") == "draft persistence unverified":
+            return "BLOCKED", "draft_persistence_unverified"
+        if plan.metadata.get("block_reason") == "attachment draft receipt unverified":
+            return "BLOCKED", "attachment_persistence_unverified"
+        if plan.metadata.get("block_reason") == "form observation unavailable":
+            return "BLOCKED", "form_observation_unavailable"
+        if plan.metadata.get("block_reason") == "row reconciliation unverified":
+            return "BLOCKED", "row_reconciliation_unverified"
         if plan.metadata.get("auth_kind"):
             if plan.metadata["auth_kind"] in {
                     "return_target_unverified", "account_identity_unverified"}:
@@ -349,6 +377,10 @@ class Worker:
             runner = self.runner_factory(spec["target_url"], spec["profile_ref"], self._runner_settings(), execution_id=tid,
                 otp_bridge=bridge, audit_store=audit, guard=guard,
                 resume_url=task.get("checkpoint_url"), existing_browser_only=True)
+            if self.runner_factory is ApplicationExecutor:
+                runner.attachment_manifest_path = (self.queue.root / "attachment_manifests"
+                                                    / f"{tid}.json")
+                runner.row_journal_path = (self.queue.root / "row_journals" / f"{tid}.sqlite3")
             if session_epoch is not None:
                 runner.browser_session_epoch = session_epoch
                 runner.browser_binding_get = lambda: self.queue.browser_binding(tid)
@@ -367,7 +399,8 @@ class Worker:
             if spec["attachment_refs"]:
                 for key, path in spec["attachment_refs"].items():
                     # References become assets in the existing profile/attachment resolver.
-                    runner.profile.setdefault("assets", {})[key] = {"path": path, "kind": key}
+                    assets = runner.profile.setdefault("assets", {})
+                    assets[key] = _task_attachment_asset(key, path, assets.get(key))
                     runner.plan.attachments[key] = path
             attempt_id = self.queue.begin_run_attempt(tid, owner)
             plan = runner.run()

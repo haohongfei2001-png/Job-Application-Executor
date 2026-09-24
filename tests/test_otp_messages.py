@@ -5,7 +5,9 @@ def test_unique_recent_otp(tmp_path):
     db=tmp_path/'chat.db'; con=sqlite3.connect(db)
     con.executescript('CREATE TABLE handle(ROWID INTEGER PRIMARY KEY,id TEXT); CREATE TABLE message(ROWID INTEGER PRIMARY KEY,text TEXT,date INTEGER,handle_id INTEGER);')
     con.execute('INSERT INTO handle(ROWID,id) VALUES(1,?)',('10690000',))
-    now=time.time(); apple_ns=int((now-APPLE_EPOCH)*1_000_000_000)
+    # A timestamp at the exact floating-point boundary can round a few ns
+    # into the future after Apple's epoch conversion; model a received SMS.
+    now=time.time(); apple_ns=int((now-1-APPLE_EPOCH)*1_000_000_000)
     con.execute('INSERT INTO message(text,date,handle_id) VALUES(?,?,1)',('Example verification code is 482731',apple_ns)); con.commit(); con.close()
     hit=find_recent_sms_code(db,window_seconds=180,sender_hint='1069',body_keyword='Example',now=now)
     assert hit['code']=='482731'
