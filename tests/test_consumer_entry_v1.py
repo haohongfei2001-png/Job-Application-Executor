@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import signal
 import socket
 import stat
 import subprocess
@@ -179,7 +180,8 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         service_port = reservation.getsockname()[1]
-    env = {**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"}
+    env = {**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated",
+           "PYTHONFAULTHANDLER": "1"}
     process = subprocess.Popen(
         [sys.executable, "-m", "executor.autonomy.cli", "--runtime", str(runtime),
          "--port", str(service_port), "bootstrap-serve", "--reason", "service_start_failed"],
@@ -237,7 +239,15 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
                 text=True, timeout=5,
             ).stdout.splitlines()
             related = [line for line in processes if "executor.autonomy.cli" in line]
-            pytest.fail(f"hosted Mac bootstrap retry failed: {error!r}; {logs!r}; processes={related!r}")
+            if isinstance(error, TimeoutError):
+                for line in related:
+                    if line.rstrip().endswith(" serve") and str(runtime) in line:
+                        os.kill(int(line.split()[0]), signal.SIGABRT)
+                        time.sleep(0.5)
+                        service_log = runtime / "service.log"
+                        logs["service.log"] = service_log.read_text(errors="replace")[-8000:] if service_log.exists() else "(missing)"
+                        break
+            pytest.fail(f"hosted Mac bootstrap retry failed: {error!r}; {logs!r}; processes={related!r}; bootstrap_port={record['port']}; service_port={service_port}")
         assert redirected.value.code == 303
         assert redirected.value.headers["Location"].startswith(
             f"http://127.0.0.1:{service_port}/ui-login?ticket="
