@@ -385,6 +385,14 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
     assert observation["server_verified"] is False
     assert observed_targets == [(q.get(tid)["spec"]["target_url"], None)]
     assert q.get(tid)["stage"] == "READY_TO_SUBMIT"
+    with worker.review_lock:
+        worker.review_cache[tid]["expires_at"] = 0
+    with pytest.raises(ValueError, match="expired or the service restarted"):
+        supervisor.review_values(tid)
+    assert supervisor.ui_state()["tasks"][0]["can_confirm_submission"] is False
+    with pytest.raises(ValueError, match="expired or the service restarted"):
+        supervisor.confirm_human_submission(tid, q.get(tid)["revision"])
+    assert q.get(tid)["stage"] == "READY_TO_SUBMIT"
 
 
 def test_human_submission_receipt_protects_verified_job_without_server_claim(tmp_path):
