@@ -63,7 +63,7 @@ def _trusted_bundle(app: Path) -> bool:
 def _candidate_starts(python: Path, release: Path) -> bool:
     """Import the staged CLI with the target interpreter before activation."""
     script = (
-        "import importlib,pathlib,sys;"
+        "import importlib,pathlib,sys;sys.dont_write_bytecode=True;"
         f"root=pathlib.Path({str(release)!r}).resolve();"
         "sys.path.insert(0,str(root));"
         "module=importlib.import_module('executor.autonomy.cli');"
@@ -191,7 +191,7 @@ exit $STATUS
             "message": "新应用包未通过本机校验；现有应用没有被替换。",
         }
 
-    if not _candidate_starts(python, release):
+    if not _candidate_starts(python, release) or not verify_source_candidate(release):
         shutil.rmtree(staging)
         return {
             "ok": False,
