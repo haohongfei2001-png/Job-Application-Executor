@@ -64,7 +64,7 @@ def verify_source_candidate(root: str | Path) -> bool:
             if path.is_symlink() or (path.is_file() and path.relative_to(root).as_posix() not in allowed):
                 return False
         return True
-    except (OSError, ValueError, TypeError):
+    except (OSError, UnicodeError, ValueError, TypeError):
         return False
 
 
@@ -114,5 +114,5 @@ def read_release_identity(root: str | Path) -> dict:
     try:
         manifest = json.loads((root / MANIFEST_NAME).read_text(encoding="utf-8"))
         return {"status": "verified", "source_sha256": manifest["source_sha256"]}
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
         return {"status": "unverified", "source_sha256": ""}
