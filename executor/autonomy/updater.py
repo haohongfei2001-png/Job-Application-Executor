@@ -125,7 +125,7 @@ def read_update_state(runtime: str | Path) -> dict:
         status = "failed"
     old_version = data.get("old_version")
     new_version = data.get("new_version")
-    reason = data.get("reason")
+    reason = data.get("reason", "")
     return {
         "status": status,
         "old_version": old_version if isinstance(old_version, str) and re.fullmatch(r"[0-9a-fA-F]{1,12}", old_version) else "",
