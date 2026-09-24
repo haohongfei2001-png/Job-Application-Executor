@@ -123,10 +123,12 @@ def install_macos_app(
     apps_dir.mkdir(parents=True, exist_ok=True)
     app = apps_dir / f"{APP_NAME}.app"
     staging = apps_dir / f".{APP_NAME}.app.installing"
-    if staging.is_symlink():
-        staging.unlink()
-    elif staging.exists():
-        shutil.rmtree(staging)
+    if staging.exists() or staging.is_symlink():
+        return {
+            "ok": False,
+            "reason": "staging_pending",
+            "message": "发现未完成的安装暂存目录；没有删除或替换任何应用。",
+        }
 
     macos = staging / "Contents" / "MacOS"
     macos.mkdir(parents=True)
