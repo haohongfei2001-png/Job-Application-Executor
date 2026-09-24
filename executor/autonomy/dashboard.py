@@ -20,6 +20,7 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .metric{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
 .task .title{font-weight:650}.task .meta{font-size:12px;color:#64748b;margin-top:4px}.stage{font-size:11px;border-radius:999px;padding:3px 7px;background:#eef2ff;display:inline-block;margin-top:7px}
+.review{font-size:12px;line-height:1.5;margin-top:9px;padding:9px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0}.review.warning{background:#fff7ed;border-color:#fed7aa;color:#9a3412}
 .taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
 .factinput{display:flex;gap:5px;margin-top:8px}.factinput input,.factinput select{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.factinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}
 .factinput .remember-fact{flex:0 0 16px;width:16px;min-width:16px;padding:0}
@@ -139,6 +140,9 @@ function render(state){
       <div class="title">${esc(t.company)} · ${esc(t.role)}</div>
       <div class="meta">${esc(t.target_host||'')} ${t.blocker?'· '+esc(humanBlocker(t.blocker)):''}</div>
       <span class="stage">${esc(humanStage(t.stage))}</span>
+      ${t.stage==='READY_TO_SUBMIT'?(t.review_summary?.status==='last_verified'?`
+        <div class="review">上次独立核验：${Number(t.review_summary.field_count)||0} 项填写、${Number(t.review_summary.row_count)||0} 条经历、${Number(t.review_summary.attachment_count)||0} 个附件，${Number(t.review_summary.check_count)||0} 项检查通过。请在申请页面再次核对完整内容；最终提交只能由你本人点击。</div>`:
+        '<div class="review warning">核验摘要不可用，请勿提交。任务需要重新核验。</div>'):''}
       ${t.stage==='NEEDS_USER_INPUT'?(t.unresolved_keys||[]).map(key=>`
         <label class="factinput"><span>${esc(key)}</span>${(t.boolean_keys||[]).includes(key)?`<select aria-label="${esc(key)}"><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select>`:`<input autocomplete="off" aria-label="${esc(key)}">`}
           <button type="button" data-answer="true" data-key="${esc(key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button>
