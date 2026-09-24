@@ -453,6 +453,10 @@ exit $STATUS
             "CFBundleExecutable": "AIApplicationManager",
         }, handle)
 
+    executable.write_text(old_launcher + "echo tampered\\n", encoding="utf-8")
+    refused = install_macos_app(repo, destination=apps, platform="darwin")
+    assert refused["reason"] == "untrusted_app_path"
+    executable.write_text(old_launcher, encoding="utf-8")
     installed = install_macos_app(repo, destination=apps, platform="darwin")
     assert installed["ok"] is True
     assert installed["replaced"] is True
