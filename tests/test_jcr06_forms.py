@@ -171,6 +171,26 @@ def test_unresolved_parent_blocks_dependent_write(tmp_path):
         assert adapter.page.locator("#major").input_value() == ""
 
 
+def test_failed_parent_choice_never_writes_dependent_field(tmp_path):
+    html = tmp_path / "failed-parent.html"
+    html.write_text("""<!doctype html><body>
+      <select id='school'><option value=''>Choose school</option></select>
+      <input id='major' data-depends-on='#school'>
+    """, encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([
+            FieldResolution(field_id="major", selector="#major", label="Major",
+                status=ResolutionStatus.RESOLVED, value="Computer Science"),
+            FieldResolution(field_id="school", selector="#school", label="School",
+                status=ResolutionStatus.RESOLVED, value="Synthetic University"),
+        ])
+        assert actions == [
+            {"field_id": "school", "ok": False, "reason": "no_matching_select_option"},
+            {"field_id": "major", "ok": False, "reason": "parent_field_write_failed"},
+        ]
+        assert adapter.page.locator("#major").input_value() == ""
+
+
 def test_dynamic_required_field_is_reobserved_after_fill(tmp_path, monkeypatch):
     runner, _html = _runner(tmp_path, monkeypatch, """
       <label>姓名<input id='name' name='full_name' required></label>

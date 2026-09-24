@@ -500,8 +500,15 @@ class GenericWebAdapter(SiteAdapter):
             getattr(self, "mutation_guard", lambda: None)()
             if resolution.status != ResolutionStatus.RESOLVED:
                 continue
-            if (observed_by_selector.get(resolution.selector)
-                    and observed_by_selector[resolution.selector].metadata.get("depends_on")):
+            observed = observed_by_selector.get(resolution.selector)
+            dependency = str(observed.metadata.get("depends_on") or "") if observed else ""
+            if (dependency in by_selector and any(
+                    action["field_id"] == by_selector[dependency].field_id
+                    and not action["ok"] for action in actions)):
+                actions.append({"field_id": resolution.field_id, "ok": False,
+                                "reason": "parent_field_write_failed"})
+                continue
+            if dependency:
                 self.await_form_render()
             element = self._locate(resolution.selector, resolution.label)
             if element.count() != 1:
