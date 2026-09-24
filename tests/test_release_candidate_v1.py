@@ -68,11 +68,11 @@ def test_candidate_dependency_check_rejects_missing_or_changed_versions(tmp_path
     copy_source_candidate(repo, candidate)
     assert installed_dependencies_match(candidate)
     requirements = candidate / "requirements.txt"
-    requirements.write_text("pydantic==0.0.0\\n", encoding="utf-8")
+    requirements.write_text("pydantic==0.0.0\n", encoding="utf-8")
     assert not installed_dependencies_match(candidate)
-    requirements.write_text("missing-jae-dependency==1.0.0\\n", encoding="utf-8")
+    requirements.write_text("missing-jae-dependency==1.0.0\n", encoding="utf-8")
     assert not installed_dependencies_match(candidate)
-    requirements.write_text("pydantic>=2\\n", encoding="utf-8")
+    requirements.write_text("pydantic>=2\n", encoding="utf-8")
     assert not installed_dependencies_match(candidate)
 
 
