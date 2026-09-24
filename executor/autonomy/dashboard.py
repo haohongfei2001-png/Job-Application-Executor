@@ -134,7 +134,7 @@ function privateReviewHtml(review){
   const fields=(review.fields||[]).map(f=>`<tr><th>${esc(f.label||f.key)}</th><td>${esc(privateValue(f.expected))}</td><td>${esc(privateValue(f.observed))}</td></tr>`).join('');
   const files=(review.attachments||[]).map(a=>`<li>${esc(a.slot)}：${esc(a.filename)} · 本地 ${esc(a.canonical_sha256)} · 草稿 ${esc(a.observed_sha256)}</li>`).join('');
   const coverage=review.project_coverage||{};
-  return `<strong>上次独立核验的完整值</strong><p>这是当时的只读快照；页面若被编辑，请重新核验，不能据此认定当前值仍相同。</p>
+  return `<strong>上次独立核验的完整值</strong> <button type="button" class="headerbtn" data-close-private-review="true">隐藏完整值</button><p>这是当时的只读快照；页面若被编辑，请重新核验，不能据此认定当前值仍相同。</p>
     <p>目标：${esc(review.target_url)}</p>
     <p>账号：${esc(review.account?.key||'未展示')} · ${esc(privateValue(review.account?.canonical_value||''))}（上次与活动账号匹配）</p>
     <table><thead><tr><th>字段</th><th>申请意图</th><th>草稿实际保留值</th></tr></thead><tbody>${fields}</tbody></table>
@@ -182,6 +182,13 @@ function render(state){
       ${t.stage==='READY_TO_SUBMIT'?'<div class="review private-review" data-private-review-panel hidden></div>':''}
     </div>`).join('');
 }
+tasksEl.addEventListener('click',event=>{
+  const button=event.target.closest('button[data-close-private-review]');if(!button)return;
+  const panel=button.closest('[data-private-review-panel]');
+  panel.innerHTML='';panel.hidden=true;
+  delete panel.dataset.privateReviewOpen;delete panel.dataset.revision;
+  state();
+});
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-review-values]');if(!button)return;
   button.disabled=true;
