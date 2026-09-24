@@ -152,6 +152,7 @@ fi
 
 cd "$RELEASE_ROOT" || exit 1
 export PYTHONPATH="$RELEASE_ROOT"
+export PYTHONDONTWRITEBYTECODE=1
 "$PYTHON" -B -m executor.autonomy.cli launch >>"$LOG_FILE" 2>&1
 STATUS=$?
 if [[ $STATUS -ne 0 ]]; then
