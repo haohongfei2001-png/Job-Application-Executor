@@ -158,6 +158,7 @@ function render(state){
       ${t.blocker==='account_identity_unverified'?'<div class="otpnote">系统无法证明当前账号属于申请人。此站点表单保持只读，直到有受验证的站点账号识别能力。</div>':''}
       <div class="taskcontrols">
         ${t.stage==='READY_TO_SUBMIT'?`<button type="button" data-observe-submission="true" data-task="${esc(t.task_id)}">只读查看提交结果</button>`:''}
+        ${t.stage==='READY_TO_SUBMIT'&&t.can_confirm_submission?`<button type="button" data-confirm-submission="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">我已在招聘网站亲自提交</button>`:''}
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
         ${['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="OBSERVE" data-task="${esc(t.task_id)}">只读核对</button>`:''}
       ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown','auth_return_unverified','account_identity_unverified','draft_persistence_unverified'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
@@ -165,6 +166,20 @@ function render(state){
       </div>
     </div>`).join('');
 }
+tasksEl.addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-confirm-submission]');if(!button)return;
+  if(!window.confirm('请确认你已经在招聘网站亲自点击最终提交。这里仅记录你的确认并保护该岗位，不会代你点击提交。'))return;
+  button.disabled=true;
+  try{
+    const r=await fetch('/ui/api/human-submission',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      body:JSON.stringify({task_id:button.dataset.task,expected_revision:Number(button.dataset.revision),user_confirmed:true})});
+    if(!r.ok)throw new Error();
+    const receipt=await r.json();
+    notify(receipt.page_signal?'已记录你的提交确认；页面有成功提示，但服务器结果尚未独立核实。':'已记录你的提交确认；服务器结果尚未独立核实，请保留招聘网站回执。');
+    await state();
+  }catch(e){notify('确认未记录；请核对当前任务及招聘网站，再重试。');await state()}
+  finally{button.disabled=false}
+});
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-observe-submission]');if(!button)return;
   button.disabled=true;
