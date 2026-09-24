@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from .base import SiteAdapter
 from ..browser import BrowserOwnershipError, connect, owned_page_after_action, page_document_epoch, page_target_id
 from ..field_classifier import is_final_submit, is_initial_apply, is_next
-from ..forms import FormObservation, ObservedRow
+from ..forms import FormObservation, FormObservationError, ObservedRow
 from ..models import (
     ApplicationPlan,
     FieldResolution,
@@ -266,7 +266,7 @@ class GenericWebAdapter(SiteAdapter):
         try:
             snapshot = self.page.evaluate(script) or []
         except Exception:
-            raise BrowserOwnershipError("field observation unavailable") from None
+            raise FormObservationError("field observation unavailable") from None
 
         return [
             WebField(
@@ -336,7 +336,7 @@ class GenericWebAdapter(SiteAdapter):
             }""") or {}
             epoch = page_document_epoch(self.page)
         except Exception:
-            raise BrowserOwnershipError("form structure observation unavailable") from None
+            raise FormObservationError("form structure observation unavailable") from None
         selector_counts = Counter(item.selector for item in fields)
         ambiguous = sum(count - 1 for count in selector_counts.values() if count > 1)
         grouped: dict[str, list[WebField]] = {}

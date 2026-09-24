@@ -8,6 +8,10 @@ from typing import Iterable
 from ..models import FieldResolution, WebField
 
 
+class FormObservationError(RuntimeError):
+    """The page structure could not be read; no empty form may be inferred."""
+
+
 @dataclass(frozen=True)
 class ObservedRow:
     section: str

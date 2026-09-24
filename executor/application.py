@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from .adapters.registry import adapter_for_url, site_id_for_url
 from .browser import BrowserOwnershipError, browser_mode
 from .audit import AuditStore
-from .forms import FillPlan
+from .forms import FillPlan, FormObservationError
 from .forms.attachments import verify_attachment_readback
 from .models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus, WebField
 from .otp.bridge import OtpBridge, OtpBridgeError
@@ -525,8 +525,15 @@ class ApplicationExecutor:
                             "active account identity is unverified")
 
                 observe_form = getattr(adapter, "observe_form", None)
-                observation = observe_form() if callable(observe_form) else None
-                fields = list(observation.fields) if observation else adapter.discover_fields()
+                try:
+                    observation = observe_form() if callable(observe_form) else None
+                    fields = list(observation.fields) if observation else adapter.discover_fields()
+                except FormObservationError:
+                    self.plan.stage = ApplicationStage.BLOCKED
+                    self.plan.metadata["block_reason"] = "form observation unavailable"
+                    self.plan.metadata["form_observation"] = "ERROR"
+                    self.audit.save_plan(self.plan)
+                    return self.plan
                 if observation:
                     self.plan.metadata["form_observation"] = observation.safe_summary()
                 if not fields and adapter.start_application():
@@ -570,7 +577,14 @@ class ApplicationExecutor:
                         await_render = getattr(adapter, "await_form_render", None)
                         if callable(await_render):
                             await_render()
-                        updated = observe_form()
+                        try:
+                            updated = observe_form()
+                        except FormObservationError:
+                            self.plan.stage = ApplicationStage.BLOCKED
+                            self.plan.metadata["block_reason"] = "form observation unavailable"
+                            self.plan.metadata["form_observation"] = "ERROR"
+                            self.audit.save_plan(self.plan)
+                            return self.plan
                         self.plan.metadata["form_observation"] = updated.safe_summary()
                         if (updated.unsupported_component_count or updated.ambiguous_selector_count
                                 or updated.ambiguous_row_count):

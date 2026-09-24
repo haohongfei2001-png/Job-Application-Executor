@@ -51,6 +51,8 @@ def outcome(plan):
             return "BLOCKED", "draft_persistence_unverified"
         if plan.metadata.get("block_reason") == "attachment draft receipt unverified":
             return "BLOCKED", "attachment_persistence_unverified"
+        if plan.metadata.get("block_reason") == "form observation unavailable":
+            return "BLOCKED", "form_observation_unavailable"
         if plan.metadata.get("auth_kind"):
             if plan.metadata["auth_kind"] in {
                     "return_target_unverified", "account_identity_unverified"}:

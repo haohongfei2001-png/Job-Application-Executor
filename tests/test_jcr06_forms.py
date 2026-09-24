@@ -7,9 +7,11 @@ import pytest
 
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.application import ApplicationExecutor
-from executor.forms import FillPlan, FormObservation
+from executor.forms import FillPlan, FormObservation, FormObservationError
 from executor.models import (ApplicationStage, FieldResolution, ResolutionStatus,
                              WebField)
+from executor.autonomy.worker import outcome
+from executor.autonomy.queue import TaskQueue, TaskSpec
 
 
 def _runner(tmp_path, monkeypatch, body, extra_fields=None):
@@ -61,6 +63,74 @@ def test_no_observed_fields_cannot_become_ready(tmp_path, monkeypatch):
     plan = runner.run(max_pages=1)
     assert plan.stage == ApplicationStage.BLOCKED
     assert plan.metadata["form_observation"]["field_count"] == 0
+
+
+def test_form_observation_error_blocks_before_any_fill(tmp_path, monkeypatch):
+    runner, _html = _runner(tmp_path, monkeypatch,
+        "<label>姓名<input id='name' name='full_name' required></label>"
+        "<button type='button'>Submit application</button>")
+
+    class BrokenObservation(GenericWebAdapter):
+        def observe_form(self):
+            raise FormObservationError("synthetic page evaluate failed")
+
+        def apply_resolutions(self, _resolutions):
+            pytest.fail("field write after failed observation")
+
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: BrokenObservation(url))
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["form_observation"] == "ERROR"
+    assert plan.fields == []
+    assert outcome(plan) == ("BLOCKED", "form_observation_unavailable")
+
+
+def test_form_observation_error_after_write_never_reaches_ready(tmp_path, monkeypatch):
+    runner, _html = _runner(tmp_path, monkeypatch,
+        "<label>姓名<input id='name' name='full_name' required></label>"
+        "<button type='button'>Submit application</button>")
+
+    class FailsAfterWrite(GenericWebAdapter):
+        observations = 0
+
+        def observe_form(self):
+            self.observations += 1
+            if self.observations > 1:
+                raise FormObservationError("synthetic redraw evaluate failed")
+            return super().observe_form()
+
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: FailsAfterWrite(url))
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["form_observation"] == "ERROR"
+    assert outcome(plan) == ("BLOCKED", "form_observation_unavailable")
+
+
+@pytest.mark.parametrize("blocker", [
+    "form_observation_unavailable",
+    "draft_persistence_unverified",
+    "attachment_persistence_unverified",
+    "auth_return_unverified",
+    "account_identity_unverified",
+])
+def test_unverified_effect_cannot_be_blindly_resumed_after_pause(tmp_path, blocker):
+    queue = TaskQueue(tmp_path / "runtime")
+    task = queue.enqueue(TaskSpec(
+        company="Synthetic", role="Engineer",
+        target_url="https://jobs.example.test/apply?postId=observe-1",
+        profile_ref=str(tmp_path / "synthetic-profile.json")))
+    claimed = queue.claim("synthetic-worker")
+    queue.checkpoint(task["task_id"], claimed["owner"], "BLOCKED",
+                     blocker=blocker, release=True)
+    assert queue.get(task["task_id"])["blocker"] == blocker
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        queue.resume(task["task_id"])
+    queue.pause(task["task_id"])
+    assert queue.get(task["task_id"])["blocker"] == "user_paused_from_" + blocker
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        queue.resume(task["task_id"])
 
 
 def test_duplicate_locator_never_writes_first_repeated_row(tmp_path):
