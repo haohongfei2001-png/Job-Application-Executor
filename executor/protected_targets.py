@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
+import uuid
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -84,3 +87,79 @@ def assert_target_not_protected(target_url: str, *, tenant: str = "", job_id: st
         label = hit.get("label") or "protected submitted application"
         status = hit.get("status") or "protected"
         raise RuntimeError(f"target is protected from mutation: {label} ({status})")
+
+
+def register_user_confirmed_target(
+    target_url: str, *, tenant: str, job_id: str, campaign: str = "",
+    verified_identity: bool, user_confirmed: bool,
+    path: str | Path = PROTECTED_TARGETS,
+) -> bool:
+    """Protect a verified target only after explicit human submission confirmation.
+
+    The file stores a stable job identity, never the application URL or its
+    query. Existing protection is idempotent. A page signal alone cannot call
+    this with user_confirmed=True.
+    """
+    if verified_identity is not True or user_confirmed is not True:
+        raise ValueError("verified target and explicit human confirmation required")
+    if (not isinstance(tenant, str) or not tenant.strip()
+            or not isinstance(job_id, str) or not job_id.strip()
+            or not isinstance(campaign, str)):
+        raise ValueError("verified job identity required")
+    parsed = urlparse(target_url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("verified HTTPS target required")
+    route = parse_ats_route(target_url)
+    if route and (route.tenant.casefold() != tenant.casefold() or route.job_id != job_id):
+        raise ValueError("verified target differs from job route")
+
+    path = Path(path).expanduser()
+    parent = path.parent
+    if parent.is_symlink():
+        raise ValueError("protected target directory cannot be a symlink")
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent.chmod(0o700)
+    if path.is_symlink():
+        raise ValueError("protected target file cannot be a symlink")
+    lock_path = parent / (path.name + ".lock")
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(lock_fd, "r+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if path.is_symlink():
+                raise ValueError("protected target file cannot be a symlink")
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or not isinstance(data.get("targets"), list):
+                    raise ValueError("protected target registry is malformed")
+                if path.stat().st_mode & 0o077:
+                    raise ValueError("protected target registry must be private")
+            else:
+                data = {"targets": []}
+            items = data["targets"]
+            if protected_target(target_url, items, tenant=tenant, job_id=job_id,
+                                campaign=campaign):
+                return False
+            items.append({
+                "label": "user-confirmed submitted application",
+                "status": "USER_CONFIRMED",
+                "target_identity": {
+                    "tenant": tenant,
+                    "job_id": job_id,
+                    "campaign": campaign,
+                },
+            })
+            temporary = parent / (path.name + ".tmp-" + uuid.uuid4().hex)
+            try:
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle, ensure_ascii=False, indent=2)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return True
+    finally:
+        pass
