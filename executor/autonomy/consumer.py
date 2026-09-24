@@ -14,6 +14,51 @@ from .release import copy_source_candidate, verify_source_candidate
 APP_NAME = "AI 投递经理"
 BUNDLE_ID = "com.local.job-application-executor.ai-application-manager"
 
+def _legacy_launcher(repo: Path) -> str:
+    repo_q = shlex.quote(str(repo))
+    return f"""#!/bin/zsh
+set -u
+REPO_ROOT={repo_q}
+PYTHON="$REPO_ROOT/.venv/bin/python"
+LOG_DIR="$HOME/Library/Logs/AI投递经理"
+LOG_FILE="$LOG_DIR/launcher.log"
+/bin/mkdir -p "$LOG_DIR"
+
+if [[ ! -x "$PYTHON" ]]; then
+  /usr/bin/osascript -e 'display dialog "AI 投递经理缺少运行环境。请重新安装本地入口。" buttons {{"好"}} default button "好" with icon caution'
+  exit 1
+fi
+
+cd "$REPO_ROOT" || exit 1
+"$PYTHON" -m executor.autonomy.cli launch >>"$LOG_FILE" 2>&1
+STATUS=$?
+if [[ $STATUS -ne 0 ]]; then
+  /usr/bin/osascript -e 'display dialog "AI 投递经理没有成功就绪。现有任务不会被提交或丢失。请在 ChatGPT 中检查启动状态。" buttons {{"好"}} default button "好" with icon caution'
+fi
+exit $STATUS
+"""
+
+
+def _legacy_bundle_matches(executable: Path) -> bool:
+    try:
+        launcher = executable.read_text(encoding="utf-8")
+        assignments = [line for line in launcher.splitlines()
+                       if line.startswith("REPO_ROOT=")]
+        if len(assignments) != 1:
+            return False
+        quoted = assignments[0].removeprefix("REPO_ROOT=")
+        parsed = shlex.split(quoted)
+        if len(parsed) != 1 or not Path(parsed[0]).is_absolute():
+            return False
+        repo = Path(parsed[0])
+        return repo.name == "Job-Application-Executor" and (
+            shlex.quote(str(repo)) == quoted
+            and launcher == _legacy_launcher(repo)
+        )
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
 REMEDIATION_MESSAGES = {
     "use_live_browser_mode": "当前不是实时浏览器模式。",
     "install_google_chrome": "没有找到 Google Chrome。",
@@ -61,7 +106,7 @@ def _trusted_bundle(app: Path) -> bool:
             and info.get("CFBundleIdentifier") == BUNDLE_ID
             and info.get("CFBundleExecutable") == "AIApplicationManager"
             and bool(executable.stat().st_mode & stat.S_IXUSR)
-            and verify_source_candidate(release)
+            and (verify_source_candidate(release) if release.exists() else _legacy_bundle_matches(executable))
         )
     except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
         return False
