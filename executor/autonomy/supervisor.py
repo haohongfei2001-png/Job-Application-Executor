@@ -129,6 +129,9 @@ class Supervisor:
                     }
                 else:
                     task["review_summary"] = {"status": "unavailable"}
+                task["can_confirm_submission"] = bool(
+                    task["can_confirm_submission"]
+                    and task["review_summary"]["status"] == "last_verified")
                 continue
             if task.get("stage") != "NEEDS_USER_ACTION" or task.get("blocker") != "otp_waiting":
                 continue
