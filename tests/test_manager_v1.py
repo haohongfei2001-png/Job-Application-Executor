@@ -361,6 +361,63 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
     assert q.get(tid)["stage"] == "READY_TO_SUBMIT"
 
 
+def test_human_submission_receipt_protects_verified_job_without_server_claim(tmp_path):
+    profile = tmp_path / "profile.json"
+    profile.write_text('{"identity":{"full_name":"Synthetic Applicant"}}')
+    q = TaskQueue(tmp_path / "runtime")
+    task_spec = TaskSpec(
+        company="Synthetic Co", role="AI Product Manager",
+        target_url="https://jobs.example.test/apply?postId=role-1",
+        job_id="role-1", tenant="synthetic-tenant", campaign="autumn",
+        target_verified=True, target_evidence_digest="a" * 64,
+        target_source_chain=["https://jobs.example.test/jobs"],
+        profile_ref=str(profile),
+    )
+    tid = q.enqueue(task_spec)["task_id"]
+    claimed = q.claim("test-worker")
+    certificate = {
+        "target_sha256": hashlib.sha256(task_spec.target_url.encode()).hexdigest(),
+        "draft_id_digest": "b" * 64, "revision": 1,
+        "document_epoch_sha256": "c" * 64, "driver_version": "synthetic-v1",
+        "field_count": 1, "attachment_count": 0, "row_count": 0,
+        "checks": {key: "PASS" for key in (
+            "target_account_draft", "complete_fields_defaults",
+            "structured_rows", "attachments", "validation_save",
+            "manual_submit_boundary")},
+        "final_click_actor": "user",
+    }
+    q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT",
+                 details={"unresolved_keys": [], "review_certificate": certificate},
+                 release=True)
+    revision = q.get(tid)["revision"]
+    observation = {"status": "PAGE_SIGNAL_OBSERVED", "level": "page_signal"}
+    registry = tmp_path / "private" / "protected-targets.json"
+    with pytest.raises(ValueError, match="explicit human confirmation"):
+        q.confirm_human_submission(
+            tid, expected_revision=revision, user_confirmed=False,
+            observation=observation, registry_path=registry)
+    assert not registry.exists()
+    with pytest.raises(RuntimeError, match="stale task revision"):
+        q.confirm_human_submission(
+            tid, expected_revision=revision - 1, user_confirmed=True,
+            observation=observation, registry_path=registry)
+    assert not registry.exists()
+    submitted = q.confirm_human_submission(
+        tid, expected_revision=revision, user_confirmed=True,
+        observation=observation, registry_path=registry)
+    assert submitted["stage"] == "SUBMITTED"
+    assert submitted["details"]["submission"] == {
+        "level": "user_confirmed",
+        "read_only_observation": "PAGE_SIGNAL_OBSERVED",
+        "page_signal": True,
+        "server_verified": False,
+    }
+    assert registry.exists()
+    assert "postId" not in registry.read_text()
+    with pytest.raises(ValueError, match="immutable human boundary"):
+        q.resume(tid)
+
+
 def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
     q = TaskQueue(tmp_path / "runtime")
     tid = q.enqueue(spec(tmp_path))["task_id"]
