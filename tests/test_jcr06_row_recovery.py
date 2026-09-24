@@ -210,6 +210,20 @@ def test_lost_response_and_unmanaged_extra_are_safe(tmp_path, row_site):
     assert server.delete_count == 0
 
 
+def test_unmanaged_matching_row_blocks_before_adding_another_record(tmp_path, row_site):
+    server, driver = row_site
+    server.rows = [{"record_id": "A", "site_row_id": "someone-elses-row",
+                    "values": {"school": "A School"}, "managed": False}]
+    server.revision = 1
+    desired = (DesiredRow("A", {"school": "A School"}),
+               DesiredRow("B", {"school": "B School"}))
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    with pytest.raises(RowReconciliationBlocked, match="unbound or unmanaged"):
+        reconciler(driver, journal, guard=lambda: None).reconcile(desired)
+    assert server.add_count == 0
+    assert journal.pending() == ()
+
+
 def test_concurrent_row_intents_cannot_both_start(tmp_path):
     path = tmp_path / "private" / "rows.sqlite3"
     RowActionJournal(path, scope=SCOPE)
@@ -426,3 +440,95 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
     assert omitted_field.stage == ApplicationStage.BLOCKED
     assert omitted_field.metadata["block_reason"] == "row reconciliation unverified"
     assert server.add_count == 2 and server.submit_count == 0
+
+
+def test_executor_certified_education_and_project_contracts_use_distinct_journals(
+        tmp_path, monkeypatch, row_site):
+    education, education_driver = row_site
+    projects = ThreadingHTTPServer(("127.0.0.1", 0), RowSite)
+    projects.rows, projects.revision, projects.complete = [], 0, True
+    projects.draft_id_digest = DRAFT_DIGEST
+    projects.add_count = projects.delete_count = projects.reorder_count = 0
+    threading.Thread(target=projects.serve_forever, daemon=True).start()
+    try:
+        project_driver = RowHttpDriver(f"http://127.0.0.1:{projects.server_port}")
+        target = f"http://127.0.0.1:{education.server_port}/apply"
+        target_hash = hashlib.sha256(target.encode()).hexdigest()
+        education.target_sha256 = projects.target_sha256 = target_hash
+        profile = tmp_path / "profile.json"
+        profile.write_text(json.dumps({"fields": {"identity.full_name": {
+            "value": "Synthetic Person", "confidence": 1.0}}, "collections": {
+            "education_records": [{"id": "school-a", "fields": {
+                "school": {"value": "School A"}}}],
+            "projects": [{"id": "project-a", "fields": {
+                "title": {"value": "Project A"}}}],
+        }}))
+
+        class TwoCollectionAdapter:
+            def __init__(self, url):
+                self.target_url = url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+            def auth_challenge(self):
+                return False
+
+            def structured_row_contract(self, applicant_profile):
+                return tuple(RowExecutionContract(driver, tuple(DesiredRow(
+                    record["id"], {key: field["value"] for key, field in
+                                    record["fields"].items()}) for record in
+                    applicant_profile["collections"][key]), DRAFT_DIGEST, key)
+                    for key, driver in (("education_records", education_driver),
+                                        ("projects", project_driver)))
+
+            def discover_fields(self):
+                return [WebField(field_id="full_name", selector="#name",
+                                 label="Full name", required=True)]
+
+            def apply_resolutions(self, resolutions):
+                return [{"field_id": item.field_id, "ok": True}
+                        for item in resolutions]
+
+            def validate(self, _plan):
+                return ValidationResult(ok=True)
+
+            def final_submit_control(self):
+                return "Submit"
+
+            def verify_draft_persistence(self, _plan):
+                if ([(row["record_id"], row["values"]) for row in education.rows]
+                        != [("school-a", {"school": "School A"})]
+                        or [(row["record_id"], row["values"]) for row in projects.rows]
+                        != [("project-a", {"title": "Project A"})]):
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "draft_id_digest": DRAFT_DIGEST,
+                        "revision": max(education.revision, projects.revision)}
+
+            def screenshot(self, _path):
+                pass
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: TwoCollectionAdapter(url))
+        monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+        journal = tmp_path / "private" / "task-rows.sqlite3"
+
+        def run():
+            runner = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}},
+                                         execution_id="two-collections")
+            runner.row_journal_path = journal
+            return runner.run(max_pages=1)
+
+        assert run().stage == ApplicationStage.READY_TO_SUBMIT
+        assert education.add_count == projects.add_count == 1
+        assert journal.with_name("task-rows.education_records.sqlite3").exists()
+        assert journal.with_name("task-rows.projects.sqlite3").exists()
+        assert run().stage == ApplicationStage.READY_TO_SUBMIT
+        assert education.add_count == projects.add_count == 1
+    finally:
+        projects.shutdown()
+        projects.server_close()

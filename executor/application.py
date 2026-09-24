@@ -565,70 +565,76 @@ class ApplicationExecutor:
                 row_contract_builder = getattr(adapter, "structured_row_contract", None)
                 if callable(row_contract_builder):
                     try:
-                        contract = row_contract_builder(self.profile)
-                        if not isinstance(contract, RowExecutionContract):
+                        offered = row_contract_builder(self.profile)
+                        contracts = ((offered,) if isinstance(offered, RowExecutionContract)
+                                     else offered if isinstance(offered, tuple) else ())
+                        if (not contracts or any(not isinstance(item, RowExecutionContract)
+                                                 for item in contracts)):
                             raise RowReconciliationBlocked("certified row contract unavailable")
-                        if self.row_journal_path is None:
-                            raise RowReconciliationBlocked("task row journal unavailable")
-                        if contract.collection_key not in collection_keys or contract.delete_ids:
-                            raise RowReconciliationBlocked("row collection or deletion unsupported")
-                        if (row_bindings and
-                                contract.draft_id_digest != row_bindings[0][0].draft_id_digest):
-                            raise RowReconciliationBlocked("row collection draft identity changed")
-                        if (attachment_binding and
-                                contract.draft_id_digest != attachment_binding[0]):
-                            raise RowReconciliationBlocked("row and attachment draft identity differs")
-                        if prior_row_journals - ({key for _, _, key in row_bindings}
-                                                 | {contract.collection_key}):
+                        offered_keys = {item.collection_key for item in contracts}
+                        if (len(offered_keys) != len(contracts)
+                                or prior_row_journals - ({key for _, _, key in row_bindings}
+                                                         | offered_keys)):
                             raise RowReconciliationBlocked(
                                 "prior row collection has not been reobserved")
-                        records = (self.profile.get("collections") or {}).get(
-                            contract.collection_key, [])
-                        if not isinstance(records, list) or any(
-                                not isinstance(record, dict) for record in records):
-                            raise RowReconciliationBlocked("canonical row collection invalid")
-                        by_id = {str(record.get("id")): record for record in records
-                                 if record.get("id")}
-                        if (len(by_id) != len(records)
-                                or {row.record_id for row in contract.desired} != set(by_id)):
-                            raise RowReconciliationBlocked("canonical row coverage incomplete")
-                        for desired_row in contract.desired:
-                            canonical_fields = by_id[desired_row.record_id].get("fields") or {}
-                            if not isinstance(canonical_fields, dict) or any(
-                                    not isinstance(field, dict)
-                                    for field in canonical_fields.values()):
-                                raise RowReconciliationBlocked("row value lacks canonical source")
-                            known = {key: field["value"] for key, field in canonical_fields.items()
-                                     if field.get("value") not in (None, "")}
-                            if (any(not isinstance(value, str) for value in known.values())
-                                    or dict(desired_row.values) != known):
-                                raise RowReconciliationBlocked("row value lacks canonical source")
-                        target_hash = hashlib.sha256(self.target_url.encode()).hexdigest()
-                        journal_path = self.row_journal_path.with_name(
-                            f"{self.row_journal_path.stem}.{contract.collection_key}"
-                            f"{self.row_journal_path.suffix}")
-                        journal = RowActionJournal(journal_path,
-                            scope=f"{target_hash}:{self.plan.execution_id}:"
-                                  f"{contract.draft_id_digest}:{contract.collection_key}")
-                        reconciler = RowReconciler(
-                            contract.driver, journal, target_sha256=target_hash,
-                            draft_id_digest=contract.draft_id_digest,
-                            mutation_guard=guarded_browser_mutation)
-                        receipt = reconciler.reconcile(
-                            contract.desired, delete_ids=contract.delete_ids)
+                        if self.row_journal_path is None:
+                            raise RowReconciliationBlocked("task row journal unavailable")
+                        for contract in contracts:
+                            if contract.collection_key not in collection_keys or contract.delete_ids:
+                                raise RowReconciliationBlocked("row collection or deletion unsupported")
+                            if (row_bindings and
+                                    contract.draft_id_digest != row_bindings[0][0].draft_id_digest):
+                                raise RowReconciliationBlocked("row collection draft identity changed")
+                            if (attachment_binding and
+                                    contract.draft_id_digest != attachment_binding[0]):
+                                raise RowReconciliationBlocked("row and attachment draft identity differs")
+                            records = (self.profile.get("collections") or {}).get(
+                                contract.collection_key, [])
+                            if not isinstance(records, list) or any(
+                                    not isinstance(record, dict) for record in records):
+                                raise RowReconciliationBlocked("canonical row collection invalid")
+                            by_id = {str(record.get("id")): record for record in records
+                                     if record.get("id")}
+                            if (len(by_id) != len(records)
+                                    or {row.record_id for row in contract.desired} != set(by_id)):
+                                raise RowReconciliationBlocked("canonical row coverage incomplete")
+                            for desired_row in contract.desired:
+                                canonical_fields = by_id[desired_row.record_id].get("fields") or {}
+                                if not isinstance(canonical_fields, dict) or any(
+                                        not isinstance(field, dict)
+                                        for field in canonical_fields.values()):
+                                    raise RowReconciliationBlocked("row value lacks canonical source")
+                                known = {key: field["value"] for key, field in canonical_fields.items()
+                                         if field.get("value") not in (None, "")}
+                                if (any(not isinstance(value, str) for value in known.values())
+                                        or dict(desired_row.values) != known):
+                                    raise RowReconciliationBlocked("row value lacks canonical source")
+                            target_hash = hashlib.sha256(self.target_url.encode()).hexdigest()
+                            journal_path = self.row_journal_path.with_name(
+                                f"{self.row_journal_path.stem}.{contract.collection_key}"
+                                f"{self.row_journal_path.suffix}")
+                            journal = RowActionJournal(journal_path,
+                                scope=f"{target_hash}:{self.plan.execution_id}:"
+                                      f"{contract.draft_id_digest}:{contract.collection_key}")
+                            reconciler = RowReconciler(
+                                contract.driver, journal, target_sha256=target_hash,
+                                draft_id_digest=contract.draft_id_digest,
+                                mutation_guard=guarded_browser_mutation)
+                            receipt = reconciler.reconcile(
+                                contract.desired, delete_ids=contract.delete_ids)
+                            self.plan.metadata.setdefault("row_reconciliation", []).append({
+                                "page_index": page_index, "revision": receipt.revision,
+                                "row_count": receipt.row_count, "add_count": receipt.add_count,
+                                "delete_count": receipt.delete_count,
+                                "reorder_count": receipt.reorder_count})
+                            row_bindings.append((reconciler, contract.desired,
+                                                 contract.collection_key))
+                            self.audit.save_plan(self.plan)
                     except RowReconciliationBlocked:
                         self.plan.stage = ApplicationStage.BLOCKED
                         self.plan.metadata["block_reason"] = "row reconciliation unverified"
                         self.audit.save_plan(self.plan)
                         return self.plan
-                    self.plan.metadata.setdefault("row_reconciliation", []).append({
-                        "page_index": page_index, "revision": receipt.revision,
-                        "row_count": receipt.row_count, "add_count": receipt.add_count,
-                        "delete_count": receipt.delete_count,
-                        "reorder_count": receipt.reorder_count})
-                    row_bindings.append((reconciler, contract.desired,
-                                         contract.collection_key))
-                    self.audit.save_plan(self.plan)
 
                 observe_form = getattr(adapter, "observe_form", None)
                 try:

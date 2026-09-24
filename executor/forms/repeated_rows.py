@@ -263,8 +263,8 @@ class RowReconciler:
         inventory = self.reconcile_pending_read_only()
         by_id = {row.record_id: row for row in inventory.rows}
         unknown = set(by_id) - set(ids) - set(delete_ids)
-        if unknown or any(not by_id[rid].managed for rid in delete_ids if rid in by_id):
-            raise RowReconciliationBlocked("unbound or unmanaged row cannot be removed")
+        if unknown or any(not row.managed for row in inventory.rows):
+            raise RowReconciliationBlocked("unbound or unmanaged row cannot be mutated")
         adds = deletes = reorders = 0
         for rid in sorted(delete_ids):
             existing = by_id.get(rid)
