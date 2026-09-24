@@ -41,7 +41,9 @@ class FormObservation:
                     fields: Iterable[WebField], **kwargs) -> "FormObservation":
         items = tuple(fields)
         structure = [(item.field_id, item.selector, item.input_type,
-                      bool(item.required), str(item.metadata.get("section") or ""))
+                      bool(item.required), str(item.metadata.get("section") or ""),
+                      str(item.metadata.get("depends_on") or ""),
+                      tuple(item.options))
                      for item in items]
         row_structure = [(row.section, row.row_key, row.field_selectors,
                           row.identity_proven) for row in kwargs.get("rows", ())]

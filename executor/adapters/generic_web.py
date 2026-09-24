@@ -253,6 +253,7 @@ class GenericWebAdapter(SiteAdapter):
               accept: e.getAttribute('accept') || '',
               multiple: !!e.multiple,
               maxSize: e.getAttribute('data-max-size') || e.getAttribute('data-max-file-size') || '',
+              dependsOn: e.getAttribute('data-depends-on') || '',
               rowToken,
               rowAttribute: rowToken ? rowAttribute : '',
               rowUnique,
@@ -285,6 +286,7 @@ class GenericWebAdapter(SiteAdapter):
                     "accept": item.get("accept") or "",
                     "multiple": bool(item.get("multiple")),
                     "max_size": item.get("maxSize") or "",
+                    "depends_on": item.get("dependsOn") or "",
                     "row_key": hashlib.sha256(
                         (str(item.get("rowAttribute") or "") + ":" +
                          str(item.get("rowToken") or "")).encode()).hexdigest()[:20]
@@ -349,9 +351,11 @@ class GenericWebAdapter(SiteAdapter):
             identity_proven=all(bool(item.metadata.get("row_identity_proven"))
                                 for item in items),
         ) for key, items in grouped.items())
+        dependencies = tuple((str(item.metadata["depends_on"]), item.selector)
+                             for item in fields if item.metadata.get("depends_on"))
         return FormObservation.from_fields(
             self.page.url, epoch, fields,
-            rows=rows,
+            rows=rows, dependencies=dependencies,
             hidden_required_count=int(signals.get("hiddenRequired") or 0),
             unsupported_component_count=int(signals.get("unsupported") or 0),
             ambiguous_selector_count=ambiguous,
@@ -459,11 +463,46 @@ class GenericWebAdapter(SiteAdapter):
         return True
 
     def apply_resolutions(self, resolutions: Iterable[FieldResolution]) -> list[dict]:
+        resolutions = list(resolutions)
+        # Explicit site dependency metadata permits a bounded parent-first
+        # order. The child locator is resolved after the parent's redraw.
+        # Missing or cyclic dependencies are unsupported, never guessed.
+        observed_by_selector = {item.selector: item for item in self.discover_fields()}
+        by_selector = {item.selector: item for item in resolutions}
+        ordered: list[FieldResolution] = []
+        pending = list(resolutions)
+        completed: set[str] = set()
+        while pending:
+            ready = []
+            for item in pending:
+                observed = observed_by_selector.get(item.selector)
+                dependency = str(observed.metadata.get("depends_on") or "") if observed else ""
+                if not dependency or dependency in completed or dependency not in by_selector:
+                    ready.append(item)
+            if not ready:
+                return [{"field_id": item.field_id, "ok": False,
+                         "reason": "cyclic_field_dependency"} for item in pending]
+            for item in ready:
+                observed = observed_by_selector.get(item.selector)
+                dependency = str(observed.metadata.get("depends_on") or "") if observed else ""
+                if dependency and dependency not in observed_by_selector:
+                    return [{"field_id": item.field_id, "ok": False,
+                             "reason": "missing_field_dependency"}]
+                if (dependency in by_selector and item.status == ResolutionStatus.RESOLVED
+                        and by_selector[dependency].status != ResolutionStatus.RESOLVED):
+                    return [{"field_id": item.field_id, "ok": False,
+                             "reason": "unresolved_field_dependency"}]
+                ordered.append(item)
+                completed.add(item.selector)
+                pending.remove(item)
         actions: list[dict] = []
-        for resolution in resolutions:
+        for resolution in ordered:
             getattr(self, "mutation_guard", lambda: None)()
             if resolution.status != ResolutionStatus.RESOLVED:
                 continue
+            if (observed_by_selector.get(resolution.selector)
+                    and observed_by_selector[resolution.selector].metadata.get("depends_on")):
+                self.await_form_render()
             element = self._locate(resolution.selector, resolution.label)
             if element.count() != 1:
                 actions.append({"field_id": resolution.field_id, "ok": False,

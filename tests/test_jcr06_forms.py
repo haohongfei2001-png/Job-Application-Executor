@@ -102,6 +102,75 @@ def test_repeated_rows_are_observed_without_exposing_site_record_tokens(tmp_path
         assert observed.unsafe_structure
 
 
+def test_explicit_dependent_select_is_filled_after_parent_redraw(tmp_path):
+    html = tmp_path / "dependent.html"
+    html.write_text("""<!doctype html><body>
+      <label>本科专业<select id='major' data-depends-on='#school' required>
+        <option value=''>Choose major</option></select></label>
+      <label>本科院校<select id='school' required>
+        <option value=''>Choose school</option>
+        <option value='school-a'>Synthetic University</option></select></label>
+      <script>
+      document.querySelector('#school').addEventListener('change', () => {
+        document.querySelector('#major').innerHTML =
+          '<option value="">Choose major</option>' +
+          '<option value="cs">Computer Science</option>';
+      });
+      </script>
+    """, encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        observation = adapter.observe_form()
+        assert observation.dependencies == (("#school", "#major"),)
+        before = observation.structure_digest
+        actions = adapter.apply_resolutions([
+            FieldResolution(field_id="major", selector="#major", label="本科专业",
+                status=ResolutionStatus.RESOLVED, value="Computer Science"),
+            FieldResolution(field_id="school", selector="#school", label="本科院校",
+                status=ResolutionStatus.RESOLVED, value="Synthetic University"),
+        ])
+        assert [action["field_id"] for action in actions] == ["school", "major"]
+        assert all(action["ok"] for action in actions)
+        assert adapter.page.locator("#major").input_value() == "cs"
+        assert adapter.observe_form().structure_digest != before
+
+
+def test_cyclic_field_dependency_blocks_without_writing(tmp_path):
+    html = tmp_path / "cycle.html"
+    html.write_text("""<!doctype html><body>
+      <input id='a' data-depends-on='#b'>
+      <input id='b' data-depends-on='#a'>
+    """, encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([
+            FieldResolution(field_id="a", selector="#a", label="A",
+                status=ResolutionStatus.RESOLVED, value="one"),
+            FieldResolution(field_id="b", selector="#b", label="B",
+                status=ResolutionStatus.RESOLVED, value="two"),
+        ])
+        assert all(not action["ok"] and action["reason"] == "cyclic_field_dependency"
+                   for action in actions)
+        assert adapter.page.locator("#a").input_value() == ""
+        assert adapter.page.locator("#b").input_value() == ""
+
+
+def test_unresolved_parent_blocks_dependent_write(tmp_path):
+    html = tmp_path / "unresolved-parent.html"
+    html.write_text("""<!doctype html><body>
+      <input id='school'>
+      <input id='major' data-depends-on='#school'>
+    """, encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([
+            FieldResolution(field_id="major", selector="#major", label="Major",
+                status=ResolutionStatus.RESOLVED, value="Computer Science"),
+            FieldResolution(field_id="school", selector="#school", label="School",
+                status=ResolutionStatus.UNRESOLVED),
+        ])
+        assert actions == [{"field_id": "major", "ok": False,
+                            "reason": "unresolved_field_dependency"}]
+        assert adapter.page.locator("#major").input_value() == ""
+
+
 def test_dynamic_required_field_is_reobserved_after_fill(tmp_path, monkeypatch):
     runner, _html = _runner(tmp_path, monkeypatch, """
       <label>姓名<input id='name' name='full_name' required></label>
