@@ -548,6 +548,8 @@ def test_certified_post_click_server_receipt_is_bound_and_copy_safe(monkeypatch)
         "replay_allowed": False,
     }
     assert "private" not in json.dumps(observed)
+    assert browser.observe_bound_submission_receipt(target, binding, {
+        **expected, "account_identity_digest": None}) is None
     receipt["draft_id_digest"] = digest("other-draft")
     assert browser.observe_bound_submission_receipt(target, binding, expected) is None
     receipt["draft_id_digest"] = expected["draft_id_digest"]
