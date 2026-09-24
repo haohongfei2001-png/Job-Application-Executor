@@ -232,7 +232,12 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
             for name in ("bootstrap.log", "service.log", "service.json"):
                 path = runtime / name
                 logs[name] = path.read_text(errors="replace")[-4000:] if path.exists() else "(missing)"
-            pytest.fail(f"hosted Mac bootstrap retry failed: {error!r}; {logs!r}")
+            processes = subprocess.run(
+                ["ps", "-axo", "pid,ppid,state,command"], capture_output=True,
+                text=True, timeout=5,
+            ).stdout.splitlines()
+            related = [line for line in processes if "executor.autonomy.cli" in line]
+            pytest.fail(f"hosted Mac bootstrap retry failed: {error!r}; {logs!r}; processes={related!r}")
         assert redirected.value.code == 303
         assert redirected.value.headers["Location"].startswith(
             f"http://127.0.0.1:{service_port}/ui-login?ticket="
