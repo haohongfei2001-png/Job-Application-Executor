@@ -159,7 +159,14 @@ class Worker:
 
     def _remember_private_review(self, tid, runner, plan, revision):
         snapshot = getattr(runner, "private_review_snapshot", None)
-        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("fields"), list):
+        profile_path = getattr(runner, "profile_path", None)
+        profile_version = getattr(runner, "private_review_profile_version", None)
+        if (not isinstance(snapshot, dict) or not isinstance(snapshot.get("fields"), list)
+                or profile_path is None or not isinstance(profile_version, str)
+                or len(profile_version) != 64):
+            return
+        profile_path = Path(profile_path)
+        if hashlib.sha256(profile_path.read_bytes()).hexdigest() != profile_version:
             return
         expected = [field for field in plan.fields if field.status in {
             ResolutionStatus.RESOLVED, ResolutionStatus.KEEP_EXISTING}
@@ -204,24 +211,32 @@ class Worker:
         with self.review_lock:
             self.review_cache[tid] = {
                 "revision": revision, "expires_at": time.monotonic() + 3600,
+                "profile_path": profile_path, "profile_version": profile_version,
                 "payload": payload,
             }
 
+    def _current_private_review(self, tid, revision):
+        row = self.review_cache.get(tid)
+        if not row or row["revision"] != revision or row["expires_at"] <= time.monotonic():
+            self.review_cache.pop(tid, None)
+            return None
+        try:
+            digest = hashlib.sha256(row["profile_path"].read_bytes()).hexdigest()
+        except OSError:
+            digest = None
+        if digest != row["profile_version"]:
+            self.review_cache.pop(tid, None)
+            return None
+        return row
+
     def private_review(self, tid, revision):
         with self.review_lock:
-            row = self.review_cache.get(tid)
-            if not row or row["revision"] != revision or row["expires_at"] <= time.monotonic():
-                self.review_cache.pop(tid, None)
-                return None
-            return copy.deepcopy(row["payload"])
+            row = self._current_private_review(tid, revision)
+            return copy.deepcopy(row["payload"]) if row else None
 
     def private_review_available(self, tid, revision):
         with self.review_lock:
-            row = self.review_cache.get(tid)
-            if row and row["expires_at"] <= time.monotonic():
-                self.review_cache.pop(tid, None)
-                return False
-            return bool(row and row["revision"] == revision)
+            return self._current_private_review(tid, revision) is not None
 
     def discard_private_review(self, tid):
         with self.review_lock:
