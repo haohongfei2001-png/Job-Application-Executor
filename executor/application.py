@@ -692,8 +692,9 @@ class ApplicationExecutor:
                     draft_evidence = verify_draft(self.plan) if callable(verify_draft) else None
                     if not isinstance(draft_evidence, dict) or draft_evidence.get("verified") is not True:
                         self.plan.stage = ApplicationStage.BLOCKED
-                        self.plan.metadata["block_reason"] = "draft persistence unverified before navigation"
+                        self.plan.metadata["block_reason"] = "draft persistence unverified"
                         self.plan.metadata["draft_persistence"] = "UNVERIFIED"
+                        self.plan.metadata["draft_persistence_phase"] = "before_navigation"
                         self.audit.save_plan(self.plan)
                         return self.plan
                     self.plan.metadata.setdefault("page_draft_receipts", []).append({

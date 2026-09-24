@@ -247,7 +247,8 @@ def test_generic_next_cannot_leave_unverified_draft(tmp_path, monkeypatch):
     """)
     plan = runner.run(max_pages=2)
     assert plan.stage == ApplicationStage.BLOCKED
-    assert plan.metadata["block_reason"] == "draft persistence unverified before navigation"
+    assert plan.metadata["block_reason"] == "draft persistence unverified"
+    assert plan.metadata["draft_persistence_phase"] == "before_navigation"
     assert plan.metadata["page_index"] == 0
     assert not plan.metadata.get("page_draft_receipts")
 

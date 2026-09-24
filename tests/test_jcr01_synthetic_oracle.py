@@ -12,7 +12,7 @@ from pathlib import Path
 from executor.autonomy.manager import ManagerAction, ManagerController, ManagerDecision, ManagerTurn
 from executor.autonomy.queue import TaskQueue
 from executor.autonomy.supervisor import Supervisor, create_server
-from executor.autonomy.worker import Worker
+from executor.autonomy.worker import Worker, outcome
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.application import ApplicationExecutor
 from executor.models import ApplicationStage
@@ -216,7 +216,9 @@ def test_multipage_navigation_requires_independent_draft_readback(tmp_path, monk
         ats.draft, ats.revision, ats.page_two_reads, ats.accept_draft = {}, 0, 0, False
         blocked = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=2)
         assert blocked.stage == ApplicationStage.BLOCKED
-        assert blocked.metadata["block_reason"] == "draft persistence unverified before navigation"
+        assert blocked.metadata["block_reason"] == "draft persistence unverified"
+        assert blocked.metadata["draft_persistence_phase"] == "before_navigation"
+        assert outcome(blocked) == ("BLOCKED", "draft_persistence_unverified")
         assert ats.page_two_reads == 0
         assert ats.submit_count == 0
     finally:
