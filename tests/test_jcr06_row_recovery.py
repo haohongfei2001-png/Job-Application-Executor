@@ -224,6 +224,23 @@ def test_unmanaged_matching_row_blocks_before_adding_another_record(tmp_path, ro
     assert journal.pending() == ()
 
 
+def test_malformed_row_inventory_cannot_assert_management_or_revision(tmp_path, row_site):
+    server, driver = row_site
+    server.rows = [{"record_id": "A", "site_row_id": "site-a",
+                    "values": {"school": "A School"}, "managed": "false"}]
+    server.revision = 1
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    with pytest.raises(RowReconciliationBlocked, match="inventory incomplete"):
+        reconciler(driver, journal, guard=lambda: None).reconcile(
+            (DesiredRow("A", {"school": "A School"}),))
+    server.rows[0]["managed"] = True
+    server.revision = True
+    with pytest.raises(RowReconciliationBlocked, match="inventory incomplete"):
+        reconciler(driver, journal, guard=lambda: None).reconcile(
+            (DesiredRow("A", {"school": "A School"}),))
+    assert server.add_count == 0 and journal.pending() == ()
+
+
 def test_concurrent_row_intents_cannot_both_start(tmp_path):
     path = tmp_path / "private" / "rows.sqlite3"
     RowActionJournal(path, scope=SCOPE)
@@ -448,6 +465,7 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
     projects = ThreadingHTTPServer(("127.0.0.1", 0), RowSite)
     projects.rows, projects.revision, projects.complete = [], 0, True
     projects.draft_id_digest = DRAFT_DIGEST
+    projects.wrong_contract = False
     projects.add_count = projects.delete_count = projects.reorder_count = 0
     threading.Thread(target=projects.serve_forever, daemon=True).start()
     try:
@@ -481,7 +499,9 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
                 return tuple(RowExecutionContract(driver, tuple(DesiredRow(
                     record["id"], {key: field["value"] for key, field in
                                     record["fields"].items()}) for record in
-                    applicant_profile["collections"][key]), DRAFT_DIGEST, key)
+                    applicant_profile["collections"][key]),
+                    digest("wrong-project-draft") if key == "projects" and
+                    projects.wrong_contract else DRAFT_DIGEST, key)
                     for key, driver in (("education_records", education_driver),
                                         ("projects", project_driver)))
 
@@ -523,6 +543,12 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
             runner.row_journal_path = journal
             return runner.run(max_pages=1)
 
+        projects.wrong_contract = True
+        mismatched = run()
+        assert mismatched.stage == ApplicationStage.BLOCKED
+        assert mismatched.metadata["block_reason"] == "row reconciliation unverified"
+        assert education.add_count == projects.add_count == 0
+        projects.wrong_contract = False
         assert run().stage == ApplicationStage.READY_TO_SUBMIT
         assert education.add_count == projects.add_count == 1
         assert journal.with_name("task-rows.education_records.sqlite3").exists()

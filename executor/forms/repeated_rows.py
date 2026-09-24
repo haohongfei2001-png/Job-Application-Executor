@@ -177,13 +177,22 @@ class RowReconciler:
             inventory = self.driver.read_rows()
         except Exception:
             raise RowReconciliationBlocked("row inventory unavailable") from None
-        if (not inventory.complete or inventory.revision < 0
+        if (not isinstance(inventory, RowInventory)
+                or not isinstance(inventory.rows, tuple)
+                or any(not isinstance(row, SiteRow) for row in inventory.rows)
+                or type(inventory.complete) is not bool or not inventory.complete
+                or type(inventory.revision) is not int or inventory.revision < 0
                 or inventory.target_sha256 != self.target_sha256
                 or inventory.draft_id_digest != self.draft_id_digest
                 or len({row.record_id for row in inventory.rows}) != len(inventory.rows)
                 or len({row.site_row_id for row in inventory.rows}) != len(inventory.rows)
-                or any(not row.record_id or not row.site_row_id or
-                       len(row.values_digest) != 64 for row in inventory.rows)):
+                or any(not isinstance(row.record_id, str)
+                       or not isinstance(row.site_row_id, str)
+                       or not isinstance(row.values_digest, str)
+                       or not row.record_id or not row.site_row_id or
+                       type(row.managed) is not bool or
+                       not re.fullmatch(r"[0-9a-f]{64}", row.values_digest)
+                       for row in inventory.rows)):
             raise RowReconciliationBlocked("row identity or inventory incomplete")
         return inventory
 

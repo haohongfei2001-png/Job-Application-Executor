@@ -577,17 +577,19 @@ class ApplicationExecutor:
                                                          | offered_keys)):
                             raise RowReconciliationBlocked(
                                 "prior row collection has not been reobserved")
+                        draft_ids = {item.draft_id_digest for item in contracts}
+                        if (len(draft_ids) != 1
+                                or any(item.collection_key not in collection_keys
+                                       or item.delete_ids for item in contracts)
+                                or (row_bindings and
+                                    next(iter(draft_ids)) != row_bindings[0][0].draft_id_digest)
+                                or (attachment_binding and
+                                    next(iter(draft_ids)) != attachment_binding[0])):
+                            raise RowReconciliationBlocked(
+                                "row contracts disagree on collection or draft identity")
                         if self.row_journal_path is None:
                             raise RowReconciliationBlocked("task row journal unavailable")
                         for contract in contracts:
-                            if contract.collection_key not in collection_keys or contract.delete_ids:
-                                raise RowReconciliationBlocked("row collection or deletion unsupported")
-                            if (row_bindings and
-                                    contract.draft_id_digest != row_bindings[0][0].draft_id_digest):
-                                raise RowReconciliationBlocked("row collection draft identity changed")
-                            if (attachment_binding and
-                                    contract.draft_id_digest != attachment_binding[0]):
-                                raise RowReconciliationBlocked("row and attachment draft identity differs")
                             records = (self.profile.get("collections") or {}).get(
                                 contract.collection_key, [])
                             if not isinstance(records, list) or any(
