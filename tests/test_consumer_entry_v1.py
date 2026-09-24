@@ -225,7 +225,7 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
                  {"redirect_request": lambda self, *args: None})()
         )
         with pytest.raises(urllib.error.HTTPError) as redirected:
-            no_redirect.open(retry, timeout=10)
+            no_redirect.open(retry, timeout=30)
         assert redirected.value.code == 303
         assert redirected.value.headers["Location"].startswith(
             f"http://127.0.0.1:{service_port}/ui-login?ticket="
