@@ -118,6 +118,19 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 - **Related acceptance IDs:** C-01 through C-15 and G-class auth recovery cases.
 - **Evidence / PR / commit:** PR #15 merged as `476d19de4f4c6750cd1a46beeda20cbbd556579e`; final-live NOT_RUN.
 
+### DFG-007 — Real applicant structured-form and draft evidence
+
+- **Source round:** JCR-06
+- **Type / status:** `FINAL_LIVE` / `MITIGATED_FOR_ENGINEERING`
+- **Blocking scope:** Claiming that an authenticated real applicant's fields, repeated records, attachments, autosave, multi-page draft and site validation satisfy D-01 through D-22 on a real target. No real applicant profile, account, job application or upload is used for unattended proof.
+- **Non-blocked work:** Production form drivers, typed representation, row recovery, isolated React/Vue and fake-service fixtures, independent server draft oracles, fault injection, rollback and later independent engineering rounds.
+- **Safe degradation:** The generic driver blocks unproven upload, unsupported components, ambiguous repeated rows and drafts without independent readback. A failed or unknown intermediate save cannot advance or blindly Resume. No automated final submit is available.
+- **Existing evidence:** JCR-06 draft PR #16 has isolated synthetic structural, attachment-preflight, dependency, multi-page and server-draft tests; `receipts/JCR-06-WIP.md` records exact local results. These are AUTO subevidence only, not final-live PASS.
+- **Missing final evidence:** Owner-authorized real session and exact target, applicant fact/record review, permitted file/version proof, site-specific saved draft and attachment readback, and per-case D-01 through D-22 real-site results. Engineering gaps listed in the JCR-06 WIP receipt remain engineering work and are not deferred by this entry.
+- **Final convergence condition:** After automatable JCR-06 engineering and later rounds are complete, the owner performs only unavoidable real account, file, draft and final acceptance actions in JCR-09. Unsupported site paths remain disabled if proof is unavailable; no false D-case PASS or automated final click is permitted.
+- **Related acceptance IDs:** D-01 through D-22; G-class browser recovery where the same real draft is involved.
+- **Evidence / PR / commit:** JCR-06 draft PR #16; final-live NOT_RUN.
+
 ## Invariants
 
 1. A deferred item is never silently converted to PASS.
