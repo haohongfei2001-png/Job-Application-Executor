@@ -145,3 +145,32 @@ def test_missing_observer_and_unconfirmed_default_fail_closed():
     with pytest.raises(ReviewUnverified, match="unconfirmed site default"):
         certify_review(profile, plan, observation,
                        expected_account_identity_digest=digest("account"))
+
+
+def test_project_row_identity_and_values_must_match_current_inventory():
+    profile = {"generated_at": "v1", "collections": {"projects": [
+        {"id": "research-1", "title": "Research One", "category": "research"}]}}
+    plan = ApplicationPlan(execution_id="task", target_url="https://example.test/job",
+                           site_id="synthetic")
+    values_digest = digest(json.dumps({"title": "Research One", "category": "research"},
+                                      sort_keys=True, ensure_ascii=False,
+                                      separators=(",", ":")))
+    snapshot = {
+        "source": "server_readback", "target_sha256": digest(plan.target_url),
+        "draft_id_digest": digest("draft"), "revision": 2,
+        "account_verified": True, "account_identity_digest": digest("account"),
+        "complete_pages": True, "complete_required": True, "save_status": "VERIFIED",
+        "validation_error_count": 0, "hidden_required_count": 0,
+        "unverified_default_count": 0, "document_epoch": "epoch",
+        "driver_version": "synthetic-v1", "fields": [], "attachments": {},
+        "rows": {"projects": [{"record_id": "research-1",
+                              "values_digest": values_digest}]},
+    }
+    expected = {"projects": {"research-1": values_digest}}
+    assert certify_review(
+        profile, plan, snapshot, expected_rows=expected,
+        expected_account_identity_digest=digest("account")).row_count == 1
+    snapshot["rows"]["projects"][0]["values_digest"] = digest("wrong category")
+    with pytest.raises(ReviewUnverified, match="structured row values"):
+        certify_review(profile, plan, snapshot, expected_rows=expected,
+                       expected_account_identity_digest=digest("account"))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import http.cookiejar
+import hashlib
 import json
 import threading
 import urllib.request
@@ -16,6 +17,38 @@ from executor.autonomy.worker import Worker, outcome
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.application import ApplicationExecutor
 from executor.models import ApplicationStage
+
+
+def _digest(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _review_snapshot(adapter, plan, ats, *, account):
+    """Read actual values from the fixture service, never from the fill plan."""
+    actual = json.load(urllib.request.urlopen(
+        f"http://127.0.0.1:{ats.server_port}/oracle"))
+    draft = actual["draft"]
+    return {
+        "source": "server_readback",
+        "target_sha256": _digest(plan.target_url),
+        "draft_id_digest": _digest("syntheticats-draft"),
+        "revision": actual["revision"],
+        "account_verified": True,
+        "account_identity_digest": _digest("identity.email:" + account.casefold()),
+        "complete_pages": set(draft) == {"full_name", "email"},
+        "complete_required": set(draft) == {"full_name", "email"},
+        "save_status": "VERIFIED",
+        "validation_error_count": 0, "hidden_required_count": 0,
+        "unverified_default_count": 0,
+        "document_epoch": _digest(adapter.page.url),
+        "driver_version": "syntheticats-v1",
+        "fields": [
+            {"index": index, "field_id": field.field_id,
+             "selector": field.selector, "required": field.required,
+             "value": draft.get(field.field_id)}
+            for index, field in enumerate(plan.fields)],
+        "attachments": {}, "rows": {},
+    }
 
 
 class SyntheticATS(BaseHTTPRequestHandler):
@@ -135,6 +168,9 @@ def test_ui_to_service_to_browser_draft_has_independent_server_oracle(tmp_path, 
                 return {"verified": True, "level": "server_readback",
                         "revision": actual["revision"]}
 
+            def observe_review_draft(self, plan):
+                return _review_snapshot(self, plan, ats, account=golden["email"])
+
         monkeypatch.setattr("executor.application.adapter_for_url",
                             lambda url: SyntheticATSAdapter(url))
         profile.write_text(json.dumps({"fields": {
@@ -197,6 +233,9 @@ def test_multipage_navigation_requires_independent_draft_readback(tmp_path, monk
                     return None
                 return {"verified": True, "level": "server_readback",
                         "revision": oracle["revision"]}
+
+            def observe_review_draft(self, plan):
+                return _review_snapshot(self, plan, ats, account="synthetic@example.test")
 
         monkeypatch.setattr("executor.application.adapter_for_url", lambda url: MultiPageAdapter(url))
         monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")

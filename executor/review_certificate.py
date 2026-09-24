@@ -77,6 +77,8 @@ def certify_review(
     *,
     expected_draft_id_digest: str | None = None,
     expected_account_identity_digest: str | None = None,
+    expected_rows: dict[str, dict[str, str]] | None = None,
+    expected_attachments: dict[str, str] | None = None,
     minimum_revision: int = 0,
     profile_version: str | None = None,
 ) -> ReviewCertificate:
@@ -141,10 +143,11 @@ def certify_review(
 
     assets = profile.get("assets") or {}
     actual_assets = snapshot.get("attachments")
-    expected_assets = {
+    expected_assets = expected_attachments if expected_attachments is not None else {
         field.canonical_key.removeprefix("assets."): assets.get(
             field.canonical_key.removeprefix("assets."), {}).get("sha256")
-        for field in expected if field.canonical_key
+        for field in plan.fields if field.status == ResolutionStatus.RESOLVED
+        and field.canonical_key
         and field.canonical_key.startswith("assets.")
     }
     if (not isinstance(actual_assets, dict) or
@@ -155,11 +158,21 @@ def certify_review(
         raise ReviewUnverified("attachment readback differs from canonical file")
 
     rows = snapshot.get("rows")
-    if not isinstance(rows, dict) or any(
-            not isinstance(ids, list) or len(ids) != len(set(ids))
-            or any(not isinstance(i, str) or not i for i in ids)
-            for ids in rows.values()):
+    expected_rows = expected_rows or {}
+    if not isinstance(rows, dict) or set(rows) != set(expected_rows):
         raise ReviewUnverified("structured row inventory unverified")
+    for collection, records in expected_rows.items():
+        actual_records = rows.get(collection)
+        if (not isinstance(actual_records, list)
+                or len(actual_records) != len(records)
+                or not all(isinstance(item, dict)
+                           and isinstance(item.get("record_id"), str)
+                           and isinstance(item.get("values_digest"), str)
+                           and _SHA256.fullmatch(item["values_digest"])
+                           for item in actual_records)
+                or {item["record_id"]: item["values_digest"]
+                    for item in actual_records} != records):
+            raise ReviewUnverified("structured row values differ from canonical records")
     projects = (profile.get("collections") or {}).get("projects") or []
     exclusions = ((profile.get("collections") or {}).get("fact_exclusions") or {}).get(
         plan.execution_id, {})
@@ -171,7 +184,8 @@ def certify_review(
                  and str(exclusions[item["id"]].get("reason") or "").strip())
     }
     if (None in required_projects or
-            not required_projects.issubset(set(rows.get("projects", [])))):
+            not required_projects.issubset({
+                item["record_id"] for item in rows.get("projects", [])})):
         raise ReviewUnverified("canonical project rows unverified")
 
     profile_version = profile_version or profile.get("generated_at")
@@ -200,12 +214,16 @@ def recheck_review(
     *,
     profile_version: str | None = None,
     expected_account_identity_digest: str | None = None,
+    expected_rows: dict[str, dict[str, str]] | None = None,
+    expected_attachments: dict[str, str] | None = None,
 ) -> ReviewCertificate:
     """Only a fresh read-only observation can preserve READY after a change."""
     current = certify_review(
         profile, plan, snapshot,
         expected_draft_id_digest=certificate.draft_id_digest,
         expected_account_identity_digest=expected_account_identity_digest,
+        expected_rows=expected_rows,
+        expected_attachments=expected_attachments,
         minimum_revision=certificate.revision,
         profile_version=profile_version,
     )

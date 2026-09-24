@@ -1039,6 +1039,14 @@ class ApplicationExecutor:
                             expected_account_identity_digest=canonical_account_digest(
                                 self.profile, live=browser_mode() not in {
                                     "isolated", "test", "headless"}),
+                            expected_rows={
+                                key: {row.record_id: row.values_digest for row in desired}
+                                for _, desired, key in row_bindings},
+                            expected_attachments={
+                                item.canonical_key.removeprefix("assets."): (
+                                    self.profile["assets"][
+                                        item.canonical_key.removeprefix("assets.")]["sha256"])
+                                for item in attachment_selections},
                             minimum_revision=max(
                                 [*(row_revisions if row_bindings else []),
                                  attachment_binding[1] if attachment_binding else 0]),
