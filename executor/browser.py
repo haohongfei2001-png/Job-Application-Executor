@@ -438,7 +438,14 @@ def observe_bound_submission_receipt(
     target, draft, account and observer version; no receipt body or applicant
     value leaves this function.
     """
-    if (not binding or not expected_review
+    if (not binding or not isinstance(expected_review, dict)
+            or any(not isinstance(expected_review.get(key), str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", expected_review[key])
+                   for key in ("target_sha256", "draft_id_digest",
+                               "account_identity_digest"))
+            or not isinstance(expected_review.get("driver_version"), str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",
+                                expected_review["driver_version"])
             or browser_mode() in {"test", "isolated", "headless"}):
         return None
     epoch = owned_cdp_fingerprint()
