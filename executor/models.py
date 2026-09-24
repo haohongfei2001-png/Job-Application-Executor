@@ -69,6 +69,7 @@ class FieldResolution(BaseModel):
     field_id: str
     selector: str
     label: str
+    scope_sha256: str | None = None
     canonical_key: str | None = None
     record_id: str | None = None
     status: ResolutionStatus

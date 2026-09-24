@@ -21,12 +21,26 @@ from executor.forms.attachment_manifest import (AttachmentManifestError,
                                                 load_attachment_manifest)
 from executor.forms import (DesiredRow, RowActionJournal, RowExecutionContract, RowInventory,
                             SiteRow)
-from executor.autonomy.worker import outcome
+from executor.autonomy.worker import _task_attachment_asset, outcome
 from executor.models import ApplicationStage, ValidationResult, WebField
 
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def test_task_attachment_reference_keeps_matching_hash_and_binds_new_bytes(tmp_path):
+    original = tmp_path / "original.pdf"
+    replacement = tmp_path / "replacement.pdf"
+    original.write_bytes(b"original synthetic resume")
+    replacement.write_bytes(b"replacement synthetic resume")
+    prior = {"path": str(original), "kind": "resume", "sha256": digest("prior verified")}
+    same = _task_attachment_asset("resume", str(original), prior)
+    assert same["sha256"] == prior["sha256"]
+    changed = _task_attachment_asset("resume", str(replacement), prior)
+    assert changed["sha256"] == hashlib.sha256(replacement.read_bytes()).hexdigest()
+    assert changed["sha256"] != prior["sha256"]
+    assert "sha256" not in _task_attachment_asset("resume", str(tmp_path / "missing.pdf"), None)
 
 
 class UploadATS(BaseHTTPRequestHandler):
@@ -280,6 +294,7 @@ def test_two_uploads_need_retained_same_draft_receipts(tmp_path, monkeypatch, up
         "level": "server_readback"}
     assert upload_site.submit_count == 0
 
+
     upload_site.attachments.clear()
     upload_site.revision = 0
     upload_site.drop_slot = "photo"
@@ -306,6 +321,37 @@ def test_two_uploads_need_retained_same_draft_receipts(tmp_path, monkeypatch, up
     wrong_draft = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=1)
     assert wrong_draft.stage == ApplicationStage.BLOCKED
     assert wrong_draft.metadata["block_reason"] == "draft persistence unverified"
+    assert upload_site.submit_count == 0
+
+
+@pytest.mark.parametrize("before_navigation", [False, True])
+def test_draft_readback_exception_blocks_without_claiming_save(
+        tmp_path, monkeypatch, upload_site, before_navigation):
+    resume, photo = tmp_path / "resume.pdf", tmp_path / "photo.png"
+    resume.write_bytes(b"%PDF-1.4 readback failure")
+    photo.write_bytes(b"\x89PNG readback failure")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"assets": {
+        "resume": {"path": str(resume), "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()},
+        "photo": {"path": str(photo), "sha256": hashlib.sha256(photo.read_bytes()).hexdigest()},
+    }}))
+    target = f"http://127.0.0.1:{upload_site.server_port}/apply"
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+
+    class BrokenReadback(TwoPageUploadAdapter if before_navigation else CertifiedUploadAdapter):
+        def verify_draft_persistence(self, _plan):
+            raise TimeoutError("synthetic private draft payload")
+
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: BrokenReadback(url, upload_site, lose_photo=False)
+                        if before_navigation else BrokenReadback(url))
+    plan = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(
+        max_pages=2 if before_navigation else 1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "draft persistence unverified"
+    assert plan.metadata["draft_persistence"] == "UNVERIFIED"
+    assert outcome(plan) == ("BLOCKED", "draft_persistence_unverified")
+    assert "synthetic private draft payload" not in repr(plan.metadata)
     assert upload_site.submit_count == 0
 
 

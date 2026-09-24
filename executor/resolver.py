@@ -399,7 +399,9 @@ class FieldResolver:
             if represented is not None:
                 return FieldResolution(
                     field_id=field.field_id, selector=field.selector,
-                    label=field.label, canonical_key="preferences.expected_salary",
+                    label=field.label,
+                    scope_sha256=hashlib.sha256(field.page_url.encode()).hexdigest(),
+                    canonical_key="preferences.expected_salary",
                     status=ResolutionStatus.RESOLVED, value=represented,
                     source="user_confirmed_scoped_salary", confidence=1.0,
                     reason="exact target, currency, period and tax basis; explicit unit conversion",

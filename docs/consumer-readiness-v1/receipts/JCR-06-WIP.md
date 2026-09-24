@@ -58,6 +58,10 @@ The first candidate-wide run exposed two old synthetic tests that hard-coded the
 
 The corrected full candidate suite passed **448 tests in 106.95 seconds** in isolated/headless mode. This is local AUTO evidence only. Exact-head GitHub CI, review, main integration and honest deferred status are still required before the round can advance.
 
+The first Ready candidate passed exact-head foundation and full GitHub CI, then automated review found three actionable faults. Explicit task attachment references were replacing canonical assets without a hash; the worker now preserves a matching prior hash or hashes the task-selected bytes, while the resolver rehashes them before selection. Multi-page salary resolution and the final audit now compare the same page-scope digest without storing the page URL in the field receipt. A certified draft verifier's timeout/operational exception becomes `draft_persistence_unverified` at both pre-navigation and final review; browser ownership exceptions still propagate. New regression canaries plus affected attachment, salary, application, task, resolver and historical privacy tests passed **139 isolated/headless tests**. These review fixes require a new final-tree full suite and exact-head CI before merge.
+
+After the review fixes, the full isolated/headless suite passed **452 tests in 109.44 seconds**. Exact-head GitHub CI on this corrected tree, review-thread closure and main integration remain pending.
+
 ## Still open
 
 D-01–D-22 are not certified as a set. The row reconciler is integrated with the application and a certified synthetic driver; no real ATS row driver or complete worker browser/draft recovery is proven. Virtualized list support, unannotated site dependency drivers, external site upload completion receipts, broader multi-page recovery and per-action fault injections remain. The generic unsupported paths are blocked. DFG-002 browser write reconciliation is engineering debt; it is not a final-live owner item. DFG-007 records real applicant/site draft evidence as FINAL_LIVE while this engineering continues. No owner action or automated final submit is authorized by this checkpoint.

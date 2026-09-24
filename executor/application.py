@@ -444,6 +444,18 @@ class ApplicationExecutor:
                  field.selector, field.field_id, field.label, field.input_type)
         return "site_field." + hashlib.sha256(repr(scope).encode("utf-8")).hexdigest()
 
+    def _read_draft_evidence(self, adapter) -> dict | None:
+        verifier = getattr(adapter, "verify_draft_persistence", None)
+        if not callable(verifier):
+            return None
+        try:
+            return verifier(self.plan)
+        except BrowserOwnershipError:
+            raise
+        except Exception:
+            # Site readback errors prove neither a save nor a safe retry.
+            return None
+
     def _resolve_page(self, fields: list[WebField]) -> list[FieldResolution]:
         resolved: list[FieldResolution] = []
         for field in fields:
@@ -481,8 +493,9 @@ class ApplicationExecutor:
                     canonical = get_field(self.profile, item.canonical_key)
                     salary_scope = ((canonical.normalization or {}).get("salary") or {}) if canonical else {}
                     if (not canonical or not canonical.user_confirmed
-                            or salary_scope.get("target_sha256") != hashlib.sha256(
-                                self.target_url.encode()).hexdigest()):
+                            or salary_scope.get("target_sha256") != (
+                                item.scope_sha256 or hashlib.sha256(
+                                    self.target_url.encode()).hexdigest())):
                         errors.append(f"{item.field_id}: salary scope is no longer confirmed")
                     continue
                 if item.canonical_key.startswith("assets."):
@@ -969,7 +982,7 @@ class ApplicationExecutor:
                         self.audit.save_plan(self.plan)
                         return self.plan
                     if callable(verify_draft):
-                        draft_evidence = verify_draft(self.plan)
+                        draft_evidence = self._read_draft_evidence(adapter)
                         if (not isinstance(draft_evidence, dict)
                                 or draft_evidence.get("verified") is not True
                                 or (row_bindings and (
@@ -1028,7 +1041,7 @@ class ApplicationExecutor:
                 next_control = getattr(adapter, "next_control", None)
                 if callable(next_control) and next_control():
                     verify_draft = getattr(adapter, "verify_draft_persistence", None)
-                    draft_evidence = verify_draft(self.plan) if callable(verify_draft) else None
+                    draft_evidence = self._read_draft_evidence(adapter)
                     if (not isinstance(draft_evidence, dict)
                             or draft_evidence.get("verified") is not True
                             or (row_bindings and (

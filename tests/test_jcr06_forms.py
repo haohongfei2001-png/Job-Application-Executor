@@ -534,6 +534,29 @@ def test_scoped_salary_representation_preserves_canonical_amount(tmp_path, monke
     assert runner._profile_consistency()["ok"] is True
 
 
+def test_scoped_salary_on_later_page_uses_same_scope_for_resolution_and_audit(tmp_path, monkeypatch):
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+    target = "https://synthetic.example.test/apply/role-1"
+    salary_page = target + "/salary"
+    profile = tmp_path / "salary-page-profile.json"
+    profile.write_text(json.dumps({"fields": {"preferences.expected_salary": {
+        "value": "200000", "user_confirmed": True,
+        "normalization": {"salary": {
+            "target_sha256": hashlib.sha256(salary_page.encode()).hexdigest(),
+            "currency": "CNY", "period": "annual", "tax_basis": "gross", "unit": "yuan",
+        }}}}}))
+    runner = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}})
+    field = WebField(field_id="salary", selector="#salary", label="期望年薪",
+                     required=True, page_url=salary_page,
+                     metadata={"salary": {"currency": "CNY", "period": "annual",
+                                          "tax_basis": "gross", "unit": "ten_thousand_yuan"}})
+    resolved = runner.resolver.resolve(field)
+    assert resolved.value == "20"
+    assert resolved.scope_sha256 == hashlib.sha256(salary_page.encode()).hexdigest()
+    runner.plan.fields.append(resolved)
+    assert runner._profile_consistency()["ok"] is True
+
+
 def test_form_observation_and_fill_plan_do_not_expose_values_in_receipts():
     field = WebField(field_id="name", selector="#name", label="Private Label",
                      current_value="CANARY_PRIVATE_PERSON", required=True)
