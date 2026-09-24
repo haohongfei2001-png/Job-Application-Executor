@@ -117,19 +117,27 @@ def launch_consumer(root, port):
             ensure_chrome()
         except Exception:
             pass
-    started = lifecycle("start", root, port)
-    health = lifecycle("health", root, port)
-    # A newly installed app must not silently reuse a daemon loaded from an old
-    # release. Stop only at the worker's safe checkpoint, then verify readback.
-    from .release import read_release_identity
-    identity = read_release_identity(Path(__file__).resolve().parents[2])
+    # A packaged app with a broken source manifest must not start a service.
+    # Development checkouts have no release manifest and retain their normal path.
+    from .release import MANIFEST_NAME, read_release_identity
+    source = Path(__file__).resolve().parents[2]
+    identity = read_release_identity(source)
     expected = identity.get("source_sha256") if identity.get("status") == "verified" else ""
-    if expected and health.get("ok") and health.get("loaded_source_sha256") != expected:
-        restarted = lifecycle("restart", root, port)
+    packaged = (source / MANIFEST_NAME).exists() or (source / MANIFEST_NAME).is_symlink()
+    if packaged and not expected:
+        started = {"ok": False, "reason": "release_unverified"}
+        health = {"ok": False}
+    else:
+        started = lifecycle("start", root, port)
         health = lifecycle("health", root, port)
-        if not restarted.get("ok") or health.get("loaded_source_sha256") != expected:
-            started = {"ok": False, "reason": "release_mismatch"}
-            health = {"ok": False}
+        # A newly installed app must not silently reuse a daemon loaded from
+        # an old release. Stop at the worker's safe checkpoint and read back.
+        if expected and health.get("ok") and health.get("loaded_source_sha256") != expected:
+            restarted = lifecycle("restart", root, port)
+            health = lifecycle("health", root, port)
+            if not restarted.get("ok") or health.get("loaded_source_sha256") != expected:
+                started = {"ok": False, "reason": "release_mismatch"}
+                health = {"ok": False}
     result = collect_live_preflight(
         supervisor_running=bool(health.get("ok")),
     )
