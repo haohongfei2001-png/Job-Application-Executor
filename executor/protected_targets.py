@@ -123,43 +123,40 @@ def register_user_confirmed_target(
         raise ValueError("protected target file cannot be a symlink")
     lock_path = parent / (path.name + ".lock")
     lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        with os.fdopen(lock_fd, "r+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            if path.is_symlink():
-                raise ValueError("protected target file cannot be a symlink")
-            if path.exists():
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict) or not isinstance(data.get("targets"), list):
-                    raise ValueError("protected target registry is malformed")
-                if path.stat().st_mode & 0o077:
-                    raise ValueError("protected target registry must be private")
-            else:
-                data = {"targets": []}
-            items = data["targets"]
-            if protected_target(target_url, items, tenant=tenant, job_id=job_id,
-                                campaign=campaign):
-                return False
-            items.append({
-                "label": "user-confirmed submitted application",
-                "status": "USER_CONFIRMED",
-                "target_identity": {
-                    "tenant": tenant,
-                    "job_id": job_id,
-                    "campaign": campaign,
-                },
-            })
-            temporary = parent / (path.name + ".tmp-" + uuid.uuid4().hex)
-            try:
-                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(data, handle, ensure_ascii=False, indent=2)
-                    handle.write("\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, path)
-            finally:
-                temporary.unlink(missing_ok=True)
-            return True
-    finally:
-        pass
+    with os.fdopen(lock_fd, "r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if path.is_symlink():
+            raise ValueError("protected target file cannot be a symlink")
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("targets"), list):
+                raise ValueError("protected target registry is malformed")
+            if path.stat().st_mode & 0o077:
+                raise ValueError("protected target registry must be private")
+        else:
+            data = {"targets": []}
+        items = data["targets"]
+        if protected_target(target_url, items, tenant=tenant, job_id=job_id,
+                            campaign=campaign):
+            return False
+        items.append({
+            "label": "user-confirmed submitted application",
+            "status": "USER_CONFIRMED",
+            "target_identity": {
+                "tenant": tenant,
+                "job_id": job_id,
+                "campaign": campaign,
+            },
+        })
+        temporary = parent / (path.name + ".tmp-" + uuid.uuid4().hex)
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return True
