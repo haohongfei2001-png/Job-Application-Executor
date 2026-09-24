@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from executor.autonomy import bootstrap, cli, preflight
-from executor.autonomy.consumer import install_macos_app
+from executor.autonomy.consumer import install_macos_app, rollback_macos_app
 from executor.autonomy.dashboard import DASHBOARD_HTML
 
 
@@ -265,6 +265,39 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert third["reason"] == "rollback_pending"
     assert app.is_dir()
     assert rollback.is_dir()
+    restored = rollback_macos_app(apps)
+    assert restored["ok"] is True
+    assert restored["restored"] is True
+    assert rogue.read_text() == "old"
+    assert (apps / ".AI 投递经理.app.failed").is_dir()
+    assert not rollback.exists()
+
+
+def test_macos_consumer_app_rollback_failure_preserves_current(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\\nexit 0\\n")
+    python.chmod(0o755)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    previous = apps / ".AI 投递经理.app.previous"
+    original_rename = Path.rename
+
+    def fail_previous(self, target):
+        if self == previous:
+            raise OSError("synthetic rollback failure")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_previous)
+    result = rollback_macos_app(apps)
+    assert result["ok"] is False
+    assert result["reason"] == "rollback_activation_failed"
+    assert app.is_dir()
+    assert previous.is_dir()
+    assert not (apps / ".AI 投递经理.app.failed").exists()
 
 
 def test_macos_consumer_app_activation_failure_restores_known_good(tmp_path, monkeypatch):
