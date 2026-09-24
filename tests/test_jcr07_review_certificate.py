@@ -104,7 +104,8 @@ def test_server_draft_certificate_and_fault_canaries():
             certify_review(profile, plan, read(),
                            expected_account_identity_digest=digest("account-1"))
 
-        for key, value in (("revision", 1), ("document_epoch", "new-page"),
+        for key, value in (("revision", 1), ("revision", 3),
+                           ("document_epoch", "new-page"),
                            ("driver_version", "synthetic-v2")):
             service.actual = copy.deepcopy(snapshot)
             service.actual[key] = value
