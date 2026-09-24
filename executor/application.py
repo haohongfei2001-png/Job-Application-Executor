@@ -86,6 +86,7 @@ class ApplicationExecutor:
         self.otp_bridge = otp_bridge or OtpBridge()
         # Private, process-local last readback for the authenticated review UI.
         self.private_review_snapshot = None
+        self.private_review_profile_version = None
 
     @staticmethod
     def _auth_kind(adapter) -> str | None:
@@ -1089,6 +1090,7 @@ class ApplicationExecutor:
                         self.audit.save_plan(self.plan)
                         return self.plan
                     self.private_review_snapshot = fresh_snapshot
+                    self.private_review_profile_version = profile_version
                     self.plan.metadata["review_certificate"] = certificate.safe_summary()
                     self.plan.stage = ApplicationStage.READY_TO_SUBMIT
                     self.plan.metadata["final_submit_control"] = final_control
