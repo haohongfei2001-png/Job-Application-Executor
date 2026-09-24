@@ -1135,6 +1135,8 @@ class ApplicationExecutor:
                                     and draft_evidence["revision"] >= 0 else None,
                     })
                     self.audit.save_plan(self.plan)
+                    if draft_evidence.get("level") == "server_readback":
+                        adapter._certified_navigation_receipt = draft_evidence
                 if adapter.advance():
                     self.audit.record_action({"type": "advance", "page_index": page_index})
                     continue
