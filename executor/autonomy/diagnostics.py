@@ -98,9 +98,21 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
         cdp_alive = False
 
     state = repository_state(repo_root)
+    identity = getattr(supervisor, "release_identity", {})
+    digest = identity.get("source_sha256") if isinstance(identity, dict) else ""
+    verified = (
+        isinstance(identity, dict)
+        and identity.get("status") == "verified"
+        and isinstance(digest, str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", digest))
+    )
     return {
         "format": "application-executor-diagnostics-v1",
         "repository": state,
+        "loaded_source": {
+            "verified_at_start": verified,
+            "sha256": digest if verified else "",
+        },
         "system": {
             "supervisor": True,
             "worker_active": bool(supervisor.worker.active),
