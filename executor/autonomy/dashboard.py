@@ -33,7 +33,11 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .composer{background:#fff;border-top:1px solid #e5e7eb;padding:14px 20px;display:flex;gap:10px}
 textarea{flex:1;min-height:52px;max-height:160px;resize:vertical;border:1px solid #cbd5e1;border-radius:12px;padding:12px;font:inherit}
 button{border:0;border-radius:10px;background:#111;color:#fff;padding:0 18px;font-weight:600;cursor:pointer}
-button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b91c1c}.toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
+button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b91c1c}.diagnostics-dialog{width:min(680px,calc(100vw - 32px));max-height:80vh;border:1px solid #cbd5e1;border-radius:14px;padding:22px;box-shadow:0 18px 60px #0003}
+.diagnostics-dialog::backdrop{background:#0f172a99}.diagnostics-dialog h2{font-size:18px;margin:0 0 8px}.diagnostics-dialog p{font-size:13px;line-height:1.5;color:#475569}
+.diagnostics-dialog pre{max-height:48vh;overflow:auto;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.diagnostics-actions{display:flex;justify-content:flex-end;gap:8px}.diagnostics-actions button{min-height:36px}
+.toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
 @media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:none}}
 </style>
 </head>
@@ -66,7 +70,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <div class="statusbar">
     <div><span class="dot"></span><span id="health">本地服务</span></div>
     <span id="readiness" class="readiness" role="status">正在检查运行条件…</span>
-    <button id="diagnostics" class="headerbtn" type="button">复制诊断</button>
+    <button id="diagnostics" class="headerbtn" type="button">查看诊断</button>
     <button id="update" class="headerbtn" type="button">检查并更新</button>
   </div>
 </header>
@@ -79,9 +83,18 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 </div>
 </main>
 </div>
+<dialog id="diagnostics-dialog" class="diagnostics-dialog" aria-labelledby="diagnostics-title">
+  <h2 id="diagnostics-title">诊断预览</h2>
+  <p>此报告仅显示运行状态和恢复代码。请核对内容，再决定是否复制分享。</p>
+  <pre id="diagnostics-report"></pre>
+  <div class="diagnostics-actions">
+    <button id="diagnostics-close" class="headerbtn" type="button">关闭</button>
+    <button id="diagnostics-copy" type="button">复制报告</button>
+  </div>
+</dialog>
 <div id="toast" class="toast"></div>
 <script>
-const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
+const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),diagnosticsDialog=document.getElementById('diagnostics-dialog'),diagnosticsReport=document.getElementById('diagnostics-report'),diagnosticsCopy=document.getElementById('diagnostics-copy'),diagnosticsClose=document.getElementById('diagnostics-close'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
 const newTaskForm=document.getElementById('newtask');
 const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -358,27 +371,41 @@ function updateLabel(update){
     updateBtn.textContent='检查并更新';
   }
 }
-async function copyDiagnostics(){
+async function previewDiagnostics(){
   diagnosticsBtn.disabled=true;
   try{
     const r=await fetch('/ui/api/diagnostics',{credentials:'same-origin'});
     const data=await r.json();
     if(!r.ok)throw new Error();
-    const text=JSON.stringify(data,null,2);
-    try{
-      await navigator.clipboard.writeText(text);
-    }catch(copyError){
-      const helper=document.createElement('textarea');
-      helper.value=text;helper.setAttribute('readonly','');helper.style.position='fixed';helper.style.opacity='0';
-      document.body.appendChild(helper);helper.select();
-      if(!document.execCommand('copy'))throw copyError;
-      helper.remove();
-    }
-    notify('诊断信息已复制。可以直接粘贴给 ChatGPT。');
+    diagnosticsReport.textContent=JSON.stringify(data,null,2);
+    diagnosticsDialog.showModal();
+    diagnosticsClose.focus();
   }catch(e){
-    notify('复制诊断失败；现有任务未被修改。');
+    notify('无法读取诊断；现有任务未被修改。');
   }finally{diagnosticsBtn.disabled=false}
 }
+async function copyDiagnostics(){
+  diagnosticsCopy.disabled=true;
+  const report=diagnosticsReport.textContent;
+  try{
+    if(!diagnosticsDialog.open||!report)throw new Error();
+    try{
+      await navigator.clipboard.writeText(report);
+    }catch(copyError){
+      const helper=document.createElement('textarea');
+      helper.value=report;helper.setAttribute('readonly','');helper.style.position='fixed';helper.style.opacity='0';
+      document.body.appendChild(helper);helper.select();
+      try{if(!document.execCommand('copy'))throw copyError}
+      finally{helper.remove()}
+    }
+    notify('诊断信息已复制。');
+  }catch(e){
+    notify('复制诊断失败；现有任务未被修改。');
+  }finally{diagnosticsCopy.disabled=false}
+}
+diagnosticsDialog.addEventListener('close',()=>{diagnosticsReport.textContent=''});
+diagnosticsClose.onclick=()=>diagnosticsDialog.close();
+diagnosticsCopy.onclick=copyDiagnostics;
 async function startUpdate(){
   updateBtn.disabled=true;updateBtn.textContent='正在检查…';
   try{
@@ -444,7 +471,7 @@ async function pollUpdate(){
     // opens a new authenticated UI, so no destructive retry is attempted here.
   }
 }
-diagnosticsBtn.onclick=copyDiagnostics;
+diagnosticsBtn.onclick=previewDiagnostics;
 updateBtn.onclick=startUpdate;
 async function readiness(){
   const label=document.getElementById('readiness');
