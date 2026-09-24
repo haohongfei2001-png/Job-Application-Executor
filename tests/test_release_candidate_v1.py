@@ -66,7 +66,7 @@ def test_undecodable_release_manifest_is_unverified_without_exposing_state(tmp_p
     repo = _source(tmp_path)
     candidate = tmp_path / "candidate"
     copy_source_candidate(repo, candidate)
-    (candidate / MANIFEST_NAME).write_bytes(b"\\xff\\xfe")
+    (candidate / MANIFEST_NAME).write_bytes(bytes((0xff, 0xfe)))
     assert verify_source_candidate(candidate) is False
     assert read_release_identity(candidate) == {
         "status": "unverified", "source_sha256": ""
