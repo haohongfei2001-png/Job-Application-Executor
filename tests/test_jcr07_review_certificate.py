@@ -499,6 +499,65 @@ def test_post_human_submit_observer_is_read_only_and_page_signal_only(monkeypatc
     assert calls == {"connect": 1, "stop": 1}
 
 
+
+def test_certified_post_click_server_receipt_is_bound_and_copy_safe(monkeypatch):
+    from executor.adapters import registry
+    target = "https://jobs.example.test/apply?postId=role-1&resumeId=private"
+    binding = {
+        "process_epoch": "process12345", "target_id": "target12345",
+        "document_epoch": "100.0",
+    }
+    expected = {
+        "target_sha256": digest(target),
+        "draft_id_digest": digest("draft-1"),
+        "account_identity_digest": digest("account-1"),
+        "driver_version": "synthetic-v1",
+    }
+    receipt = {
+        **expected, "source": "server_readback", "verified": True,
+        "status": "submitted", "submission_id": "private-submission-123",
+    }
+    calls = {"reads": 0, "stops": 0}
+
+    class Playwright:
+        def stop(self):
+            calls["stops"] += 1
+
+    class Driver:
+        read_only_submission_certified = True
+        def observe_submission_receipt(self):
+            calls["reads"] += 1
+            return dict(receipt)
+
+    driver = Driver()
+    monkeypatch.setattr(browser, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser, "owned_cdp_fingerprint", lambda: "process12345")
+    monkeypatch.setattr(
+        browser, "connect",
+        lambda *_args, **_kwargs: (Playwright(), object(), object(), object()))
+    monkeypatch.setattr(browser, "page_target_id",
+                        lambda _ctx, _page: "target12345")
+    monkeypatch.setattr(registry, "adapter_for_url", lambda _url: driver)
+
+    observed = browser.observe_bound_submission_receipt(target, binding, expected)
+    assert observed == {
+        "status": "SERVER_SUBMISSION_VERIFIED",
+        "level": "server_verified",
+        "server_verified": True,
+        "user_confirmed": False,
+        "replay_allowed": False,
+    }
+    assert "private" not in json.dumps(observed)
+    receipt["draft_id_digest"] = digest("other-draft")
+    assert browser.observe_bound_submission_receipt(target, binding, expected) is None
+    receipt["draft_id_digest"] = expected["draft_id_digest"]
+    receipt["verified"] = 1
+    assert browser.observe_bound_submission_receipt(target, binding, expected) is None
+    driver.read_only_submission_certified = False
+    assert browser.observe_bound_submission_receipt(target, binding, expected) is None
+    assert calls == {"reads": 3, "stops": 4}
+
+
 def test_user_confirmed_protection_is_private_exact_and_idempotent(tmp_path):
     target = "https://jobs.example.test/apply?postId=role-1&resumeId=private-123"
     registry = tmp_path / "private" / "protected-targets.json"
