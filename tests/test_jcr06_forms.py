@@ -102,6 +102,23 @@ def test_repeated_rows_are_observed_without_exposing_site_record_tokens(tmp_path
         assert observed.unsafe_structure
 
 
+def test_unique_dom_row_ids_do_not_prove_canonical_record_binding(tmp_path, monkeypatch):
+    runner, html = _runner(tmp_path, monkeypatch, """
+      <div data-record-id='SITE_ROW_A'><label>学校<input id='school-a' required></label></div>
+      <div data-record-id='SITE_ROW_B'><label>学校<input id='school-b' required></label></div>
+      <button type='button'>Submit application</button>
+    """)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        observed = adapter.observe_form()
+        assert len(observed.rows) == 2
+        assert observed.ambiguous_row_count == 0
+        assert observed.ambiguous_selector_count == 0
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "form structure unsupported or incomplete"
+    assert plan.fields == []
+
+
 def test_explicit_dependent_select_is_filled_after_parent_redraw(tmp_path):
     html = tmp_path / "dependent.html"
     html.write_text("""<!doctype html><body>

@@ -531,7 +531,9 @@ class ApplicationExecutor:
                 if not fields and adapter.start_application():
                     self.audit.record_action({"type": "start_application", "page_index": page_index})
                     continue
-                if observation and ((observation.unsupported_component_count
+                if observation and (((observation.rows and not getattr(
+                        adapter, "repeated_rows_certified", False))
+                                     or observation.unsupported_component_count
                                      or observation.ambiguous_selector_count
                                      or observation.ambiguous_row_count) or (
                         not fields and adapter.final_submit_control())):
