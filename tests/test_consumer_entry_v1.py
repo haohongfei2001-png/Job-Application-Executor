@@ -332,7 +332,7 @@ def test_macos_candidate_rejects_dependency_drift_without_replacing_old_app(tmp_
     app = apps / "AI 投递经理.app"
     old_release = app / "Contents" / "Resources" / "release"
     old_digest = (old_release / "release-source-manifest.json").read_text()
-    (repo / "requirements.txt").write_text("pydantic==0.0.0\\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text("pydantic==0.0.0\n", encoding="utf-8")
 
     rejected = install_macos_app(repo, destination=apps, platform="darwin")
     assert rejected["ok"] is False
