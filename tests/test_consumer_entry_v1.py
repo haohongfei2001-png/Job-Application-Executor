@@ -268,6 +268,10 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
 
     rogue = app / "Contents" / "old-file.txt"
     rogue.write_text("old")
+    (repo / "executor" / "consumer_entry.py").write_text(
+        "VERSION = 'candidate'\\n", encoding="utf-8"
+    )
+    assert (release / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\\n"
     second = install_macos_app(repo, destination=apps, platform="darwin")
     assert second["ok"] is True
     assert second["replaced"] is True
@@ -275,6 +279,8 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     rollback = apps / ".AI 投递经理.app.previous"
     assert second["rollback_path"] == str(rollback)
     assert (rollback / "Contents" / "old-file.txt").read_text() == "old"
+    assert (rollback / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\\n"
+    assert (app / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'candidate'\\n"
     third = install_macos_app(repo, destination=apps, platform="darwin")
     assert third["ok"] is False
     assert third["reason"] == "rollback_pending"
@@ -284,6 +290,7 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert restored["ok"] is True
     assert restored["restored"] is True
     assert rogue.read_text() == "old"
+    assert (app / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\\n"
     assert (apps / ".AI 投递经理.app.failed").is_dir()
     assert not rollback.exists()
 
