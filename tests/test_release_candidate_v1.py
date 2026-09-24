@@ -84,6 +84,9 @@ def test_release_candidate_rejects_added_file_and_symlink(tmp_path):
     assert not verify_source_candidate(candidate)
     link.unlink()
     assert verify_source_candidate(candidate)
+    candidate_link = tmp_path / "candidate-link"
+    candidate_link.symlink_to(candidate, target_is_directory=True)
+    assert not verify_source_candidate(candidate_link)
 
     (repo / "executor" / "external.py").symlink_to(
         repo / "executor" / "__init__.py"
