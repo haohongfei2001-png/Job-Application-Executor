@@ -123,7 +123,9 @@ def install_macos_app(
     apps_dir.mkdir(parents=True, exist_ok=True)
     app = apps_dir / f"{APP_NAME}.app"
     staging = apps_dir / f".{APP_NAME}.app.installing"
-    if staging.exists() or staging.is_symlink():
+    try:
+        staging.mkdir()
+    except FileExistsError:
         return {
             "ok": False,
             "reason": "staging_pending",
