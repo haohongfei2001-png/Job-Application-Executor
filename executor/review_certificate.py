@@ -7,6 +7,7 @@ memory and are absent from the copy-safe certificate.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -50,6 +51,7 @@ class ReviewCertificate:
     document_epoch: str
     driver_version: str
     profile_version: str
+    plan_binding_digest: str
     field_count: int
     attachment_count: int
     row_count: int
@@ -191,6 +193,14 @@ def certify_review(
     profile_version = profile_version or profile.get("generated_at")
     if not isinstance(profile_version, str) or not profile_version:
         raise ReviewUnverified("profile version unavailable")
+    # Keep this binding in memory only. The copy-safe summary never exposes
+    # a digest of low-entropy applicant answers or declarations.
+    plan_binding_digest = _digest(json.dumps({
+        "target": plan.target,
+        "fields": [field.model_dump(mode="json") for field in plan.fields],
+        "rows": expected_rows,
+        "attachments": expected_assets,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     checks = (
         ("target_account_draft", "PASS"),
         ("complete_fields_defaults", "PASS"),
@@ -201,7 +211,7 @@ def certify_review(
     )
     return ReviewCertificate(
         target, draft, revision, epoch, version, profile_version,
-        len(actual), len(actual_assets), sum(len(ids) for ids in rows.values()),
+        plan_binding_digest, len(actual), len(actual_assets), sum(len(ids) for ids in rows.values()),
         checks,
     )
 
@@ -232,6 +242,7 @@ def recheck_review(
             or current.document_epoch != certificate.document_epoch
             or current.driver_version != certificate.driver_version
             or current.profile_version != certificate.profile_version
+            or current.plan_binding_digest != certificate.plan_binding_digest
             or current.field_count != certificate.field_count
             or current.attachment_count != certificate.attachment_count
             or current.row_count != certificate.row_count):
