@@ -138,7 +138,7 @@ function privateReviewHtml(review){
     <p>目标：${esc(review.target_url)}</p>
     <p>账号：${esc(review.account?.key||'未展示')} · ${esc(privateValue(review.account?.canonical_value||''))}（上次与活动账号匹配）</p>
     <table><thead><tr><th>字段</th><th>申请意图</th><th>草稿实际保留值</th></tr></thead><tbody>${fields}</tbody></table>
-    <p>附件：${files?`<ul>${files}</ul>`:'无'}</p>
+    <p>附件：</p>${files?`<ul>${files}</ul>`:'<p>无</p>'}
     <p>项目核验：${esc(coverage.status||'未知')} · 规范项目 ${esc((coverage.canonical_projects||[]).join('、'))} · 明确排除 ${esc((coverage.explicit_exclusions||[]).join('、'))}</p>
     <p>服务端结构化行只保存身份和摘要；请在招聘页面核对每条内容。</p>`;
 }
