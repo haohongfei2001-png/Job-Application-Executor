@@ -37,6 +37,20 @@ jobs:
         run: python -m pytest -q tests/test_jcr07_review_certificate.py tests/test_application_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py
       - name: Compile Python sources
         run: python -m compileall -q executor tests
+      - name: Check local dashboard JavaScript syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from tempfile import NamedTemporaryFile
+          import subprocess
+
+          source = Path("executor/autonomy/dashboard.py").read_text(encoding="utf-8")
+          script = source.split("<script>", 1)[1].split("</script>", 1)[0]
+          with NamedTemporaryFile("w", suffix=".js", encoding="utf-8") as handle:
+              handle.write(script)
+              handle.flush()
+              subprocess.run(["node", "--check", handle.name], check=True)
+          PY
       - name: Diff whitespace check
         if: github.event_name == 'pull_request'
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
