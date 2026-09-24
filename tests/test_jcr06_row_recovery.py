@@ -1,0 +1,215 @@
+"""Synthetic server rows are the independent oracle for idempotent recovery."""
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+import sys
+import threading
+import urllib.request
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+from executor.forms import (DesiredRow, RowActionJournal, RowInventory,
+                            RowOutcomeUnknown, RowReconciler,
+                            RowReconciliationBlocked, SiteRow)
+
+
+SCOPE = "synthetic-ats/task-one/draft-one"
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+class RowSite(BaseHTTPRequestHandler):
+    def log_message(self, *_):
+        pass
+
+    def do_GET(self):
+        if self.path != "/rows":
+            self.send_error(404)
+            return
+        self._json({"rows": self.server.rows, "revision": self.server.revision,
+                    "complete": self.server.complete})
+
+    def do_POST(self):
+        data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/add":
+            # Deliberately non-idempotent: replaying add would create a duplicate.
+            self.server.rows.append({"record_id": data["record_id"],
+                                     "site_row_id": uuid.uuid4().hex,
+                                     "values": data["values"], "managed": True})
+            self.server.add_count += 1
+        elif self.path == "/delete":
+            self.server.rows = [row for row in self.server.rows
+                                if row["site_row_id"] != data["site_row_id"]]
+            self.server.delete_count += 1
+        elif self.path == "/reorder":
+            by_id = {row["record_id"]: row for row in self.server.rows}
+            self.server.rows = [by_id[rid] for rid in data["record_ids"]]
+            self.server.reorder_count += 1
+        else:
+            self.send_error(404)
+            return
+        self.server.revision += 1
+        self._json({"ok": True})
+
+    def _json(self, value):
+        body = json.dumps(value).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class RowHttpDriver:
+    capabilities = frozenset({"add", "delete", "reorder"})
+
+    def __init__(self, base):
+        self.base = base
+        self.fail_after_add = False
+
+    def read_rows(self):
+        result = json.load(urllib.request.urlopen(self.base + "/rows"))
+        return RowInventory(result["revision"], result["complete"], tuple(
+            SiteRow(row["record_id"], row["site_row_id"],
+                    digest(row["values"]), row["managed"])
+            for row in result["rows"]))
+
+    def _post(self, path, value):
+        request = urllib.request.Request(self.base + path,
+            data=json.dumps(value).encode(), headers={"Content-Type": "application/json"},
+            method="POST")
+        urllib.request.urlopen(request).read()
+
+    def add_row(self, row):
+        self._post("/add", {"record_id": row.record_id, "values": dict(row.values)})
+        if self.fail_after_add:
+            raise ConnectionError("response lost after site committed")
+
+    def delete_row(self, site_row_id):
+        self._post("/delete", {"site_row_id": site_row_id})
+
+    def reorder_rows(self, record_ids):
+        self._post("/reorder", {"record_ids": record_ids})
+
+
+@pytest.fixture
+def row_site():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RowSite)
+    server.rows, server.revision, server.complete = [], 0, True
+    server.add_count = server.delete_count = server.reorder_count = 0
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server, RowHttpDriver(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_reconcile_explicit_delete_add_reorder_and_repeat_without_duplicate(tmp_path, row_site):
+    server, driver = row_site
+    server.rows = [
+        {"record_id": "A", "site_row_id": "site-a", "values": {"school": "A School"},
+         "managed": True},
+        {"record_id": "C", "site_row_id": "site-c", "values": {"school": "C School"},
+         "managed": True},
+    ]
+    server.revision = 2
+    desired = (DesiredRow("B", {"school": "B School"}),
+               DesiredRow("A", {"school": "A School"}))
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    receipt = RowReconciler(driver, journal).reconcile(
+        desired, delete_ids=frozenset({"C"}))
+    assert (receipt.add_count, receipt.delete_count, receipt.reorder_count) == (1, 1, 1)
+    assert [(row["record_id"], row["values"]) for row in server.rows] == [
+        ("B", {"school": "B School"}), ("A", {"school": "A School"})]
+    assert (server.add_count, server.delete_count, server.reorder_count) == (1, 1, 1)
+    repeat = RowReconciler(driver, RowActionJournal(journal.path, scope=SCOPE)).reconcile(desired)
+    assert (repeat.add_count, repeat.delete_count, repeat.reorder_count) == (0, 0, 0)
+    assert (server.add_count, server.delete_count, server.reorder_count) == (1, 1, 1)
+    assert "B School".encode() not in journal.path.read_bytes()
+
+
+def test_pending_add_after_crash_reconciles_only_from_readback(tmp_path, row_site):
+    server, driver = row_site
+    desired = (DesiredRow("B", {"school": "B School"}),)
+    journal_path = tmp_path / "private" / "rows.sqlite3"
+    child = subprocess.run([sys.executable, "-c", """
+import hashlib, json, os, sys, urllib.request
+from executor.forms import RowActionJournal
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+        separators=(',', ':')).encode()).hexdigest()
+journal = RowActionJournal(sys.argv[1], scope='synthetic-ats/task-one/draft-one')
+journal.begin('add', digest('B'), digest({'school': 'B School'}), 0)
+request = urllib.request.Request(sys.argv[2] + '/add',
+    data=json.dumps({'record_id': 'B', 'values': {'school': 'B School'}}).encode(),
+    headers={'Content-Type': 'application/json'}, method='POST')
+urllib.request.urlopen(request).read()
+os._exit(23)
+""", str(journal_path), driver.base], capture_output=True, timeout=15)
+    assert child.returncode == 23, child.stderr.decode(errors="replace")
+    # The process died after site commit but before journal completion. A new
+    # reconciler may settle read-only; it must not replay the non-idempotent add.
+    receipt = RowReconciler(driver, RowActionJournal(journal_path, scope=SCOPE)).reconcile(desired)
+    assert receipt.add_count == 0
+    assert server.add_count == 1
+    assert not RowActionJournal(journal_path, scope=SCOPE).pending()
+
+    absent_path = tmp_path / "other-private" / "rows.sqlite3"
+    RowActionJournal(absent_path, scope=SCOPE).begin("add", digest("MISSING"), digest({"school": "M"}),
+                                        server.revision)
+    with pytest.raises(RowOutcomeUnknown, match="replay disabled"):
+        RowReconciler(driver, RowActionJournal(absent_path, scope=SCOPE)).reconcile(
+            (DesiredRow("B", {"school": "B School"}),
+             DesiredRow("MISSING", {"school": "M"})))
+    assert server.add_count == 1
+
+
+def test_lost_response_and_unmanaged_extra_are_safe(tmp_path, row_site):
+    server, driver = row_site
+    driver.fail_after_add = True
+    desired = (DesiredRow("A", {"school": "A School"}),)
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    receipt = RowReconciler(driver, journal).reconcile(desired)
+    assert receipt.add_count == 1
+    assert server.add_count == 1
+
+    server.rows.append({"record_id": "OTHER", "site_row_id": "other",
+                        "values": {"school": "Other School"}, "managed": False})
+    server.revision += 1
+    with pytest.raises(RowReconciliationBlocked, match="unbound or unmanaged"):
+        RowReconciler(driver, journal).reconcile(desired)
+    assert server.add_count == 1
+    assert server.delete_count == 0
+
+
+def test_concurrent_row_intents_cannot_both_start(tmp_path):
+    path = tmp_path / "private" / "rows.sqlite3"
+    RowActionJournal(path, scope=SCOPE)
+
+    def start():
+        try:
+            return RowActionJournal(path, scope=SCOPE).begin("add", digest("A"),
+                                                digest({"school": "A School"}), 0)
+        except RowOutcomeUnknown:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _: start(), range(2)))
+    assert sum(value is not None for value in outcomes) == 1
+    assert len(RowActionJournal(path, scope=SCOPE).pending()) == 1
+    with pytest.raises(RowReconciliationBlocked, match="scope changed"):
+        RowActionJournal(path, scope="different target/draft")
+    pending_id = RowActionJournal(path, scope=SCOPE).pending()[0][0]
+    RowActionJournal(path, scope=SCOPE).observed(pending_id, 1)
+    with pytest.raises(RowReconciliationBlocked, match="stale"):
+        RowActionJournal(path, scope=SCOPE).begin("add", digest("A"),
+                                                 digest({"school": "A School"}), 0)
