@@ -738,6 +738,9 @@ def test_dashboard_http_ticket_cookie_and_same_origin_chat(tmp_path):
     port = server.server_address[1]
     base = f"http://127.0.0.1:{port}"
     try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(base + "/ui/api/review-values?task_id=unknown")
+        assert exc.value.code == 401
         ticket_request = urllib.request.Request(
             base + "/v1/ui-ticket",
             data=b"{}",
@@ -786,6 +789,9 @@ def test_dashboard_http_ticket_cookie_and_same_origin_chat(tmp_path):
         assert q.get(created["task_id"])["spec"]["target_url"] == "https://jobs.example.test/roles/role-1"
         assert q.get(created["task_id"])["spec"]["live_authorized"] is False
         assert "jobs.example.test/roles" not in provider.seen["message"]
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            opener.open(base + "/ui/api/review-values?task_id=" + created["task_id"])
+        assert exc.value.code == 400
 
         evil = urllib.request.Request(
             base + "/ui/api/chat",
