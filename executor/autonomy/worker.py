@@ -215,6 +215,14 @@ class Worker:
                 return None
             return copy.deepcopy(row["payload"])
 
+    def private_review_available(self, tid, revision):
+        with self.review_lock:
+            row = self.review_cache.get(tid)
+            if row and row["expires_at"] <= time.monotonic():
+                self.review_cache.pop(tid, None)
+                return False
+            return bool(row and row["revision"] == revision)
+
     def discard_private_review(self, tid):
         with self.review_lock:
             self.review_cache.pop(tid, None)
@@ -476,7 +484,12 @@ class Worker:
             checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields], "review_certificate": plan.metadata.get("review_certificate")}, release=True)
             self.queue.finish_run_attempt(attempt_id, "RETURNED_UNVERIFIED")
             if stage == "READY_TO_SUBMIT":
-                self._remember_private_review(tid, runner, plan, self.queue.get(tid)["revision"])
+                try:
+                    self._remember_private_review(tid, runner, plan, self.queue.get(tid)["revision"])
+                except (AttributeError, TypeError, ValueError):
+                    # The durable certificate survives; the local full-value
+                    # review remains unavailable until it can be rebuilt safely.
+                    self.discard_private_review(tid)
             else:
                 self.discard_private_review(tid)
             if blocker == "otp_waiting" and self.broker.pending(tid):
