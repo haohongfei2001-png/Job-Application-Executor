@@ -119,6 +119,17 @@ def launch_consumer(root, port):
             pass
     started = lifecycle("start", root, port)
     health = lifecycle("health", root, port)
+    # A newly installed app must not silently reuse a daemon loaded from an old
+    # release. Stop only at the worker's safe checkpoint, then verify readback.
+    from .release import read_release_identity
+    identity = read_release_identity(Path(__file__).resolve().parents[2])
+    expected = identity.get("source_sha256") if identity.get("status") == "verified" else ""
+    if expected and health.get("ok") and health.get("loaded_source_sha256") != expected:
+        restarted = lifecycle("restart", root, port)
+        health = lifecycle("health", root, port)
+        if not restarted.get("ok") or health.get("loaded_source_sha256") != expected:
+            started = {"ok": False, "reason": "release_mismatch"}
+            health = {"ok": False}
     result = collect_live_preflight(
         supervisor_running=bool(health.get("ok")),
     )
