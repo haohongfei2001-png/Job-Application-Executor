@@ -11,14 +11,29 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import pytest
 
 from executor.autonomy import bootstrap, cli, preflight
 from executor.autonomy.consumer import install_macos_app, rollback_macos_app
+from executor.autonomy.loopback_http import LoopbackHTTPServer
 from executor.autonomy.release import verify_source_candidate
 from executor.autonomy.dashboard import DASHBOARD_HTML
+
+
+
+def test_local_http_bind_does_not_resolve_hostname(monkeypatch):
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("loopback bind must not resolve a hostname")
+
+    monkeypatch.setattr(socket, "getfqdn", forbidden_resolution)
+    with LoopbackHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
+        assert server.server_address[0] == "127.0.0.1"
+        assert server.server_name == "127.0.0.1"
+        assert server.server_port == server.server_address[1]
+        assert server.server_port > 0
 
 
 def _minimal_source(repo):
