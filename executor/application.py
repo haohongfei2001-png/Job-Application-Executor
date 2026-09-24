@@ -573,10 +573,13 @@ class ApplicationExecutor:
                         for desired_row in contract.desired:
                             canonical_fields = by_id[desired_row.record_id].get("fields") or {}
                             if not isinstance(canonical_fields, dict) or any(
-                                    not isinstance(value, str)
-                                    or not isinstance(canonical_fields.get(key), dict)
-                                    or canonical_fields[key].get("value") != value
-                                    for key, value in desired_row.values.items()):
+                                    not isinstance(field, dict)
+                                    for field in canonical_fields.values()):
+                                raise RowReconciliationBlocked("row value lacks canonical source")
+                            known = {key: field["value"] for key, field in canonical_fields.items()
+                                     if field.get("value") not in (None, "")}
+                            if (any(not isinstance(value, str) for value in known.values())
+                                    or dict(desired_row.values) != known):
                                 raise RowReconciliationBlocked("row value lacks canonical source")
                         target_hash = hashlib.sha256(self.target_url.encode()).hexdigest()
                         journal = RowActionJournal(self.row_journal_path,

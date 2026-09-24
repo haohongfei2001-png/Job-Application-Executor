@@ -395,3 +395,13 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
     omitted = run()
     assert omitted.stage == ApplicationStage.BLOCKED
     assert server.add_count == 2 and server.submit_count == 0
+
+    server.omit_record = False
+    changed_profile = json.loads(profile.read_text())
+    changed_profile["collections"]["education_records"][0]["fields"]["degree"] = {
+        "value": "Master"}
+    profile.write_text(json.dumps(changed_profile))
+    omitted_field = run()
+    assert omitted_field.stage == ApplicationStage.BLOCKED
+    assert omitted_field.metadata["block_reason"] == "row reconciliation unverified"
+    assert server.add_count == 2 and server.submit_count == 0
