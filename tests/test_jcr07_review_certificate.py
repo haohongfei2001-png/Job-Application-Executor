@@ -283,6 +283,13 @@ def test_attachment_receipt_must_match_canonical_asset_hash():
         expected_account_identity_digest=digest("account"))
     assert certificate.attachment_count == 1
     assert "CANARY_RESUME" not in json.dumps(certificate.safe_summary())
+    # A requested attachment cannot disappear from the observed form and
+    # quietly become an empty receipt inventory.
+    plan.fields = []
+    snapshot["attachments"] = {}
+    with pytest.raises(ReviewUnverified, match="attachment readback"):
+        certify_review(profile, plan, snapshot,
+                       expected_account_identity_digest=digest("account"))
 
 
 
