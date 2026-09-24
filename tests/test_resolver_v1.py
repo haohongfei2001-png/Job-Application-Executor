@@ -63,6 +63,36 @@ def test_subjective_salary_requires_user_confirmation():
     assert item.status == ResolutionStatus.USER_CONFIRMATION
 
 
+def test_salary_requires_confirmed_target_and_typed_unit_conversion():
+    target = "https://synthetic.example.test/apply/role-1"
+    profile = _profile()
+    profile["fields"]["preferences.expected_salary"] = {
+        "value": "200000", "confidence": 1.0, "user_confirmed": True,
+        "normalization": {"salary": {
+            "target_sha256": hashlib.sha256(target.encode()).hexdigest(),
+            "currency": "CNY", "period": "annual", "tax_basis": "gross", "unit": "yuan",
+        }},
+    }
+    resolver = FieldResolver(profile, {"deepseek": {"enabled": False}})
+    site = {"currency": "CNY", "period": "annual", "tax_basis": "gross",
+            "unit": "ten_thousand_yuan", "step": "1", "min": "1", "max": "50"}
+    field = WebField(field_id="salary", selector="#salary", label="期望年薪",
+                     input_type="number", required=True, page_url=target,
+                     metadata={"salary": site})
+    matched = resolver.resolve(field)
+    assert matched.status == ResolutionStatus.RESOLVED
+    assert matched.value == "20"
+    assert matched.source == "user_confirmed_scoped_salary"
+    assert resolver.resolve(field.model_copy(update={
+        "page_url": "https://synthetic.example.test/apply/role-2"})).status == ResolutionStatus.USER_CONFIRMATION
+    assert resolver.resolve(field.model_copy(update={
+        "metadata": {"salary": {**site, "period": "monthly"}}})).status == ResolutionStatus.USER_CONFIRMATION
+    assert resolver.resolve(field.model_copy(update={
+        "metadata": {"salary": {**site, "tax_basis": "net"}}})).status == ResolutionStatus.USER_CONFIRMATION
+    assert resolver.resolve(field.model_copy(update={
+        "metadata": {"salary": {**site, "max": "19"}}})).status == ResolutionStatus.USER_CONFIRMATION
+
+
 def test_site_existing_value_is_preserved_for_unknown_field():
     item = _resolver().resolve(WebField(
         field_id="custom", selector="#custom", label="Platform custom field",

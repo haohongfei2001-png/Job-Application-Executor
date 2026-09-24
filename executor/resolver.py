@@ -14,6 +14,7 @@ from .models import FieldResolution, ResolutionStatus, WebField
 from .profile import (aliases_for, field_is_current, get_field, has_unresolved_conflict,
                       is_sensitive_key, profile_keys)
 from .facts.representation import represent_choice
+from .forms.typed import represent_scoped_salary
 
 
 PRIVACY_PATTERNS = (
@@ -388,6 +389,27 @@ class FieldResolver:
                 field_id=field.field_id, selector=field.selector, label=field.label,
                 status=ResolutionStatus.UNRESOLVED, reason="untrusted field instruction",
                 required=field.required,
+            )
+        if re.search(r"salary|薪资|薪酬|期望年薪|期望月薪", field.label, re.I):
+            salary = get_field(self.profile, "preferences.expected_salary")
+            represented = (represent_scoped_salary(
+                salary.value, salary.normalization.get("salary") or {},
+                field.metadata.get("salary") or {}, field.page_url)
+                if salary and salary.user_confirmed and field_is_current(salary) else None)
+            if represented is not None:
+                return FieldResolution(
+                    field_id=field.field_id, selector=field.selector,
+                    label=field.label, canonical_key="preferences.expected_salary",
+                    status=ResolutionStatus.RESOLVED, value=represented,
+                    source="user_confirmed_scoped_salary", confidence=1.0,
+                    reason="exact target, currency, period and tax basis; explicit unit conversion",
+                    required=field.required,
+                )
+            return FieldResolution(
+                field_id=field.field_id, selector=field.selector,
+                label=field.label, canonical_key="preferences.expected_salary",
+                status=ResolutionStatus.USER_CONFIRMATION, required=field.required,
+                reason="salary target or typed representation requires confirmation",
             )
         key, confidence, reason = _contextual_rule_key(field)
         if not key:

@@ -446,6 +446,14 @@ class ApplicationExecutor:
                         )
                 continue
             if item.status == ResolutionStatus.RESOLVED and item.canonical_key:
+                if item.source == "user_confirmed_scoped_salary":
+                    canonical = get_field(self.profile, item.canonical_key)
+                    salary_scope = ((canonical.normalization or {}).get("salary") or {}) if canonical else {}
+                    if (not canonical or not canonical.user_confirmed
+                            or salary_scope.get("target_sha256") != hashlib.sha256(
+                                self.target_url.encode()).hexdigest()):
+                        errors.append(f"{item.field_id}: salary scope is no longer confirmed")
+                    continue
                 if item.canonical_key.startswith("assets."):
                     if not Path(str(item.value)).expanduser().is_file():
                         errors.append(f"{item.field_id}: resolved attachment is missing")

@@ -241,6 +241,25 @@ def test_existing_checked_declaration_is_not_new_scoped_consent(tmp_path, monkey
     assert declaration.status == ResolutionStatus.USER_CONFIRMATION
 
 
+def test_scoped_salary_representation_preserves_canonical_amount(tmp_path, monkeypatch):
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+    target = "https://synthetic.example.test/apply/role-1"
+    profile = tmp_path / "salary-profile.json"
+    salary_profile = {"fields": {"preferences.expected_salary": {
+        "value": "200000", "user_confirmed": True,
+        "normalization": {"salary": {
+            "target_sha256": hashlib.sha256(target.encode()).hexdigest(),
+            "currency": "CNY", "period": "annual", "tax_basis": "gross", "unit": "yuan",
+        }}}}}
+    profile.write_text(json.dumps(salary_profile), encoding="utf-8")
+    runner = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}})
+    runner.plan.fields.append(FieldResolution(
+        field_id="salary", selector="#salary", label="期望年薪",
+        canonical_key="preferences.expected_salary", status=ResolutionStatus.RESOLVED,
+        value="20", source="user_confirmed_scoped_salary"))
+    assert runner._profile_consistency()["ok"] is True
+
+
 def test_form_observation_and_fill_plan_do_not_expose_values_in_receipts():
     field = WebField(field_id="name", selector="#name", label="Private Label",
                      current_value="CANARY_PRIVATE_PERSON", required=True)
