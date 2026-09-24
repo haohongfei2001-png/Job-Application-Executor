@@ -209,6 +209,58 @@ def test_live_private_review_rechecks_saved_draft_and_invalidates_after_edit(
     assert worker.private_review_available("task", 7) is False
 
 
+
+def test_bound_review_observer_requires_certified_driver_and_stable_document(monkeypatch):
+    from executor.adapters import registry
+    target = "https://synthetic.example/apply/job-1"
+    binding = {
+        "process_epoch": "owned-process",
+        "target_id": "owned-target",
+        "document_epoch": "100.0",
+    }
+    state = {"epoch": "100.0", "reads": 0, "stops": 0}
+
+    class Playwright:
+        def stop(self):
+            state["stops"] += 1
+
+    class Driver:
+        read_only_review_certified = True
+        def observe_review_draft(self, plan):
+            state["reads"] += 1
+            assert plan.target_url == target
+            return {"source": "server_readback"}
+
+    driver = Driver()
+    monkeypatch.setattr(browser, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser, "owned_cdp_fingerprint", lambda: "owned-process")
+    monkeypatch.setattr(
+        browser, "connect",
+        lambda *_args, **_kwargs: (Playwright(), object(), object(), object()))
+    monkeypatch.setattr(browser, "page_target_id",
+                        lambda _ctx, _page: "owned-target")
+    monkeypatch.setattr(browser, "page_document_epoch",
+                        lambda _page: state["epoch"])
+    monkeypatch.setattr(registry, "adapter_for_url", lambda _url: driver)
+    plan = ApplicationPlan(execution_id="task", target_url=target, site_id="synthetic")
+
+    assert browser.observe_bound_review(target, binding, plan) == {
+        "source": "server_readback"}
+    assert state["reads"] == 1
+    driver.read_only_review_certified = False
+    assert browser.observe_bound_review(target, binding, plan) is None
+    assert state["reads"] == 1
+    driver.read_only_review_certified = True
+
+    def changed_document(_plan):
+        state["reads"] += 1
+        state["epoch"] = "200.0"
+        return {"source": "server_readback"}
+    driver.observe_review_draft = changed_document
+    assert browser.observe_bound_review(target, binding, plan) is None
+    assert state["stops"] == 3
+
+
 def test_persisted_review_omits_private_project_titles_and_file_names():
     plan = ApplicationPlan(
         execution_id="synthetic-review", target_url="https://example.test/apply",
