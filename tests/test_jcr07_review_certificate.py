@@ -10,6 +10,7 @@ from urllib.request import urlopen
 
 import pytest
 
+from executor.audit import safe_plan
 from executor.models import ApplicationPlan, FieldResolution, ResolutionStatus
 from executor.review_certificate import ReviewUnverified, certify_review, recheck_review
 
@@ -120,6 +121,33 @@ def test_server_draft_certificate_and_fault_canaries():
     finally:
         service.shutdown()
         service.server_close()
+
+
+def test_persisted_review_omits_private_project_titles_and_file_names():
+    plan = ApplicationPlan(
+        execution_id="synthetic-review", target_url="https://example.test/apply",
+        site_id="synthetic", attachments={
+            "resume": "/private/CANARY_APPLICANT_RESUME.pdf"})
+    plan.metadata["final_review"] = {
+        "human_review_required": True,
+        "final_click_actor": "user",
+        "attachment_basenames": {"resume": "CANARY_APPLICANT_RESUME.pdf"},
+        "project_coverage": {
+            "status": "REVIEW_REQUIRED", "canonical_count": 1,
+            "structured_count": 0,
+            "canonical_projects": ["CANARY_PRIVATE_PROJECT"],
+            "uncovered_projects": ["CANARY_PRIVATE_PROJECT"],
+            "explicit_exclusions": [],
+        },
+    }
+    saved = safe_plan(plan)
+    text = json.dumps(saved)
+    assert "CANARY_PRIVATE_PROJECT" not in text
+    assert "CANARY_APPLICANT_RESUME" not in text
+    assert saved["metadata"]["final_review"]["project_coverage"][
+        "uncovered_count"] == 1
+    assert saved["metadata"]["final_review"]["attachment_count"] == 1
+    assert saved["attachments"] == {"resume": "[LOCAL_FILE]"}
 
 
 def test_missing_observer_and_unconfirmed_default_fail_closed():
