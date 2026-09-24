@@ -335,6 +335,18 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path):
         "reason": "manual_submit_gate",
     }
     assert q.get(tid)["stage"] == "READY_TO_SUBMIT"
+    supervisor = Supervisor(q, worker=worker, token="x" * 40, manager=manager)
+    ready_view = next(task for task in supervisor.ui_state()["tasks"]
+                      if task["task_id"] == tid)
+    assert ready_view["review_summary"] == {
+        "status": "last_verified",
+        "field_count": 1,
+        "attachment_count": 0,
+        "row_count": 0,
+        "check_count": 6,
+    }
+    assert "resume.docx" not in str(ready_view)
+    assert "postId=role-1" not in str(ready_view)
 
 
 def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
