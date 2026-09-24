@@ -5,6 +5,7 @@ import hashlib
 import http.cookiejar
 import json
 import threading
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 
@@ -20,7 +21,7 @@ from executor.autonomy.manager import (
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.supervisor import Supervisor, create_server
 from executor.autonomy.worker import Worker, outcome
-from executor.models import ApplicationPlan, ApplicationStage
+from executor.models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus
 
 
 def spec(tmp_path: Path, *, url="https://jobs.example.test/apply?postId=role-1"):
@@ -347,6 +348,29 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
     }
     assert "resume.docx" not in str(ready_view)
     assert "postId=role-1" not in str(ready_view)
+    private_plan = ApplicationPlan(
+        execution_id=tid, target_url=q.get(tid)["spec"]["target_url"],
+        site_id="synthetic", stage=ApplicationStage.READY_TO_SUBMIT,
+        fields=[FieldResolution(
+            field_id="name", selector="#name", label="Name",
+            status=ResolutionStatus.RESOLVED, value="PRIVATE_CANARY",
+            required=True, canonical_key="identity.full_name")],
+    )
+    private_runner = SimpleNamespace(
+        private_review_snapshot={
+            "fields": [{"value": "PRIVATE_CANARY"}], "attachments": {}, "rows": {}},
+        profile={"identity": {"email": "private@example.test"}, "assets": {}},
+    )
+    worker._remember_private_review(
+        tid, private_runner, private_plan, q.get(tid)["revision"])
+    private_view = supervisor.review_values(tid)["review"]
+    assert private_view["fields"][0]["observed"] == "PRIVATE_CANARY"
+    assert private_view["account"]["canonical_value"] == "private@example.test"
+    assert supervisor.ui_state()["tasks"][0]["review_values_available"] is True
+    assert "PRIVATE_CANARY" not in str(supervisor.ui_state())
+    assert "PRIVATE_CANARY" not in str(q.get(tid))
+    assert Worker(q, settings={"deepseek": {"enabled": False}}).private_review(
+        tid, q.get(tid)["revision"]) is None
     observed_targets = []
     def read_only_observer(target_url, binding):
         observed_targets.append((target_url, binding))
