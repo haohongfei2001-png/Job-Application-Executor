@@ -46,6 +46,10 @@ def _minimal_source(repo):
     autonomy.mkdir()
     (autonomy / "__init__.py").write_text("", encoding="utf-8")
     (autonomy / "cli.py").write_text("VERSION = 'fixture'\n", encoding="utf-8")
+    (autonomy / "release.py").write_text(
+        (Path(__file__).resolve().parents[1] / "executor" / "autonomy" / "release.py")
+        .read_text(encoding="utf-8"), encoding="utf-8"
+    )
     (repo / "requirements.txt").write_text(f"pydantic=={version('pydantic')}\n", encoding="utf-8")
 
 
