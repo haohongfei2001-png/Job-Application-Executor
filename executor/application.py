@@ -398,12 +398,8 @@ class ApplicationExecutor:
         matches = [
             answer for answer in self.user_answers
             if answer.get("selector") == field.selector
+            and answer.get("label") == field.label
         ]
-        if not matches:
-            matches = [
-                answer for answer in self.user_answers
-                if not answer.get("selector") and answer.get("field_id") == field.field_id
-            ]
         if not matches and base.canonical_key:
             matches = [
                 answer for answer in self.user_answers
@@ -427,10 +423,21 @@ class ApplicationExecutor:
             sensitive=base.sensitive or is_sensitive_key(canonical_key),
         )
 
+    def _site_answer_key(self, field: WebField) -> str:
+        # Unknown site questions have no canonical semantic identity. Bind a
+        # task answer to the exact target, page, locator and question so a
+        # reused DOM id on another page cannot receive the previous answer.
+        scope = (self.target_url, field.page_url or self.plan.metadata.get("checkpoint_url"),
+                 field.selector, field.field_id, field.label, field.input_type)
+        return "site_field." + hashlib.sha256(repr(scope).encode("utf-8")).hexdigest()
+
     def _resolve_page(self, fields: list[WebField]) -> list[FieldResolution]:
         resolved: list[FieldResolution] = []
         for field in fields:
             base = self._attachment_resolution(field) or self.resolver.resolve(field)
+            if (base.canonical_key is None and base.status in {
+                    ResolutionStatus.UNRESOLVED, ResolutionStatus.USER_CONFIRMATION}):
+                base.canonical_key = self._site_answer_key(field)
             resolved.append(self._user_answer_resolution(field, base) or base)
         return resolved
 

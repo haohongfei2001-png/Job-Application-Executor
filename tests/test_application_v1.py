@@ -315,6 +315,25 @@ def test_execution_answer_resolves_same_execution_without_profile_mutation(tmp_p
     assert json.loads(profile_path.read_text())["fields"].get("preferences.salary_policy") is None
 
 
+def test_unknown_answer_is_bound_to_question_and_page_not_reused_dom_id(tmp_path, monkeypatch):
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    runner = ApplicationExecutor(
+        "https://example.test/apply", _profile_file(tmp_path),
+        {"deepseek": {"enabled": False}},
+    )
+    first = WebField(field_id="question", selector="#question", label="Favorite project?",
+                     required=True, page_url="https://example.test/apply/one")
+    unresolved = runner._resolve_page([first])[0]
+    assert unresolved.canonical_key.startswith("site_field.")
+    runner.user_answers = [{"canonical_key": unresolved.canonical_key,
+                            "field_id": unresolved.canonical_key, "value": "Synthetic answer"}]
+    assert runner._resolve_page([first])[0].source == "user_execution_answer"
+    other_page = first.model_copy(update={"page_url": "https://example.test/apply/two"})
+    other_question = first.model_copy(update={"label": "Employment history?"})
+    assert runner._resolve_page([other_page])[0].source != "user_execution_answer"
+    assert runner._resolve_page([other_question])[0].source != "user_execution_answer"
+
+
 class FakeOtpBridge:
     enabled = True
 
