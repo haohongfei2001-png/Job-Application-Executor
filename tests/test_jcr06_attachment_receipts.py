@@ -19,7 +19,7 @@ from executor.adapters.generic_web import GenericWebAdapter
 from executor.browser import BrowserOwnershipError
 from executor.forms.attachment_manifest import (AttachmentManifestError,
                                                 load_attachment_manifest)
-from executor.forms import (DesiredRow, RowExecutionContract, RowInventory,
+from executor.forms import (DesiredRow, RowActionJournal, RowExecutionContract, RowInventory,
                             SiteRow)
 from executor.autonomy.worker import outcome
 from executor.models import ApplicationStage, ValidationResult, WebField
@@ -558,7 +558,8 @@ def test_browser_upload_and_rows_share_one_draft_across_pages_and_restart(
         ("school-b", {"school": "School B"})]
     assert set(upload_site.attachments) == {"resume", "photo"}
     assert upload_site.row_add_count == 2 and upload_site.submit_count == 0
-    assert "School A" not in journal.read_bytes().decode(errors="replace")
+    collection_journal = journal.with_name("rows.education_records.sqlite3")
+    assert "School A" not in collection_journal.read_bytes().decode(errors="replace")
 
     monkeypatch.setattr("executor.application.adapter_for_url",
                         lambda url: IntegratedAdapter(url, start_page=1))
@@ -567,6 +568,27 @@ def test_browser_upload_and_rows_share_one_draft_across_pages_and_restart(
     assert returned.stage == ApplicationStage.READY_TO_SUBMIT
     assert upload_site.revision == before
     assert upload_site.row_add_count == 2 and upload_site.submit_count == 0
+
+    def missing_row_driver(url):
+        adapter = IntegratedAdapter(url, start_page=1)
+        adapter.structured_row_contract = None
+        return adapter
+
+    monkeypatch.setattr("executor.application.adapter_for_url", missing_row_driver)
+    missing_contract = run(pages=1)
+    assert missing_contract.stage == ApplicationStage.BLOCKED
+    assert missing_contract.metadata["block_reason"] == "row reconciliation unverified"
+    assert upload_site.row_add_count == 2 and upload_site.submit_count == 0
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: IntegratedAdapter(url, start_page=1))
+
+    project_journal = journal.with_name("rows.projects.sqlite3")
+    RowActionJournal(project_journal, scope="prior-project-collection")
+    unreconciled_collection = run(pages=1)
+    assert unreconciled_collection.stage == ApplicationStage.BLOCKED
+    assert unreconciled_collection.metadata["block_reason"] == "row reconciliation unverified"
+    assert upload_site.row_add_count == 2 and upload_site.submit_count == 0
+    project_journal.unlink()
 
     upload_site.rows.pop()
     upload_site.revision += 1

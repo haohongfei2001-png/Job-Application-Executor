@@ -483,7 +483,20 @@ class ApplicationExecutor:
         self.guard()
         attachment_binding = None
         attachment_selections: list[FieldResolution] = []
-        row_bindings: list[tuple[RowReconciler, tuple[DesiredRow, ...]]] = []
+        row_bindings: list[tuple[RowReconciler, tuple[DesiredRow, ...], str]] = []
+        collection_keys = {"education_records", "projects", "work_records",
+                           "research_records"}
+        prior_row_journals: set[str] = set()
+        if self.row_journal_path:
+            if self.row_journal_path.exists():
+                # The earlier unscoped journal cannot identify its collection.
+                self.plan.stage = ApplicationStage.BLOCKED
+                self.plan.metadata["block_reason"] = "row reconciliation unverified"
+                self.audit.save_plan(self.plan)
+                return self.plan
+            prior_row_journals = {key for key in collection_keys if
+                self.row_journal_path.with_name(
+                    f"{self.row_journal_path.stem}.{key}{self.row_journal_path.suffix}").exists()}
         if self.attachment_manifest_path:
             try:
                 manifest = load_attachment_manifest(
@@ -557,9 +570,7 @@ class ApplicationExecutor:
                             raise RowReconciliationBlocked("certified row contract unavailable")
                         if self.row_journal_path is None:
                             raise RowReconciliationBlocked("task row journal unavailable")
-                        if (contract.collection_key not in {"education_records", "projects",
-                                                             "work_records", "research_records"}
-                                or contract.delete_ids):
+                        if contract.collection_key not in collection_keys or contract.delete_ids:
                             raise RowReconciliationBlocked("row collection or deletion unsupported")
                         if (row_bindings and
                                 contract.draft_id_digest != row_bindings[0][0].draft_id_digest):
@@ -567,6 +578,10 @@ class ApplicationExecutor:
                         if (attachment_binding and
                                 contract.draft_id_digest != attachment_binding[0]):
                             raise RowReconciliationBlocked("row and attachment draft identity differs")
+                        if prior_row_journals - ({key for _, _, key in row_bindings}
+                                                 | {contract.collection_key}):
+                            raise RowReconciliationBlocked(
+                                "prior row collection has not been reobserved")
                         records = (self.profile.get("collections") or {}).get(
                             contract.collection_key, [])
                         if not isinstance(records, list) or any(
@@ -589,8 +604,12 @@ class ApplicationExecutor:
                                     or dict(desired_row.values) != known):
                                 raise RowReconciliationBlocked("row value lacks canonical source")
                         target_hash = hashlib.sha256(self.target_url.encode()).hexdigest()
-                        journal = RowActionJournal(self.row_journal_path,
-                            scope=f"{target_hash}:{self.plan.execution_id}:{contract.draft_id_digest}")
+                        journal_path = self.row_journal_path.with_name(
+                            f"{self.row_journal_path.stem}.{contract.collection_key}"
+                            f"{self.row_journal_path.suffix}")
+                        journal = RowActionJournal(journal_path,
+                            scope=f"{target_hash}:{self.plan.execution_id}:"
+                                  f"{contract.draft_id_digest}:{contract.collection_key}")
                         reconciler = RowReconciler(
                             contract.driver, journal, target_sha256=target_hash,
                             draft_id_digest=contract.draft_id_digest,
@@ -607,7 +626,8 @@ class ApplicationExecutor:
                         "row_count": receipt.row_count, "add_count": receipt.add_count,
                         "delete_count": receipt.delete_count,
                         "reorder_count": receipt.reorder_count})
-                    row_bindings.append((reconciler, contract.desired))
+                    row_bindings.append((reconciler, contract.desired,
+                                         contract.collection_key))
                     self.audit.save_plan(self.plan)
 
                 observe_form = getattr(adapter, "observe_form", None)
@@ -818,10 +838,15 @@ class ApplicationExecutor:
                 self.plan.stage = ApplicationStage.VALIDATED
                 final_control = adapter.final_submit_control()
                 if final_control:
+                    if prior_row_journals - {key for _, _, key in row_bindings}:
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "row reconciliation unverified"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
                     if row_bindings:
                         try:
                             row_revisions = [binding.verify_rows_read_only(desired).revision
-                                             for binding, desired in row_bindings]
+                                             for binding, desired, _ in row_bindings]
                         except RowReconciliationBlocked:
                             self.plan.stage = ApplicationStage.BLOCKED
                             self.plan.metadata["block_reason"] = "row reconciliation unverified"
@@ -923,7 +948,7 @@ class ApplicationExecutor:
                                 or isinstance(draft_evidence.get("revision"), bool)
                                 or draft_evidence["revision"] <
                                     max(binding.journal.latest_observed_revision() or 0
-                                        for binding, _ in row_bindings)))
+                                        for binding, _, _ in row_bindings)))
                             or (attachment_binding and (
                                 draft_evidence.get("level") != "server_readback"
                                 or draft_evidence.get("draft_id_digest") != attachment_binding[0]
