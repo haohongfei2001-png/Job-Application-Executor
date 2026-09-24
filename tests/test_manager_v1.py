@@ -302,17 +302,17 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path):
     }
     with pytest.raises(ValueError, match="independent review certificate"):
         q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT",
-                     details={"review_certificate": {
+                     details={"unresolved_keys": [], "review_certificate": {
                          **certificate, "target_sha256": "d" * 64}}, release=True)
     with pytest.raises(ValueError, match="independent review certificate"):
         q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT",
-                     details={"review_certificate": {
+                     details={"unresolved_keys": [], "review_certificate": {
                          **certificate,
                          "checks": {**certificate["checks"],
                                     "attachments": "FAIL"}}}, release=True)
     assert q.get(tid)["stage"] != "READY_TO_SUBMIT"
     q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT",
-                 details={"review_certificate": certificate}, release=True)
+                 details={"unresolved_keys": [], "review_certificate": certificate}, release=True)
     provider = FakeProvider(ManagerTurn(reply="继续。", decisions=[
         ManagerDecision(action=ManagerAction.RESUME, task_id=tid)
     ]))
