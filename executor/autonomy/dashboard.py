@@ -425,7 +425,8 @@ async function startUpdate(){
         stale_update_recovered:'检测到上次更新被中断，已解除锁定；可以重新检查更新。',
         not_on_main:'当前代码不在 main 分支，已拒绝自动更新。',
         tracked_changes_present:'本地有未提交代码修改，已拒绝自动更新。',
-        unexpected_origin:'GitHub 来源不符合预期，已拒绝自动更新。'
+        unexpected_origin:'GitHub 来源不符合预期，已拒绝自动更新。',
+        packaged_update_not_ready:'当前安装包尚不支持安全更新；现有版本与任务保持不变。'
       }[data.reason]||'当前不能安全更新。';
       notify(reason);updateBtn.disabled=false;updateBtn.textContent='检查并更新';return;
     }
