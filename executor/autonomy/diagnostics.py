@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -106,8 +107,18 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
         and isinstance(digest, str)
         and bool(re.fullmatch(r"[0-9a-f]{64}", digest))
     )
+    if not verified:
+        recovery = {"reason": "release_unverified", "action": "reinstall_verified_app"}
+    elif not cdp_alive and browser_mode_value == "live":
+        recovery = {"reason": "owned_browser_unavailable", "action": "reconnect_owned_browser"}
+    elif not deepseek_available:
+        recovery = {"reason": "provider_unavailable", "action": "check_provider_settings"}
+    else:
+        recovery = {"reason": "none", "action": "none"}
     return {
         "format": "application-executor-diagnostics-v1",
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "recovery": recovery,
         "repository": state,
         "loaded_source": {
             "verified_at_start": verified,
