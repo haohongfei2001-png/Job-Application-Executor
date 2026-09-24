@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from executor.autonomy.release import (
+    MANIFEST_NAME,
+    copy_source_candidate,
+    source_manifest,
+    verify_source_candidate,
+)
+
+
+def _source(tmp_path):
+    repo = tmp_path / "source"
+    package = repo / "executor"
+    (package / "autonomy").mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "autonomy" / "cli.py").write_text("VERSION = 'one'\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text("pydantic==2.13.0\n", encoding="utf-8")
+    (repo / "config").mkdir()
+    (repo / "config" / "private-token.json").write_text('{"secret":"never-copy"}')
+    return repo
+
+
+def test_release_source_snapshot_is_independent_and_detects_candidate_drift(tmp_path):
+    repo = _source(tmp_path)
+    candidate = tmp_path / "candidate"
+    expected = source_manifest(repo)
+    actual = copy_source_candidate(repo, candidate)
+
+    assert actual == expected
+    assert actual["format"] == "jae-release-source-v1"
+    assert len(actual["source_sha256"]) == 64
+    assert verify_source_candidate(candidate)
+    assert not (candidate / "config").exists()
+    assert json.loads((candidate / MANIFEST_NAME).read_text()) == expected
+
+    (repo / "executor" / "autonomy" / "cli.py").write_text("VERSION = 'two'\n")
+    assert verify_source_candidate(candidate)
+    (candidate / "executor" / "autonomy" / "cli.py").write_text("VERSION = 'tampered'\n")
+    assert not verify_source_candidate(candidate)
+
+
+def test_release_candidate_rejects_added_file_and_symlink(tmp_path):
+    repo = _source(tmp_path)
+    candidate = tmp_path / "candidate"
+    copy_source_candidate(repo, candidate)
+    added = candidate / "executor" / "unexpected.py"
+    added.write_text("print('unexpected')\n")
+    assert not verify_source_candidate(candidate)
+    added.unlink()
+    link = candidate / "executor" / "linked.py"
+    link.symlink_to(repo / "executor" / "__init__.py")
+    assert not verify_source_candidate(candidate)
+    link.unlink()
+    assert verify_source_candidate(candidate)
+
+    (repo / "executor" / "external.py").symlink_to(
+        repo / "executor" / "__init__.py"
+    )
+    with pytest.raises(ValueError, match="release_source_symlink"):
+        copy_source_candidate(repo, tmp_path / "refused")
+    assert not (tmp_path / "refused").exists()
