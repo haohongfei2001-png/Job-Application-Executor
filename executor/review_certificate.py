@@ -70,7 +70,7 @@ class ReviewCertificate:
             "target_sha256": self.target_sha256,
             "draft_id_digest": self.draft_id_digest,
             "revision": self.revision,
-            "document_epoch": self.document_epoch,
+            "document_epoch_sha256": _digest(self.document_epoch),
             "driver_version": self.driver_version,
             "field_count": self.field_count,
             "attachment_count": self.attachment_count,
