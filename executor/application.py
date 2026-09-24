@@ -346,15 +346,18 @@ class ApplicationExecutor:
             return unsupported("canonical attachment is unavailable")
         path_obj = Path(path).expanduser().resolve()
         max_size = str(field.metadata.get("max_size") or "")
-        if max_size and (not max_size.isdecimal() or path_obj.stat().st_size > int(max_size)):
-            return unsupported("attachment size exceeds or cannot be checked against slot limit")
         expected_hash = str(asset.get("sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
             return unsupported("canonical attachment hash is unavailable")
         digest = hashlib.sha256()
-        with path_obj.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
+        try:
+            if max_size and (not max_size.isdecimal() or path_obj.stat().st_size > int(max_size)):
+                return unsupported("attachment size exceeds or cannot be checked against slot limit")
+            with path_obj.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            return unsupported("canonical attachment became inaccessible")
         actual_hash = digest.hexdigest()
         if actual_hash != expected_hash:
             return unsupported("canonical attachment file changed since evidence capture")
