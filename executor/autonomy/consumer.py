@@ -43,9 +43,15 @@ def _trusted_bundle(app: Path) -> bool:
     """Accept only an existing app bundle with our identity and executable."""
     if app.is_symlink() or not app.is_dir():
         return False
-    info_path = app / "Contents" / "Info.plist"
-    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
-    if info_path.is_symlink() or executable.is_symlink() or not executable.is_file():
+    contents = app / "Contents"
+    macos = contents / "MacOS"
+    resources = contents / "Resources"
+    release = resources / "release"
+    info_path = contents / "Info.plist"
+    executable = macos / "AIApplicationManager"
+    if (any(path.is_symlink() for path in (contents, macos, resources, release))
+            or info_path.is_symlink() or executable.is_symlink()
+            or not executable.is_file()):
         return False
     try:
         with info_path.open("rb") as handle:
@@ -55,7 +61,7 @@ def _trusted_bundle(app: Path) -> bool:
             and info.get("CFBundleIdentifier") == BUNDLE_ID
             and info.get("CFBundleExecutable") == "AIApplicationManager"
             and bool(executable.stat().st_mode & stat.S_IXUSR)
-            and verify_source_candidate(app / "Contents" / "Resources" / "release")
+            and verify_source_candidate(release)
         )
     except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
         return False
