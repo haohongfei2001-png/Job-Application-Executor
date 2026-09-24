@@ -43,7 +43,8 @@ def test_server_draft_certificate_and_fault_canaries():
     plan.fields = [FieldResolution(
         field_id="full_name", selector="#name", label="Full name",
         status=ResolutionStatus.RESOLVED, value="Synthetic Applicant",
-        required=True, canonical_key="identity.full_name")]
+        required=True, canonical_key="identity.full_name",
+        scope_sha256=digest("applicant-field-scope"))]
     snapshot = {
         "source": "server_readback",
         "target_sha256": digest(plan.target_url),
@@ -60,6 +61,7 @@ def test_server_draft_certificate_and_fault_canaries():
         "document_epoch": "CANARY_PRIVATE_SESSION_EPOCH",
         "driver_version": "synthetic-v1",
         "fields": [{"index": 0, "field_id": "full_name", "selector": "#name",
+                    "scope_sha256": digest("applicant-field-scope"),
                     "required": True, "value": "Synthetic Applicant"}],
         "attachments": {},
         "rows": {},
@@ -109,6 +111,15 @@ def test_server_draft_certificate_and_fault_canaries():
         with pytest.raises(ReviewUnverified):
             certify_review(profile, plan, read(),
                            expected_account_identity_digest=digest("account-1"))
+
+        for field_change in ({"index": False},
+                             {"scope_sha256": digest("wrong-field-scope")},
+                             {"scope_sha256": None}):
+            service.actual = copy.deepcopy(snapshot)
+            service.actual["fields"][0].update(field_change)
+            with pytest.raises(ReviewUnverified, match="current draft field"):
+                certify_review(profile, plan, read(),
+                               expected_account_identity_digest=digest("account-1"))
 
         for key, value in (("revision", 1), ("revision", 3),
                            ("document_epoch", "new-page"),
