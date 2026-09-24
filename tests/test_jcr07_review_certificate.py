@@ -270,10 +270,11 @@ def test_continue_that_submits_remains_human_only(tmp_path, human_trigger):
     html = tmp_path / "ambiguous-continue.html"
     html.write_text(
         """<!doctype html><meta charset="utf-8"><body>
-        <form onsubmit="window.submitCount++; event.preventDefault()">
+        <form onsubmit="window.submitCount++; document.querySelector('#result').textContent='Application has been submitted'; event.preventDefault()">
           <label>Name <input id="name" value="Synthetic Applicant"></label>
           <button id="continue" type="submit">Continue</button>
         </form>
+        <p id="result"></p>
         <script>window.submitCount = 0</script>
         </body>""",
         encoding="utf-8",
@@ -290,3 +291,8 @@ def test_continue_that_submits_remains_human_only(tmp_path, human_trigger):
             adapter.page.locator("#name").focus()
             adapter.page.keyboard.press("Enter")
         assert adapter.page.evaluate("window.submitCount") == 1
+        observed = adapter.verify_submission()
+        assert observed.level == "page_signal"
+        assert observed.verified is False
+        assert observed.status == "page_signal_observed"
+        assert observed.evidence == {"success_text_present": True}
