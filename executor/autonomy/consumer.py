@@ -144,6 +144,14 @@ exit $STATUS
     with (staging / "Contents" / "Info.plist").open("wb") as handle:
         plistlib.dump(info, handle, sort_keys=True)
 
+    if not _trusted_bundle(staging):
+        shutil.rmtree(staging)
+        return {
+            "ok": False,
+            "reason": "candidate_invalid",
+            "message": "新应用包未通过本机校验；现有应用没有被替换。",
+        }
+
     rollback = apps_dir / f".{APP_NAME}.app.previous"
     if (app.exists() or app.is_symlink()) and not _trusted_bundle(app):
         shutil.rmtree(staging)
