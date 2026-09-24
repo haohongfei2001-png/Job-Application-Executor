@@ -24,8 +24,8 @@ def _minimal_source(repo):
     package = repo / "executor"
     package.mkdir()
     (package / "__init__.py").write_text("", encoding="utf-8")
-    (package / "consumer_entry.py").write_text("VERSION = 'fixture'\\n", encoding="utf-8")
-    (repo / "requirements.txt").write_text("pydantic==2.13.0\\n", encoding="utf-8")
+    (package / "consumer_entry.py").write_text("VERSION = 'fixture'\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text("pydantic==2.13.0\n", encoding="utf-8")
 
 
 def _ready_preflight(*, supervisor_running):
@@ -252,7 +252,7 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert app.is_dir()
     release = app / "Contents" / "Resources" / "release"
     assert verify_source_candidate(release)
-    assert (release / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\\n"
+    assert (release / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\n"
     assert executable.stat().st_mode & stat.S_IXUSR
     launcher = executable.read_text(encoding="utf-8")
     assert str(repo.resolve()) in launcher
@@ -269,9 +269,9 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     rogue = app / "Contents" / "old-file.txt"
     rogue.write_text("old")
     (repo / "executor" / "consumer_entry.py").write_text(
-        "VERSION = 'candidate'\\n", encoding="utf-8"
+        "VERSION = 'candidate'\n", encoding="utf-8"
     )
-    assert (release / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\\n"
+    assert (release / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\n"
     second = install_macos_app(repo, destination=apps, platform="darwin")
     assert second["ok"] is True
     assert second["replaced"] is True
@@ -279,8 +279,8 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     rollback = apps / ".AI 投递经理.app.previous"
     assert second["rollback_path"] == str(rollback)
     assert (rollback / "Contents" / "old-file.txt").read_text() == "old"
-    assert (rollback / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\\n"
-    assert (app / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'candidate'\\n"
+    assert (rollback / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\n"
+    assert (app / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'candidate'\n"
     third = install_macos_app(repo, destination=apps, platform="darwin")
     assert third["ok"] is False
     assert third["reason"] == "rollback_pending"
@@ -290,7 +290,7 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert restored["ok"] is True
     assert restored["restored"] is True
     assert rogue.read_text() == "old"
-    assert (app / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\\n"
+    assert (app / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\n"
     assert (apps / ".AI 投递经理.app.failed").is_dir()
     assert not rollback.exists()
 
@@ -299,7 +299,7 @@ def test_macos_consumer_app_rollback_failure_preserves_current(tmp_path, monkeyp
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\\nexit 0\\n")
+    python.write_text("#!/bin/sh\nexit 0\n")
     python.chmod(0o755)
     _minimal_source(repo)
     apps = tmp_path / "Applications"
@@ -327,7 +327,7 @@ def test_macos_consumer_app_activation_failure_restores_known_good(tmp_path, mon
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\\nexit 0\\n")
+    python.write_text("#!/bin/sh\nexit 0\n")
     python.chmod(0o755)
     _minimal_source(repo)
     apps = tmp_path / "Applications"
@@ -354,7 +354,7 @@ def test_macos_consumer_app_rejects_untrusted_existing_bundle(tmp_path):
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\\nexit 0\\n")
+    python.write_text("#!/bin/sh\nexit 0\n")
     python.chmod(0o755)
     _minimal_source(repo)
     apps = tmp_path / "Applications"
@@ -399,7 +399,7 @@ def test_macos_consumer_app_rejects_invalid_staging_before_replacement(
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\\nexit 0\\n")
+    python.write_text("#!/bin/sh\nexit 0\n")
     python.chmod(0o755)
     _minimal_source(repo)
     apps = tmp_path / "Applications"
