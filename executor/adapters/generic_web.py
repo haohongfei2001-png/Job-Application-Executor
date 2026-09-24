@@ -1336,16 +1336,11 @@ class GenericWebAdapter(SiteAdapter):
             body,
             re.I,
         )
-        app_id = None
-        id_match = re.search(r"(?:application|申请)\s*(?:id|编号)?[:：#\s]+([A-Za-z0-9_-]{6,})", body, re.I)
-        if id_match:
-            app_id = id_match.group(1)
         return SubmissionVerification(
-            verified=bool(match),
+            verified=False,
             level="page_signal" if match else "none",
-            application_id=app_id,
-            status="submitted" if match else None,
-            evidence={"matched_success_text": match.group(0) if match else None, "url": self.page.url},
+            status="page_signal_observed" if match else None,
+            evidence={"success_text_present": bool(match)},
         )
 
     def screenshot(self, path: str) -> None:
