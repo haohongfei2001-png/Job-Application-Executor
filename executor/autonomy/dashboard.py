@@ -179,7 +179,7 @@ function render(state){
       ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown','auth_return_unverified','account_identity_unverified','draft_persistence_unverified'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
         ${!['SUBMITTED','VERIFIED','CANCELLED','READY_TO_SUBMIT'].includes(t.stage)?`<button type="button" data-action="CANCEL" data-task="${esc(t.task_id)}" data-revision="${t.revision}">取消</button>`:''}
       </div>
-      ${t.stage==='READY_TO_SUBMIT'?'<div id="review-${esc(t.task_id)}" class="review private-review" data-private-review-panel role="region" aria-label="完整申请复核" tabindex="-1" hidden></div>':''}
+      ${t.stage==='READY_TO_SUBMIT'?`<div id="review-${esc(t.task_id)}" class="review private-review" data-private-review-panel role="region" aria-label="完整申请复核" tabindex="-1" hidden></div>`:''}
     </div>`).join('');
 }
 tasksEl.addEventListener('click',event=>{
