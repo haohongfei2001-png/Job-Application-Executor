@@ -15,7 +15,7 @@ from urllib.parse import parse_qsl, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..models import ApplicationStage
-from ..protected_targets import assert_target_not_protected
+from ..protected_targets import assert_target_not_protected, register_user_confirmed_target
 from ..discovery.core import normalize_component
 
 RUNTIME = Path(__file__).resolve().parents[2] / "runtime" / "autonomy"
@@ -593,6 +593,62 @@ class TaskQueue:
             delay = min(60, 2**row["attempts"]) if blocker == "retry_pending" else 0
             db.execute("UPDATE tasks SET stage=?,checkpoint=?,blocker=?,details=?,owner=?,lease_until=?,next_run=?,updated=? WHERE task_id=?", (stage, cp, blocker, json.dumps(safe), None if release else owner, None if release else row["lease_until"], self.clock()+delay, self.clock(), tid))
             self._event(db, tid, "checkpoint", stage)
+
+    def confirm_human_submission(
+        self, tid: str, *, expected_revision: int, user_confirmed: bool,
+        observation: dict | None = None, registry_path=None,
+    ) -> dict:
+        """Record a human claim, never infer submission from page text."""
+        if user_confirmed is not True or type(expected_revision) is not int:
+            raise ValueError("explicit human confirmation and task revision required")
+        status = observation.get("status") if isinstance(observation, dict) else None
+        allowed = {
+            "PAGE_SIGNAL_OBSERVED", "NO_SUBMISSION_SIGNAL", "NO_TASK_BINDING",
+            "ISOLATED_LIVE_OBSERVATION_UNSUPPORTED", "OWNED_SESSION_UNAVAILABLE",
+            "PROCESS_EPOCH_CHANGED", "TARGET_CHANGED", "OWNERSHIP_UNVERIFIED",
+            "OBSERVATION_UNAVAILABLE",
+        }
+        if status not in allowed:
+            raise ValueError("read-only submission observation required")
+        with self.tx() as db:
+            row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
+            self._view(row)
+            if row["revision"] != expected_revision:
+                raise RuntimeError("stale task revision")
+            if row["stage"] != "READY_TO_SUBMIT" or row["owner"]:
+                raise ValueError("task is not at the human submit boundary")
+            spec = TaskSpec.model_validate(json.loads(row["spec"]))
+            if not spec.target_verified:
+                raise ValueError("verified job identity required for protection")
+            details = json.loads(row["details"])
+            review = details.get("final_review") or {}
+            if (not isinstance(review, dict) or review.get("validated") is not True
+                    or review.get("final_click_actor") != "user"):
+                raise ValueError("independent review certificate required")
+            kwargs = {
+                "tenant": spec.tenant, "job_id": spec.job_id,
+                "campaign": spec.campaign, "verified_identity": True,
+                "user_confirmed": True,
+            }
+            if registry_path is not None:
+                kwargs["path"] = registry_path
+            register_user_confirmed_target(spec.target_url, **kwargs)
+            safe = {
+                "submission": {
+                    "level": "user_confirmed",
+                    "read_only_observation": status,
+                    "page_signal": status == "PAGE_SIGNAL_OBSERVED",
+                    "server_verified": False,
+                },
+                "final_review": review,
+            }
+            db.execute(
+                "UPDATE tasks SET stage='SUBMITTED',blocker=NULL,details=?,updated=? WHERE task_id=?",
+                (json.dumps(safe), self.clock(), tid),
+            )
+            self._event(db, tid, "human_submission_confirmed", "SUBMITTED")
+            return self._view(
+                db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone())
 
     def _resume_in_tx(self, db, tid, *, command_id=None, expected_revision=None):
         prior = self._command_before(db, tid, "RESUME", command_id, expected_revision)
