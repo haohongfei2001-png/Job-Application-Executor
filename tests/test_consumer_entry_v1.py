@@ -368,6 +368,32 @@ def test_macos_consumer_app_rejects_untrusted_existing_bundle(tmp_path):
     assert not (apps / ".AI 投递经理.app.failed").exists()
 
 
+def test_macos_consumer_app_rejects_invalid_staging_before_replacement(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\\nexit 0\\n")
+    python.chmod(0o755)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    marker = app / "Contents" / "known-good.txt"
+    marker.write_text("preserve", encoding="utf-8")
+
+    def corrupt_candidate(_info, handle, *, sort_keys):
+        handle.write(b"invalid-plist")
+
+    monkeypatch.setattr(plistlib, "dump", corrupt_candidate)
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert result["ok"] is False
+    assert result["reason"] == "candidate_invalid"
+    assert marker.read_text(encoding="utf-8") == "preserve"
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+    assert not (apps / ".AI 投递经理.app.installing").exists()
+
+
 def test_macos_consumer_app_refuses_missing_virtualenv(tmp_path):
     result = install_macos_app(
         tmp_path / "missing-repo",
