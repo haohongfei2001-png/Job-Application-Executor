@@ -62,6 +62,17 @@ def test_release_source_snapshot_is_independent_and_detects_candidate_drift(tmp_
     }
 
 
+def test_undecodable_release_manifest_is_unverified_without_exposing_state(tmp_path):
+    repo = _source(tmp_path)
+    candidate = tmp_path / "candidate"
+    copy_source_candidate(repo, candidate)
+    (candidate / MANIFEST_NAME).write_bytes(b"\\xff\\xfe")
+    assert verify_source_candidate(candidate) is False
+    assert read_release_identity(candidate) == {
+        "status": "unverified", "source_sha256": ""
+    }
+
+
 def test_candidate_dependency_check_rejects_missing_or_changed_versions(tmp_path):
     repo = _source(tmp_path)
     candidate = tmp_path / "candidate"
