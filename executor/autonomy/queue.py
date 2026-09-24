@@ -549,7 +549,8 @@ class TaskQueue:
                 }
                 target = json.loads(row["spec"])["target_url"]
                 target_digest = hashlib.sha256(target.encode("utf-8")).hexdigest()
-                if (safe["unresolved_keys"]
+                if (not isinstance(details.get("unresolved_keys"), list)
+                        or details["unresolved_keys"]
                         or not isinstance(certificate, dict)
                         or certificate.get("target_sha256") != target_digest
                         or not isinstance(certificate.get("draft_id_digest"), str)
