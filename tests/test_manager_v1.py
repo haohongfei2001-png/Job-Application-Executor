@@ -371,6 +371,15 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
     }
     assert "PRIVATE_CANARY" not in str(supervisor.ui_state())
     assert "PRIVATE_CANARY" not in str(q.get(tid))
+    with monkeypatch.context() as patcher:
+        patcher.setattr("executor.autonomy.supervisor.browser.browser_mode", lambda: "live")
+        patcher.setattr("executor.autonomy.supervisor.browser.observe_bound_draft",
+                        lambda *_: {"status": "DOCUMENT_CHANGED"})
+        with pytest.raises(ValueError, match="document or owned session changed"):
+            supervisor.review_values(tid)
+    assert supervisor.ui_state()["tasks"][0]["review_values_available"] is False
+    worker._remember_private_review(
+        tid, private_runner, private_plan, q.get(tid)["revision"])
     assert Worker(q, settings={"deepseek": {"enabled": False}}).private_review(
         tid, q.get(tid)["revision"]) is None
     observed_targets = []
