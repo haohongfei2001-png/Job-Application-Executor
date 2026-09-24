@@ -103,6 +103,8 @@ def write_update_state(
 
 def read_update_state(runtime: str | Path) -> dict:
     path = _state_path(Path(runtime).expanduser().resolve())
+    if path.is_symlink():
+        return {"status": "failed", "old_version": "", "new_version": "", "reason": "state_invalid"}
     if not path.is_file():
         return {"status": "idle", "old_version": "", "new_version": "", "reason": ""}
     try:
