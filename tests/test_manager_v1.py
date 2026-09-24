@@ -339,13 +339,8 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
     supervisor = Supervisor(q, worker=worker, token="x" * 40, manager=manager)
     ready_view = next(task for task in supervisor.ui_state()["tasks"]
                       if task["task_id"] == tid)
-    assert ready_view["review_summary"] == {
-        "status": "last_verified",
-        "field_count": 1,
-        "attachment_count": 0,
-        "row_count": 0,
-        "check_count": 6,
-    }
+    assert ready_view["review_summary"] == {"status": "unavailable"}
+    assert ready_view["can_confirm_submission"] is False
     assert "resume.docx" not in str(ready_view)
     assert "postId=role-1" not in str(ready_view)
     private_plan = ApplicationPlan(
@@ -367,6 +362,13 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
     assert private_view["fields"][0]["observed"] == "PRIVATE_CANARY"
     assert private_view["account"]["canonical_value"] == "private@example.test"
     assert supervisor.ui_state()["tasks"][0]["review_values_available"] is True
+    assert supervisor.ui_state()["tasks"][0]["review_summary"] == {
+        "status": "last_verified",
+        "field_count": 1,
+        "attachment_count": 0,
+        "row_count": 0,
+        "check_count": 6,
+    }
     assert "PRIVATE_CANARY" not in str(supervisor.ui_state())
     assert "PRIVATE_CANARY" not in str(q.get(tid))
     assert Worker(q, settings={"deepseek": {"enabled": False}}).private_review(
