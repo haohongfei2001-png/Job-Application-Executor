@@ -3,6 +3,7 @@ from __future__ import annotations
 import plistlib
 import shlex
 import shutil
+import subprocess
 import stat
 import sys
 from pathlib import Path
@@ -56,6 +57,30 @@ def _trusted_bundle(app: Path) -> bool:
             and bool(executable.stat().st_mode & stat.S_IXUSR)
         )
     except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
+        return False
+
+
+def _candidate_starts(python: Path, release: Path) -> bool:
+    """Import the staged CLI with the target interpreter before activation."""
+    script = (
+        "import importlib,pathlib,sys;"
+        f"root=pathlib.Path({str(release)!r}).resolve();"
+        "sys.path.insert(0,str(root));"
+        "module=importlib.import_module('executor.autonomy.cli');"
+        "assert pathlib.Path(module.__file__).resolve().is_relative_to(root)"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-I", "-c", script],
+            cwd=release,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
         return False
 
 
@@ -164,6 +189,14 @@ exit $STATUS
             "ok": False,
             "reason": "candidate_invalid",
             "message": "新应用包未通过本机校验；现有应用没有被替换。",
+        }
+
+    if not _candidate_starts(python, release):
+        shutil.rmtree(staging)
+        return {
+            "ok": False,
+            "reason": "candidate_start_failed",
+            "message": "新版本无法用当前运行环境启动；现有应用没有被替换。",
         }
 
     rollback = apps_dir / f".{APP_NAME}.app.previous"
