@@ -228,6 +228,7 @@ def recheck_review(
         profile_version=profile_version,
     )
     if (current.target_sha256 != certificate.target_sha256
+            or current.revision != certificate.revision
             or current.document_epoch != certificate.document_epoch
             or current.driver_version != certificate.driver_version
             or current.profile_version != certificate.profile_version
