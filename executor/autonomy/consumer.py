@@ -123,16 +123,43 @@ exit $STATUS
     with (staging / "Contents" / "Info.plist").open("wb") as handle:
         plistlib.dump(info, handle, sort_keys=True)
 
-    replaced = app.exists() or app.is_symlink()
-    if app.is_symlink():
-        app.unlink()
-    elif app.exists():
-        shutil.rmtree(app)
-    staging.rename(app)
+    rollback = apps_dir / f".{APP_NAME}.app.previous"
+    if app.is_symlink() or rollback.exists() or rollback.is_symlink():
+        shutil.rmtree(staging)
+        return {
+            "ok": False,
+            "reason": "untrusted_app_path" if app.is_symlink() else "rollback_pending",
+            "message": "旧版应用或回退副本需要先核对；现有应用没有被替换。",
+        }
+    replaced = app.exists()
+    try:
+        if replaced:
+            app.rename(rollback)
+        staging.rename(app)
+    except OSError:
+        restored = not replaced
+        if replaced and rollback.exists() and not app.exists():
+            try:
+                rollback.rename(app)
+                restored = True
+            except OSError:
+                restored = False
+        if staging.exists():
+            shutil.rmtree(staging)
+        return {
+            "ok": False,
+            "reason": "activation_failed" if restored else "rollback_required",
+            "rollback_path": str(rollback) if rollback.exists() else None,
+            "message": (
+                "新版本未启用，原应用保持可用。"
+                if restored else "新版本未启用；旧版保存在回退位置，需要人工恢复。"
+            ),
+        }
     return {
         "ok": True,
         "installed": True,
         "replaced": replaced,
         "app_path": str(app),
+        "rollback_path": str(rollback) if replaced else None,
         "message": "AI 投递经理已安装。以后直接双击应用即可。",
     }
