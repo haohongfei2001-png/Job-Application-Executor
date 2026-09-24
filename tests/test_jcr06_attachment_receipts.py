@@ -88,6 +88,9 @@ class CertifiedUploadAdapter:
     def auth_challenge(self):
         return False
 
+    def start_application(self):
+        return False
+
     def discover_fields(self):
         return [WebField(field_id="resume", selector="#resume", label="Resume",
                          input_type="file", required=True, metadata={"accept": ".pdf"}),
@@ -143,6 +146,32 @@ class CertifiedUploadAdapter:
         pass
 
 
+class TwoPageUploadAdapter(CertifiedUploadAdapter):
+    def __init__(self, target_url, server, *, lose_photo):
+        super().__init__(target_url)
+        self.server = server
+        self.page_index = 0
+        self.lose_photo = lose_photo
+
+    def discover_fields(self):
+        return super().discover_fields() if self.page_index == 0 else []
+
+    def next_control(self):
+        return self.page_index == 0
+
+    def final_submit_control(self):
+        return "Submit" if self.page_index == 1 else None
+
+    def advance(self):
+        if self.page_index != 0:
+            return False
+        self.page_index = 1
+        if self.lose_photo:
+            self.server.attachments.pop("photo", None)
+            self.server.revision += 1
+        return True
+
+
 def test_two_uploads_need_retained_same_draft_receipts(tmp_path, monkeypatch, upload_site):
     resume, photo = tmp_path / "resume.pdf", tmp_path / "photo.png"
     resume.write_bytes(b"%PDF-1.4 synthetic canary")
@@ -191,4 +220,36 @@ def test_two_uploads_need_retained_same_draft_receipts(tmp_path, monkeypatch, up
     wrong_draft = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=1)
     assert wrong_draft.stage == ApplicationStage.BLOCKED
     assert wrong_draft.metadata["block_reason"] == "draft persistence unverified"
+    assert upload_site.submit_count == 0
+
+
+def test_next_page_rechecks_earlier_attachments_before_ready(tmp_path, monkeypatch, upload_site):
+    resume, photo = tmp_path / "resume.pdf", tmp_path / "photo.png"
+    resume.write_bytes(b"%PDF-1.4 earlier page")
+    photo.write_bytes(b"\x89PNG earlier page")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"assets": {
+        "resume": {"path": str(resume), "kind": "resume_pdf",
+                   "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()},
+        "photo": {"path": str(photo), "kind": "photo_png",
+                  "sha256": hashlib.sha256(photo.read_bytes()).hexdigest()},
+    }}))
+    target = f"http://127.0.0.1:{upload_site.server_port}/apply"
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: TwoPageUploadAdapter(url, upload_site,
+                                                         lose_photo=True))
+    lost = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=2)
+    assert lost.stage == ApplicationStage.BLOCKED
+    assert lost.metadata["block_reason"] == "attachment draft receipt unverified"
+    assert upload_site.submit_count == 0
+
+    upload_site.attachments.clear()
+    upload_site.revision = 0
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: TwoPageUploadAdapter(url, upload_site,
+                                                         lose_photo=False))
+    retained = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=2)
+    assert retained.stage == ApplicationStage.READY_TO_SUBMIT
+    assert retained.metadata["attachment_persistence"]["slot_count"] == 2
     assert upload_site.submit_count == 0

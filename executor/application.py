@@ -494,6 +494,7 @@ class ApplicationExecutor:
             assert_target_not_protected(self.resume_url)
             adapter.target_url = self.resume_url
         attachment_binding = None
+        attachment_selections: list[FieldResolution] = []
         with adapter:
             for page_index in range(max_pages):
                 self.guard()
@@ -636,6 +637,7 @@ class ApplicationExecutor:
                         self.audit.save_plan(self.plan)
                         return self.plan
                     attachment_binding = (new_binding, proof["minimum_draft_revision"])
+                    attachment_selections.extend(selected_assets)
                     self.plan.metadata["attachment_persistence"] = proof
                     self.audit.save_plan(self.plan)
 
@@ -682,6 +684,29 @@ class ApplicationExecutor:
                 self.plan.stage = ApplicationStage.VALIDATED
                 final_control = adapter.final_submit_control()
                 if final_control:
+                    if attachment_binding:
+                        # A later page may silently discard a previous upload.
+                        # Re-read every selected slot from the server before READY.
+                        readback = getattr(adapter, "verify_attachment_receipts", None)
+                        try:
+                            receipts = (readback(self.plan, attachment_selections)
+                                        if callable(readback) else None)
+                            retained = verify_attachment_readback(
+                                self.target_url, attachment_selections,
+                                self.profile.get("assets") or {}, receipts)
+                            if retained.pop("_draft_id_digest") != attachment_binding[0]:
+                                raise ValueError("attachment draft identity changed")
+                        except BrowserOwnershipError:
+                            raise
+                        except Exception:
+                            self.plan.stage = ApplicationStage.BLOCKED
+                            self.plan.metadata["block_reason"] = "attachment draft receipt unverified"
+                            self.plan.metadata["attachment_persistence"] = "UNVERIFIED"
+                            self.audit.save_plan(self.plan)
+                            return self.plan
+                        attachment_binding = (attachment_binding[0],
+                                              retained["minimum_draft_revision"])
+                        self.plan.metadata["attachment_persistence"] = retained
                     verify_draft = getattr(adapter, "verify_draft_persistence", None)
                     if attachment_binding and not callable(verify_draft):
                         self.plan.stage = ApplicationStage.BLOCKED
