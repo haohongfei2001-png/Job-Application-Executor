@@ -178,7 +178,7 @@ def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_u
         with log.open("ab") as stream:
             log.chmod(0o600)
             child = subprocess.Popen(
-                [sys.executable, "-m", "executor.autonomy.cli", "--runtime", str(root),
+                [sys.executable, "-B", "-m", "executor.autonomy.cli", "--runtime", str(root),
                  "--port", str(service_port), "bootstrap-serve", "--reason", reason],
                 cwd=Path(__file__).resolve().parents[2],
                 stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
