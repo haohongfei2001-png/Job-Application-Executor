@@ -15,6 +15,7 @@ from executor import browser
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.models import ApplicationPlan, FieldResolution, ResolutionStatus
 from executor.review_certificate import ReviewUnverified, certify_review, recheck_review
+from executor.protected_targets import load_protected_targets, protected_target, register_user_confirmed_target
 
 
 def digest(value: str) -> str:
@@ -355,3 +356,36 @@ def test_post_human_submit_observer_is_read_only_and_page_signal_only(monkeypatc
     monkeypatch.setattr(browser, "owned_cdp_fingerprint", lambda: "otherprocess")
     assert browser.observe_bound_submission(target, binding)["status"] == "PROCESS_EPOCH_CHANGED"
     assert calls == {"connect": 1, "stop": 1}
+
+
+def test_user_confirmed_protection_is_private_exact_and_idempotent(tmp_path):
+    target = "https://jobs.example.test/apply?postId=role-1&resumeId=private-123"
+    registry = tmp_path / "private" / "protected-targets.json"
+    args = {
+        "tenant": "synthetic-tenant",
+        "job_id": "role-1",
+        "campaign": "autumn",
+        "verified_identity": True,
+        "path": registry,
+    }
+    with pytest.raises(ValueError, match="explicit human confirmation"):
+        register_user_confirmed_target(target, user_confirmed=False, **args)
+    assert not registry.exists()
+    with pytest.raises(ValueError, match="verified target"):
+        register_user_confirmed_target(
+            target, user_confirmed=True, **{**args, "verified_identity": False})
+    assert register_user_confirmed_target(target, user_confirmed=True, **args) is True
+    assert register_user_confirmed_target(target, user_confirmed=True, **args) is False
+    raw = registry.read_text(encoding="utf-8")
+    assert target not in raw
+    assert "private-123" not in raw
+    assert registry.stat().st_mode & 0o077 == 0
+    items = load_protected_targets(registry)
+    assert protected_target(
+        "https://jobs.example.test/new-path?jobId=role-1",
+        items, tenant="synthetic-tenant", job_id="role-1", campaign="autumn",
+    )["status"] == "USER_CONFIRMED"
+    assert protected_target(
+        "https://jobs.example.test/new-path?jobId=other",
+        items, tenant="synthetic-tenant", job_id="other", campaign="autumn",
+    ) is None
