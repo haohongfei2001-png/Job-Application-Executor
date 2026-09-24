@@ -329,6 +329,65 @@ def observe_bound_draft(target_url: str, binding: dict | None) -> dict:
     }
 
 
+def observe_bound_submission(target_url: str, binding: dict | None) -> dict:
+    """Read an owned task tab after a human click without replaying any action.
+
+    Navigation may replace the READY document. Process, tab and origin must
+    still match; page text is only a signal and never server verification.
+    """
+    status = "NO_TASK_BINDING"
+    if binding and binding.get("document_epoch"):
+        if browser_mode() in {"test", "isolated", "headless"}:
+            status = "ISOLATED_LIVE_OBSERVATION_UNSUPPORTED"
+        else:
+            epoch = owned_cdp_fingerprint()
+            if epoch is None:
+                status = "OWNED_SESSION_UNAVAILABLE"
+            elif epoch != binding.get("process_epoch"):
+                status = "PROCESS_EPOCH_CHANGED"
+            else:
+                pw = None
+                try:
+                    read_binding = dict(binding)
+                    read_binding.pop("document_epoch", None)
+                    pw, _browser, ctx, page = connect(
+                        target_url, existing_only=True,
+                        task_binding=read_binding, session_epoch=epoch,
+                    )
+                    if page_target_id(ctx, page) != binding["target_id"]:
+                        status = "TARGET_CHANGED"
+                    else:
+                        changed = page_document_epoch(page) != binding["document_epoch"]
+                        from .adapters.generic_web import GenericWebAdapter
+                        observer = GenericWebAdapter(target_url)
+                        observer.page = page
+                        signal = observer.verify_submission()
+                        return {
+                            "status": "PAGE_SIGNAL_OBSERVED"
+                                      if signal.level == "page_signal"
+                                      else "NO_SUBMISSION_SIGNAL",
+                            "level": signal.level if signal.level == "page_signal" else "none",
+                            "server_verified": False,
+                            "user_confirmed": False,
+                            "document_changed": changed,
+                            "replay_allowed": False,
+                        }
+                except BrowserOwnershipError:
+                    status = "OWNERSHIP_UNVERIFIED"
+                except Exception:
+                    status = "OBSERVATION_UNAVAILABLE"
+                finally:
+                    if pw is not None:
+                        pw.stop()
+    return {
+        "status": status,
+        "level": "none",
+        "server_verified": False,
+        "user_confirmed": False,
+        "replay_allowed": False,
+    }
+
+
 def observe_bound_auth(target_url: str, binding: dict | None, origin: str) -> str:
     """Read-only proof for a continuing OTP wait on the same owned document."""
     if (not binding or not binding.get("document_epoch")
