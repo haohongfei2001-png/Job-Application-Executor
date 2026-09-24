@@ -15,9 +15,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+from .loopback_http import LoopbackHTTPServer
 from .queue import private_dir
 from .release import read_release_identity
 
@@ -127,7 +128,7 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
         do_GET = handle_request
         do_POST = handle_request
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
     state = _state_path(root)
     tmp = state.with_suffix(".tmp")
     tmp.write_text(json.dumps({"pid": os.getpid(), "port": server.server_address[1], "token": token}))
@@ -183,7 +184,7 @@ def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_u
                 stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
                 start_new_session=True,
             )
-        for _ in range(300):
+        for _ in range(50):
             if child.poll() is not None:
                 break
             active = current()
