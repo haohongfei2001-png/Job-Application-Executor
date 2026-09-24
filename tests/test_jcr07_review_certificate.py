@@ -203,6 +203,14 @@ def test_missing_observer_and_unconfirmed_default_fail_closed():
         certify_review(profile, plan, observation,
                        expected_account_identity_digest=digest("account"))
 
+    # A stale unresolved_fields list must not hide a mandatory field requiring input.
+    observation["fields"][0]["value"] = True
+    plan.fields[0].status = ResolutionStatus.USER_CONFIRMATION
+    assert plan.unresolved_fields == []
+    with pytest.raises(ReviewUnverified, match="unresolved application fields"):
+        certify_review(profile, plan, observation,
+                       expected_account_identity_digest=digest("account"))
+
 
 def test_project_row_identity_and_values_must_match_current_inventory():
     profile = {"generated_at": "v1", "collections": {"projects": [
