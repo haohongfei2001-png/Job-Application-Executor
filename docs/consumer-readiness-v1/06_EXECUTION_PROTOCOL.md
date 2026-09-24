@@ -9,12 +9,13 @@
 <p>当前用户明确目标/安全边界 &gt; 本包已批准 scope/architecture/invariants &gt; 本轮 contract &gt; implementation convenience。历史文档中与当前 scope 或本连续执行协议冲突的产品合同显式视为 superseded，不删除历史。已完成的正确安全工作不可退回。</p>
 
 <h2 id="06_execution_protocol-3-连续无人执行">3. 连续无人执行</h2>
-<p>执行模型的默认职责是持续推进，而不是等待 owner 管理开发。每完成一个 coding/test/CI/review/merge 阶段都重新读取 remote main、open PR、active writer、CI、STATUS、当前 round 与 deferred ledger，并继续下一项可执行工作。</p>
+<p>执行模型的默认职责是持续推进，而不是等待 owner 管理开发。完整事实重建按<strong>工程批次边界</strong>执行，而不是按每个 coding/test/fix 步骤重复执行：一个 JCR round 或 coherent engineering batch 开始时完成一次 remote main、open PR、active writer、CI、STATUS、当前 round 与 deferred ledger 的完整对账；同一 sole-writer PR 内的 coding → targeted test → fix → checkpoint 使用已确认的 branch/HEAD 上下文连续推进。</p>
+<p>仅在以下情况重新执行完整 reconcile：准备合并；合并后进入下一 round/batch；检测到 remote main、active writer 或依赖边界发生变化；CI/review 暴露跨模块事实变化；当前证据表明原先读取的事实已经陈旧。普通 targeted-test/fix 循环、无新信息的 CI 等待、同一 branch 上的连续实现不得触发全仓库上下文重建或为了“保持活跃”重复轮询 GitHub。</p>
 <p><strong>核心规则：</strong><code>block the unsafe action, not the development package</code>。任何单点 blocker 默认只阻塞它直接依赖的动作或验收证据，不阻塞其他工程工作。</p>
 <p>CI 等待、review 等待、网络瞬断、普通实现争议、测试失败、locator drift、兼容性 bug、merge conflict、依赖问题、重构、fixture 修复、需要多次 commit 或某轮完成，都不是 package-level 停止理由。能够自行诊断和修复的必须自行处理。</p>
 
 <h2 id="06_execution_protocol-4-每轮开始-read_first">4. 每轮开始 READ_FIRST</h2>
-<p>读取当前 main/branch/HEAD、open PR/active writer、exact-head CI、README/STATUS、当前 round contract、对应 acceptance IDs、上一轮 receipt、架构不变量、<code>DEFERRED_FINAL_GATES.md</code> 与受影响生产路径。若已有正确实现或现有 PR，接续它，不创建平行 writer。</p>
+<p>在每个新 round / coherent batch 起点读取当前 main/branch/HEAD、open PR/active writer、exact-head CI、README/STATUS、当前 round contract、对应 acceptance IDs、上一轮 receipt、架构不变量、<code>DEFERRED_FINAL_GATES.md</code> 与受影响生产路径。若已有正确实现或现有 PR，接续它，不创建平行 writer。完成 READ_FIRST 后，在没有 section 3 所列漂移信号时保持上下文连续，不机械重复同一套读取。</p>
 <p>轮次仍作为审计和集成边界：应尽可能逐轮实现、验证、PR、合并、receipt 和 STATUS。但“上一轮存在不影响后续独立工作的 deferred 项”不再强制整个 package 空等。</p>
 
 <h2 id="06_execution_protocol-5-工程动作授权">5. 工程动作授权</h2>
