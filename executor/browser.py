@@ -428,6 +428,65 @@ def observe_bound_submission(target_url: str, binding: dict | None) -> dict:
     }
 
 
+
+def observe_bound_submission_receipt(
+    target_url: str, binding: dict | None, expected_review: dict | None,
+) -> dict | None:
+    """Optional post-click server proof from a certified read-only driver.
+
+    A generic page signal is never upgraded. The private certificate binds
+    target, draft, account and observer version; no receipt body or applicant
+    value leaves this function.
+    """
+    if (not binding or not expected_review
+            or browser_mode() in {"test", "isolated", "headless"}):
+        return None
+    epoch = owned_cdp_fingerprint()
+    if not epoch or epoch != binding.get("process_epoch"):
+        return None
+    pw = None
+    try:
+        read_binding = dict(binding)
+        read_binding.pop("document_epoch", None)
+        pw, _browser, ctx, page = connect(
+            target_url, existing_only=True, task_binding=read_binding,
+            session_epoch=epoch,
+        )
+        from .adapters.registry import adapter_for_url
+        observer = adapter_for_url(target_url)
+        if getattr(observer, "read_only_submission_certified", False) is not True:
+            return None
+        observer.ctx, observer.page = ctx, page
+        readback = getattr(observer, "observe_submission_receipt", None)
+        if not callable(readback):
+            return None
+        receipt = readback()
+        if (page_target_id(ctx, page) != binding["target_id"]
+                or not isinstance(receipt, dict)
+                or receipt.get("source") != "server_readback"
+                or receipt.get("verified") is not True
+                or receipt.get("status") != "submitted"
+                or any(receipt.get(key) != expected_review.get(key) for key in (
+                    "target_sha256", "draft_id_digest",
+                    "account_identity_digest", "driver_version"))
+                or not isinstance(receipt.get("submission_id"), str)
+                or not re.fullmatch(r"[A-Za-z0-9_.:-]{6,128}",
+                                    receipt["submission_id"])):
+            return None
+        return {
+            "status": "SERVER_SUBMISSION_VERIFIED",
+            "level": "server_verified",
+            "server_verified": True,
+            "user_confirmed": False,
+            "replay_allowed": False,
+        }
+    except Exception:
+        return None
+    finally:
+        if pw is not None:
+            pw.stop()
+
+
 def observe_bound_auth(target_url: str, binding: dict | None, origin: str) -> str:
     """Read-only proof for a continuing OTP wait on the same owned document."""
     if (not binding or not binding.get("document_epoch")
