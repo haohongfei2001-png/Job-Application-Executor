@@ -114,6 +114,7 @@ def test_form_observation_error_after_write_never_reaches_ready(tmp_path, monkey
     "attachment_persistence_unverified",
     "auth_return_unverified",
     "account_identity_unverified",
+    "row_reconciliation_unverified",
 ])
 def test_unverified_effect_cannot_be_blindly_resumed_after_pause(tmp_path, blocker):
     queue = TaskQueue(tmp_path / "runtime")

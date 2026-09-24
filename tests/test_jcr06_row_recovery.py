@@ -15,7 +15,10 @@ import pytest
 
 from executor.forms import (DesiredRow, RowActionJournal, RowInventory,
                             RowOutcomeUnknown, RowReconciler,
-                            RowReconciliationBlocked, SiteRow)
+                            RowReconciliationBlocked, RowExecutionContract, SiteRow)
+from executor.application import ApplicationExecutor
+from executor.autonomy.worker import outcome
+from executor.models import ApplicationStage, ValidationResult, WebField
 
 
 SCOPE = "synthetic-ats/task-one/draft-one"
@@ -284,3 +287,111 @@ def test_row_inventory_wrong_draft_blocks_before_intent_or_site_write(tmp_path, 
             (DesiredRow("A", {"school": "A School"}),))
     assert server.add_count == 0
     assert journal.pending() == ()
+
+
+def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
+        tmp_path, monkeypatch, row_site):
+    server, driver = row_site
+    target = f"http://127.0.0.1:{server.server_port}/apply"
+    server.target_sha256 = hashlib.sha256(target.encode()).hexdigest()
+    server.full_name = ""
+    server.submit_count = 0
+    server.corrupt_contract = False
+    server.omit_record = False
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "fields": {"identity.full_name": {"value": "Synthetic Person",
+                                         "confidence": 1.0}},
+        "collections": {"education_records": [
+            {"id": "A", "fields": {"school": {"value": "A School"}}},
+            {"id": "B", "fields": {"school": {"value": "B School"}}},
+        ]},
+    }))
+
+    class CertifiedRowsAdapter:
+        def __init__(self, target_url):
+            self.target_url = target_url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def auth_challenge(self):
+            return False
+
+        def structured_row_contract(self, applicant_profile):
+            records = applicant_profile["collections"]["education_records"]
+            desired = tuple(DesiredRow(record["id"], {
+                "school": record["fields"]["school"]["value"]})
+                for record in records)
+            if server.omit_record:
+                desired = desired[:1]
+            if server.corrupt_contract:
+                desired = (DesiredRow("A", {"school": "Invented School"}),) + desired[1:]
+            return RowExecutionContract(driver, desired, DRAFT_DIGEST,
+                                        "education_records")
+
+        def discover_fields(self):
+            return [WebField(field_id="full_name", selector="#name",
+                             label="Full name", required=True)]
+
+        def apply_resolutions(self, resolutions):
+            server.full_name = resolutions[0].value
+            return [{"field_id": resolutions[0].field_id, "ok": True}]
+
+        def validate(self, _plan):
+            return ValidationResult(ok=server.full_name == "Synthetic Person")
+
+        def final_submit_control(self):
+            return "Submit"
+
+        def verify_draft_persistence(self, _plan):
+            if (server.full_name != "Synthetic Person"
+                    or [(row["record_id"], row["values"]) for row in server.rows] != [
+                        ("A", {"school": "A School"}), ("B", {"school": "B School"})]):
+                return None
+            return {"verified": True, "level": "server_readback",
+                    "revision": server.revision}
+
+        def screenshot(self, _path):
+            pass
+
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: CertifiedRowsAdapter(url))
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
+    journal_path = tmp_path / "private" / "task-rows.sqlite3"
+
+    def run():
+        runner = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}},
+                                     execution_id="synthetic-task")
+        runner.row_journal_path = journal_path
+        return runner.run(max_pages=1)
+
+    first = run()
+    assert first.stage == ApplicationStage.READY_TO_SUBMIT
+    assert first.metadata["row_reconciliation"][0]["add_count"] == 2
+    assert server.add_count == 2 and server.submit_count == 0
+    second = run()
+    assert second.stage == ApplicationStage.READY_TO_SUBMIT
+    assert second.metadata["row_reconciliation"][0]["add_count"] == 0
+    assert server.add_count == 2
+
+    server.draft_id_digest = digest("wrong-draft")
+    wrong = run()
+    assert wrong.stage == ApplicationStage.BLOCKED
+    assert wrong.metadata["block_reason"] == "row reconciliation unverified"
+    assert outcome(wrong) == ("BLOCKED", "row_reconciliation_unverified")
+    assert server.add_count == 2 and server.submit_count == 0
+
+    server.draft_id_digest = DRAFT_DIGEST
+    server.corrupt_contract = True
+    invented = run()
+    assert invented.stage == ApplicationStage.BLOCKED
+    assert server.add_count == 2
+    server.corrupt_contract = False
+    server.omit_record = True
+    omitted = run()
+    assert omitted.stage == ApplicationStage.BLOCKED
+    assert server.add_count == 2 and server.submit_count == 0

@@ -68,6 +68,16 @@ class RowReceipt:
     order_digest: str
 
 
+@dataclass(frozen=True, repr=False)
+class RowExecutionContract:
+    """A certified site driver binds canonical records to one observed draft."""
+    driver: RowDriver = field(repr=False)
+    desired: tuple[DesiredRow, ...] = field(repr=False)
+    draft_id_digest: str
+    collection_key: str
+    delete_ids: frozenset[str] = frozenset()
+
+
 class RowDriver(Protocol):
     capabilities: frozenset[str]
 

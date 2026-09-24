@@ -27,6 +27,7 @@ RECONCILIATION_REQUIRED = frozenset({
     "browser_ownership_unknown", "unknown_outcome", "auth_return_unverified",
     "account_identity_unverified", "draft_persistence_unverified",
     "attachment_persistence_unverified", "form_observation_unavailable",
+    "row_reconciliation_unverified",
 })
 PAUSED_RECONCILIATION_REQUIRED = frozenset(
     "user_paused_from_" + blocker for blocker in RECONCILIATION_REQUIRED)
@@ -534,7 +535,7 @@ class TaskQueue:
             safe[key] = [k for k in details.get(key, []) if isinstance(k, str) and IDENTIFIER.fullmatch(k)]
         if stage == "READY_TO_SUBMIT":
             safe["final_review"] = {"final_click_actor": "user", "validated": True, "review_ref": tid, "manual_final_click_required": True}
-        if blocker not in {None, "unknown_facts", "security_challenge", "otp_waiting", "otp_ambiguous", "validation", "retry_pending", "retry_exhausted", "live_not_authorized", "session_unavailable", "protected_target", "target_mismatch", "isolated_external_target", "browser_ownership_unknown", "unknown_outcome", "auth_return_unverified", "account_identity_unverified", "draft_persistence_unverified", "attachment_persistence_unverified", "form_observation_unavailable"}:
+        if blocker not in {None, "unknown_facts", "security_challenge", "otp_waiting", "otp_ambiguous", "validation", "retry_pending", "retry_exhausted", "live_not_authorized", "session_unavailable", "protected_target", "target_mismatch", "isolated_external_target"} | RECONCILIATION_REQUIRED:
             raise ValueError("invalid blocker type")
         with self.tx() as db:
             row = db.execute("SELECT * FROM tasks WHERE task_id=? AND owner=? AND lease_until>? AND stage NOT IN ('CANCELLED','READY_TO_SUBMIT','SUBMITTED','VERIFIED')", (tid, owner, self.clock())).fetchone()

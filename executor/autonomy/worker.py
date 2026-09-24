@@ -53,6 +53,8 @@ def outcome(plan):
             return "BLOCKED", "attachment_persistence_unverified"
         if plan.metadata.get("block_reason") == "form observation unavailable":
             return "BLOCKED", "form_observation_unavailable"
+        if plan.metadata.get("block_reason") == "row reconciliation unverified":
+            return "BLOCKED", "row_reconciliation_unverified"
         if plan.metadata.get("auth_kind"):
             if plan.metadata["auth_kind"] in {
                     "return_target_unverified", "account_identity_unverified"}:
@@ -358,6 +360,7 @@ class Worker:
             if self.runner_factory is ApplicationExecutor:
                 runner.attachment_manifest_path = (self.queue.root / "attachment_manifests"
                                                     / f"{tid}.json")
+                runner.row_journal_path = (self.queue.root / "row_journals" / f"{tid}.sqlite3")
             if session_epoch is not None:
                 runner.browser_session_epoch = session_epoch
                 runner.browser_binding_get = lambda: self.queue.browser_binding(tid)

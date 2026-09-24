@@ -10,7 +10,8 @@ from urllib.parse import urlparse
 from .adapters.registry import adapter_for_url, site_id_for_url
 from .browser import BrowserOwnershipError, browser_mode
 from .audit import AuditStore
-from .forms import FillPlan, FormObservationError
+from .forms import (FillPlan, FormObservationError, RowActionJournal,
+                    RowExecutionContract, RowReconciler, RowReconciliationBlocked)
 from .forms.attachments import verify_attachment_readback
 from .forms.attachment_manifest import (AttachmentManifestError,
                                         load_attachment_manifest,
@@ -65,6 +66,7 @@ class ApplicationExecutor:
         self.resume_url = resume_url
         self.existing_browser_only = existing_browser_only
         self.attachment_manifest_path: Path | None = None
+        self.row_journal_path: Path | None = None
         self.user_answers = self.audit.load_user_answers()
         self.otp_bridge = otp_bridge or OtpBridge()
 
@@ -545,6 +547,56 @@ class ApplicationExecutor:
                         return self._block_auth(
                             page_index, "account_identity_unverified",
                             "active account identity is unverified")
+
+                row_contract_builder = getattr(adapter, "structured_row_contract", None)
+                if callable(row_contract_builder):
+                    try:
+                        contract = row_contract_builder(self.profile)
+                        if not isinstance(contract, RowExecutionContract):
+                            raise RowReconciliationBlocked("certified row contract unavailable")
+                        if self.row_journal_path is None:
+                            raise RowReconciliationBlocked("task row journal unavailable")
+                        if (contract.collection_key not in {"education_records", "projects",
+                                                             "work_records", "research_records"}
+                                or contract.delete_ids):
+                            raise RowReconciliationBlocked("row collection or deletion unsupported")
+                        records = (self.profile.get("collections") or {}).get(
+                            contract.collection_key, [])
+                        if not isinstance(records, list) or any(
+                                not isinstance(record, dict) for record in records):
+                            raise RowReconciliationBlocked("canonical row collection invalid")
+                        by_id = {str(record.get("id")): record for record in records
+                                 if record.get("id")}
+                        if (len(by_id) != len(records)
+                                or {row.record_id for row in contract.desired} != set(by_id)):
+                            raise RowReconciliationBlocked("canonical row coverage incomplete")
+                        for desired_row in contract.desired:
+                            canonical_fields = by_id[desired_row.record_id].get("fields") or {}
+                            if not isinstance(canonical_fields, dict) or any(
+                                    not isinstance(value, str)
+                                    or not isinstance(canonical_fields.get(key), dict)
+                                    or canonical_fields[key].get("value") != value
+                                    for key, value in desired_row.values.items()):
+                                raise RowReconciliationBlocked("row value lacks canonical source")
+                        target_hash = hashlib.sha256(self.target_url.encode()).hexdigest()
+                        journal = RowActionJournal(self.row_journal_path,
+                            scope=f"{target_hash}:{self.plan.execution_id}:{contract.draft_id_digest}")
+                        receipt = RowReconciler(
+                            contract.driver, journal, target_sha256=target_hash,
+                            draft_id_digest=contract.draft_id_digest,
+                            mutation_guard=guarded_browser_mutation).reconcile(
+                                contract.desired, delete_ids=contract.delete_ids)
+                    except RowReconciliationBlocked:
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "row reconciliation unverified"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
+                    self.plan.metadata.setdefault("row_reconciliation", []).append({
+                        "page_index": page_index, "revision": receipt.revision,
+                        "row_count": receipt.row_count, "add_count": receipt.add_count,
+                        "delete_count": receipt.delete_count,
+                        "reorder_count": receipt.reorder_count})
+                    self.audit.save_plan(self.plan)
 
                 observe_form = getattr(adapter, "observe_form", None)
                 try:
