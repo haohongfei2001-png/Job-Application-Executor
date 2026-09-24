@@ -7,7 +7,9 @@ a dependency lock; those are separate release gates.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -86,6 +88,22 @@ def copy_source_candidate(repo_root: str | Path, destination: str | Path) -> dic
     if not verify_source_candidate(target):
         raise ValueError("release_candidate_invalid")
     return before
+
+
+def installed_dependencies_match(root: str | Path) -> bool:
+    """Require the candidate interpreter to have the pinned release set."""
+    try:
+        lines = (Path(root) / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        pins = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+        if not pins:
+            return False
+        for pin in pins:
+            match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([A-Za-z0-9][A-Za-z0-9_.!+~-]*)", pin)
+            if not match or importlib.metadata.version(match[1]) != match[2]:
+                return False
+        return True
+    except (OSError, UnicodeError, importlib.metadata.PackageNotFoundError):
+        return False
 
 
 def read_release_identity(root: str | Path) -> dict:
