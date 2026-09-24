@@ -404,7 +404,7 @@ async function copyDiagnostics(){
   }finally{diagnosticsCopy.disabled=false}
 }
 diagnosticsDialog.addEventListener('close',()=>{diagnosticsReport.textContent=''});
-diagnosticsClose.onclick=()=>diagnosticsDialog.close();
+diagnosticsClose.onclick=()=>{diagnosticsReport.textContent='';diagnosticsDialog.close()};
 diagnosticsCopy.onclick=copyDiagnostics;
 async function startUpdate(){
   updateBtn.disabled=true;updateBtn.textContent='正在检查…';
