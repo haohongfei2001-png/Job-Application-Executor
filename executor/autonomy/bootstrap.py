@@ -183,7 +183,7 @@ def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_u
                 stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
                 start_new_session=True,
             )
-        for _ in range(50):
+        for _ in range(300):
             if child.poll() is not None:
                 break
             active = current()
