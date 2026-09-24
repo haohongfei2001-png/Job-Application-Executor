@@ -223,6 +223,8 @@ def test_multipage_navigation_requires_independent_draft_readback(tmp_path, monk
         }}))
 
         class MultiPageAdapter(GenericWebAdapter):
+            safe_advance_certified = True
+
             def verify_draft_persistence(self, _plan):
                 oracle = json.load(urllib.request.urlopen(
                     f"http://127.0.0.1:{ats.server_port}/oracle"))
