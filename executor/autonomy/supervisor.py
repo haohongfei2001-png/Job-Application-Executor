@@ -17,6 +17,7 @@ from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
 from .manager import ManagerController, safe_task_view
 from .queue import TaskQueue, TaskSpec, private_dir
+from .release import read_release_identity
 from .updater import reconciled_update_state, safe_to_update, spawn_update
 from .worker import Worker
 
@@ -53,6 +54,7 @@ class Supervisor:
         if len(self.token) < 32:
             raise ValueError("local auth token too short")
         self.manager = manager or ManagerController(queue, self.worker)
+        self.release_identity = read_release_identity(Path(__file__).resolve().parents[2])
         self._ui_lock = threading.RLock()
         self._mutation_lock = threading.RLock()
         self._command_lock = threading.RLock()
