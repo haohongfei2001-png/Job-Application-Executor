@@ -287,7 +287,7 @@ def test_worker_rejects_uncertified_ready_plan():
     assert outcome(plan) == ("BLOCKED", "validation")
 
 
-def test_resume_ready_to_submit_is_never_allowed(tmp_path):
+def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
     q = TaskQueue(tmp_path / "runtime")
     worker = Worker(q, settings={"deepseek": {"enabled": False}})
     tid = q.enqueue(spec(tmp_path))["task_id"]
@@ -347,6 +347,18 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path):
     }
     assert "resume.docx" not in str(ready_view)
     assert "postId=role-1" not in str(ready_view)
+    observed_targets = []
+    def read_only_observer(target_url, binding):
+        observed_targets.append((target_url, binding))
+        return {"status": "PAGE_SIGNAL_OBSERVED", "level": "page_signal",
+                "server_verified": False, "replay_allowed": False}
+    monkeypatch.setattr("executor.autonomy.supervisor.browser.observe_bound_submission",
+                        read_only_observer)
+    observation = supervisor.observe_submission(tid)
+    assert observation["level"] == "page_signal"
+    assert observation["server_verified"] is False
+    assert observed_targets == [(q.get(tid)["spec"]["target_url"], None)]
+    assert q.get(tid)["stage"] == "READY_TO_SUBMIT"
 
 
 def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
