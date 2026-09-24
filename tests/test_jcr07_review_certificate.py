@@ -11,6 +11,7 @@ from urllib.request import urlopen
 import pytest
 
 from executor.audit import safe_plan
+from executor import browser
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.models import ApplicationPlan, FieldResolution, ResolutionStatus
 from executor.review_certificate import ReviewUnverified, certify_review, recheck_review
@@ -296,3 +297,61 @@ def test_continue_that_submits_remains_human_only(tmp_path, human_trigger):
         assert observed.verified is False
         assert observed.status == "page_signal_observed"
         assert observed.evidence == {"success_text_present": True}
+
+
+def test_post_human_submit_observer_is_read_only_and_page_signal_only(monkeypatch):
+    target = "https://jobs.example.test/apply?postId=role-1"
+    binding = {
+        "process_epoch": "process12345",
+        "target_id": "target12345",
+        "document_epoch": "100.0",
+    }
+    calls = {"connect": 0, "stop": 0}
+
+    class FakeBody:
+        def inner_text(self, timeout):
+            assert timeout == 5000
+            return "Application has been submitted for Synthetic Applicant"
+
+    class FakePage:
+        def locator(self, selector):
+            assert selector == "body"
+            return FakeBody()
+
+    class FakePlaywright:
+        def stop(self):
+            calls["stop"] += 1
+
+    def connect(url, *, existing_only, task_binding, session_epoch):
+        calls["connect"] += 1
+        assert url == target
+        assert existing_only is True
+        assert task_binding == {
+            "process_epoch": "process12345",
+            "target_id": "target12345",
+        }
+        assert session_epoch == "process12345"
+        return FakePlaywright(), object(), object(), FakePage()
+
+    monkeypatch.setattr(browser, "browser_mode", lambda: "live")
+    monkeypatch.setattr(browser, "owned_cdp_fingerprint", lambda: "process12345")
+    monkeypatch.setattr(browser, "connect", connect)
+    monkeypatch.setattr(browser, "page_target_id", lambda _ctx, _page: "target12345")
+    monkeypatch.setattr(browser, "page_document_epoch", lambda _page: "200.0")
+
+    observed = browser.observe_bound_submission(target, binding)
+    assert observed == {
+        "status": "PAGE_SIGNAL_OBSERVED",
+        "level": "page_signal",
+        "server_verified": False,
+        "user_confirmed": False,
+        "document_changed": True,
+        "replay_allowed": False,
+    }
+    assert calls == {"connect": 1, "stop": 1}
+    assert "Synthetic Applicant" not in json.dumps(observed)
+    assert "postId" not in json.dumps(observed)
+
+    monkeypatch.setattr(browser, "owned_cdp_fingerprint", lambda: "otherprocess")
+    assert browser.observe_bound_submission(target, binding)["status"] == "PROCESS_EPOCH_CHANGED"
+    assert calls == {"connect": 1, "stop": 1}
