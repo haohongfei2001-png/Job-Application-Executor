@@ -276,6 +276,21 @@ class Worker:
             payload["fresh_rechecked_at_open"] = True
             return payload
 
+    def private_review_expectations(self, tid, revision):
+        """Private binding for optional post-click server verification."""
+        with self.review_lock:
+            row = self._current_private_review(tid, revision)
+            context = row.get("recheck") if row else None
+            if not context:
+                return None
+            certificate = context["certificate"]
+            return {
+                "target_sha256": certificate.target_sha256,
+                "draft_id_digest": certificate.draft_id_digest,
+                "account_identity_digest": context["account"],
+                "driver_version": certificate.driver_version,
+            }
+
     def private_review_available(self, tid, revision):
         with self.review_lock:
             return self._current_private_review(tid, revision) is not None
