@@ -519,10 +519,14 @@ class ApplicationExecutor:
                      if field.get("value") not in (None, "")}
             if contract.collection_key == "projects":
                 title = record.get("title")
+                category = record.get("category")
                 if (not isinstance(title, str) or not title.strip()
-                        or ("title" in known and known["title"] != title)):
-                    raise RowReconciliationBlocked("project title source invalid")
+                        or category not in {"project", "research"}
+                        or ("title" in known and known["title"] != title)
+                        or ("category" in known and known["category"] != category)):
+                    raise RowReconciliationBlocked("project title or category source invalid")
                 known["title"] = title
+                known["category"] = category
             if (any(not isinstance(value, str) for value in known.values())
                     or dict(row.values) != known):
                 raise RowReconciliationBlocked("row value lacks canonical source")

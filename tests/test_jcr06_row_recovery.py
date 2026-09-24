@@ -515,7 +515,8 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
     projects.draft_id_digest = DRAFT_DIGEST
     projects.wrong_contract = False
     projects.rows = [{"record_id": "project-b", "site_row_id": "prior-project-b",
-                      "values": {"title": "Project B"}, "managed": True}]
+                      "values": {"title": "Project B", "category": "project"},
+                      "managed": True}]
     projects.revision = 1
     projects.add_count = projects.delete_count = projects.reorder_count = 0
     threading.Thread(target=projects.serve_forever, daemon=True).start()
@@ -553,7 +554,8 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
 
             def structured_row_contract(self, applicant_profile):
                 return tuple(RowExecutionContract(driver, tuple(DesiredRow(
-                    record["id"], ({"title": record["title"]} if key == "projects"
+                    record["id"], ({"title": record["title"],
+                                    "category": record["category"]} if key == "projects"
                                    else {name: field["value"] for name, field in
                                          record["fields"].items()})) for record in
                     (record for record in applicant_profile["collections"][key]
@@ -583,7 +585,8 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
                 if ([(row["record_id"], row["values"]) for row in education.rows]
                         != [("school-a", {"school": "School A"})]
                         or [(row["record_id"], row["values"]) for row in projects.rows]
-                        != [("project-a", {"title": "Project A"})]):
+                        != [("project-a", {"title": "Project A",
+                                          "category": "research"})]):
                     return None
                 return {"verified": True, "level": "server_readback",
                         "draft_id_digest": DRAFT_DIGEST,
@@ -616,6 +619,13 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
         approved = json.loads(profile.read_text())
         approved["collections"]["fact_exclusions"]["two-collections"]["project-b"]["source"] = \
             "user_explicit_task"
+        approved["collections"]["projects"][0]["category"] = "project_or_research"
+        profile.write_text(json.dumps(approved))
+        ambiguous_category = run()
+        assert ambiguous_category.stage == ApplicationStage.BLOCKED
+        assert ambiguous_category.metadata["block_reason"] == "row reconciliation unverified"
+        assert education.add_count == projects.add_count == 0
+        approved["collections"]["projects"][0]["category"] = "research"
         profile.write_text(json.dumps(approved))
         first = run()
         assert first.stage == ApplicationStage.READY_TO_SUBMIT
