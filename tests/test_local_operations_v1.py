@@ -889,6 +889,24 @@ def test_update_state_readback_never_exposes_corrupt_private_text(tmp_path):
     assert private not in json.dumps(state)
 
 
+
+def test_update_state_readback_refuses_symlink_to_private_file(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    private = tmp_path / "private-applicant.txt"
+    private.write_text("CANARY_PRIVATE_APPLICANT_VALUE", encoding="utf-8")
+    (runtime / "update-state.json").symlink_to(private)
+
+    state = updater.read_update_state(runtime)
+    assert state == {
+        "status": "failed",
+        "old_version": "",
+        "new_version": "",
+        "reason": "state_invalid",
+    }
+    assert "CANARY_PRIVATE_APPLICANT_VALUE" not in json.dumps(state)
+
+
 def test_diagnostics_do_not_claim_clean_checkout_when_git_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(diagnostics, "_git", lambda *args, **kwargs: None)
     state = diagnostics.repository_state(tmp_path)
