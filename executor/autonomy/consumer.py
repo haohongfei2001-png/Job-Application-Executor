@@ -152,7 +152,7 @@ fi
 
 cd "$RELEASE_ROOT" || exit 1
 export PYTHONPATH="$RELEASE_ROOT"
-"$PYTHON" -m executor.autonomy.cli launch >>"$LOG_FILE" 2>&1
+"$PYTHON" -B -m executor.autonomy.cli launch >>"$LOG_FILE" 2>&1
 STATUS=$?
 if [[ $STATUS -ne 0 ]]; then
   /usr/bin/osascript -e 'display dialog "AI 投递经理没有成功就绪。现有任务不会被提交或丢失。请在 ChatGPT 中检查启动状态。" buttons {{"好"}} default button "好" with icon caution'
