@@ -867,6 +867,28 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
         thread.join()
 
 
+
+def test_update_state_readback_never_exposes_corrupt_private_text(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    private = "CANARY_PRIVATE_APPLICANT_VALUE"
+    (runtime / "update-state.json").write_text(json.dumps({
+        "status": "failed",
+        "old_version": private,
+        "new_version": private,
+        "reason": private,
+    }), encoding="utf-8")
+
+    state = updater.read_update_state(runtime)
+    assert state == {
+        "status": "failed",
+        "old_version": "",
+        "new_version": "",
+        "reason": "state_invalid",
+    }
+    assert private not in json.dumps(state)
+
+
 def test_diagnostics_do_not_claim_clean_checkout_when_git_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(diagnostics, "_git", lambda *args, **kwargs: None)
     state = diagnostics.repository_state(tmp_path)
