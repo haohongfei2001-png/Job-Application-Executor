@@ -501,7 +501,7 @@ class Worker:
             if stage == "READY_TO_SUBMIT":
                 try:
                     self._remember_private_review(tid, runner, plan, self.queue.get(tid)["revision"])
-                except (AttributeError, TypeError, ValueError):
+                except (AttributeError, OSError, TypeError, ValueError):
                     # The durable certificate survives; the local full-value
                     # review remains unavailable until it can be rebuilt safely.
                     self.discard_private_review(tid)
