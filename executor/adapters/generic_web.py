@@ -72,6 +72,7 @@ ACCOUNT_OR_DESTRUCTIVE_RE = re.compile(
 
 class GenericWebAdapter(SiteAdapter):
     site_id = "generic_web"
+    safe_advance_certified = False
 
     def __init__(self, target_url: str):
         super().__init__(target_url)
@@ -1295,8 +1296,22 @@ class GenericWebAdapter(SiteAdapter):
         return None
 
     def advance(self) -> bool:
-        """Generic labels cannot prove that Continue is not the final submit."""
-        return False
+        """Advance only after a certified driver and fresh server draft receipt."""
+        receipt = getattr(self, "_certified_navigation_receipt", None)
+        if (not self.safe_advance_certified or not isinstance(receipt, dict)
+                or receipt.get("verified") is not True
+                or receipt.get("level") != "server_readback"):
+            return False
+        matches = [(element, text) for element, text in self._buttons()
+                   if is_next(text) and not is_final_submit(text)]
+        if len(matches) != 1:
+            return False
+        self._certified_navigation_receipt = None
+        getattr(self, "mutation_guard", lambda: None)()
+        matches[0][0].click()
+        self.page.wait_for_timeout(1000)
+        self._adopt_owned_page()
+        return True
 
     def next_control(self) -> bool:
         """Read-only navigation preflight; a draft must be proven before leaving it."""
