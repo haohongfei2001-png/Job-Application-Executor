@@ -23,7 +23,7 @@ from .profile import get_field, is_sensitive_key, load_profile
 from .resolver import FieldResolver
 from .review import build_final_review
 from .review_certificate import (
-    ReviewUnverified, canonical_account_digest, certify_review,
+    ReviewUnverified, canonical_account_digest, certify_review, recheck_review,
 )
 
 
@@ -1031,27 +1031,43 @@ class ApplicationExecutor:
                     observer = getattr(adapter, "observe_review_draft", None)
                     try:
                         snapshot = observer(self.plan) if callable(observer) else None
+                        expected_draft_id_digest = (
+                            row_bindings[0][0].draft_id_digest if row_bindings
+                            else attachment_binding[0] if attachment_binding else None
+                        )
+                        account_identity_digest = canonical_account_digest(
+                            self.profile, live=browser_mode() not in {
+                                "isolated", "test", "headless"})
+                        expected_rows = {
+                            key: {row.record_id: row.values_digest for row in desired}
+                            for _, desired, key in row_bindings}
+                        expected_attachments = {
+                            item.canonical_key.removeprefix("assets."): (
+                                self.profile["assets"][
+                                    item.canonical_key.removeprefix("assets.")]["sha256"])
+                            for item in attachment_selections}
+                        profile_version = hashlib.sha256(
+                            self.profile_path.read_bytes()).hexdigest()
                         certificate = certify_review(
                             self.profile, self.plan, snapshot,
-                            expected_draft_id_digest=(
-                                row_bindings[0][0].draft_id_digest if row_bindings
-                                else attachment_binding[0] if attachment_binding else None),
-                            expected_account_identity_digest=canonical_account_digest(
-                                self.profile, live=browser_mode() not in {
-                                    "isolated", "test", "headless"}),
-                            expected_rows={
-                                key: {row.record_id: row.values_digest for row in desired}
-                                for _, desired, key in row_bindings},
-                            expected_attachments={
-                                item.canonical_key.removeprefix("assets."): (
-                                    self.profile["assets"][
-                                        item.canonical_key.removeprefix("assets.")]["sha256"])
-                                for item in attachment_selections},
+                            expected_draft_id_digest=expected_draft_id_digest,
+                            expected_account_identity_digest=account_identity_digest,
+                            expected_rows=expected_rows,
+                            expected_attachments=expected_attachments,
                             minimum_revision=max(
                                 [*(row_revisions if row_bindings else []),
                                  attachment_binding[1] if attachment_binding else 0]),
-                            profile_version=hashlib.sha256(
-                                self.profile_path.read_bytes()).hexdigest(),
+                            profile_version=profile_version,
+                        )
+                        # A second read-only observation catches a draft or
+                        # document change between initial review and READY.
+                        recheck_review(
+                            certificate, self.profile, self.plan,
+                            observer(self.plan) if callable(observer) else None,
+                            expected_account_identity_digest=account_identity_digest,
+                            expected_rows=expected_rows,
+                            expected_attachments=expected_attachments,
+                            profile_version=profile_version,
                         )
                     except BrowserOwnershipError:
                         raise
