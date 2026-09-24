@@ -351,7 +351,12 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
             status=ResolutionStatus.RESOLVED, value="PRIVATE_CANARY",
             required=True, canonical_key="identity.full_name")],
     )
+    certified_profile_path = Path(q.get(tid)["spec"]["profile_ref"])
+    certified_profile_bytes = certified_profile_path.read_bytes()
     private_runner = SimpleNamespace(
+        profile_path=certified_profile_path,
+        private_review_profile_version=hashlib.sha256(
+            certified_profile_bytes).hexdigest(),
         private_review_snapshot={
             "fields": [{"value": "PRIVATE_CANARY"}], "attachments": {}, "rows": {}},
         profile={"identity": {"email": "private@example.test"}, "assets": {}},
@@ -378,6 +383,11 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
         with pytest.raises(ValueError, match="document or owned session changed"):
             supervisor.review_values(tid)
     assert supervisor.ui_state()["tasks"][0]["review_values_available"] is False
+    worker._remember_private_review(
+        tid, private_runner, private_plan, q.get(tid)["revision"])
+    certified_profile_path.write_bytes(certified_profile_bytes + b" ")
+    assert worker.private_review_available(tid, q.get(tid)["revision"]) is False
+    certified_profile_path.write_bytes(certified_profile_bytes)
     worker._remember_private_review(
         tid, private_runner, private_plan, q.get(tid)["revision"])
     assert Worker(q, settings={"deepseek": {"enabled": False}}).private_review(
