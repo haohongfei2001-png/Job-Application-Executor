@@ -556,6 +556,13 @@ class TaskQueue:
                         or not re.fullmatch(r"[0-9a-f]{64}", certificate["draft_id_digest"])
                         or type(certificate.get("revision")) is not int
                         or certificate["revision"] < 1
+                        or not isinstance(certificate.get("document_epoch_sha256"), str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", certificate["document_epoch_sha256"])
+                        or not isinstance(certificate.get("driver_version"), str)
+                        or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", certificate["driver_version"])
+                        or any(type(certificate.get(key)) is not int
+                               or certificate[key] < 0
+                               for key in ("field_count", "attachment_count", "row_count"))
                         or certificate.get("final_click_actor") != "user"
                         or not isinstance(checks, dict)
                         or set(checks) != required_checks
