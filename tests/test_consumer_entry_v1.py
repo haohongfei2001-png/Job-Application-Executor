@@ -320,6 +320,28 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert not rollback.exists()
 
 
+def test_macos_candidate_rejects_dependency_drift_without_replacing_old_app(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    first = install_macos_app(repo, destination=apps, platform="darwin")
+    assert first["ok"] is True
+    app = apps / "AI 投递经理.app"
+    old_release = app / "Contents" / "Resources" / "release"
+    old_digest = (old_release / "release-source-manifest.json").read_text()
+    (repo / "requirements.txt").write_text("pydantic==0.0.0\\n", encoding="utf-8")
+
+    rejected = install_macos_app(repo, destination=apps, platform="darwin")
+    assert rejected["ok"] is False
+    assert rejected["reason"] == "candidate_start_failed"
+    assert (old_release / "release-source-manifest.json").read_text() == old_digest
+    assert verify_source_candidate(old_release)
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+
+
 def test_macos_consumer_app_rollback_failure_preserves_current(tmp_path, monkeypatch):
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
