@@ -256,6 +256,40 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert second["ok"] is True
     assert second["replaced"] is True
     assert not rogue.exists()
+    rollback = apps / ".AI 投递经理.app.previous"
+    assert second["rollback_path"] == str(rollback)
+    assert (rollback / "Contents" / "old-file.txt").read_text() == "old"
+    third = install_macos_app(repo, destination=apps, platform="darwin")
+    assert third["ok"] is False
+    assert third["reason"] == "rollback_pending"
+    assert app.is_dir()
+    assert rollback.is_dir()
+
+
+def test_macos_consumer_app_activation_failure_restores_known_good(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\\nexit 0\\n")
+    python.chmod(0o755)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    marker = app / "Contents" / "known-good.txt"
+    marker.write_text("keep", encoding="utf-8")
+    original_rename = Path.rename
+
+    def fail_candidate(self, target):
+        if self.name.endswith(".app.installing"):
+            raise OSError("synthetic activation failure")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_candidate)
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert result["ok"] is False
+    assert result["reason"] == "activation_failed"
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert not (apps / ".AI 投递经理.app.previous").exists()
 
 
 def test_macos_consumer_app_refuses_missing_virtualenv(tmp_path):
