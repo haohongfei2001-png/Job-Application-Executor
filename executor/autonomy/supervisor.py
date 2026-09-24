@@ -100,12 +100,21 @@ class Supervisor:
             if task.get("stage") == "READY_TO_SUBMIT":
                 details = self.queue.get(task["task_id"]).get("details") or {}
                 review = details.get("final_review") or {}
-                certificate = review.get("certificate") if isinstance(review, dict) else None
+                if not isinstance(review, dict):
+                    review = {}
+                certificate = review.get("certificate")
                 checks = certificate.get("checks") if isinstance(certificate, dict) else None
+                required_checks = {
+                    "target_account_draft", "complete_fields_defaults",
+                    "structured_rows", "attachments", "validation_save",
+                    "manual_submit_boundary",
+                }
                 if (review.get("validated") is True
                         and review.get("final_click_actor") == "user"
-                        and isinstance(checks, dict) and checks
-                        and all(value == "PASS" for value in checks.values())):
+                        and isinstance(checks, dict) and set(checks) == required_checks
+                        and set(checks.values()) == {"PASS"}
+                        and all(type(certificate.get(key)) is int and certificate[key] >= 0
+                                for key in ("field_count", "attachment_count", "row_count"))):
                     task["review_summary"] = {
                         "status": "last_verified",
                         "field_count": certificate["field_count"],
