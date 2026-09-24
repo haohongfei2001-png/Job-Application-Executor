@@ -23,6 +23,13 @@ SAFE_STAGES = {"DISCOVERED", "PROFILE_RESOLVED", "FORM_FILLED", "VALIDATED"}
 STOPPED = {"READY_TO_SUBMIT", "SUBMITTED", "VERIFIED", "CANCELLED"}
 STAGES = {str(x) for x in ApplicationStage}
 IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.:-]{0,150}$")
+RECONCILIATION_REQUIRED = frozenset({
+    "browser_ownership_unknown", "unknown_outcome", "auth_return_unverified",
+    "account_identity_unverified", "draft_persistence_unverified",
+    "attachment_persistence_unverified", "form_observation_unavailable",
+})
+PAUSED_RECONCILIATION_REQUIRED = frozenset(
+    "user_paused_from_" + blocker for blocker in RECONCILIATION_REQUIRED)
 
 
 def _safe_hash_job_id(fragment: str) -> str:
@@ -555,7 +562,7 @@ class TaskQueue:
             raise ValueError("task active or at immutable human boundary")
         if row["attempts"] >= json.loads(row["spec"])["max_attempts"] and row["stage"] == "ERROR":
             raise ValueError("retry budget exhausted")
-        if row["blocker"] in {"browser_ownership_unknown", "user_paused_from_browser_ownership_unknown", "unknown_outcome", "user_paused_from_unknown_outcome", "auth_return_unverified", "user_paused_from_auth_return_unverified", "account_identity_unverified", "user_paused_from_account_identity_unverified", "draft_persistence_unverified", "user_paused_from_draft_persistence_unverified", "attachment_persistence_unverified", "user_paused_from_attachment_persistence_unverified", "form_observation_unavailable", "user_paused_from_form_observation_unavailable"}:
+        if row["blocker"] in RECONCILIATION_REQUIRED | PAUSED_RECONCILIATION_REQUIRED:
             raise ValueError("browser or draft outcome requires read-only reconciliation")
         if db.execute(
             "SELECT 1 FROM run_attempts WHERE task_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
@@ -682,27 +689,11 @@ class TaskQueue:
                 "user_paused_from_otp_ambiguous",
                 "user_paused_from_session_unavailable",
                 "user_paused_from_validation",
-                "user_paused_from_browser_ownership_unknown",
-                "user_paused_from_unknown_outcome",
-                "user_paused_from_auth_return_unverified",
-                "user_paused_from_account_identity_unverified",
-                "user_paused_from_draft_persistence_unverified",
-                "user_paused_from_attachment_persistence_unverified",
-                "user_paused_from_form_observation_unavailable",
-            }
+            } | PAUSED_RECONCILIATION_REQUIRED
             if row["stage"] == "BLOCKED" and row["blocker"] in preserved_pause_markers:
                 pause_blocker = row["blocker"]
-            elif row["stage"] == "BLOCKED" and row["blocker"] in {
-                "session_unavailable",
-                "validation",
-                "browser_ownership_unknown",
-                "unknown_outcome",
-                "auth_return_unverified",
-                "account_identity_unverified",
-                "draft_persistence_unverified",
-                "attachment_persistence_unverified",
-                "form_observation_unavailable",
-            }:
+            elif row["stage"] == "BLOCKED" and row["blocker"] in (
+                    {"session_unavailable", "validation"} | RECONCILIATION_REQUIRED):
                 pause_blocker = "user_paused_from_" + row["blocker"]
             elif row["stage"] == "NEEDS_USER_ACTION" and row["blocker"] in {
                 "otp_waiting",
