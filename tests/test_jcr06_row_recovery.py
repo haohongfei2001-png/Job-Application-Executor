@@ -238,6 +238,11 @@ def test_malformed_row_inventory_cannot_assert_management_or_revision(tmp_path, 
     with pytest.raises(RowReconciliationBlocked, match="inventory incomplete"):
         reconciler(driver, journal, guard=lambda: None).reconcile(
             (DesiredRow("A", {"school": "A School"}),))
+    server.revision = 1
+    server.rows[0]["record_id"] = ["A"]
+    with pytest.raises(RowReconciliationBlocked, match="inventory incomplete"):
+        reconciler(driver, journal, guard=lambda: None).reconcile(
+            (DesiredRow("A", {"school": "A School"}),))
     assert server.add_count == 0 and journal.pending() == ()
 
 
