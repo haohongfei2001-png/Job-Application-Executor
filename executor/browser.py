@@ -329,6 +329,46 @@ def observe_bound_draft(target_url: str, binding: dict | None) -> dict:
     }
 
 
+
+def observe_bound_review(target_url: str, binding: dict | None, plan) -> dict | None:
+    """Fresh server draft readback from the same owned page, without writes.
+
+    An ordinary generic page has no certified observer and returns None.
+    Private values stay in process memory and are never returned as a public
+    task observation or written to the durable audit.
+    """
+    if (not binding or not binding.get("document_epoch")
+            or browser_mode() in {"test", "isolated", "headless"}):
+        return None
+    epoch = owned_cdp_fingerprint()
+    if not epoch or epoch != binding.get("process_epoch"):
+        return None
+    pw = None
+    try:
+        pw, _browser, ctx, page = connect(
+            target_url, existing_only=True, task_binding=binding,
+            session_epoch=epoch,
+        )
+        from .adapters.registry import adapter_for_url
+        observer = adapter_for_url(target_url)
+        if getattr(observer, "read_only_review_certified", False) is not True:
+            return None
+        observer.ctx, observer.page = ctx, page
+        readback = getattr(observer, "observe_review_draft", None)
+        if not callable(readback):
+            return None
+        snapshot = readback(plan)
+        if (page_target_id(ctx, page) != binding["target_id"]
+                or page_document_epoch(page) != binding["document_epoch"]):
+            return None
+        return snapshot if isinstance(snapshot, dict) else None
+    except Exception:
+        return None
+    finally:
+        if pw is not None:
+            pw.stop()
+
+
 def observe_bound_submission(target_url: str, binding: dict | None) -> dict:
     """Read an owned task tab after a human click without replaying any action.
 
