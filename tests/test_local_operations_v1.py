@@ -170,6 +170,22 @@ def _init_git_repo(path):
     return tracked
 
 
+def test_packaged_app_never_invokes_legacy_git_updater(tmp_path, monkeypatch):
+    _queue, _worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {"status": "verified", "source_sha256": "a" * 64}
+
+    def forbidden_writer(**_kwargs):
+        raise AssertionError("packaged app must not launch the Git writer")
+
+    monkeypatch.setattr("executor.autonomy.supervisor.spawn_update", forbidden_writer)
+    result = supervisor.begin_update(9344)
+    assert result == {
+        "ok": False,
+        "status": "denied",
+        "reason": "packaged_update_not_ready",
+    }
+
+
 def test_updater_requires_clean_main_and_expected_origin(tmp_path):
     repo = tmp_path / "repo"
     tracked = _init_git_repo(repo)
