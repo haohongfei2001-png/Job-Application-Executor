@@ -163,3 +163,44 @@ exit $STATUS
         "rollback_path": str(rollback) if replaced else None,
         "message": "AI 投递经理已安装。以后直接双击应用即可。",
     }
+
+
+def rollback_macos_app(destination: str | Path) -> dict:
+    """Restore the retained app without deleting the failed candidate."""
+    apps_dir = Path(destination).expanduser().resolve()
+    app = apps_dir / f"{APP_NAME}.app"
+    previous = apps_dir / f".{APP_NAME}.app.previous"
+    failed = apps_dir / f".{APP_NAME}.app.failed"
+    if (app.is_symlink() or previous.is_symlink() or failed.is_symlink()
+            or not app.is_dir() or not previous.is_dir() or failed.exists()):
+        return {
+            "ok": False,
+            "reason": "rollback_unavailable",
+            "message": "回退副本不完整或路径已被占用；没有修改当前应用。",
+        }
+    try:
+        app.rename(failed)
+    except OSError:
+        return {
+            "ok": False,
+            "reason": "rollback_start_failed",
+            "message": "无法保存当前版本；没有修改当前应用。",
+        }
+    try:
+        previous.rename(app)
+    except OSError:
+        try:
+            failed.rename(app)
+            reason = "rollback_activation_failed"
+            message = "旧版没有启用，当前版本已恢复。"
+        except OSError:
+            reason = "manual_recovery_required"
+            message = "两个版本仍保留在原位置与失败位置，需要人工恢复。"
+        return {"ok": False, "reason": reason, "message": message}
+    return {
+        "ok": True,
+        "restored": True,
+        "app_path": str(app),
+        "failed_candidate_path": str(failed),
+        "message": "已恢复上一版本。失败的候选版本保留供诊断。",
+    }
