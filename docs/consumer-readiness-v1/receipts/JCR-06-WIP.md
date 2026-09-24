@@ -12,7 +12,7 @@ Canonical package: `JAE-CONSUMER-READINESS-v1`. Sole writer: draft PR #16, `feat
 - Before a supported driver clicks a multi-page Next control, the executor now requires an independent draft readback and records only its evidence level and revision. The two-page loopback ATS checks the first page's server draft before navigation and the combined draft at final review. A server that discards the first write blocks before the second page is opened; the synthetic submit counter stays zero. Generic sites with no independent readback stay blocked at that navigation.
 - General standing consent flags no longer authorize unseen statement text or another target. A default checked declaration without exact user-confirmed text and target digests blocks.
 
-Local isolated/headless full suite after the multi-page draft preflight: **406 passed in 81.81s**. The focused structured forms and SyntheticATS regression passed **19 tests**. The attachment read-error classification passed its focused regression. GitHub exact-head CI and review status must be read from PR #16 for the current head; earlier heads passed both CI jobs.
+Local isolated/headless full suite after the multi-page draft preflight: **406 passed in 81.81s**. The focused structured forms and SyntheticATS regression passed **19 tests**; an additional isolated generic Next negative case passed separately. The attachment read-error classification passed its focused regression. GitHub exact-head CI and review status must be read from PR #16 for the current head; earlier heads passed both CI jobs.
 
 ## Still open
 

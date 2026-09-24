@@ -151,6 +151,18 @@ def test_dom_value_alone_cannot_prove_persisted_draft(tmp_path, monkeypatch):
     assert plan.metadata["block_reason"] == "draft persistence unverified"
 
 
+def test_generic_next_cannot_leave_unverified_draft(tmp_path, monkeypatch):
+    runner, _html = _runner(tmp_path, monkeypatch, """
+      <label>姓名<input id='name' name='full_name' required></label>
+      <button type='button' onclick="location.href='missing-next.html'">Next</button>
+    """)
+    plan = runner.run(max_pages=2)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "draft persistence unverified before navigation"
+    assert plan.metadata["page_index"] == 0
+    assert not plan.metadata.get("page_draft_receipts")
+
+
 def test_generic_upload_needs_independent_completion_receipt(tmp_path):
     html = tmp_path / "upload.html"
     html.write_text("<!doctype html><body><input id='resume' type='file'>",
