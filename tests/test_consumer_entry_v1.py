@@ -464,6 +464,29 @@ def test_macos_consumer_app_rejects_symlinked_release_directory(tmp_path):
     assert not (apps / ".AI 投递经理.app.previous").exists()
 
 
+
+def test_macos_consumer_app_preserves_unknown_pending_staging(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    staging = apps / ".AI 投递经理.app.installing"
+    staging.mkdir()
+    sentinel = staging / "do-not-delete.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    refused = install_macos_app(repo, destination=apps, platform="darwin")
+    assert refused["ok"] is False
+    assert refused["reason"] == "staging_pending"
+    assert sentinel.read_text() == "keep"
+    assert app.is_dir()
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+
+
 def test_macos_consumer_app_rejects_invalid_staging_before_replacement(
     tmp_path, monkeypatch
 ):
