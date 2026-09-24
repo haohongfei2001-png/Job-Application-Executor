@@ -292,6 +292,15 @@ class Supervisor:
                         "status": "denied",
                         "reason": "update_in_progress",
                     }
+                # A packaged release has no trusted Git checkout. Until the
+                # staged release updater is ready, never route it to the old
+                # in-place Git writer.
+                if self.release_identity.get("status") == "verified":
+                    return {
+                        "ok": False,
+                        "status": "denied",
+                        "reason": "packaged_update_not_ready",
+                    }
                 safe, reason = safe_to_update(self)
                 if not safe:
                     return {
