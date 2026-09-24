@@ -4,6 +4,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from urllib.request import urlopen
@@ -11,6 +13,7 @@ from urllib.request import urlopen
 import pytest
 
 from executor.audit import safe_plan
+from executor.autonomy.worker import Worker
 from executor import browser
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.models import ApplicationPlan, FieldResolution, ResolutionStatus
@@ -144,6 +147,66 @@ def test_server_draft_certificate_and_fault_canaries():
     finally:
         service.shutdown()
         service.server_close()
+
+
+
+def test_live_private_review_rechecks_saved_draft_and_invalidates_after_edit(
+        tmp_path, monkeypatch):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text('{"generated_at":"v1"}', encoding="utf-8")
+    version = hashlib.sha256(profile_path.read_bytes()).hexdigest()
+    profile = {"generated_at": "v1", "assets": {}}
+    plan = ApplicationPlan(
+        execution_id="task", target_url="https://synthetic.example/apply/job-1",
+        site_id="synthetic",
+        fields=[FieldResolution(
+            field_id="name", selector="#name", label="Name",
+            status=ResolutionStatus.RESOLVED, value="Original Applicant",
+            required=True)],
+    )
+    snapshot = {
+        "source": "server_readback",
+        "target_sha256": digest(plan.target_url),
+        "draft_id_digest": digest("draft-1"),
+        "revision": 2,
+        "account_verified": True,
+        "account_identity_digest": digest("account-1"),
+        "complete_pages": True,
+        "complete_required": True,
+        "save_status": "VERIFIED",
+        "validation_error_count": 0,
+        "hidden_required_count": 0,
+        "unverified_default_count": 0,
+        "document_epoch": "epoch-1",
+        "driver_version": "synthetic-v1",
+        "fields": [{"index": 0, "field_id": "name", "selector": "#name",
+                    "required": True, "value": "Original Applicant"}],
+        "attachments": {},
+        "rows": {},
+    }
+    certificate = certify_review(
+        profile, plan, snapshot, profile_version=version,
+        expected_account_identity_digest=digest("account-1"))
+    worker = object.__new__(Worker)
+    worker.review_lock = threading.RLock()
+    worker.review_cache = {"task": {
+        "revision": 7, "expires_at": time.monotonic() + 60,
+        "profile_path": profile_path, "profile_version": version,
+        "payload": {"source": "last_certified_server_readback"},
+        "recheck": {
+            "certificate": certificate, "profile": profile, "plan": plan,
+            "account": digest("account-1"), "rows": {}, "attachments": {},
+        },
+    }}
+    actual = copy.deepcopy(snapshot)
+    monkeypatch.setattr(
+        browser, "observe_bound_review",
+        lambda target_url, binding, reviewed_plan: copy.deepcopy(actual))
+    assert worker.recheck_private_review("task", 7, {"target_id": "bound"})[
+        "fresh_rechecked_at_open"] is True
+    actual["fields"][0]["value"] = "Edited After READY"
+    assert worker.recheck_private_review("task", 7, {"target_id": "bound"}) is None
+    assert worker.private_review_available("task", 7) is False
 
 
 def test_persisted_review_omits_private_project_titles_and_file_names():
