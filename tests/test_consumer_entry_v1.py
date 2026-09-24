@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from importlib.metadata import version
 import plistlib
 import shlex
 import socket
@@ -45,7 +46,7 @@ def _minimal_source(repo):
     autonomy.mkdir()
     (autonomy / "__init__.py").write_text("", encoding="utf-8")
     (autonomy / "cli.py").write_text("VERSION = 'fixture'\n", encoding="utf-8")
-    (repo / "requirements.txt").write_text("pydantic==2.13.0\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text(f"pydantic=={version('pydantic')}\n", encoding="utf-8")
 
 
 def _ready_preflight(*, supervisor_running):
