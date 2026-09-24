@@ -11,6 +11,7 @@ from .adapters.registry import adapter_for_url, site_id_for_url
 from .browser import BrowserOwnershipError, browser_mode
 from .audit import AuditStore
 from .forms import FillPlan
+from .forms.attachments import verify_attachment_readback
 from .models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus, WebField
 from .otp.bridge import OtpBridge, OtpBridgeError
 from .profile import get_field, is_sensitive_key, load_profile
@@ -492,6 +493,7 @@ class ApplicationExecutor:
                 raise RuntimeError("checkpoint origin differs from exact target")
             assert_target_not_protected(self.resume_url)
             adapter.target_url = self.resume_url
+        attachment_binding = None
         with adapter:
             for page_index in range(max_pages):
                 self.guard()
@@ -604,6 +606,37 @@ class ApplicationExecutor:
                     self.audit.save_plan(self.plan)
                     return self.plan
 
+                selected_assets = [item for item in resolutions
+                                   if item.status == ResolutionStatus.RESOLVED
+                                   and item.canonical_key in {"assets.resume", "assets.photo"}]
+                if selected_assets:
+                    readback = getattr(adapter, "verify_attachment_receipts", None)
+                    try:
+                        receipts = readback(self.plan, selected_assets) if callable(readback) else None
+                        proof = verify_attachment_readback(
+                            self.target_url, selected_assets,
+                            self.profile.get("assets") or {}, receipts)
+                    except BrowserOwnershipError:
+                        raise
+                    except Exception:
+                        # An upload may have happened before its readback failed.
+                        # Keep this task blocked; never replay the file selection.
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "attachment draft receipt unverified"
+                        self.plan.metadata["attachment_persistence"] = "UNVERIFIED"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
+                    new_binding = proof.pop("_draft_id_digest")
+                    if attachment_binding and attachment_binding[0] != new_binding:
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "attachment draft receipt unverified"
+                        self.plan.metadata["attachment_persistence"] = "UNVERIFIED"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
+                    attachment_binding = (new_binding, proof["minimum_draft_revision"])
+                    self.plan.metadata["attachment_persistence"] = proof
+                    self.audit.save_plan(self.plan)
+
                 blocking = self._blocking_unresolved(resolutions)
                 if blocking:
                     if getattr(adapter, "save_draft", lambda: False)():
@@ -648,9 +681,22 @@ class ApplicationExecutor:
                 final_control = adapter.final_submit_control()
                 if final_control:
                     verify_draft = getattr(adapter, "verify_draft_persistence", None)
+                    if attachment_binding and not callable(verify_draft):
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "draft persistence unverified"
+                        self.plan.metadata["draft_persistence"] = "UNVERIFIED"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
                     if callable(verify_draft):
                         draft_evidence = verify_draft(self.plan)
-                        if not isinstance(draft_evidence, dict) or draft_evidence.get("verified") is not True:
+                        if (not isinstance(draft_evidence, dict)
+                                or draft_evidence.get("verified") is not True
+                                or (attachment_binding and (
+                                    draft_evidence.get("level") != "server_readback"
+                                    or draft_evidence.get("draft_id_digest") != attachment_binding[0]
+                                    or not isinstance(draft_evidence.get("revision"), int)
+                                    or isinstance(draft_evidence.get("revision"), bool)
+                                    or draft_evidence["revision"] < attachment_binding[1]))):
                             self.plan.stage = ApplicationStage.BLOCKED
                             self.plan.metadata["block_reason"] = "draft persistence unverified"
                             self.plan.metadata["draft_persistence"] = "UNVERIFIED"
@@ -690,7 +736,14 @@ class ApplicationExecutor:
                 if callable(next_control) and next_control():
                     verify_draft = getattr(adapter, "verify_draft_persistence", None)
                     draft_evidence = verify_draft(self.plan) if callable(verify_draft) else None
-                    if not isinstance(draft_evidence, dict) or draft_evidence.get("verified") is not True:
+                    if (not isinstance(draft_evidence, dict)
+                            or draft_evidence.get("verified") is not True
+                            or (attachment_binding and (
+                                draft_evidence.get("level") != "server_readback"
+                                or draft_evidence.get("draft_id_digest") != attachment_binding[0]
+                                or not isinstance(draft_evidence.get("revision"), int)
+                                or isinstance(draft_evidence.get("revision"), bool)
+                                or draft_evidence["revision"] < attachment_binding[1]))):
                         self.plan.stage = ApplicationStage.BLOCKED
                         self.plan.metadata["block_reason"] = "draft persistence unverified"
                         self.plan.metadata["draft_persistence"] = "UNVERIFIED"
