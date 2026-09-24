@@ -46,7 +46,10 @@ def source_manifest(root: str | Path) -> dict:
 
 
 def verify_source_candidate(root: str | Path) -> bool:
-    root = Path(root).expanduser().resolve()
+    supplied = Path(root).expanduser()
+    if supplied.is_symlink():
+        return False
+    root = supplied.resolve()
     manifest_file = root / MANIFEST_NAME
     if manifest_file.is_symlink():
         return False
