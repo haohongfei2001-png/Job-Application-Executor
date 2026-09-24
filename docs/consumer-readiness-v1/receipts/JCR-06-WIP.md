@@ -40,6 +40,8 @@ A certified site driver may provide distinct education and project row contracts
 
 All offered row contracts now establish one draft identity before the first row mutation; a mismatched second collection blocks with zero adds. Row inventories must provide actual Boolean management/completeness flags, an integer revision, typed row identities and SHA-256 value digests; a string such as `"false"` cannot assert ownership. The focused row fault set passed **12 tests** after this safety tightening.
 
+Unsupported initial form structures now carry fixed, copy-safe capability codes for unbound repeated rows, unsupported components, ambiguous field/row identity and empty final forms. The task stays blocked without asking for a missing applicant fact or exposing site labels in those codes. The affected isolated browser form, row and attachment set passed **50 tests** after this classification and the row-proof tightening.
+
 ## Still open
 
 D-01–D-22 are not certified as a set. The row reconciler is integrated with the application and a certified synthetic driver; no real ATS row driver or complete worker browser/draft recovery is proven. Virtualized list support, unannotated site dependency drivers, external site upload completion receipts, broader multi-page recovery and per-action fault injections remain. The generic unsupported paths are blocked. DFG-002 browser write reconciliation is engineering debt; it is not a final-live owner item. DFG-007 records real applicant/site draft evidence as FINAL_LIVE while this engineering continues. No owner action or automated final submit is authorized by this checkpoint.

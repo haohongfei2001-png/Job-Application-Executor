@@ -54,6 +54,9 @@ def test_unproven_form_structure_blocks_before_fill(tmp_path, monkeypatch, body,
     else:
         assert plan.metadata["block_reason"] == "form structure unsupported or incomplete"
         assert plan.fields == []
+        expected = ("component_driver_unavailable" if signal == "unsupported_component_count"
+                    else "ambiguous_field_or_row_identity")
+        assert expected in plan.metadata["capability_limitations"]
 
 
 def test_no_observed_fields_cannot_become_ready(tmp_path, monkeypatch):
@@ -63,6 +66,7 @@ def test_no_observed_fields_cannot_become_ready(tmp_path, monkeypatch):
     plan = runner.run(max_pages=1)
     assert plan.stage == ApplicationStage.BLOCKED
     assert plan.metadata["form_observation"]["field_count"] == 0
+    assert plan.metadata["capability_limitations"] == ["empty_final_form_unverified"]
 
 
 def test_form_observation_error_blocks_before_any_fill(tmp_path, monkeypatch):

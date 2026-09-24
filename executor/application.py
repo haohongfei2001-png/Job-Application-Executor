@@ -659,8 +659,18 @@ class ApplicationExecutor:
                                      or observation.ambiguous_selector_count
                                      or observation.ambiguous_row_count) or (
                         not fields and adapter.final_submit_control())):
+                    limitations = []
+                    if observation.rows and not getattr(adapter, "repeated_rows_certified", False):
+                        limitations.append("repeated_rows_without_canonical_binding")
+                    if observation.unsupported_component_count:
+                        limitations.append("component_driver_unavailable")
+                    if observation.ambiguous_selector_count or observation.ambiguous_row_count:
+                        limitations.append("ambiguous_field_or_row_identity")
+                    if not fields:
+                        limitations.append("empty_final_form_unverified")
                     self.plan.stage = ApplicationStage.BLOCKED
                     self.plan.metadata["block_reason"] = "form structure unsupported or incomplete"
+                    self.plan.metadata["capability_limitations"] = limitations
                     self.audit.save_plan(self.plan)
                     return self.plan
                 resolutions = self._resolve_page(fields)
