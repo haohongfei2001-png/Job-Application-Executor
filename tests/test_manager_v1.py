@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import http.cookiejar
 import json
 import threading
@@ -280,7 +281,27 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path):
     worker = Worker(q, settings={"deepseek": {"enabled": False}})
     tid = q.enqueue(spec(tmp_path))["task_id"]
     claimed = q.claim("test-worker")
-    q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT", release=True)
+    with pytest.raises(ValueError, match="independent review certificate"):
+        q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT", release=True)
+    assert q.get(tid)["stage"] != "READY_TO_SUBMIT"
+    certificate = {
+        "target_sha256": hashlib.sha256(
+            q.get(tid)["spec"]["target_url"].encode()).hexdigest(),
+        "draft_id_digest": "b" * 64,
+        "revision": 1,
+        "document_epoch_sha256": "c" * 64,
+        "driver_version": "synthetic-v1",
+        "field_count": 1,
+        "attachment_count": 0,
+        "row_count": 0,
+        "checks": {key: "PASS" for key in (
+            "target_account_draft", "complete_fields_defaults",
+            "structured_rows", "attachments", "validation_save",
+            "manual_submit_boundary")},
+        "final_click_actor": "user",
+    }
+    q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT",
+                 details={"review_certificate": certificate}, release=True)
     provider = FakeProvider(ManagerTurn(reply="继续。", decisions=[
         ManagerDecision(action=ManagerAction.RESUME, task_id=tid)
     ]))
