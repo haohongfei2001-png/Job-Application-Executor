@@ -231,6 +231,32 @@ def test_review_requires_independent_actual_draft_and_rejects_wrong_value(tmp_pa
     assert missing.submit_calls == 0
 
 
+def test_draft_change_between_review_and_ready_blocks(tmp_path, monkeypatch):
+    class ChangingDraft(FakeAdapter):
+        review_reads = 0
+
+        def observe_review_draft(self, plan):
+            observed = super().observe_review_draft(plan)
+            self.review_reads += 1
+            if self.review_reads == 2:
+                observed["revision"] += 1
+            return observed
+
+    fake = ChangingDraft([
+        WebField(field_id="name", selector="#name", label="姓名", required=True),
+    ], final="Submit application")
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: fake)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    plan = ApplicationExecutor(
+        "https://example.test/apply", _profile_file(tmp_path),
+        {"deepseek": {"enabled": False}},
+    ).run(max_pages=1)
+    assert fake.review_reads == 2
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["review_certificate"] == "UNVERIFIED"
+    assert fake.submit_calls == 0
+
+
 def test_uncovered_project_blocks_false_ready(tmp_path, monkeypatch):
     profile = tmp_path / "project-profile.json"
     profile.write_text(json.dumps({"fields": {"identity.full_name": {
