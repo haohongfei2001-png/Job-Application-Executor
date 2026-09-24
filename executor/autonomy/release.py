@@ -52,7 +52,13 @@ def verify_source_candidate(root: str | Path) -> bool:
         return False
     try:
         saved = json.loads(manifest_file.read_text(encoding="utf-8"))
-        return saved == source_manifest(root)
+        if saved != source_manifest(root):
+            return False
+        allowed = {entry["path"] for entry in saved["files"]} | {MANIFEST_NAME}
+        for path in root.rglob("*"):
+            if path.is_symlink() or (path.is_file() and path.relative_to(root).as_posix() not in allowed):
+                return False
+        return True
     except (OSError, ValueError, TypeError):
         return False
 
