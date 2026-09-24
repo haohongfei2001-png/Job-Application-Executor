@@ -126,6 +126,10 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
         assert private not in serialized
     assert report["tasks"][0]["task"] == task["task_id"][:8]
     assert "target_host" not in report["tasks"][0]
+    monkeypatch.setattr(diagnostics.browser, "browser_mode", lambda: "CANARY_PRIVATE_MODE_VALUE")
+    bounded = diagnostics.collect_diagnostics(supervisor, repo_root=tmp_path)
+    assert bounded["system"]["browser_mode"] == "unknown"
+    assert "CANARY_PRIVATE_MODE_VALUE" not in json.dumps(bounded)
 
 
 def _init_git_repo(path):
