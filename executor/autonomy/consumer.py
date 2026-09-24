@@ -55,6 +55,7 @@ def _trusted_bundle(app: Path) -> bool:
             and info.get("CFBundleIdentifier") == BUNDLE_ID
             and info.get("CFBundleExecutable") == "AIApplicationManager"
             and bool(executable.stat().st_mode & stat.S_IXUSR)
+            and verify_source_candidate(app / "Contents" / "Resources" / "release")
         )
     except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
         return False
