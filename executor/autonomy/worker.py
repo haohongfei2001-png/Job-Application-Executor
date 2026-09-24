@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from .. import browser
 from ..application import ApplicationExecutor
+from ..review_certificate import ReviewCertificate, recheck_review
 from ..models import ApplicationStage, ResolutionStatus
 from ..protected_targets import assert_target_not_protected
 from ..settings import load_settings
@@ -208,11 +209,23 @@ class Worker:
             "source": "last_certified_server_readback",
             "current_site_state_unverified": True,
         }
+        certificate = getattr(runner, "private_review_certificate", None)
+        recheck = None
+        if isinstance(certificate, ReviewCertificate):
+            recheck = {
+                "certificate": certificate,
+                "profile": copy.deepcopy(runner.profile),
+                "plan": plan.model_copy(deep=True),
+                "account": getattr(runner, "private_review_expected_account", None),
+                "rows": copy.deepcopy(getattr(runner, "private_review_expected_rows", None)),
+                "attachments": copy.deepcopy(
+                    getattr(runner, "private_review_expected_attachments", None)),
+            }
         with self.review_lock:
             self.review_cache[tid] = {
                 "revision": revision, "expires_at": time.monotonic() + 3600,
                 "profile_path": profile_path, "profile_version": profile_version,
-                "payload": payload,
+                "payload": payload, "recheck": recheck,
             }
 
     def _current_private_review(self, tid, revision):
@@ -233,6 +246,35 @@ class Worker:
         with self.review_lock:
             row = self._current_private_review(tid, revision)
             return copy.deepcopy(row["payload"]) if row else None
+
+    def recheck_private_review(self, tid, revision, binding):
+        """Fresh server readback before exposing values on a live READY page."""
+        with self.review_lock:
+            row = self._current_private_review(tid, revision)
+            context = row.get("recheck") if row else None
+        if not context:
+            self.discard_private_review(tid)
+            return None
+        snapshot = browser.observe_bound_review(
+            context["plan"].target_url, binding, context["plan"])
+        try:
+            recheck_review(
+                context["certificate"], context["profile"], context["plan"],
+                snapshot,
+                profile_version=row["profile_version"],
+                expected_account_identity_digest=context["account"],
+                expected_rows=context["rows"],
+                expected_attachments=context["attachments"],
+            )
+        except Exception:
+            self.discard_private_review(tid)
+            return None
+        with self.review_lock:
+            if self._current_private_review(tid, revision) is not row:
+                return None
+            payload = copy.deepcopy(row["payload"])
+            payload["fresh_rechecked_at_open"] = True
+            return payload
 
     def private_review_available(self, tid, revision):
         with self.review_lock:
