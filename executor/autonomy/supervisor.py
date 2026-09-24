@@ -213,6 +213,12 @@ class Supervisor:
         task = self.queue.get(tid)
         if task["stage"] != "READY_TO_SUBMIT" or task["owner"]:
             raise ValueError("task is not at the human review boundary")
+        if browser.browser_mode() not in {"test", "isolated", "headless"}:
+            observed = browser.observe_bound_draft(
+                task["spec"]["target_url"], self.queue.browser_binding(tid))
+            if observed.get("status") != "BOUND_DOCUMENT_OBSERVED":
+                self.worker.discard_private_review(tid)
+                raise ValueError("review document or owned session changed")
         review = self.worker.private_review(tid, task["revision"])
         if review is None:
             raise ValueError("private review has expired or the service restarted")
