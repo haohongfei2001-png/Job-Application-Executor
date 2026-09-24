@@ -55,18 +55,24 @@ def _covered(title: str, names: list[str]) -> bool:
 def project_coverage_review(
     profile: dict[str, Any],
     plan: ApplicationPlan,
+    verified_row_record_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     collections = profile.get("collections") or {}
     parse_status = collections.get("resume_project_parse_status")
-    records = [item for item in (collections.get("projects") or [])
+    raw_projects = collections.get("projects") or []
+    if not isinstance(raw_projects, list):
+        raw_projects = [raw_projects]
+    malformed_record_count = sum(not isinstance(item, dict)
+                                 or not str(item.get("title") or "").strip()
+                                 for item in raw_projects)
+    ids = [item.get("id") for item in raw_projects if isinstance(item, dict)
+           and isinstance(item.get("id"), str) and item.get("id")]
+    duplicate_id_count = len(ids) - len(set(ids))
+    records = [item for item in raw_projects
                if isinstance(item, dict) and str(item.get("title") or "").strip()]
     canonical = canonical_project_titles(profile)
     structured = structured_project_names(plan.fields)
-    exclusions = [
-        str(x).strip()
-        for x in (plan.metadata.get("project_exclusions") or [])
-        if str(x).strip()
-    ]
+    exclusions: list[str] = []
     scoped = (collections.get("fact_exclusions") or {}).get(
         plan.execution_id, {})
     scoped_ids = set()
@@ -96,13 +102,12 @@ def project_coverage_review(
             available[_norm(field.value)] += 1
     title_counts = Counter(_norm(record["title"]) for record in records)
     uncovered = []
-    legacy_exclusions = {_norm(title) for title in (plan.metadata.get("project_exclusions") or [])}
     for record in records:
         title = str(record["title"]).strip()
         normalized = _norm(title)
         if record.get("id") in scoped_ids:
             continue
-        if title_counts[normalized] == 1 and normalized in legacy_exclusions:
+        if record.get("id") in verified_row_record_ids:
             continue
         if record.get("id") and normalized in bound.get(record["id"], set()):
             continue
@@ -115,10 +120,14 @@ def project_coverage_review(
         "structured_projects": structured,
         "explicit_exclusions": exclusions,
         "uncovered_projects": uncovered,
-        "canonical_count": len(canonical),
+        "canonical_count": len(raw_projects),
+        "malformed_record_count": malformed_record_count,
+        "duplicate_id_count": duplicate_id_count,
         "structured_count": len(structured),
         "resume_parse_status": parse_status,
-        "status": "REVIEW_REQUIRED" if uncovered or parse_status == "UNPARSED_SECTION"
+        "status": "REVIEW_REQUIRED" if (uncovered or malformed_record_count
+                                         or duplicate_id_count
+                                         or parse_status == "UNPARSED_SECTION")
                   else "COVERED_OR_EXPLICITLY_EXCLUDED",
         "rules": {
             "attachment_is_not_substitute_for_structured_project_fields": True,
@@ -133,6 +142,7 @@ def build_final_review(
     profile: dict[str, Any],
     plan: ApplicationPlan,
     final_control: str,
+    verified_project_row_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     return {
         "human_review_required": True,
@@ -143,7 +153,8 @@ def build_final_review(
         "attachment_basenames": {
             key: Path(value).name for key, value in plan.attachments.items()
         },
-        "project_coverage": project_coverage_review(profile, plan),
+        "project_coverage": project_coverage_review(
+            profile, plan, verified_row_record_ids=verified_project_row_ids),
         "checklist": [
             "verify exact company / role / position identifier / location",
             "audit parser-derived resume sections; remove misclassified work, project, education or skill rows",

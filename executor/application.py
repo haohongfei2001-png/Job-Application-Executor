@@ -4,6 +4,7 @@ import hashlib
 import mimetypes
 import re
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -479,6 +480,49 @@ class ApplicationExecutor:
                 warnings.append(f"{item.field_id}: optional field remains unresolved")
         return {"ok": not errors, "errors": errors, "warnings": warnings}
 
+    def _validate_row_contract(self, contract: RowExecutionContract) -> None:
+        """Prove every offered row value from canonical facts before any row write."""
+        collections = self.profile.get("collections") or {}
+        records = collections.get(contract.collection_key, [])
+        if not isinstance(records, list) or any(not isinstance(item, dict)
+                                                 for item in records):
+            raise RowReconciliationBlocked("canonical row collection invalid")
+        if any(not isinstance(item.get("id"), str) or not item["id"] for item in records):
+            raise RowReconciliationBlocked("canonical row identity invalid")
+        if contract.collection_key == "projects":
+            scoped = (collections.get("fact_exclusions") or {}).get(
+                self.plan.execution_id, {})
+            if not isinstance(scoped, dict):
+                raise RowReconciliationBlocked("project exclusion scope invalid")
+            records = [item for item in records if not (
+                isinstance(scoped.get(item["id"]), dict)
+                and scoped[item["id"]].get("source") == "user_explicit_task"
+                and str(scoped[item["id"]].get("reason") or "").strip())]
+        by_id = {item["id"]: item for item in records}
+        if any(not isinstance(row.record_id, str) or not row.record_id
+               or not isinstance(row.values, Mapping) for row in contract.desired):
+            raise RowReconciliationBlocked("row contract identity or values invalid")
+        if (len(by_id) != len(records)
+                or {row.record_id for row in contract.desired} != set(by_id)):
+            raise RowReconciliationBlocked("canonical row coverage incomplete")
+        for row in contract.desired:
+            record = by_id[row.record_id]
+            fields = record.get("fields") or {}
+            if (not isinstance(fields, dict)
+                    or any(not isinstance(field, dict) for field in fields.values())):
+                raise RowReconciliationBlocked("row value lacks canonical source")
+            known = {key: field["value"] for key, field in fields.items()
+                     if field.get("value") not in (None, "")}
+            if contract.collection_key == "projects":
+                title = record.get("title")
+                if (not isinstance(title, str) or not title.strip()
+                        or ("title" in known and known["title"] != title)):
+                    raise RowReconciliationBlocked("project title source invalid")
+                known["title"] = title
+            if (any(not isinstance(value, str) for value in known.values())
+                    or dict(row.values) != known):
+                raise RowReconciliationBlocked("row value lacks canonical source")
+
     def run(self, max_pages: int = 15) -> ApplicationPlan:
         self.guard()
         attachment_binding = None
@@ -590,27 +634,8 @@ class ApplicationExecutor:
                         if self.row_journal_path is None:
                             raise RowReconciliationBlocked("task row journal unavailable")
                         for contract in contracts:
-                            records = (self.profile.get("collections") or {}).get(
-                                contract.collection_key, [])
-                            if not isinstance(records, list) or any(
-                                    not isinstance(record, dict) for record in records):
-                                raise RowReconciliationBlocked("canonical row collection invalid")
-                            by_id = {str(record.get("id")): record for record in records
-                                     if record.get("id")}
-                            if (len(by_id) != len(records)
-                                    or {row.record_id for row in contract.desired} != set(by_id)):
-                                raise RowReconciliationBlocked("canonical row coverage incomplete")
-                            for desired_row in contract.desired:
-                                canonical_fields = by_id[desired_row.record_id].get("fields") or {}
-                                if not isinstance(canonical_fields, dict) or any(
-                                        not isinstance(field, dict)
-                                        for field in canonical_fields.values()):
-                                    raise RowReconciliationBlocked("row value lacks canonical source")
-                                known = {key: field["value"] for key, field in canonical_fields.items()
-                                         if field.get("value") not in (None, "")}
-                                if (any(not isinstance(value, str) for value in known.values())
-                                        or dict(desired_row.values) != known):
-                                    raise RowReconciliationBlocked("row value lacks canonical source")
+                            self._validate_row_contract(contract)
+                        for contract in contracts:
                             target_hash = hashlib.sha256(self.target_url.encode()).hexdigest()
                             journal_path = self.row_journal_path.with_name(
                                 f"{self.row_journal_path.stem}.{contract.collection_key}"
@@ -932,7 +957,12 @@ class ApplicationExecutor:
                                         if isinstance(draft_evidence.get("revision"), int)
                                         and draft_evidence["revision"] >= 0 else None,
                         }
-                    review = build_final_review(self.profile, self.plan, final_control)
+                    verified_project_ids = frozenset(
+                        row.record_id for _, desired, key in row_bindings
+                        if key == "projects" for row in desired)
+                    review = build_final_review(
+                        self.profile, self.plan, final_control,
+                        verified_project_row_ids=verified_project_ids)
                     self.plan.metadata["final_review"] = review
                     if review["project_coverage"]["status"] == "REVIEW_REQUIRED":
                         self.plan.stage = ApplicationStage.BLOCKED

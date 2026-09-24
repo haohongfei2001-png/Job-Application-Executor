@@ -483,8 +483,13 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
             "value": "Synthetic Person", "confidence": 1.0}}, "collections": {
             "education_records": [{"id": "school-a", "fields": {
                 "school": {"value": "School A"}}}],
-            "projects": [{"id": "project-a", "fields": {
-                "title": {"value": "Project A"}}}],
+            "projects": [{"id": "project-a", "title": "Project A",
+                          "metadata": ["2025.01-2025.06"],
+                          "category": "research"},
+                         {"id": "project-b", "title": "Project B",
+                          "category": "project"}],
+            "fact_exclusions": {"two-collections": {
+                "project-b": {"source": "unapproved", "reason": "No second slot"}}},
         }}))
 
         class TwoCollectionAdapter:
@@ -502,9 +507,11 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
 
             def structured_row_contract(self, applicant_profile):
                 return tuple(RowExecutionContract(driver, tuple(DesiredRow(
-                    record["id"], {key: field["value"] for key, field in
-                                    record["fields"].items()}) for record in
-                    applicant_profile["collections"][key]),
+                    record["id"], ({"title": record["title"]} if key == "projects"
+                                   else {name: field["value"] for name, field in
+                                         record["fields"].items()})) for record in
+                    (record for record in applicant_profile["collections"][key]
+                     if key != "projects" or record["id"] != "project-b")),
                     digest("wrong-project-draft") if key == "projects" and
                     projects.wrong_contract else DRAFT_DIGEST, key)
                     for key, driver in (("education_records", education_driver),
@@ -554,7 +561,21 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
         assert mismatched.metadata["block_reason"] == "row reconciliation unverified"
         assert education.add_count == projects.add_count == 0
         projects.wrong_contract = False
-        assert run().stage == ApplicationStage.READY_TO_SUBMIT
+        unapproved = run()
+        assert unapproved.stage == ApplicationStage.BLOCKED
+        assert unapproved.metadata["block_reason"] == "row reconciliation unverified"
+        assert education.add_count == projects.add_count == 0
+        approved = json.loads(profile.read_text())
+        approved["collections"]["fact_exclusions"]["two-collections"]["project-b"]["source"] = \
+            "user_explicit_task"
+        profile.write_text(json.dumps(approved))
+        first = run()
+        assert first.stage == ApplicationStage.READY_TO_SUBMIT
+        assert first.metadata["final_review"]["project_coverage"]["status"] == \
+            "COVERED_OR_EXPLICITLY_EXCLUDED"
+        assert first.metadata["final_review"]["project_coverage"]["canonical_count"] == 2
+        assert first.metadata["final_review"]["project_coverage"]["explicit_exclusions"] == \
+            ["Project B"]
         assert education.add_count == projects.add_count == 1
         assert journal.with_name("task-rows.education_records.sqlite3").exists()
         assert journal.with_name("task-rows.projects.sqlite3").exists()
