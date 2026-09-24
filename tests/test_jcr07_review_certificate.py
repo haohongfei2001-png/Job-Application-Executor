@@ -117,7 +117,7 @@ def test_server_draft_certificate_and_fault_canaries():
         changed_plan.fields[0].value = "Corrected Applicant"
         service.actual = copy.deepcopy(snapshot)
         service.actual["fields"][0]["value"] = "Corrected Applicant"
-        with pytest.raises(ReviewUnverified, match="plan binding"):
+        with pytest.raises(ReviewUnverified, match="dependencies changed"):
             recheck_review(certificate, profile, changed_plan, read(),
                            expected_account_identity_digest=digest("account-1"))
         service.actual = snapshot
