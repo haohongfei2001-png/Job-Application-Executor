@@ -22,6 +22,9 @@ from .otp.bridge import OtpBridge, OtpBridgeError
 from .profile import get_field, is_sensitive_key, load_profile
 from .resolver import FieldResolver
 from .review import build_final_review
+from .review_certificate import (
+    ReviewUnverified, canonical_account_digest, certify_review,
+)
 
 
 def execution_id_for(target_url: str) -> str:
@@ -1025,6 +1028,38 @@ class ApplicationExecutor:
                         self.plan.metadata["block_reason"] = "structured project coverage unproven"
                         self.audit.save_plan(self.plan)
                         return self.plan
+                    observer = getattr(adapter, "observe_review_draft", None)
+                    try:
+                        snapshot = observer(self.plan) if callable(observer) else None
+                        certificate = certify_review(
+                            self.profile, self.plan, snapshot,
+                            expected_draft_id_digest=(
+                                row_bindings[0][0].draft_id_digest if row_bindings
+                                else attachment_binding[0] if attachment_binding else None),
+                            expected_account_identity_digest=canonical_account_digest(
+                                self.profile, live=browser_mode() not in {
+                                    "isolated", "test", "headless"}),
+                            minimum_revision=max(
+                                [*(row_revisions if row_bindings else []),
+                                 attachment_binding[1] if attachment_binding else 0]),
+                            profile_version=hashlib.sha256(
+                                self.profile_path.read_bytes()).hexdigest(),
+                        )
+                    except BrowserOwnershipError:
+                        raise
+                    except (ReviewUnverified, OSError, ValueError, TypeError):
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "independent final review unverified"
+                        self.plan.metadata["review_certificate"] = "UNVERIFIED"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
+                    except Exception:
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "independent final review unverified"
+                        self.plan.metadata["review_certificate"] = "UNVERIFIED"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
+                    self.plan.metadata["review_certificate"] = certificate.safe_summary()
                     self.plan.stage = ApplicationStage.READY_TO_SUBMIT
                     self.plan.metadata["final_submit_control"] = final_control
                     self.plan.metadata["manual_final_click_required"] = True
