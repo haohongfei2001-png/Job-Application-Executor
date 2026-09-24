@@ -170,6 +170,7 @@ def test_packaged_candidate_starts_on_loopback_and_answers_health_without_fqdn(t
             "ok": True,
             "worker_active": None,
             "final_click_actor": "user",
+            "loaded_source_sha256": source_manifest(candidate)["source_sha256"],
         }, log_path.read_text(errors="replace")[-4000:]
         assert process.poll() is None
         assert verify_source_candidate(candidate)
