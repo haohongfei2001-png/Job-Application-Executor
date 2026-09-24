@@ -1,4 +1,5 @@
 import json
+import hashlib
 
 import pytest
 
@@ -85,6 +86,39 @@ class FakeAdapter:
     def final_submit_control(self):
         return self.final
 
+    def observe_review_draft(self, plan):
+        # A separate fake-site read model. Tests below can alter it to prove
+        # that a successful fill call alone never yields a certificate.
+        if not hasattr(self, "site_draft"):
+            self.site_draft = {item.selector: item.value for item in self.applied}
+        expected = [item for item in plan.fields if str(item.status) in
+                    {"RESOLVED", "KEEP_EXISTING"}
+                    and not (item.canonical_key or "").startswith("assets.")]
+        account_field = next((item for item in expected
+                              if item.canonical_key == "identity.full_name"), None)
+        account_digest = getattr(self, "expected_account_digest", None) or hashlib.sha256(
+            f"identity.full_name:{str(account_field.value).strip().casefold()}".encode()
+            if account_field else b"missing-account").hexdigest()
+        return {
+            "source": "server_readback",
+            "target_sha256": hashlib.sha256(plan.target_url.encode()).hexdigest(),
+            "draft_id_digest": hashlib.sha256(b"fake-site-draft").hexdigest(),
+            "revision": max(1, len(self.applied)),
+            "account_verified": True,
+            "account_identity_digest": account_digest,
+            "complete_pages": True, "complete_required": True,
+            "save_status": "VERIFIED", "validation_error_count": 0,
+            "hidden_required_count": 0, "unverified_default_count": 0,
+            "document_epoch": "synthetic-page-1", "driver_version": "fake-v1",
+            "fields": [
+                {"index": index, "field_id": item.field_id,
+                 "selector": item.selector, "required": item.required,
+                 "value": self.site_draft.get(item.selector),
+                 "default_confirmed": str(item.status) == "KEEP_EXISTING"}
+                for index, item in enumerate(expected)],
+            "attachments": {}, "rows": {},
+        }
+
     def advance(self):
         return False
 
@@ -119,8 +153,15 @@ def test_live_form_write_requires_certified_account_identity(tmp_path, monkeypat
 
     verified = FakeAdapter(fields, final="Submit application")
     verified.account_identity_verified = lambda _profile: True
+    account_profile = _profile_file(tmp_path)
+    profile_data = json.loads(account_profile.read_text())
+    profile_data["fields"]["identity.email"] = {
+        "value": "synthetic@example.test", "confidence": 1.0, "user_confirmed": True}
+    account_profile.write_text(json.dumps(profile_data))
+    verified.expected_account_digest = hashlib.sha256(
+        b"identity.email:synthetic@example.test").hexdigest()
     monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: verified)
-    plan = ApplicationExecutor("https://example.test/apply", _profile_file(tmp_path),
+    plan = ApplicationExecutor("https://example.test/apply", account_profile,
                                {"deepseek": {"enabled": False}}).run(max_pages=1)
     assert plan.stage == ApplicationStage.READY_TO_SUBMIT
     assert [item.field_id for item in verified.applied] == ["name"]
@@ -157,6 +198,92 @@ def test_ready_to_submit_does_not_submit_without_authorization(tmp_path, monkeyp
     )
     plan = runner.run(max_pages=1)
     assert plan.stage == ApplicationStage.READY_TO_SUBMIT
+    assert fake.submit_calls == 0
+
+
+def test_review_requires_independent_actual_draft_and_rejects_wrong_value(tmp_path, monkeypatch):
+    fake = FakeAdapter([
+        WebField(field_id="name", selector="#name", label="姓名", required=True),
+    ], final="Submit application")
+    fake.site_draft = {"#name": "Wrong Applicant"}
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: fake)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    plan = ApplicationExecutor(
+        "https://example.test/apply", _profile_file(tmp_path),
+        {"deepseek": {"enabled": False}},
+    ).run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "independent final review unverified"
+    assert plan.metadata["review_certificate"] == "UNVERIFIED"
+    assert fake.submit_calls == 0
+
+    missing = FakeAdapter([
+        WebField(field_id="name", selector="#name", label="姓名", required=True),
+    ], final="Submit application")
+    missing.observe_review_draft = None
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: missing)
+    plan = ApplicationExecutor(
+        "https://example.test/apply", _profile_file(tmp_path),
+        {"deepseek": {"enabled": False}},
+    ).run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["review_certificate"] == "UNVERIFIED"
+    assert missing.submit_calls == 0
+
+
+def test_draft_change_between_review_and_ready_blocks(tmp_path, monkeypatch):
+    class ChangingDraft(FakeAdapter):
+        review_reads = 0
+
+        def observe_review_draft(self, plan):
+            observed = super().observe_review_draft(plan)
+            self.review_reads += 1
+            if self.review_reads == 2:
+                observed["revision"] += 1
+            return observed
+
+    fake = ChangingDraft([
+        WebField(field_id="name", selector="#name", label="姓名", required=True),
+    ], final="Submit application")
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: fake)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    plan = ApplicationExecutor(
+        "https://example.test/apply", _profile_file(tmp_path),
+        {"deepseek": {"enabled": False}},
+    ).run(max_pages=1)
+    assert fake.review_reads == 2
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["review_certificate"] == "UNVERIFIED"
+    assert fake.submit_calls == 0
+
+
+def test_profile_change_during_review_blocks_ready(tmp_path, monkeypatch):
+    profile_path = _profile_file(tmp_path)
+
+    class ChangingProfile(FakeAdapter):
+        review_reads = 0
+
+        def observe_review_draft(self, plan):
+            observed = super().observe_review_draft(plan)
+            self.review_reads += 1
+            if self.review_reads == 2:
+                updated = json.loads(profile_path.read_text(encoding="utf-8"))
+                updated["fields"]["identity.full_name"]["value"] = "Changed Applicant"
+                profile_path.write_text(json.dumps(updated), encoding="utf-8")
+            return observed
+
+    fake = ChangingProfile([
+        WebField(field_id="name", selector="#name", label="姓名", required=True),
+    ], final="Submit application")
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: fake)
+    monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")
+    plan = ApplicationExecutor(
+        "https://example.test/apply", profile_path,
+        {"deepseek": {"enabled": False}},
+    ).run(max_pages=1)
+    assert fake.review_reads == 2
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["review_certificate"] == "UNVERIFIED"
     assert fake.submit_calls == 0
 
 
@@ -592,6 +719,8 @@ def test_sms_auth_preparation_uses_local_phone_and_policy_before_relay(tmp_path,
         prepare_status="requested",
         final="Submit application",
     )
+    adapter.expected_account_digest = hashlib.sha256(
+        b"identity.phone:13800138000").hexdigest()
     bridge = FakeOtpBridge({"code": "462810", "source": "local_broker"})
     monkeypatch.setattr("executor.application.adapter_for_url", lambda _url: adapter)
     monkeypatch.setattr("executor.audit.ROOT", tmp_path / "applications")

@@ -22,6 +22,9 @@ from .otp.bridge import OtpBridge, OtpBridgeError
 from .profile import get_field, is_sensitive_key, load_profile
 from .resolver import FieldResolver
 from .review import build_final_review
+from .review_certificate import (
+    ReviewUnverified, canonical_account_digest, certify_review, recheck_review,
+)
 
 
 def execution_id_for(target_url: str) -> str:
@@ -81,6 +84,13 @@ class ApplicationExecutor:
         self.row_journal_path: Path | None = None
         self.user_answers = self.audit.load_user_answers()
         self.otp_bridge = otp_bridge or OtpBridge()
+        # Private, process-local last readback for the authenticated review UI.
+        self.private_review_snapshot = None
+        self.private_review_profile_version = None
+        self.private_review_certificate = None
+        self.private_review_expected_account = None
+        self.private_review_expected_rows = None
+        self.private_review_expected_attachments = None
 
     @staticmethod
     def _auth_kind(adapter) -> str | None:
@@ -1025,6 +1035,71 @@ class ApplicationExecutor:
                         self.plan.metadata["block_reason"] = "structured project coverage unproven"
                         self.audit.save_plan(self.plan)
                         return self.plan
+                    observer = getattr(adapter, "observe_review_draft", None)
+                    try:
+                        snapshot = observer(self.plan) if callable(observer) else None
+                        expected_draft_id_digest = (
+                            row_bindings[0][0].draft_id_digest if row_bindings
+                            else attachment_binding[0] if attachment_binding else None
+                        )
+                        account_identity_digest = canonical_account_digest(
+                            self.profile, live=browser_mode() not in {
+                                "isolated", "test", "headless"})
+                        expected_rows = {
+                            key: {row.record_id: row.values_digest for row in desired}
+                            for _, desired, key in row_bindings}
+                        expected_attachments = {
+                            item.canonical_key.removeprefix("assets."): (
+                                self.profile["assets"][
+                                    item.canonical_key.removeprefix("assets.")]["sha256"])
+                            for item in attachment_selections}
+                        profile_version = hashlib.sha256(
+                            self.profile_path.read_bytes()).hexdigest()
+                        certificate = certify_review(
+                            self.profile, self.plan, snapshot,
+                            expected_draft_id_digest=expected_draft_id_digest,
+                            expected_account_identity_digest=account_identity_digest,
+                            expected_rows=expected_rows,
+                            expected_attachments=expected_attachments,
+                            minimum_revision=max(
+                                [*(row_revisions if row_bindings else []),
+                                 attachment_binding[1] if attachment_binding else 0]),
+                            profile_version=profile_version,
+                        )
+                        # A second read-only observation catches a draft or
+                        # document change between initial review and READY.
+                        fresh_snapshot = observer(self.plan) if callable(observer) else None
+                        recheck_review(
+                            certificate, self.profile, self.plan,
+                            fresh_snapshot,
+                            expected_account_identity_digest=account_identity_digest,
+                            expected_rows=expected_rows,
+                            expected_attachments=expected_attachments,
+                            profile_version=profile_version,
+                        )
+                        if hashlib.sha256(self.profile_path.read_bytes()).hexdigest() != profile_version:
+                            raise ReviewUnverified("profile changed during review")
+                    except BrowserOwnershipError:
+                        raise
+                    except (ReviewUnverified, OSError, ValueError, TypeError):
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "independent final review unverified"
+                        self.plan.metadata["review_certificate"] = "UNVERIFIED"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
+                    except Exception:
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "independent final review unverified"
+                        self.plan.metadata["review_certificate"] = "UNVERIFIED"
+                        self.audit.save_plan(self.plan)
+                        return self.plan
+                    self.private_review_snapshot = fresh_snapshot
+                    self.private_review_profile_version = profile_version
+                    self.private_review_certificate = certificate
+                    self.private_review_expected_account = account_identity_digest
+                    self.private_review_expected_rows = expected_rows
+                    self.private_review_expected_attachments = expected_attachments
+                    self.plan.metadata["review_certificate"] = certificate.safe_summary()
                     self.plan.stage = ApplicationStage.READY_TO_SUBMIT
                     self.plan.metadata["final_submit_control"] = final_control
                     self.plan.metadata["manual_final_click_required"] = True
@@ -1074,6 +1149,8 @@ class ApplicationExecutor:
                                     and draft_evidence["revision"] >= 0 else None,
                     })
                     self.audit.save_plan(self.plan)
+                    if draft_evidence.get("level") == "server_readback":
+                        adapter._certified_navigation_receipt = draft_evidence
                 if adapter.advance():
                     self.audit.record_action({"type": "advance", "page_index": page_index})
                     continue

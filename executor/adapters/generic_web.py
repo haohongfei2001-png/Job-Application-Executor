@@ -72,6 +72,7 @@ ACCOUNT_OR_DESTRUCTIVE_RE = re.compile(
 
 class GenericWebAdapter(SiteAdapter):
     site_id = "generic_web"
+    safe_advance_certified = False
 
     def __init__(self, target_url: str):
         super().__init__(target_url)
@@ -1295,15 +1296,22 @@ class GenericWebAdapter(SiteAdapter):
         return None
 
     def advance(self) -> bool:
+        """Advance only after a certified driver and fresh server draft receipt."""
+        receipt = getattr(self, "_certified_navigation_receipt", None)
+        if (not self.safe_advance_certified or not isinstance(receipt, dict)
+                or receipt.get("verified") is not True
+                or receipt.get("level") != "server_readback"):
+            return False
+        matches = [(element, text) for element, text in self._buttons()
+                   if is_next(text) and not is_final_submit(text)]
+        if len(matches) != 1:
+            return False
+        self._certified_navigation_receipt = None
         getattr(self, "mutation_guard", lambda: None)()
-        for element, text in self._buttons():
-            if is_next(text) and not is_final_submit(text):
-                getattr(self, "mutation_guard", lambda: None)()
-                element.click()
-                self.page.wait_for_timeout(1000)
-                self._adopt_owned_page()
-                return True
-        return False
+        matches[0][0].click()
+        self.page.wait_for_timeout(1000)
+        self._adopt_owned_page()
+        return True
 
     def next_control(self) -> bool:
         """Read-only navigation preflight; a draft must be proven before leaving it."""
@@ -1328,16 +1336,11 @@ class GenericWebAdapter(SiteAdapter):
             body,
             re.I,
         )
-        app_id = None
-        id_match = re.search(r"(?:application|申请)\s*(?:id|编号)?[:：#\s]+([A-Za-z0-9_-]{6,})", body, re.I)
-        if id_match:
-            app_id = id_match.group(1)
         return SubmissionVerification(
-            verified=bool(match),
+            verified=False,
             level="page_signal" if match else "none",
-            application_id=app_id,
-            status="submitted" if match else None,
-            evidence={"matched_success_text": match.group(0) if match else None, "url": self.page.url},
+            status="page_signal_observed" if match else None,
+            evidence={"success_text_present": bool(match)},
         )
 
     def screenshot(self, path: str) -> None:

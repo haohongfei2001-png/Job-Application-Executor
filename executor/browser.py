@@ -329,6 +329,171 @@ def observe_bound_draft(target_url: str, binding: dict | None) -> dict:
     }
 
 
+
+def observe_bound_review(target_url: str, binding: dict | None, plan) -> dict | None:
+    """Fresh server draft readback from the same owned page, without writes.
+
+    An ordinary generic page has no certified observer and returns None.
+    Private values stay in process memory and are never returned as a public
+    task observation or written to the durable audit.
+    """
+    if (not binding or not binding.get("document_epoch")
+            or browser_mode() in {"test", "isolated", "headless"}):
+        return None
+    epoch = owned_cdp_fingerprint()
+    if not epoch or epoch != binding.get("process_epoch"):
+        return None
+    pw = None
+    try:
+        pw, _browser, ctx, page = connect(
+            target_url, existing_only=True, task_binding=binding,
+            session_epoch=epoch,
+        )
+        from .adapters.registry import adapter_for_url
+        observer = adapter_for_url(target_url)
+        if getattr(observer, "read_only_review_certified", False) is not True:
+            return None
+        observer.ctx, observer.page = ctx, page
+        readback = getattr(observer, "observe_review_draft", None)
+        if not callable(readback):
+            return None
+        snapshot = readback(plan)
+        if (page_target_id(ctx, page) != binding["target_id"]
+                or page_document_epoch(page) != binding["document_epoch"]):
+            return None
+        return snapshot if isinstance(snapshot, dict) else None
+    except Exception:
+        return None
+    finally:
+        if pw is not None:
+            pw.stop()
+
+
+def observe_bound_submission(target_url: str, binding: dict | None) -> dict:
+    """Read an owned task tab after a human click without replaying any action.
+
+    Navigation may replace the READY document. Process, tab and origin must
+    still match; page text is only a signal and never server verification.
+    """
+    status = "NO_TASK_BINDING"
+    if binding and binding.get("document_epoch"):
+        if browser_mode() in {"test", "isolated", "headless"}:
+            status = "ISOLATED_LIVE_OBSERVATION_UNSUPPORTED"
+        else:
+            epoch = owned_cdp_fingerprint()
+            if epoch is None:
+                status = "OWNED_SESSION_UNAVAILABLE"
+            elif epoch != binding.get("process_epoch"):
+                status = "PROCESS_EPOCH_CHANGED"
+            else:
+                pw = None
+                try:
+                    read_binding = dict(binding)
+                    read_binding.pop("document_epoch", None)
+                    pw, _browser, ctx, page = connect(
+                        target_url, existing_only=True,
+                        task_binding=read_binding, session_epoch=epoch,
+                    )
+                    if page_target_id(ctx, page) != binding["target_id"]:
+                        status = "TARGET_CHANGED"
+                    else:
+                        changed = page_document_epoch(page) != binding["document_epoch"]
+                        from .adapters.generic_web import GenericWebAdapter
+                        observer = GenericWebAdapter(target_url)
+                        observer.page = page
+                        signal = observer.verify_submission()
+                        return {
+                            "status": "PAGE_SIGNAL_OBSERVED"
+                                      if signal.level == "page_signal"
+                                      else "NO_SUBMISSION_SIGNAL",
+                            "level": signal.level if signal.level == "page_signal" else "none",
+                            "server_verified": False,
+                            "user_confirmed": False,
+                            "document_changed": changed,
+                            "replay_allowed": False,
+                        }
+                except BrowserOwnershipError:
+                    status = "OWNERSHIP_UNVERIFIED"
+                except Exception:
+                    status = "OBSERVATION_UNAVAILABLE"
+                finally:
+                    if pw is not None:
+                        pw.stop()
+    return {
+        "status": status,
+        "level": "none",
+        "server_verified": False,
+        "user_confirmed": False,
+        "replay_allowed": False,
+    }
+
+
+
+def observe_bound_submission_receipt(
+    target_url: str, binding: dict | None, expected_review: dict | None,
+) -> dict | None:
+    """Optional post-click server proof from a certified read-only driver.
+
+    A generic page signal is never upgraded. The private certificate binds
+    target, draft, account and observer version; no receipt body or applicant
+    value leaves this function.
+    """
+    if (not binding or not isinstance(expected_review, dict)
+            or any(not isinstance(expected_review.get(key), str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", expected_review[key])
+                   for key in ("target_sha256", "draft_id_digest",
+                               "account_identity_digest"))
+            or not isinstance(expected_review.get("driver_version"), str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",
+                                expected_review["driver_version"])
+            or browser_mode() in {"test", "isolated", "headless"}):
+        return None
+    epoch = owned_cdp_fingerprint()
+    if not epoch or epoch != binding.get("process_epoch"):
+        return None
+    pw = None
+    try:
+        read_binding = dict(binding)
+        read_binding.pop("document_epoch", None)
+        pw, _browser, ctx, page = connect(
+            target_url, existing_only=True, task_binding=read_binding,
+            session_epoch=epoch,
+        )
+        from .adapters.registry import adapter_for_url
+        observer = adapter_for_url(target_url)
+        if getattr(observer, "read_only_submission_certified", False) is not True:
+            return None
+        observer.ctx, observer.page = ctx, page
+        readback = getattr(observer, "observe_submission_receipt", None)
+        if not callable(readback):
+            return None
+        receipt = readback()
+        if (page_target_id(ctx, page) != binding["target_id"]
+                or not isinstance(receipt, dict)
+                or receipt.get("source") != "server_readback"
+                or receipt.get("verified") is not True
+                or receipt.get("status") != "submitted"
+                or any(receipt.get(key) != expected_review.get(key) for key in (
+                    "target_sha256", "draft_id_digest",
+                    "account_identity_digest", "driver_version"))
+                or not isinstance(receipt.get("submission_id"), str)
+                or not re.fullmatch(r"[A-Za-z0-9_.:-]{6,128}",
+                                    receipt["submission_id"])):
+            return None
+        return {
+            "status": "SERVER_SUBMISSION_VERIFIED",
+            "level": "server_verified",
+            "server_verified": True,
+            "user_confirmed": False,
+            "replay_allowed": False,
+        }
+    except Exception:
+        return None
+    finally:
+        if pw is not None:
+            pw.stop()
+
+
 def observe_bound_auth(target_url: str, binding: dict | None, origin: str) -> str:
     """Read-only proof for a continuing OTP wait on the same owned document."""
     if (not binding or not binding.get("document_epoch")

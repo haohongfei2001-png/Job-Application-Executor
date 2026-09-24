@@ -12,11 +12,12 @@ from urllib.parse import urlsplit
 
 from .. import browser
 from ..application import ApplicationExecutor
-from ..models import ApplicationStage
+from ..review_certificate import ReviewCertificate, recheck_review
+from ..models import ApplicationStage, ResolutionStatus
 from ..protected_targets import assert_target_not_protected
 from ..settings import load_settings
 from ..evidence import BOOL_KEYS, set_user_confirmed_field
-from ..profile import DEFAULT_ALIASES
+from ..profile import DEFAULT_ALIASES, get_field
 from ..facts.answers import TaskAnswerStore
 from .otp import BrokerBridge, OtpBroker
 from .queue import RUNTIME, STOPPED, private_dir, IDENTIFIER
@@ -86,6 +87,10 @@ def outcome(plan):
             return "NEEDS_USER_INPUT", "unknown_facts"
         return "BLOCKED", "validation"
     stage = str(plan.stage)
+    if stage == "READY_TO_SUBMIT" and (
+            plan.unresolved_fields
+            or not isinstance(plan.metadata.get("review_certificate"), dict)):
+        return "BLOCKED", "validation"
     if stage in {"SUBMITTED", "VERIFIED"}:
         raise RuntimeError("worker cannot submit")
     return stage, None
@@ -145,11 +150,154 @@ class Worker:
         self.stop_event = threading.Event()
         self.answers = {}
         self.answers_lock = threading.RLock()
+        self.review_lock = threading.RLock()
+        self.review_cache = {}
         self.answer_store = TaskAnswerStore(queue)
         self.active = None
         self._otp_watch_lock = threading.RLock()
         self._otp_watchers = set()
         self._otp_watch_retry_after = {}
+
+    def _remember_private_review(self, tid, runner, plan, revision):
+        snapshot = getattr(runner, "private_review_snapshot", None)
+        profile_path = getattr(runner, "profile_path", None)
+        profile_version = getattr(runner, "private_review_profile_version", None)
+        if (not isinstance(snapshot, dict) or not isinstance(snapshot.get("fields"), list)
+                or profile_path is None or not isinstance(profile_version, str)
+                or len(profile_version) != 64):
+            return
+        profile_path = Path(profile_path)
+        if hashlib.sha256(profile_path.read_bytes()).hexdigest() != profile_version:
+            return
+        expected = [field for field in plan.fields if field.status in {
+            ResolutionStatus.RESOLVED, ResolutionStatus.KEEP_EXISTING}
+            and not (field.canonical_key or "").startswith("assets.")]
+        actual = snapshot["fields"]
+        if len(expected) != len(actual):
+            return
+        fields = [{
+            "key": field.canonical_key or field.field_id,
+            "label": field.label,
+            "required": field.required,
+            "expected": field.model_dump(mode="json")["value"],
+            "observed": observed.get("value"),
+        } for field, observed in zip(expected, actual) if isinstance(observed, dict)]
+        if len(fields) != len(expected):
+            return
+        assets = runner.profile.get("assets") or {}
+        attachments = [{
+            "slot": slot,
+            "filename": Path(str((assets.get(slot) or {}).get("path") or "")).name,
+            "canonical_sha256": (assets.get(slot) or {}).get("sha256"),
+            "observed_sha256": digest,
+        } for slot, digest in (snapshot.get("attachments") or {}).items()]
+        account = {}
+        for key in ("identity.email", "identity.phone", "identity.full_name"):
+            field = get_field(runner.profile, key)
+            if field is not None and field.value not in (None, ""):
+                account = {"key": key, "canonical_value": field.value,
+                           "active_account_matched": True}
+                break
+        payload = {
+            "target_url": plan.target_url,
+            "account": account,
+            "fields": fields,
+            "attachments": attachments,
+            "rows": copy.deepcopy(snapshot.get("rows") or {}),
+            "project_coverage": copy.deepcopy(
+                (plan.metadata.get("final_review") or {}).get("project_coverage") or {}),
+            "source": "last_certified_server_readback",
+            "current_site_state_unverified": True,
+        }
+        certificate = getattr(runner, "private_review_certificate", None)
+        recheck = None
+        if isinstance(certificate, ReviewCertificate):
+            recheck = {
+                "certificate": certificate,
+                "profile": copy.deepcopy(runner.profile),
+                "plan": plan.model_copy(deep=True),
+                "account": getattr(runner, "private_review_expected_account", None),
+                "rows": copy.deepcopy(getattr(runner, "private_review_expected_rows", None)),
+                "attachments": copy.deepcopy(
+                    getattr(runner, "private_review_expected_attachments", None)),
+            }
+        with self.review_lock:
+            self.review_cache[tid] = {
+                "revision": revision, "expires_at": time.monotonic() + 3600,
+                "profile_path": profile_path, "profile_version": profile_version,
+                "payload": payload, "recheck": recheck,
+            }
+
+    def _current_private_review(self, tid, revision):
+        row = self.review_cache.get(tid)
+        if not row or row["revision"] != revision or row["expires_at"] <= time.monotonic():
+            self.review_cache.pop(tid, None)
+            return None
+        try:
+            digest = hashlib.sha256(row["profile_path"].read_bytes()).hexdigest()
+        except OSError:
+            digest = None
+        if digest != row["profile_version"]:
+            self.review_cache.pop(tid, None)
+            return None
+        return row
+
+    def private_review(self, tid, revision):
+        with self.review_lock:
+            row = self._current_private_review(tid, revision)
+            return copy.deepcopy(row["payload"]) if row else None
+
+    def recheck_private_review(self, tid, revision, binding):
+        """Fresh server readback before exposing values on a live READY page."""
+        with self.review_lock:
+            row = self._current_private_review(tid, revision)
+            context = row.get("recheck") if row else None
+        if not context:
+            self.discard_private_review(tid)
+            return None
+        snapshot = browser.observe_bound_review(
+            context["plan"].target_url, binding, context["plan"])
+        try:
+            recheck_review(
+                context["certificate"], context["profile"], context["plan"],
+                snapshot,
+                profile_version=row["profile_version"],
+                expected_account_identity_digest=context["account"],
+                expected_rows=context["rows"],
+                expected_attachments=context["attachments"],
+            )
+        except Exception:
+            self.discard_private_review(tid)
+            return None
+        with self.review_lock:
+            if self._current_private_review(tid, revision) is not row:
+                return None
+            payload = copy.deepcopy(row["payload"])
+            payload["fresh_rechecked_at_open"] = True
+            return payload
+
+    def private_review_expectations(self, tid, revision):
+        """Private binding for optional post-click server verification."""
+        with self.review_lock:
+            row = self._current_private_review(tid, revision)
+            context = row.get("recheck") if row else None
+            if not context:
+                return None
+            certificate = context["certificate"]
+            return {
+                "target_sha256": certificate.target_sha256,
+                "draft_id_digest": certificate.draft_id_digest,
+                "account_identity_digest": context["account"],
+                "driver_version": certificate.driver_version,
+            }
+
+    def private_review_available(self, tid, revision):
+        with self.review_lock:
+            return self._current_private_review(tid, revision) is not None
+
+    def discard_private_review(self, tid):
+        with self.review_lock:
+            self.review_cache.pop(tid, None)
 
     def _watch_late_otp(self):
         """Listen after the short browser wait without holding a task lease."""
@@ -405,8 +553,17 @@ class Worker:
             attempt_id = self.queue.begin_run_attempt(tid, owner)
             plan = runner.run()
             stage, blocker = outcome(plan)
-            checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields]}, release=True)
+            checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields], "review_certificate": plan.metadata.get("review_certificate")}, release=True)
             self.queue.finish_run_attempt(attempt_id, "RETURNED_UNVERIFIED")
+            if stage == "READY_TO_SUBMIT":
+                try:
+                    self._remember_private_review(tid, runner, plan, self.queue.get(tid)["revision"])
+                except (AttributeError, OSError, TypeError, ValueError):
+                    # The durable certificate survives; the local full-value
+                    # review remains unavailable until it can be rebuilt safely.
+                    self.discard_private_review(tid)
+            else:
+                self.discard_private_review(tid)
             if blocker == "otp_waiting" and self.broker.pending(tid):
                 self.queue.resume(tid)
             if stage in STOPPED:

@@ -15,7 +15,7 @@ from urllib.parse import parse_qsl, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..models import ApplicationStage
-from ..protected_targets import assert_target_not_protected
+from ..protected_targets import assert_target_not_protected, register_user_confirmed_target
 from ..discovery.core import normalize_component
 
 RUNTIME = Path(__file__).resolve().parents[2] / "runtime" / "autonomy"
@@ -533,14 +533,55 @@ class TaskQueue:
         safe = {}
         for key in ("unresolved_keys", "filled_keys"):
             safe[key] = [k for k in details.get(key, []) if isinstance(k, str) and IDENTIFIER.fullmatch(k)]
-        if stage == "READY_TO_SUBMIT":
-            safe["final_review"] = {"final_click_actor": "user", "validated": True, "review_ref": tid, "manual_final_click_required": True}
         if blocker not in {None, "unknown_facts", "security_challenge", "otp_waiting", "otp_ambiguous", "validation", "retry_pending", "retry_exhausted", "live_not_authorized", "session_unavailable", "protected_target", "target_mismatch", "isolated_external_target"} | RECONCILIATION_REQUIRED:
             raise ValueError("invalid blocker type")
         with self.tx() as db:
             row = db.execute("SELECT * FROM tasks WHERE task_id=? AND owner=? AND lease_until>? AND stage NOT IN ('CANCELLED','READY_TO_SUBMIT','SUBMITTED','VERIFIED')", (tid, owner, self.clock())).fetchone()
             if not row:
                 raise RuntimeError("lease lost or task stopped")
+            if stage == "READY_TO_SUBMIT":
+                certificate = details.get("review_certificate")
+                checks = certificate.get("checks") if isinstance(certificate, dict) else None
+                required_checks = {
+                    "target_account_draft", "complete_fields_defaults",
+                    "structured_rows", "attachments", "validation_save",
+                    "manual_submit_boundary",
+                }
+                target = json.loads(row["spec"])["target_url"]
+                target_digest = hashlib.sha256(target.encode("utf-8")).hexdigest()
+                if (not isinstance(details.get("unresolved_keys"), list)
+                        or details["unresolved_keys"]
+                        or not isinstance(certificate, dict)
+                        or certificate.get("target_sha256") != target_digest
+                        or not isinstance(certificate.get("draft_id_digest"), str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", certificate["draft_id_digest"])
+                        or type(certificate.get("revision")) is not int
+                        or certificate["revision"] < 1
+                        or not isinstance(certificate.get("document_epoch_sha256"), str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", certificate["document_epoch_sha256"])
+                        or not isinstance(certificate.get("driver_version"), str)
+                        or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", certificate["driver_version"])
+                        or any(type(certificate.get(key)) is not int
+                               or certificate[key] < 0
+                               for key in ("field_count", "attachment_count", "row_count"))
+                        or certificate.get("final_click_actor") != "user"
+                        or not isinstance(checks, dict)
+                        or set(checks) != required_checks
+                        or set(checks.values()) != {"PASS"}):
+                    raise ValueError("READY requires a current independent review certificate")
+                safe["final_review"] = {
+                    "final_click_actor": "user",
+                    "validated": True,
+                    "manual_final_click_required": True,
+                    "certificate": {
+                        key: certificate[key] for key in (
+                            "target_sha256", "draft_id_digest", "revision",
+                            "document_epoch_sha256", "driver_version",
+                            "field_count", "attachment_count", "row_count",
+                            "checks", "final_click_actor")
+                        if key in certificate
+                    },
+                }
             if page_url:
                 try:
                     TaskSpec.safe_url(page_url)
@@ -552,6 +593,62 @@ class TaskQueue:
             delay = min(60, 2**row["attempts"]) if blocker == "retry_pending" else 0
             db.execute("UPDATE tasks SET stage=?,checkpoint=?,blocker=?,details=?,owner=?,lease_until=?,next_run=?,updated=? WHERE task_id=?", (stage, cp, blocker, json.dumps(safe), None if release else owner, None if release else row["lease_until"], self.clock()+delay, self.clock(), tid))
             self._event(db, tid, "checkpoint", stage)
+
+    def confirm_human_submission(
+        self, tid: str, *, expected_revision: int, user_confirmed: bool,
+        observation: dict | None = None, registry_path=None,
+    ) -> dict:
+        """Record a human claim, never infer submission from page text."""
+        if user_confirmed is not True or type(expected_revision) is not int:
+            raise ValueError("explicit human confirmation and task revision required")
+        status = observation.get("status") if isinstance(observation, dict) else None
+        allowed = {
+            "SERVER_SUBMISSION_VERIFIED", "PAGE_SIGNAL_OBSERVED", "NO_SUBMISSION_SIGNAL", "NO_TASK_BINDING",
+            "ISOLATED_LIVE_OBSERVATION_UNSUPPORTED", "OWNED_SESSION_UNAVAILABLE",
+            "PROCESS_EPOCH_CHANGED", "TARGET_CHANGED", "OWNERSHIP_UNVERIFIED",
+            "OBSERVATION_UNAVAILABLE",
+        }
+        if status not in allowed:
+            raise ValueError("read-only submission observation required")
+        with self.tx() as db:
+            row = db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone()
+            self._view(row)
+            if row["revision"] != expected_revision:
+                raise RuntimeError("stale task revision")
+            if row["stage"] != "READY_TO_SUBMIT" or row["owner"]:
+                raise ValueError("task is not at the human submit boundary")
+            spec = TaskSpec.model_validate(json.loads(row["spec"]))
+            if not spec.target_verified:
+                raise ValueError("verified job identity required for protection")
+            details = json.loads(row["details"])
+            review = details.get("final_review") or {}
+            if (not isinstance(review, dict) or review.get("validated") is not True
+                    or review.get("final_click_actor") != "user"):
+                raise ValueError("independent review certificate required")
+            kwargs = {
+                "tenant": spec.tenant, "job_id": spec.job_id,
+                "campaign": spec.campaign, "verified_identity": True,
+                "user_confirmed": True,
+            }
+            if registry_path is not None:
+                kwargs["path"] = registry_path
+            register_user_confirmed_target(spec.target_url, **kwargs)
+            safe = {
+                "submission": {
+                    "level": "server_verified" if status == "SERVER_SUBMISSION_VERIFIED" else "user_confirmed",
+                    "read_only_observation": status,
+                    "page_signal": status == "PAGE_SIGNAL_OBSERVED",
+                    "server_verified": status == "SERVER_SUBMISSION_VERIFIED",
+                },
+                "final_review": review,
+            }
+            db.execute(
+                "UPDATE tasks SET stage='SUBMITTED',blocker=NULL,details=?,updated=? WHERE task_id=?",
+                (json.dumps(safe), self.clock(), tid),
+            )
+            self._event(db, tid, "human_submission_confirmed", "SUBMITTED")
+            return self._view(
+                db.execute("SELECT * FROM tasks WHERE task_id=?", (tid,)).fetchone())
 
     def _resume_in_tx(self, db, tid, *, command_id=None, expected_revision=None):
         prior = self._command_before(db, tid, "RESUME", command_id, expected_revision)

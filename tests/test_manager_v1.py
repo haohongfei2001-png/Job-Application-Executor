@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import http.cookiejar
 import json
 import threading
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 
@@ -18,7 +20,8 @@ from executor.autonomy.manager import (
 )
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.supervisor import Supervisor, create_server
-from executor.autonomy.worker import Worker
+from executor.autonomy.worker import Worker, outcome
+from executor.models import ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus
 
 
 def spec(tmp_path: Path, *, url="https://jobs.example.test/apply?postId=role-1"):
@@ -275,12 +278,53 @@ def test_create_task_accepts_ascii_sentence_punctuation(tmp_path, suffix):
     assert q.get(result["actions"][0]["task_id"])["spec"]["target_url"] == url
 
 
-def test_resume_ready_to_submit_is_never_allowed(tmp_path):
+def test_worker_rejects_uncertified_ready_plan():
+    plan = ApplicationPlan(
+        execution_id="uncertified-ready",
+        target_url="https://example.test/apply",
+        site_id="synthetic",
+        stage=ApplicationStage.READY_TO_SUBMIT,
+    )
+    assert outcome(plan) == ("BLOCKED", "validation")
+
+
+def test_resume_ready_to_submit_is_never_allowed(tmp_path, monkeypatch):
     q = TaskQueue(tmp_path / "runtime")
     worker = Worker(q, settings={"deepseek": {"enabled": False}})
     tid = q.enqueue(spec(tmp_path))["task_id"]
     claimed = q.claim("test-worker")
-    q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT", release=True)
+    with pytest.raises(ValueError, match="independent review certificate"):
+        q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT", release=True)
+    assert q.get(tid)["stage"] != "READY_TO_SUBMIT"
+    certificate = {
+        "target_sha256": hashlib.sha256(
+            q.get(tid)["spec"]["target_url"].encode()).hexdigest(),
+        "draft_id_digest": "b" * 64,
+        "revision": 1,
+        "document_epoch_sha256": "c" * 64,
+        "driver_version": "synthetic-v1",
+        "field_count": 1,
+        "attachment_count": 0,
+        "row_count": 0,
+        "checks": {key: "PASS" for key in (
+            "target_account_draft", "complete_fields_defaults",
+            "structured_rows", "attachments", "validation_save",
+            "manual_submit_boundary")},
+        "final_click_actor": "user",
+    }
+    with pytest.raises(ValueError, match="independent review certificate"):
+        q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT",
+                     details={"unresolved_keys": [], "review_certificate": {
+                         **certificate, "target_sha256": "d" * 64}}, release=True)
+    with pytest.raises(ValueError, match="independent review certificate"):
+        q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT",
+                     details={"unresolved_keys": [], "review_certificate": {
+                         **certificate,
+                         "checks": {**certificate["checks"],
+                                    "attachments": "FAIL"}}}, release=True)
+    assert q.get(tid)["stage"] != "READY_TO_SUBMIT"
+    q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT",
+                 details={"unresolved_keys": [], "review_certificate": certificate}, release=True)
     provider = FakeProvider(ManagerTurn(reply="继续。", decisions=[
         ManagerDecision(action=ManagerAction.RESUME, task_id=tid)
     ]))
@@ -292,6 +336,139 @@ def test_resume_ready_to_submit_is_never_allowed(tmp_path):
         "reason": "manual_submit_gate",
     }
     assert q.get(tid)["stage"] == "READY_TO_SUBMIT"
+    supervisor = Supervisor(q, worker=worker, token="x" * 40, manager=manager)
+    ready_view = next(task for task in supervisor.ui_state()["tasks"]
+                      if task["task_id"] == tid)
+    assert ready_view["review_summary"] == {"status": "unavailable"}
+    assert ready_view["can_confirm_submission"] is False
+    assert "resume.docx" not in str(ready_view)
+    assert "postId=role-1" not in str(ready_view)
+    private_plan = ApplicationPlan(
+        execution_id=tid, target_url=q.get(tid)["spec"]["target_url"],
+        site_id="synthetic", stage=ApplicationStage.READY_TO_SUBMIT,
+        fields=[FieldResolution(
+            field_id="name", selector="#name", label="Name",
+            status=ResolutionStatus.RESOLVED, value="PRIVATE_CANARY",
+            required=True, canonical_key="identity.full_name")],
+    )
+    certified_profile_path = Path(q.get(tid)["spec"]["profile_ref"])
+    certified_profile_bytes = certified_profile_path.read_bytes()
+    private_runner = SimpleNamespace(
+        profile_path=certified_profile_path,
+        private_review_profile_version=hashlib.sha256(
+            certified_profile_bytes).hexdigest(),
+        private_review_snapshot={
+            "fields": [{"value": "PRIVATE_CANARY"}], "attachments": {}, "rows": {}},
+        profile={"identity": {"email": "private@example.test"}, "assets": {}},
+    )
+    worker._remember_private_review(
+        tid, private_runner, private_plan, q.get(tid)["revision"])
+    private_view = supervisor.review_values(tid)["review"]
+    assert private_view["fields"][0]["observed"] == "PRIVATE_CANARY"
+    assert private_view["account"]["canonical_value"] == "private@example.test"
+    assert supervisor.ui_state()["tasks"][0]["review_values_available"] is True
+    assert supervisor.ui_state()["tasks"][0]["review_summary"] == {
+        "status": "last_verified",
+        "field_count": 1,
+        "attachment_count": 0,
+        "row_count": 0,
+        "check_count": 6,
+    }
+    assert "PRIVATE_CANARY" not in str(supervisor.ui_state())
+    assert "PRIVATE_CANARY" not in str(q.get(tid))
+    with monkeypatch.context() as patcher:
+        patcher.setattr("executor.autonomy.supervisor.browser.browser_mode", lambda: "live")
+        patcher.setattr("executor.autonomy.supervisor.browser.observe_bound_draft",
+                        lambda *_: {"status": "DOCUMENT_CHANGED"})
+        with pytest.raises(ValueError, match="document or owned session changed"):
+            supervisor.review_values(tid)
+    assert supervisor.ui_state()["tasks"][0]["review_values_available"] is False
+    worker._remember_private_review(
+        tid, private_runner, private_plan, q.get(tid)["revision"])
+    certified_profile_path.write_bytes(certified_profile_bytes + b" ")
+    assert worker.private_review_available(tid, q.get(tid)["revision"]) is False
+    certified_profile_path.write_bytes(certified_profile_bytes)
+    worker._remember_private_review(
+        tid, private_runner, private_plan, q.get(tid)["revision"])
+    assert Worker(q, settings={"deepseek": {"enabled": False}}).private_review(
+        tid, q.get(tid)["revision"]) is None
+    observed_targets = []
+    def read_only_observer(target_url, binding):
+        observed_targets.append((target_url, binding))
+        return {"status": "PAGE_SIGNAL_OBSERVED", "level": "page_signal",
+                "server_verified": False, "replay_allowed": False}
+    monkeypatch.setattr("executor.autonomy.supervisor.browser.observe_bound_submission",
+                        read_only_observer)
+    observation = supervisor.observe_submission(tid)
+    assert observation["level"] == "page_signal"
+    assert observation["server_verified"] is False
+    assert observed_targets == [(q.get(tid)["spec"]["target_url"], None)]
+    assert q.get(tid)["stage"] == "READY_TO_SUBMIT"
+    with worker.review_lock:
+        worker.review_cache[tid]["expires_at"] = 0
+    with pytest.raises(ValueError, match="expired or the service restarted"):
+        supervisor.review_values(tid)
+    assert supervisor.ui_state()["tasks"][0]["can_confirm_submission"] is False
+    with pytest.raises(ValueError, match="expired or the service restarted"):
+        supervisor.confirm_human_submission(tid, q.get(tid)["revision"])
+    assert q.get(tid)["stage"] == "READY_TO_SUBMIT"
+
+
+def test_human_submission_receipt_protects_verified_job_without_server_claim(tmp_path):
+    profile = tmp_path / "profile.json"
+    profile.write_text('{"identity":{"full_name":"Synthetic Applicant"}}')
+    q = TaskQueue(tmp_path / "runtime")
+    task_spec = TaskSpec(
+        company="Synthetic Co", role="AI Product Manager",
+        target_url="https://jobs.example.test/apply?postId=role-1",
+        job_id="role-1", tenant="synthetic-tenant", campaign="autumn",
+        target_verified=True, target_evidence_digest="a" * 64,
+        target_source_chain=["https://jobs.example.test/jobs"],
+        profile_ref=str(profile),
+    )
+    tid = q.enqueue(task_spec)["task_id"]
+    claimed = q.claim("test-worker")
+    certificate = {
+        "target_sha256": hashlib.sha256(task_spec.target_url.encode()).hexdigest(),
+        "draft_id_digest": "b" * 64, "revision": 1,
+        "document_epoch_sha256": "c" * 64, "driver_version": "synthetic-v1",
+        "field_count": 1, "attachment_count": 0, "row_count": 0,
+        "checks": {key: "PASS" for key in (
+            "target_account_draft", "complete_fields_defaults",
+            "structured_rows", "attachments", "validation_save",
+            "manual_submit_boundary")},
+        "final_click_actor": "user",
+    }
+    q.checkpoint(tid, claimed["owner"], "READY_TO_SUBMIT",
+                 details={"unresolved_keys": [], "review_certificate": certificate},
+                 release=True)
+    revision = q.get(tid)["revision"]
+    observation = {"status": "PAGE_SIGNAL_OBSERVED", "level": "page_signal"}
+    registry = tmp_path / "private" / "protected-targets.json"
+    with pytest.raises(ValueError, match="explicit human confirmation"):
+        q.confirm_human_submission(
+            tid, expected_revision=revision, user_confirmed=False,
+            observation=observation, registry_path=registry)
+    assert not registry.exists()
+    with pytest.raises(RuntimeError, match="stale task revision"):
+        q.confirm_human_submission(
+            tid, expected_revision=revision - 1, user_confirmed=True,
+            observation=observation, registry_path=registry)
+    assert not registry.exists()
+    submitted = q.confirm_human_submission(
+        tid, expected_revision=revision, user_confirmed=True,
+        observation=observation, registry_path=registry)
+    assert submitted["stage"] == "SUBMITTED"
+    assert submitted["details"]["submission"] == {
+        "level": "user_confirmed",
+        "read_only_observation": "PAGE_SIGNAL_OBSERVED",
+        "page_signal": True,
+        "server_verified": False,
+    }
+    assert registry.exists()
+    assert "postId" not in registry.read_text()
+    with pytest.raises(ValueError, match="immutable human boundary"):
+        q.resume(tid)
 
 
 def test_unavailable_manager_fails_closed_without_mutating_queue(tmp_path):
@@ -571,6 +748,9 @@ def test_dashboard_http_ticket_cookie_and_same_origin_chat(tmp_path):
     port = server.server_address[1]
     base = f"http://127.0.0.1:{port}"
     try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(base + "/ui/api/review-values?task_id=unknown")
+        assert exc.value.code == 401
         ticket_request = urllib.request.Request(
             base + "/v1/ui-ticket",
             data=b"{}",
@@ -619,6 +799,9 @@ def test_dashboard_http_ticket_cookie_and_same_origin_chat(tmp_path):
         assert q.get(created["task_id"])["spec"]["target_url"] == "https://jobs.example.test/roles/role-1"
         assert q.get(created["task_id"])["spec"]["live_authorized"] is False
         assert "jobs.example.test/roles" not in provider.seen["message"]
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            opener.open(base + "/ui/api/review-values?task_id=" + created["task_id"])
+        assert exc.value.code == 400
 
         evil = urllib.request.Request(
             base + "/ui/api/chat",

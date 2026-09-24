@@ -39,7 +39,27 @@ def safe_plan(plan: ApplicationPlan) -> dict[str, Any]:
     data = plan.model_dump(mode="json")
     data["fields"] = [_safe_resolution(x) for x in plan.fields]
     data["unresolved_fields"] = [_safe_resolution(x) for x in plan.unresolved_fields]
-    data["attachments"] = {k: Path(v).name for k, v in plan.attachments.items()}
+    # Names of local files and project records can contain applicant facts.
+    # Recovery reconstructs the profile; the persisted audit is copy-safe.
+    data["attachments"] = {k: "[LOCAL_FILE]" for k in plan.attachments}
+    review = data["metadata"].get("final_review")
+    if isinstance(review, dict):
+        coverage = review.get("project_coverage")
+        coverage = coverage if isinstance(coverage, dict) else {}
+        data["metadata"]["final_review"] = {
+            "human_review_required": review.get("human_review_required") is True,
+            "final_click_actor": "user",
+            "unresolved_field_count": len(plan.unresolved_fields),
+            "attachment_count": len(plan.attachments),
+            "project_coverage": {
+                "status": coverage.get("status"),
+                "canonical_count": coverage.get("canonical_count"),
+                "structured_count": coverage.get("structured_count"),
+                "uncovered_count": len(coverage.get("uncovered_projects") or []),
+                "explicit_exclusion_count": len(
+                    coverage.get("explicit_exclusions") or []),
+            },
+        }
     return redact_secrets(data)
 
 

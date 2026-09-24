@@ -97,6 +97,48 @@ class Supervisor:
     def ui_state(self):
         state = self.manager.state()
         for task in state.get("tasks", []):
+            if task.get("stage") == "READY_TO_SUBMIT":
+                queue_task = self.queue.get(task["task_id"])
+                spec = queue_task.get("spec") or {}
+                task["can_confirm_submission"] = bool(
+                    spec.get("target_verified") is True
+                    and spec.get("tenant") and spec.get("job_id"))
+                details = queue_task.get("details") or {}
+                review = details.get("final_review") or {}
+                if not isinstance(review, dict):
+                    review = {}
+                certificate = review.get("certificate")
+                checks = certificate.get("checks") if isinstance(certificate, dict) else None
+                required_checks = {
+                    "target_account_draft", "complete_fields_defaults",
+                    "structured_rows", "attachments", "validation_save",
+                    "manual_submit_boundary",
+                }
+                if (review.get("validated") is True
+                        and review.get("final_click_actor") == "user"
+                        and isinstance(checks, dict) and set(checks) == required_checks
+                        and set(checks.values()) == {"PASS"}
+                        and all(type(certificate.get(key)) is int and certificate[key] >= 0
+                                for key in ("field_count", "attachment_count", "row_count"))):
+                    task["review_summary"] = {
+                        "status": "last_verified",
+                        "field_count": certificate["field_count"],
+                        "attachment_count": certificate["attachment_count"],
+                        "row_count": certificate["row_count"],
+                        "check_count": len(checks),
+                    }
+                else:
+                    task["review_summary"] = {"status": "unavailable"}
+                available = getattr(self.worker, "private_review_available", None)
+                task["review_values_available"] = bool(
+                    callable(available) and available(task["task_id"], task["revision"]))
+                if not task["review_values_available"]:
+                    task["review_summary"] = {"status": "unavailable"}
+                task["can_confirm_submission"] = bool(
+                    task["can_confirm_submission"]
+                    and task["review_summary"]["status"] == "last_verified"
+                    and task["review_values_available"])
+                continue
             if task.get("stage") != "NEEDS_USER_ACTION" or task.get("blocker") != "otp_waiting":
                 continue
             attempt = self.worker.broker.attempts.valid_wait(task["task_id"])
@@ -155,6 +197,64 @@ class Supervisor:
             task["spec"]["target_url"], self.queue.browser_binding(tid)
         )
         return {"ok": True, "task_id": tid, **observed}
+
+    def observe_submission(self, tid: str):
+        """Inspect the already-owned task tab after a possible human submit."""
+        task = self.queue.get(tid)
+        if task["stage"] != "READY_TO_SUBMIT" or task["owner"]:
+            raise ValueError("task is not at the human submit boundary")
+        binding = self.queue.browser_binding(tid)
+        observed = browser.observe_bound_submission(
+            task["spec"]["target_url"], binding,
+        )
+        expected = self.worker.private_review_expectations(tid, task["revision"])
+        if expected:
+            verified = browser.observe_bound_submission_receipt(
+                task["spec"]["target_url"], binding, expected)
+            if verified is not None:
+                observed = verified
+        return {"ok": True, "task_id": tid, **observed}
+
+    def review_values(self, tid: str):
+        """Return full values only to the authenticated local UI session."""
+        task = self.queue.get(tid)
+        if task["stage"] != "READY_TO_SUBMIT" or task["owner"]:
+            raise ValueError("task is not at the human review boundary")
+        if browser.browser_mode() not in {"test", "isolated", "headless"}:
+            binding = self.queue.browser_binding(tid)
+            observed = browser.observe_bound_draft(
+                task["spec"]["target_url"], binding)
+            if observed.get("status") != "BOUND_DOCUMENT_OBSERVED":
+                self.worker.discard_private_review(tid)
+                raise ValueError("review document or owned session changed")
+            review = self.worker.recheck_private_review(tid, task["revision"], binding)
+            if review is None:
+                raise ValueError("current server draft could not be independently reverified")
+        else:
+            review = self.worker.private_review(tid, task["revision"])
+            if review is None:
+                raise ValueError("private review has expired or the service restarted")
+        return {"ok": True, "task_id": tid, "revision": task["revision"],
+                "review": review}
+
+    def confirm_human_submission(self, tid: str, expected_revision: int):
+        """Accept only a local user's after-the-fact confirmation."""
+        task_before = self.queue.get(tid)
+        if not self.worker.private_review_available(tid, task_before["revision"]):
+            raise ValueError("private review has expired or the service restarted")
+        observed = self.observe_submission(tid)
+        task = self.queue.confirm_human_submission(
+            tid, expected_revision=expected_revision, user_confirmed=True,
+            observation=observed,
+        )
+        self.worker.discard_private_review(tid)
+        submission = task["details"]["submission"]
+        return {
+            "ok": True, "task_id": tid, "stage": task["stage"],
+            "revision": task["revision"], "level": submission["level"],
+            "page_signal": submission["page_signal"],
+            "server_verified": submission["server_verified"],
+        }
 
     def update_state(self):
         return reconciled_update_state(self.queue.root)
@@ -318,6 +418,8 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Connection", "close")
             for key, value in (extra_headers or {}).items():
                 self.send_header(key, value)
@@ -414,6 +516,14 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         task_id = parse_qs(parsed.query).get("task_id", [""])[0]
                         self._send_json(200, supervisor.observe_task(task_id))
                         return
+                    if self.command == "GET" and parsed.path == "/ui/api/review-values":
+                        task_id = parse_qs(parsed.query).get("task_id", [""])[0]
+                        self._send_json(200, supervisor.review_values(task_id))
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/submission-observation":
+                        task_id = parse_qs(parsed.query).get("task_id", [""])[0]
+                        self._send_json(200, supervisor.observe_submission(task_id))
+                        return
                     if self.command == "GET" and parsed.path == "/ui/api/diagnostics":
                         self._send_json(200, supervisor.diagnostics())
                         return
@@ -456,6 +566,18 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         if "task_id" in result:
                             response.update(task_id=result["task_id"], revision=result["revision"])
                         self._send_json(200, response)
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/human-submission":
+                        data = self._read_json()
+                        if set(data) != {"task_id", "expected_revision", "user_confirmed"}:
+                            raise ValueError("invalid human submission envelope")
+                        if (not isinstance(data["task_id"], str)
+                                or type(data["expected_revision"]) is not int
+                                or data["user_confirmed"] is not True):
+                            raise ValueError("explicit human confirmation required")
+                        result = supervisor.run_mutation(lambda: supervisor.confirm_human_submission(
+                            data["task_id"], data["expected_revision"]))
+                        self._send_json(200, result)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/command":
                         command = CommandEnvelope.model_validate(self._read_json())

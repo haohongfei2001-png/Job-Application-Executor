@@ -382,7 +382,8 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
     profile = tmp_path / "profile.json"
     profile.write_text(json.dumps({
         "fields": {"identity.full_name": {"value": "Synthetic Person",
-                                         "confidence": 1.0}},
+                                         "confidence": 1.0},
+                   "identity.email": {"value": "synthetic@example.test"}},
         "collections": {"education_records": [
             {"id": "A", "fields": {"school": {"value": "A School"}}},
             {"id": "B", "fields": {"school": {"value": "B School"}}},
@@ -441,6 +442,32 @@ def test_executor_certified_education_rows_reconcile_once_and_bind_draft(
                     "revision": server.revision,
                     "draft_id_digest": digest("wrong-draft")
                         if server.wrong_draft_receipt else server.draft_id_digest}
+
+        def observe_review_draft(self, plan):
+            inventory = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/rows"))
+            return {
+                "source": "server_readback",
+                "target_sha256": hashlib.sha256(plan.target_url.encode()).hexdigest(),
+                "draft_id_digest": inventory["draft_id_digest"],
+                "revision": inventory["revision"],
+                "account_verified": True,
+                "account_identity_digest": hashlib.sha256(
+                    b"identity.email:synthetic@example.test").hexdigest(),
+                "complete_pages": True, "complete_required": True,
+                "save_status": "VERIFIED", "validation_error_count": 0,
+                "hidden_required_count": 0, "unverified_default_count": 0,
+                "document_epoch": "synthetic-row-page-1",
+                "driver_version": "synthetic-api-v1",
+                "fields": [{"index": 0, "field_id": "full_name",
+                            "selector": "#name", "required": True,
+                            "value": server.full_name}],
+                "attachments": {},
+                "rows": {"education_records": [
+                    {"record_id": row["record_id"],
+                     "values_digest": digest(row["values"])}
+                    for row in inventory["rows"]]},
+            }
 
         def screenshot(self, _path):
             pass
@@ -529,7 +556,8 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
         education.target_sha256 = projects.target_sha256 = target_hash
         profile = tmp_path / "profile.json"
         profile.write_text(json.dumps({"fields": {"identity.full_name": {
-            "value": "Synthetic Person", "confidence": 1.0}}, "collections": {
+            "value": "Synthetic Person", "confidence": 1.0},
+            "identity.email": {"value": "synthetic@example.test"}}, "collections": {
             "education_records": [{"id": "school-a", "fields": {
                 "school": {"value": "School A"}}}],
             "projects": [{"id": "project-a", "title": "Project A",
@@ -576,6 +604,7 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
                                  label="Full name", required=True)]
 
             def apply_resolutions(self, resolutions):
+                education.full_name = resolutions[0].value
                 return [{"field_id": item.field_id, "ok": True}
                         for item in resolutions]
 
@@ -595,6 +624,40 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
                 return {"verified": True, "level": "server_readback",
                         "draft_id_digest": DRAFT_DIGEST,
                         "revision": max(education.revision, projects.revision)}
+
+            def observe_review_draft(self, plan):
+                education_rows = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{education.server_port}/rows"))
+                project_rows = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{projects.server_port}/rows"))
+                return {
+                    "source": "server_readback",
+                    "target_sha256": hashlib.sha256(plan.target_url.encode()).hexdigest(),
+                    "draft_id_digest": DRAFT_DIGEST,
+                    "revision": max(education_rows["revision"], project_rows["revision"]),
+                    "account_verified": True,
+                    "account_identity_digest": hashlib.sha256(
+                        b"identity.email:synthetic@example.test").hexdigest(),
+                    "complete_pages": True, "complete_required": True,
+                    "save_status": "VERIFIED", "validation_error_count": 0,
+                    "hidden_required_count": 0, "unverified_default_count": 0,
+                    "document_epoch": "synthetic-two-collection-page",
+                    "driver_version": "synthetic-api-v1",
+                    "fields": [{"index": 0, "field_id": "full_name",
+                                "selector": "#name", "required": True,
+                                "value": education.full_name}],
+                    "attachments": {},
+                    "rows": {
+                        "education_records": [
+                            {"record_id": row["record_id"],
+                             "values_digest": digest(row["values"])}
+                            for row in education_rows["rows"]],
+                        "projects": [
+                            {"record_id": row["record_id"],
+                             "values_digest": digest(row["values"])}
+                            for row in project_rows["rows"]],
+                    },
+                }
 
             def screenshot(self, _path):
                 pass

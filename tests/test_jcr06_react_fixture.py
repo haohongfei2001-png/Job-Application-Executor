@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -85,6 +86,33 @@ def test_react_controlled_rerender_and_server_draft(tmp_path, monkeypatch):
                     return None
                 return {"verified": True, "level": "server_readback",
                         "revision": observed["revision"]}
+
+            def observe_review_draft(self, plan):
+                observed = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                draft = observed["draft"]
+                digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
+                return {
+                    "source": "server_readback",
+                    "target_sha256": digest(plan.target_url),
+                    "draft_id_digest": digest("react-fixture-draft"),
+                    "revision": observed["revision"],
+                    "account_verified": True,
+                    "account_identity_digest": digest(
+                        "identity.full_name:synthetic person"),
+                    "complete_pages": set(draft) == {"full_name"},
+                    "complete_required": set(draft) == {"full_name"},
+                    "save_status": "VERIFIED", "validation_error_count": 0,
+                    "hidden_required_count": 0, "unverified_default_count": 0,
+                    "document_epoch": digest(self.page.url),
+                    "driver_version": "react-fixture-v1",
+                    "fields": [
+                        {"index": index, "field_id": field.field_id,
+                         "selector": field.selector, "required": field.required,
+                         "value": draft.get(field.field_id)}
+                        for index, field in enumerate(plan.fields)],
+                    "attachments": {}, "rows": {},
+                }
 
         profile = tmp_path / "profile.json"
         profile.write_text(json.dumps({"fields": {"identity.full_name": {

@@ -117,6 +117,7 @@ class UploadATS(BaseHTTPRequestHandler):
             attachments["photo"]["file_sha256"] = digest("wrong-photo")
         body = json.dumps({"draft_id_digest": digest("server-draft-one"),
                            "revision": self.server.revision,
+                           "review_token": self.server.review_token,
                            "attachments": attachments,
                            "submit_count": self.server.submit_count}).encode()
         self.send_response(200)
@@ -133,6 +134,7 @@ def upload_site():
     server.drop_slot = None
     server.corrupt_photo_readback = False
     server.rows, server.row_add_count, server.target_sha256 = [], 0, ""
+    server.review_token = "synthetic-review"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         yield server
@@ -211,6 +213,37 @@ class CertifiedUploadAdapter:
                 "draft_id_digest": digest("wrong-draft") if self.mismatch
                                    else draft["draft_id_digest"]}
 
+    def observe_review_draft(self, plan):
+        draft = self._draft()
+        expected = [item for item in plan.fields
+                    if str(item.status) in {"RESOLVED", "KEEP_EXISTING"}
+                    and not (item.canonical_key or "").startswith("assets.")]
+        return {
+            "source": "server_readback",
+            "target_sha256": digest(plan.target_url),
+            "draft_id_digest": draft["draft_id_digest"],
+            "revision": draft["revision"],
+            "account_verified": True,
+            "account_identity_digest": digest(
+                "identity.email:synthetic@example.test"),
+            "complete_pages": True, "complete_required": True,
+            "save_status": "VERIFIED", "validation_error_count": 0,
+            "hidden_required_count": 0, "unverified_default_count": 0,
+            "document_epoch": f"synthetic-page-{getattr(self, 'page_index', 0)}",
+            "driver_version": "upload-fixture-v1",
+            "fields": [
+                {"index": i, "field_id": item.field_id,
+                 "selector": item.selector, "required": item.required,
+                 "value": draft["review_token"]
+                    if item.field_id == "review-token" else None,
+                 "default_confirmed": str(item.status) == "KEEP_EXISTING"}
+                for i, item in enumerate(expected)],
+            "attachments": {
+                slot: receipt["file_sha256"] for slot, receipt
+                in draft["attachments"].items()},
+            "rows": {},
+        }
+
     def screenshot(self, _path):
         pass
 
@@ -251,6 +284,7 @@ class BrowserUploadAdapter(GenericWebAdapter):
     _draft = CertifiedUploadAdapter._draft
     verify_attachment_receipts = CertifiedUploadAdapter.verify_attachment_receipts
     verify_draft_persistence = CertifiedUploadAdapter.verify_draft_persistence
+    observe_review_draft = CertifiedUploadAdapter.observe_review_draft
 
     def apply_resolutions(self, resolutions):
         actions = []
@@ -277,7 +311,8 @@ def test_two_uploads_need_retained_same_draft_receipts(tmp_path, monkeypatch, up
     resume.write_bytes(b"%PDF-1.4 synthetic canary")
     photo.write_bytes(b"\x89PNG synthetic canary")
     profile = tmp_path / "profile.json"
-    profile.write_text(json.dumps({"assets": {
+    profile.write_text(json.dumps({"fields": {"identity.email": {
+        "value": "synthetic@example.test"}}, "assets": {
         "resume": {"path": str(resume), "kind": "resume_pdf",
                    "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()},
         "photo": {"path": str(photo), "kind": "photo_png",
@@ -288,7 +323,7 @@ def test_two_uploads_need_retained_same_draft_receipts(tmp_path, monkeypatch, up
     monkeypatch.setattr("executor.application.adapter_for_url",
                         lambda url: CertifiedUploadAdapter(url))
     ready = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=1)
-    assert ready.stage == ApplicationStage.READY_TO_SUBMIT
+    assert ready.stage == ApplicationStage.READY_TO_SUBMIT, ready.metadata.get("block_reason")
     assert ready.metadata["attachment_persistence"] == {
         "verified": True, "slot_count": 2, "minimum_draft_revision": 2,
         "level": "server_readback"}
@@ -331,7 +366,8 @@ def test_draft_readback_exception_blocks_without_claiming_save(
     resume.write_bytes(b"%PDF-1.4 readback failure")
     photo.write_bytes(b"\x89PNG readback failure")
     profile = tmp_path / "profile.json"
-    profile.write_text(json.dumps({"assets": {
+    profile.write_text(json.dumps({"fields": {"identity.email": {
+        "value": "synthetic@example.test"}}, "assets": {
         "resume": {"path": str(resume), "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()},
         "photo": {"path": str(photo), "sha256": hashlib.sha256(photo.read_bytes()).hexdigest()},
     }}))
@@ -360,7 +396,8 @@ def test_next_page_rechecks_earlier_attachments_before_ready(tmp_path, monkeypat
     resume.write_bytes(b"%PDF-1.4 earlier page")
     photo.write_bytes(b"\x89PNG earlier page")
     profile = tmp_path / "profile.json"
-    profile.write_text(json.dumps({"assets": {
+    profile.write_text(json.dumps({"fields": {"identity.email": {
+        "value": "synthetic@example.test"}}, "assets": {
         "resume": {"path": str(resume), "kind": "resume_pdf",
                    "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()},
         "photo": {"path": str(photo), "kind": "photo_png",
@@ -382,7 +419,7 @@ def test_next_page_rechecks_earlier_attachments_before_ready(tmp_path, monkeypat
                         lambda url: TwoPageUploadAdapter(url, upload_site,
                                                          lose_photo=False))
     retained = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=2)
-    assert retained.stage == ApplicationStage.READY_TO_SUBMIT
+    assert retained.stage == ApplicationStage.READY_TO_SUBMIT, retained.metadata.get("block_reason")
     assert retained.metadata["attachment_persistence"]["slot_count"] == 2
     assert upload_site.submit_count == 0
 
@@ -392,7 +429,8 @@ def test_real_browser_file_inputs_require_independent_upload_oracle(tmp_path, mo
     resume.write_bytes(b"%PDF-1.4 browser upload")
     photo.write_bytes(b"\x89PNG browser upload")
     profile = tmp_path / "profile.json"
-    profile.write_text(json.dumps({"assets": {
+    profile.write_text(json.dumps({"fields": {"identity.email": {
+        "value": "synthetic@example.test"}}, "assets": {
         "resume": {"path": str(resume), "kind": "resume_pdf",
                    "sha256": hashlib.sha256(resume.read_bytes()).hexdigest()},
         "photo": {"path": str(photo), "kind": "photo_png",
@@ -430,7 +468,8 @@ def test_restart_uses_private_attachment_manifest_without_reupload(tmp_path, mon
         "photo": {"path": str(photo), "kind": "photo_png",
                   "sha256": hashlib.sha256(photo.read_bytes()).hexdigest()},
     }
-    profile.write_text(json.dumps({"assets": assets}))
+    profile.write_text(json.dumps({"fields": {"identity.email": {
+        "value": "synthetic@example.test"}}, "assets": assets}))
     target = f"http://127.0.0.1:{upload_site.server_port}/apply"
     manifest_path = tmp_path / "private" / "task-attachment.json"
     monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
@@ -500,7 +539,8 @@ def test_browser_upload_and_rows_share_one_draft_across_pages_and_restart(
               for slot, path, kind in (("resume", resume, "resume_pdf"),
                                        ("photo", photo, "photo_png"))}
     profile = tmp_path / "profile.json"
-    profile.write_text(json.dumps({"assets": assets, "collections": {
+    profile.write_text(json.dumps({"fields": {"identity.email": {
+        "value": "synthetic@example.test"}}, "assets": assets, "collections": {
         "education_records": [
             {"id": "school-a", "fields": {"school": {"value": "School A"}}},
             {"id": "school-b", "fields": {"school": {"value": "School B"}}},
@@ -583,6 +623,17 @@ def test_browser_upload_and_rows_share_one_draft_across_pages_and_restart(
                 upload_site.rows.pop()
                 upload_site.revision += 1
             return True
+
+        def observe_review_draft(self, plan):
+            snapshot = super().observe_review_draft(plan)
+            observed = json.load(urllib.request.urlopen(base + "/rows"))
+            snapshot["rows"] = {"education_records": [
+                {"record_id": row["record_id"],
+                 "values_digest": hashlib.sha256(json.dumps(
+                     row["values"], sort_keys=True, ensure_ascii=False,
+                     separators=(",", ":")).encode()).hexdigest()}
+                for row in observed["rows"]]}
+            return snapshot
 
     monkeypatch.setattr("executor.audit.ROOT", tmp_path / "audit")
     monkeypatch.setattr("executor.application.adapter_for_url",
