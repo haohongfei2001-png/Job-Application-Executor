@@ -603,7 +603,7 @@ class TaskQueue:
             raise ValueError("explicit human confirmation and task revision required")
         status = observation.get("status") if isinstance(observation, dict) else None
         allowed = {
-            "PAGE_SIGNAL_OBSERVED", "NO_SUBMISSION_SIGNAL", "NO_TASK_BINDING",
+            "SERVER_SUBMISSION_VERIFIED", "PAGE_SIGNAL_OBSERVED", "NO_SUBMISSION_SIGNAL", "NO_TASK_BINDING",
             "ISOLATED_LIVE_OBSERVATION_UNSUPPORTED", "OWNED_SESSION_UNAVAILABLE",
             "PROCESS_EPOCH_CHANGED", "TARGET_CHANGED", "OWNERSHIP_UNVERIFIED",
             "OBSERVATION_UNAVAILABLE",
@@ -635,10 +635,10 @@ class TaskQueue:
             register_user_confirmed_target(spec.target_url, **kwargs)
             safe = {
                 "submission": {
-                    "level": "user_confirmed",
+                    "level": "server_verified" if status == "SERVER_SUBMISSION_VERIFIED" else "user_confirmed",
                     "read_only_observation": status,
                     "page_signal": status == "PAGE_SIGNAL_OBSERVED",
-                    "server_verified": False,
+                    "server_verified": status == "SERVER_SUBMISSION_VERIFIED",
                 },
                 "final_review": review,
             }
