@@ -192,6 +192,49 @@ os._exit(23)
     assert server.add_count == 1
 
 
+@pytest.mark.parametrize("kind", ["delete", "reorder"])
+def test_pending_row_delete_or_reorder_after_process_crash_is_not_replayed(
+        tmp_path, row_site, kind):
+    server, driver = row_site
+    server.rows = [{"record_id": rid, "site_row_id": f"site-{rid.lower()}",
+                    "values": {"school": f"{rid} School"}, "managed": True}
+                   for rid in ("A", "B")]
+    server.revision = 2
+    journal_path = tmp_path / "private" / "rows.sqlite3"
+    child = subprocess.run([sys.executable, "-c", """
+import hashlib, json, os, sys, urllib.request
+from executor.forms import RowActionJournal
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+        separators=(',', ':')).encode()).hexdigest()
+kind, path, base = sys.argv[1:]
+journal = RowActionJournal(path, scope='synthetic-ats/task-one/draft-one')
+if kind == 'delete':
+    journal.begin('delete', digest('B'), '', 2)
+    endpoint, payload = '/delete', {'site_row_id': 'site-b'}
+else:
+    journal.begin('reorder', digest(''), digest(('B', 'A')), 2)
+    endpoint, payload = '/reorder', {'record_ids': ['B', 'A']}
+request = urllib.request.Request(base + endpoint, data=json.dumps(payload).encode(),
+    headers={'Content-Type': 'application/json'}, method='POST')
+urllib.request.urlopen(request).read()
+os._exit(23)
+""", kind, str(journal_path), driver.base], capture_output=True, timeout=15)
+    assert child.returncode == 23, child.stderr.decode(errors="replace")
+    assert RowActionJournal(journal_path, scope=SCOPE).pending()
+    desired = ((DesiredRow("A", {"school": "A School"}),)
+               if kind == "delete" else
+               (DesiredRow("B", {"school": "B School"}),
+                DesiredRow("A", {"school": "A School"})))
+    receipt = reconciler(driver, RowActionJournal(journal_path, scope=SCOPE),
+                         guard=lambda: None).reconcile(
+        desired, delete_ids=frozenset({"B"}) if kind == "delete" else frozenset())
+    assert receipt.add_count == receipt.delete_count == receipt.reorder_count == 0
+    assert RowActionJournal(journal_path, scope=SCOPE).pending() == ()
+    assert server.delete_count == (1 if kind == "delete" else 0)
+    assert server.reorder_count == (1 if kind == "reorder" else 0)
+
+
 def test_lost_response_and_unmanaged_extra_are_safe(tmp_path, row_site):
     server, driver = row_site
     driver.fail_after_add = True
@@ -471,6 +514,9 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
     projects.rows, projects.revision, projects.complete = [], 0, True
     projects.draft_id_digest = DRAFT_DIGEST
     projects.wrong_contract = False
+    projects.rows = [{"record_id": "project-b", "site_row_id": "prior-project-b",
+                      "values": {"title": "Project B"}, "managed": True}]
+    projects.revision = 1
     projects.add_count = projects.delete_count = projects.reorder_count = 0
     threading.Thread(target=projects.serve_forever, daemon=True).start()
     try:
@@ -513,7 +559,9 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
                     (record for record in applicant_profile["collections"][key]
                      if key != "projects" or record["id"] != "project-b")),
                     digest("wrong-project-draft") if key == "projects" and
-                    projects.wrong_contract else DRAFT_DIGEST, key)
+                    projects.wrong_contract else DRAFT_DIGEST, key,
+                    delete_ids=frozenset({"project-b"}) if key == "projects"
+                    else frozenset())
                     for key, driver in (("education_records", education_driver),
                                         ("projects", project_driver)))
 
@@ -577,10 +625,11 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
         assert first.metadata["final_review"]["project_coverage"]["explicit_exclusions"] == \
             ["Project B"]
         assert education.add_count == projects.add_count == 1
+        assert projects.delete_count == 1
         assert journal.with_name("task-rows.education_records.sqlite3").exists()
         assert journal.with_name("task-rows.projects.sqlite3").exists()
         assert run().stage == ApplicationStage.READY_TO_SUBMIT
-        assert education.add_count == projects.add_count == 1
+        assert education.add_count == projects.add_count == projects.delete_count == 1
     finally:
         projects.shutdown()
         projects.server_close()

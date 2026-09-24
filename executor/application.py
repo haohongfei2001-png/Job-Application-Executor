@@ -489,15 +489,19 @@ class ApplicationExecutor:
             raise RowReconciliationBlocked("canonical row collection invalid")
         if any(not isinstance(item.get("id"), str) or not item["id"] for item in records):
             raise RowReconciliationBlocked("canonical row identity invalid")
+        approved_delete_ids: set[str] = set()
         if contract.collection_key == "projects":
             scoped = (collections.get("fact_exclusions") or {}).get(
                 self.plan.execution_id, {})
             if not isinstance(scoped, dict):
                 raise RowReconciliationBlocked("project exclusion scope invalid")
-            records = [item for item in records if not (
+            approved_delete_ids = {item["id"] for item in records if (
                 isinstance(scoped.get(item["id"]), dict)
                 and scoped[item["id"]].get("source") == "user_explicit_task"
-                and str(scoped[item["id"]].get("reason") or "").strip())]
+                and str(scoped[item["id"]].get("reason") or "").strip())}
+            records = [item for item in records if item["id"] not in approved_delete_ids]
+        if not contract.delete_ids <= approved_delete_ids:
+            raise RowReconciliationBlocked("row deletion lacks explicit canonical exclusion")
         by_id = {item["id"]: item for item in records}
         if any(not isinstance(row.record_id, str) or not row.record_id
                or not isinstance(row.values, Mapping) for row in contract.desired):
@@ -624,7 +628,10 @@ class ApplicationExecutor:
                         draft_ids = {item.draft_id_digest for item in contracts}
                         if (len(draft_ids) != 1
                                 or any(item.collection_key not in collection_keys
-                                       or item.delete_ids for item in contracts)
+                                       or not isinstance(item.delete_ids, frozenset)
+                                       or any(not isinstance(rid, str) or not rid
+                                              for rid in item.delete_ids)
+                                       for item in contracts)
                                 or (row_bindings and
                                     next(iter(draft_ids)) != row_bindings[0][0].draft_id_digest)
                                 or (attachment_binding and
