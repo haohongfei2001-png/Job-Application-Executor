@@ -276,7 +276,8 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert str(repo.resolve()) in launcher
     assert 'cd "$RELEASE_ROOT"' in launcher
     assert 'export PYTHONPATH="$RELEASE_ROOT"' in launcher
-    assert "executor.autonomy.cli launch" in launcher
+    assert "export PYTHONDONTWRITEBYTECODE=1" in launcher
+    assert '"$PYTHON" -B -m executor.autonomy.cli launch' in launcher
     assert "submit" not in launcher.casefold()
 
     with info_path.open("rb") as handle:
