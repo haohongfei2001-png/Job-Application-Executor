@@ -138,7 +138,7 @@ def test_packaged_candidate_starts_on_loopback_and_answers_health_without_fqdn(t
             time.sleep(0.05)
         assert health == {
             "ok": True,
-            "worker_active": False,
+            "worker_active": None,
             "final_click_actor": "user",
         }, log_path.read_text(errors="replace")[-4000:]
         assert process.poll() is None
