@@ -16,7 +16,16 @@ import pytest
 
 from executor.autonomy import bootstrap, cli, preflight
 from executor.autonomy.consumer import install_macos_app, rollback_macos_app
+from executor.autonomy.release import verify_source_candidate
 from executor.autonomy.dashboard import DASHBOARD_HTML
+
+
+def _minimal_source(repo):
+    package = repo / "executor"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "consumer_entry.py").write_text("VERSION = 'fixture'\\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text("pydantic==2.13.0\\n", encoding="utf-8")
 
 
 def _ready_preflight(*, supervisor_running):
@@ -230,6 +239,7 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     python.parent.mkdir(parents=True)
     python.write_text("#!/bin/sh\nexit 0\n")
     python.chmod(0o755)
+    _minimal_source(repo)
     apps = tmp_path / "Applications"
 
     first = install_macos_app(repo, destination=apps, platform="darwin")
@@ -240,9 +250,14 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert first["ok"] is True
     assert first["replaced"] is False
     assert app.is_dir()
+    release = app / "Contents" / "Resources" / "release"
+    assert verify_source_candidate(release)
+    assert (release / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\\n"
     assert executable.stat().st_mode & stat.S_IXUSR
     launcher = executable.read_text(encoding="utf-8")
     assert str(repo.resolve()) in launcher
+    assert 'cd "$RELEASE_ROOT"' in launcher
+    assert 'export PYTHONPATH="$RELEASE_ROOT"' in launcher
     assert "executor.autonomy.cli launch" in launcher
     assert "submit" not in launcher.casefold()
 
@@ -279,6 +294,7 @@ def test_macos_consumer_app_rollback_failure_preserves_current(tmp_path, monkeyp
     python.parent.mkdir(parents=True)
     python.write_text("#!/bin/sh\\nexit 0\\n")
     python.chmod(0o755)
+    _minimal_source(repo)
     apps = tmp_path / "Applications"
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
@@ -306,6 +322,7 @@ def test_macos_consumer_app_activation_failure_restores_known_good(tmp_path, mon
     python.parent.mkdir(parents=True)
     python.write_text("#!/bin/sh\\nexit 0\\n")
     python.chmod(0o755)
+    _minimal_source(repo)
     apps = tmp_path / "Applications"
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
     app = apps / "AI 投递经理.app"
@@ -332,6 +349,7 @@ def test_macos_consumer_app_rejects_untrusted_existing_bundle(tmp_path):
     python.parent.mkdir(parents=True)
     python.write_text("#!/bin/sh\\nexit 0\\n")
     python.chmod(0o755)
+    _minimal_source(repo)
     apps = tmp_path / "Applications"
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
     app = apps / "AI 投递经理.app"
@@ -376,6 +394,7 @@ def test_macos_consumer_app_rejects_invalid_staging_before_replacement(
     python.parent.mkdir(parents=True)
     python.write_text("#!/bin/sh\\nexit 0\\n")
     python.chmod(0o755)
+    _minimal_source(repo)
     apps = tmp_path / "Applications"
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
     app = apps / "AI 投递经理.app"
