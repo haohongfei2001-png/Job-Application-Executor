@@ -44,9 +44,12 @@ class UploadATS(BaseHTTPRequestHandler):
         if self.path != "/draft":
             self.send_error(404)
             return
+        attachments = {key: value.copy() for key, value in self.server.attachments.items()}
+        if getattr(self.server, "corrupt_photo_readback", False) and "photo" in attachments:
+            attachments["photo"]["file_sha256"] = digest("wrong-photo")
         body = json.dumps({"draft_id_digest": digest("server-draft-one"),
                            "revision": self.server.revision,
-                           "attachments": self.server.attachments,
+                           "attachments": attachments,
                            "submit_count": self.server.submit_count}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -60,6 +63,7 @@ def upload_site():
     server = ThreadingHTTPServer(("127.0.0.1", 0), UploadATS)
     server.attachments, server.revision, server.submit_count = {}, 0, 0
     server.drop_slot = None
+    server.corrupt_photo_readback = False
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         yield server
@@ -173,6 +177,15 @@ def test_two_uploads_need_retained_same_draft_receipts(tmp_path, monkeypatch, up
     upload_site.attachments.clear()
     upload_site.revision = 0
     upload_site.drop_slot = None
+    upload_site.corrupt_photo_readback = True
+    wrong_bytes = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=1)
+    assert wrong_bytes.stage == ApplicationStage.BLOCKED
+    assert wrong_bytes.metadata["block_reason"] == "attachment draft receipt unverified"
+    assert upload_site.submit_count == 0
+
+    upload_site.attachments.clear()
+    upload_site.revision = 0
+    upload_site.corrupt_photo_readback = False
     monkeypatch.setattr("executor.application.adapter_for_url",
                         lambda url: CertifiedUploadAdapter(url, mismatch=True))
     wrong_draft = ApplicationExecutor(target, profile, {"deepseek": {"enabled": False}}).run(max_pages=1)
