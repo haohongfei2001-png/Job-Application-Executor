@@ -132,6 +132,21 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
     assert "CANARY_PRIVATE_MODE_VALUE" not in json.dumps(bounded)
 
 
+def test_diagnostic_repository_state_redacts_local_branch_names(tmp_path, monkeypatch):
+    def fake_git(_repo, *args, **_kwargs):
+        if args == ("rev-parse", "HEAD"):
+            return "a" * 40
+        if args == ("branch", "--show-current"):
+            return "CANARY_PRIVATE_APPLICANT"
+        if args == ("status", "--porcelain", "--untracked-files=no"):
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(diagnostics, "_git", fake_git)
+    state = diagnostics.repository_state(tmp_path)
+    assert state == {"version": "a" * 12, "branch": "other", "worktree_clean": True}
+
+
 def _init_git_repo(path):
     path.mkdir()
     subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
