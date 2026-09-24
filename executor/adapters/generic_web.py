@@ -1295,14 +1295,7 @@ class GenericWebAdapter(SiteAdapter):
         return None
 
     def advance(self) -> bool:
-        getattr(self, "mutation_guard", lambda: None)()
-        for element, text in self._buttons():
-            if is_next(text) and not is_final_submit(text):
-                getattr(self, "mutation_guard", lambda: None)()
-                element.click()
-                self.page.wait_for_timeout(1000)
-                self._adopt_owned_page()
-                return True
+        """Generic labels cannot prove that Continue is not the final submit."""
         return False
 
     def next_control(self) -> bool:
