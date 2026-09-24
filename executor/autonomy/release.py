@@ -83,3 +83,15 @@ def copy_source_candidate(repo_root: str | Path, destination: str | Path) -> dic
     if not verify_source_candidate(target):
         raise ValueError("release_candidate_invalid")
     return before
+
+
+def read_release_identity(root: str | Path) -> dict:
+    """Read a verified packaged-source identity without exposing local paths."""
+    root = Path(root).expanduser().resolve()
+    if not verify_source_candidate(root):
+        return {"status": "unverified", "source_sha256": ""}
+    try:
+        manifest = json.loads((root / MANIFEST_NAME).read_text(encoding="utf-8"))
+        return {"status": "verified", "source_sha256": manifest["source_sha256"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"status": "unverified", "source_sha256": ""}
