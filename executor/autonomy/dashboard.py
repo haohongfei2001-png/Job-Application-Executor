@@ -157,6 +157,7 @@ function render(state){
       ${t.blocker==='auth_return_unverified'?'<div class="otpnote">系统无法证明登录后仍在原岗位。请核对页面；此任务不会自动重发短信或继续写入。</div>':''}
       ${t.blocker==='account_identity_unverified'?'<div class="otpnote">系统无法证明当前账号属于申请人。此站点表单保持只读，直到有受验证的站点账号识别能力。</div>':''}
       <div class="taskcontrols">
+        ${t.stage==='READY_TO_SUBMIT'?`<button type="button" data-observe-submission="true" data-task="${esc(t.task_id)}">只读查看提交结果</button>`:''}
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
         ${['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="OBSERVE" data-task="${esc(t.task_id)}">只读核对</button>`:''}
       ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown','auth_return_unverified','account_identity_unverified','draft_persistence_unverified'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
@@ -164,6 +165,19 @@ function render(state){
       </div>
     </div>`).join('');
 }
+tasksEl.addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-observe-submission]');if(!button)return;
+  button.disabled=true;
+  try{
+    const r=await fetch('/ui/api/submission-observation?task_id='+encodeURIComponent(button.dataset.task),{credentials:'same-origin'});
+    if(!r.ok)throw new Error();
+    const observed=await r.json();
+    notify(observed.status==='PAGE_SIGNAL_OBSERVED'
+      ?'页面出现提交成功提示；这只是页面信号，尚未核实服务器结果。'
+      :'未看到可信的提交结果；任务状态未改变。请在招聘站点自行核对。');
+  }catch(e){notify('只读查看暂不可用；任务状态未改变。')}
+  finally{button.disabled=false}
+});
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-action]');if(!button)return;
   button.disabled=true;
