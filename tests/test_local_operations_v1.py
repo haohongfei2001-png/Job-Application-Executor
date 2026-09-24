@@ -6,6 +6,7 @@ import os
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 import urllib.request
 
 import pytest
@@ -109,6 +110,8 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
     assert report["loaded_source"] == {
         "verified_at_start": True, "sha256": "a" * 64
     }
+    assert datetime.fromisoformat(report["captured_at_utc"]).tzinfo == timezone.utc
+    assert report["recovery"] == {"reason": "none", "action": "none"}
     assert report["system"]["cdp_alive"] is True
     assert report["system"]["deepseek_available"] is True
     assert report["system"]["otp_waiting_tasks"] == 1
