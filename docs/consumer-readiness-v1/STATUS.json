@@ -74,7 +74,7 @@
     },
     {
       "id": "JCR-08",
-      "status": "READY",
+      "status": "ACTIVE",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-07 PR #19 final head 928cfa485c3885a2c3d80b42eff62af212bba8e8 passed CI 36012392907, merged at 90fc2176e6cd14c7aa5866a4953c15405be937d7, and exact-main CI 36013050660 passed. See receipts/JCR-07-ENGINEERING.md and receipts/JCR-07-MAIN-INTEGRATION.md. Start JCR-08 as the sole writer: consumer Mac app shell, transactional local release/update and rollback, safe diagnostics and final-review workbench. DFG-002/008 remain automatable engineering debt; DFG-007 and real applicant/site/final-click evidence remain FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
+  "next_action": "JCR-08 PR #20 is the sole active writer. Exact-head 1c98f2a63e91bd58f717dd6e3e82213154c8c8dc passed CI 36051069665, including hosted Mac startup/rollback and the loopback FQDN root-cause regression. Continue independent app shell/onboarding, locked release dependencies, transactional update and migration, safe diagnostics, hosted Mac interaction, and retirement of the in-place Git updater before engineering closure. DFG-002/008 remain engineering debt; DFG-007 and real applicant/site/final-click evidence remain FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,
