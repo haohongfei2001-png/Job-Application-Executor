@@ -159,7 +159,8 @@ def test_packaged_launch_refuses_unverified_source_before_service_start(tmp_path
     module.write_text("# fixture\\n")
     (source / "release-source-manifest.json").write_bytes(bytes((0xff, 0xfe)))
     monkeypatch.setattr(cli, "__file__", str(module))
-    monkeypatch.setattr(cli, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(cli, "browser_mode", lambda: "live")
+    monkeypatch.setattr(cli, "ensure_chrome", lambda: pytest.fail("unverified app must not start Chrome"))
     monkeypatch.setattr(release, "read_release_identity", lambda _: {
         "status": "unverified", "source_sha256": ""
     })
