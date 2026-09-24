@@ -141,7 +141,10 @@ def certify_review(
         raise ReviewUnverified("current field inventory differs from plan")
     for index, (field, observed) in enumerate(zip(expected, actual)):
         if (not isinstance(observed, dict)
-                or observed.get("index") != index
+                or type(observed.get("index")) is not int
+                or observed["index"] != index
+                or (field.scope_sha256 is not None
+                    and observed.get("scope_sha256") != field.scope_sha256)
                 or observed.get("selector") != field.selector
                 or observed.get("field_id") != field.field_id
                 or observed.get("required") is not field.required
