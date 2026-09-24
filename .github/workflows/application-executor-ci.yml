@@ -35,6 +35,10 @@ jobs:
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
         run: python -m pytest -q tests/test_jcr07_review_certificate.py tests/test_application_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py
+      - name: Validate update-state privacy readback
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q tests/test_local_operations_v1.py -k update_state_readback_never_exposes_corrupt_private_text
       - name: Compile Python sources
         run: python -m compileall -q executor tests
       - name: Check local dashboard JavaScript syntax
