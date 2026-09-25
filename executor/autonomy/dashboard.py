@@ -185,10 +185,10 @@ function render(state){
       ${t.stage==='READY_TO_SUBMIT'?(t.review_summary?.status==='last_verified'?`
         <div class="review">上次独立核验：${Number(t.review_summary.field_count)||0} 项填写、${Number(t.review_summary.row_count)||0} 条经历、${Number(t.review_summary.attachment_count)||0} 个附件，${Number(t.review_summary.check_count)||0} 项检查通过。请在申请页面再次核对完整内容；最终提交只能由你本人点击。</div>`:
         '<div class="review warning">核验摘要不可用，请勿提交。任务需要重新核验。</div>'):''}
-      ${t.stage==='NEEDS_USER_INPUT'?(t.unresolved_keys||[]).map(key=>`
-        <label class="factinput"><span>${esc(key)}</span>${(t.boolean_keys||[]).includes(key)?`<select aria-label="${esc(key)}"><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select>`:`<input autocomplete="off" aria-label="${esc(key)}">`}
-          <button type="button" data-answer="true" data-key="${esc(key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button>
-          ${(t.reusable_keys||[]).includes(key)?'<input type="checkbox" class="remember-fact" aria-label="保存为可复用事实"><span>经我确认后记住，供以后申请使用</span>':''}</label>`).join(''):''}
+      ${t.stage==='NEEDS_USER_INPUT'?(t.question_context?.status==='current'?(`<div class="otpnote">以下为当前招聘网站问题原文，仅供辨认；请依据本人真实情况回答。</div>`+(t.question_context.items||[]).map(q=>`
+        <label class="factinput"><span>${esc(q.label)}${q.required?' · 必填':''}</span>${(t.boolean_keys||[]).includes(q.key)?`<select aria-label="${esc(q.label)}"><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select>`:`<input autocomplete="off" aria-label="${esc(q.label)}">`}
+          <button type="button" data-answer="true" data-key="${esc(q.key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button>
+          ${(t.reusable_keys||[]).includes(q.key)?'<input type="checkbox" class="remember-fact" aria-label="保存为可复用事实"><span>经我确认后记住，供以后申请使用</span>':''}</label>`).join('')):'<div class="otpnote">当前招聘网站问题原文无法核对；为避免答错字段，已暂停本地填写。请重新核对任务。</div>'):''}
       ${t.blocker==='otp_waiting'&&t.auth_attempt_id?`
         <div class="otpnote">${t.otp_source==='configured_unverified'?'已配置自动接收，正在等待；若接收失败可在此输入。':'自动接收来源未验证；可在此本地输入。'}验证码不会发送给 AI 或保存在任务中。</div>
         <label class="otpinput"><input type="password" inputmode="numeric" autocomplete="off" maxlength="8" aria-label="当前任务验证码" data-otp-task="${esc(t.task_id)}"><button type="button" data-otp-send="true" data-task="${esc(t.task_id)}" data-attempt="${esc(t.auth_attempt_id)}">本地输入验证码</button></label>

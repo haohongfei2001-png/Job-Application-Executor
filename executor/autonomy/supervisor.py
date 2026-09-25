@@ -100,6 +100,11 @@ class Supervisor:
     def ui_state(self):
         state = self.manager.state()
         for task in state.get("tasks", []):
+            if task.get("stage") == "NEEDS_USER_INPUT":
+                task["question_context"] = (
+                    self.worker.question_context(task["task_id"], task["revision"])
+                    or {"status": "unavailable", "items": []})
+                continue
             if task.get("stage") == "READY_TO_SUBMIT":
                 queue_task = self.queue.get(task["task_id"])
                 spec = queue_task.get("spec") or {}
@@ -331,6 +336,9 @@ class Supervisor:
         with self._command_lock:
             if self.mutation_fenced():
                 raise RuntimeError("update in progress")
+            context = self.worker.question_context(task_id, revision)
+            if not context or field_key not in {item["key"] for item in context["items"]}:
+                raise ValueError("current site question context required")
             updated = self.worker.user_input(task_id, {field_key: value},
                                              expected_revision=revision,
                                              remember=remember)
