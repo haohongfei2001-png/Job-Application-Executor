@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+from datetime import datetime, timezone
 import os
 import re
 import secrets
@@ -53,10 +54,39 @@ def _version(root: str | Path | None = None) -> str:
         return "unknown"
 
 
+def _safe_diagnostics(reason: str, version: str) -> dict:
+    """A copy-safe bootstrap report that needs no running supervisor."""
+    known = {
+        "service_start_failed": "retry_service",
+        "health_timeout": "retry_service",
+        "worker_stopping_at_safe_checkpoint": "retry_after_safe_checkpoint",
+        "release_mismatch": "retry_after_old_service_stops",
+        "release_unverified": "reinstall_verified_app",
+    }
+    code = reason if reason in known else "service_unavailable"
+    source = Path(__file__).resolve().parents[2]
+    identity = read_release_identity(source)
+    verified = identity.get("status") == "verified"
+    digest = identity.get("source_sha256", "") if verified else ""
+    return {
+        "format": "application-executor-bootstrap-diagnostics-v1",
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "loaded_version": version,
+        "loaded_source_verified": verified,
+        "loaded_source_sha256": digest,
+        "reason": code,
+        "recovery_action": known.get(code, "retry_service"),
+        "applicant_values_in_report": False,
+        "final_click_actor": "user",
+        "submit_capability": False,
+    }
+
+
 def _page(reason: str, token: str) -> str:
     safe_reason = html.escape(_reason(reason))
     safe_token = html.escape(token, quote=True)
     version = _version()
+    report = html.escape(json.dumps(_safe_diagnostics(reason, version), ensure_ascii=False, indent=2))
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI 投递经理 · 恢复</title><style>
@@ -67,7 +97,8 @@ h1{{font-size:21px}}p{{line-height:1.6}}button{{background:#111;color:white;bord
 <p>可以重试本地服务。重试不会重放结果不明的浏览器写入，也不会提交申请。</p>
 <form action="/retry?token={safe_token}" method="post"><button type="submit">重试并打开面板</button></form>
 <p><small>本地版本：{version}</small></p>
-</main></body></html>"""
+<details><summary>查看安全诊断</summary><p>报告不含申请人资料、验证码或凭证；分享前请先核对。</p><pre id="safe-diagnostics">{report}</pre><button id="copy-diagnostics" type="button">复制诊断</button></details>
+</main><script>document.getElementById('copy-diagnostics').addEventListener('click',async function(){{await navigator.clipboard.writeText(document.getElementById('safe-diagnostics').textContent);this.textContent='已复制';}});</script></body></html>"""
 
 
 def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "service_unavailable") -> None:
