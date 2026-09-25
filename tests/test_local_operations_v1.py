@@ -199,6 +199,36 @@ def test_unverified_packaged_app_never_invokes_legacy_git_updater(tmp_path, monk
     }
 
 
+def test_direct_legacy_updater_refuses_packaged_source_before_git_or_runtime_write(
+    tmp_path, monkeypatch
+):
+    release = tmp_path / "AI Manager.app" / "Contents" / "Resources" / "release"
+    release.mkdir(parents=True)
+    runtime = tmp_path / "runtime"
+
+    def forbidden_git(*_args, **_kwargs):
+        pytest.fail("packaged release must never reach Git")
+
+    monkeypatch.setattr(updater, "_git", forbidden_git)
+    monkeypatch.setattr(updater, "_run", forbidden_git)
+    monkeypatch.setattr(updater.subprocess, "Popen", forbidden_git)
+    assert updater.repository_update_preconditions(release) == {
+        "ok": False, "reason": "packaged_update_not_ready"
+    }
+    assert updater.spawn_update(repo_root=release, runtime=runtime, port=9344) == {
+        "ok": False, "status": "denied", "reason": "packaged_update_not_ready"
+    }
+    assert updater.perform_update(release, runtime, 9344) == 1
+    assert not runtime.exists()
+
+    # The bundle-layout fence survives a missing source manifest. A fake Git
+    # checkout cannot turn an installed app back into an in-place update target.
+    (release / ".git").mkdir()
+    assert updater.repository_update_preconditions(release)["reason"] == "packaged_update_not_ready"
+    assert updater.perform_update(release, runtime, 9344, restart_only=True) == 1
+    assert not runtime.exists()
+
+
 def test_updater_requires_clean_main_and_expected_origin(tmp_path):
     repo = tmp_path / "repo"
     tracked = _init_git_repo(repo)

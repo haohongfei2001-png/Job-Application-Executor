@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from .queue import TaskQueue
+from .release import is_packaged_source
 
 
 EXPECTED_REMOTE = re.compile(
@@ -137,6 +138,10 @@ def read_update_state(runtime: str | Path) -> dict:
 
 
 def repository_update_preconditions(repo_root: str | Path) -> dict:
+    # A packaged app is never a writable Git checkout, even if its release
+    # manifest has been removed or somebody placed a .git directory beside it.
+    if is_packaged_source(repo_root):
+        return {"ok": False, "reason": "packaged_update_not_ready"}
     repo = Path(repo_root).expanduser().resolve()
     try:
         branch = _git(repo, "branch", "--show-current")
@@ -282,6 +287,8 @@ def spawn_update(
     port: int,
     python_executable: str | None = None,
 ) -> dict:
+    if is_packaged_source(repo_root):
+        return {"ok": False, "status": "denied", "reason": "packaged_update_not_ready"}
     repo = Path(repo_root).expanduser().resolve()
     runtime_path = Path(runtime).expanduser().resolve()
     lock_fd = acquire_update_lock(runtime_path)
@@ -487,6 +494,8 @@ def perform_update(
     python_executable: str | None = None,
     restart_only: bool = False,
 ) -> int:
+    if is_packaged_source(repo_root):
+        return 1
     repo = Path(repo_root).expanduser().resolve()
     runtime_path = Path(runtime).expanduser().resolve()
     python = python_executable or sys.executable

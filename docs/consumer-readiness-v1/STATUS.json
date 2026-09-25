@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-08 sole writer PR #20 is active. The staged Mac app source and authenticated loopback health candidate were proven on exact head 396aa0485c6f2ca99598730991771db06e824eb3 by CI 36124397738. The next coherent candidate adds an app-owned runtime snapshot with pinned-requirements digest and independent-checkout startup regression; exact-head CI is pending. Continue transactional release/data migration and rollback, legacy in-place Git updater retirement, hosted Mac interaction, and automatable DFG-002/008 debt. DFG-007 and real applicant/site/final-click evidence remain FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
+  "next_action": "JCR-08 sole writer PR #20 remains active. Exact head 834c8976d0866b42fd2f21897e7fda7e907f9f7d passed foundation, Ubuntu and hosted Mac CI 36182345383. The next coherent candidate fences all direct legacy Git updater entrypoints from packaged app sources before Git or mutable runtime access, including missing-manifest app layouts; targeted regression is added and exact-head CI is pending. Continue independent base-Python/dependency provenance, transactional data migration and rollback, hosted Mac interaction, and automatable DFG-002/008 debt. External/private and final-click evidence remain deferred; consumer certification is NOT_CERTIFIED and final submit remains user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,
