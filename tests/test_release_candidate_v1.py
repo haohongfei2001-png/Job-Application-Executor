@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from executor.autonomy.bootstrap import _version
+from executor.autonomy.queue import default_runtime
 
 from executor.autonomy.release import (
     MANIFEST_NAME,
@@ -26,6 +27,18 @@ from executor.autonomy.release import (
     verify_runtime_candidate,
     verify_source_candidate,
 )
+
+
+def test_packaged_runtime_default_stays_outside_app_with_missing_manifest(tmp_path):
+    source = tmp_path / "AI 投递经理.app" / "Contents" / "Resources" / "release"
+    source.mkdir(parents=True)
+    home = tmp_path / "consumer-home"
+    assert not (source / MANIFEST_NAME).exists()
+    assert default_runtime(source, home=home) == (
+        home / "Library" / "Application Support" / "AI投递经理" / "autonomy"
+    )
+    checkout = tmp_path / "development-checkout"
+    assert default_runtime(checkout, home=home) == checkout / "runtime" / "autonomy"
 
 
 def _source(tmp_path):
