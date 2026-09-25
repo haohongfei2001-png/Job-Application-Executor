@@ -37,6 +37,51 @@ def test_local_http_bind_does_not_resolve_hostname(monkeypatch):
         assert server.server_port > 0
 
 
+FAKE_CANDIDATE_CLI = """from __future__ import annotations
+VERSION = 'fixture'
+
+import json
+import secrets
+import sys
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+from executor.autonomy.loopback_http import LoopbackHTTPServer
+from executor.autonomy.release import source_manifest
+
+def serve():
+    runtime = Path(sys.argv[sys.argv.index('--runtime') + 1])
+    port = int(sys.argv[sys.argv.index('--port') + 1])
+    runtime.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(24)
+    token_file = runtime / 'auth.token'
+    token_file.write_text(token, encoding='utf-8')
+    token_file.chmod(0o600)
+    digest = source_manifest(Path(__file__).resolve().parents[2])['source_sha256']
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != '/health' or self.headers.get('Authorization') != 'Bearer ' + token:
+                self.send_error(404)
+                return
+            body = json.dumps({'ok': True, 'loaded_source_sha256': digest,
+                               'final_click_actor': 'user'}).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    with LoopbackHTTPServer(('127.0.0.1', port), Handler) as server:
+        server.serve_forever()
+
+if __name__ == '__main__' and sys.argv[-1] == 'serve':
+    serve()
+"""
+
+
 def _minimal_source(repo):
     package = repo / "executor"
     package.mkdir()
@@ -45,9 +90,13 @@ def _minimal_source(repo):
     autonomy = package / "autonomy"
     autonomy.mkdir()
     (autonomy / "__init__.py").write_text("", encoding="utf-8")
-    (autonomy / "cli.py").write_text("VERSION = 'fixture'\n", encoding="utf-8")
+    (autonomy / "cli.py").write_text(FAKE_CANDIDATE_CLI, encoding="utf-8")
     (autonomy / "release.py").write_text(
         (Path(__file__).resolve().parents[1] / "executor" / "autonomy" / "release.py")
+        .read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (autonomy / "loopback_http.py").write_text(
+        (Path(__file__).resolve().parents[1] / "executor" / "autonomy" / "loopback_http.py")
         .read_text(encoding="utf-8"), encoding="utf-8"
     )
     (repo / "requirements.txt").write_text(f"pydantic=={version('pydantic')}\n", encoding="utf-8")
@@ -588,7 +637,7 @@ def test_macos_consumer_app_preserves_tampered_release_on_install_and_rollback(t
     assert not (apps / ".AI 投递经理.app.previous").exists()
 
     # A retained rollback copy must pass the same source-integrity gate.
-    current_cli.write_text("VERSION = 'fixture'\n", encoding="utf-8")
+    current_cli.write_text(FAKE_CANDIDATE_CLI, encoding="utf-8")
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
     previous = apps / ".AI 投递经理.app.previous"
     previous_cli = previous / "Contents" / "Resources" / "release" / "executor" / "autonomy" / "cli.py"
@@ -712,7 +761,7 @@ def test_macos_consumer_app_rejects_unstartable_candidate_before_activation(tmp_
     assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
     app = apps / "AI 投递经理.app"
     previous_version = app / "Contents" / "Resources" / "release" / "executor" / "autonomy" / "cli.py"
-    assert previous_version.read_text() == "VERSION = 'fixture'\n"
+    assert previous_version.read_text() == FAKE_CANDIDATE_CLI
 
     (repo / "executor" / "autonomy" / "cli.py").write_text(
         "import deliberately_missing_release_dependency\n", encoding="utf-8"
@@ -720,9 +769,43 @@ def test_macos_consumer_app_rejects_unstartable_candidate_before_activation(tmp_
     result = install_macos_app(repo, destination=apps, platform="darwin")
     assert result["ok"] is False
     assert result["reason"] == "candidate_start_failed"
-    assert previous_version.read_text() == "VERSION = 'fixture'\n"
+    assert previous_version.read_text() == FAKE_CANDIDATE_CLI
     assert not (apps / ".AI 投递经理.app.previous").exists()
     assert not (apps / ".AI 投递经理.app.installing").exists()
+
+
+
+def test_macos_candidate_requires_live_health_and_matching_loaded_source(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    release = app / "Contents" / "Resources" / "release"
+    known_good = (release / "release-source-manifest.json").read_bytes()
+
+    candidate_cli = repo / "executor" / "autonomy" / "cli.py"
+    candidate_cli.write_text("VERSION = 'import_only'\n", encoding="utf-8")
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert result["reason"] == "candidate_start_failed"
+    assert (release / "release-source-manifest.json").read_bytes() == known_good
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+
+    candidate_cli.write_text(
+        FAKE_CANDIDATE_CLI.replace(
+            "digest = source_manifest(Path(__file__).resolve().parents[2])['source_sha256']",
+            "digest = '0' * 64",
+        ),
+        encoding="utf-8",
+    )
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert result["reason"] == "candidate_start_failed"
+    assert (release / "release-source-manifest.json").read_bytes() == known_good
+    assert verify_source_candidate(release)
+    assert not (apps / ".AI 投递经理.app.previous").exists()
 
 
 def test_macos_consumer_app_refuses_missing_virtualenv(tmp_path):

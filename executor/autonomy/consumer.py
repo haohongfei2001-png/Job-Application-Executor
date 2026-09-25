@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
+import socket
+import tempfile
+import time
+import urllib.error
+import urllib.request
 import plistlib
 import shlex
 import shutil
@@ -161,30 +168,72 @@ def _trusted_bundle(app: Path) -> bool:
 
 
 def _candidate_starts(python: Path, release: Path) -> bool:
-    """Import the staged CLI with the target interpreter before activation."""
+    """Require the staged service to answer authenticated loopback health."""
+    from .release import source_manifest
+
+    expected_digest = source_manifest(release)["source_sha256"]
     script = (
-        "import importlib,pathlib,sys;sys.dont_write_bytecode=True;"
+        "import pathlib,runpy,sys;sys.dont_write_bytecode=True;"
         f"root=pathlib.Path({str(release)!r}).resolve();"
         "sys.path.insert(0,str(root));"
         "from executor.autonomy.release import installed_dependencies_match;"
         "assert installed_dependencies_match(root);"
-        "module=importlib.import_module('executor.autonomy.cli');"
-        "assert pathlib.Path(module.__file__).resolve().is_relative_to(root)"
+        "sys.argv=['executor.autonomy.cli','--runtime',sys.argv[1],"
+        "'--port',sys.argv[2],'serve'];"
+        "runpy.run_module('executor.autonomy.cli',run_name='__main__')"
     )
     try:
-        result = subprocess.run(
-            [str(python), "-I", "-c", script],
-            cwd=release,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=20,
-            check=False,
-        )
-        return result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+        with tempfile.TemporaryDirectory(prefix="jae-candidate-health-") as directory:
+            runtime = Path(directory)
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            env = {**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"}
+            process = subprocess.Popen(
+                [str(python), "-I", "-B", "-c", script, str(runtime), str(port)],
+                cwd=release,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                token_file = runtime / "auth.token"
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        return False
+                    if token_file.is_file():
+                        try:
+                            token = token_file.read_text(encoding="utf-8").strip()
+                            if token:
+                                request = urllib.request.Request(
+                                    f"http://127.0.0.1:{port}/health",
+                                    headers={"Authorization": f"Bearer {token}"},
+                                )
+                                with opener.open(request, timeout=0.5) as response:
+                                    health = json.load(response)
+                                return (
+                                    isinstance(health, dict)
+                                    and health.get("ok") is True
+                                    and health.get("loaded_source_sha256") == expected_digest
+                                    and health.get("final_click_actor") == "user"
+                                )
+                        except (OSError, UnicodeError, ValueError, urllib.error.URLError):
+                            pass
+                    time.sleep(0.05)
+                return False
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
-
 
 def install_macos_app(
     repo_root: str | Path,
