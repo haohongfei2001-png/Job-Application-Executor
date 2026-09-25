@@ -403,6 +403,34 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
         process.wait(timeout=5)
 
 
+def test_macos_app_install_and_rollback_refuse_concurrent_transaction(tmp_path):
+    apps = tmp_path / "Applications"
+    lock_fd = consumer._acquire_app_transaction_lock(apps)
+    try:
+        install = install_macos_app(tmp_path / "missing-source", destination=apps, platform="darwin")
+        rollback = rollback_macos_app(apps)
+        assert install["reason"] == "update_in_progress"
+        assert rollback["reason"] == "update_in_progress"
+        assert not (apps / "AI 投递经理.app").exists()
+        assert not (apps / ".AI 投递经理.app.installing").exists()
+    finally:
+        os.close(lock_fd)
+
+    assert install_macos_app(tmp_path / "missing-source", destination=apps, platform="darwin")["reason"] == "venv_missing"
+    assert rollback_macos_app(apps)["reason"] == "rollback_unavailable"
+
+
+def test_macos_app_transaction_lock_rejects_symlink(tmp_path):
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("untouched", encoding="utf-8")
+    (apps / ".AI 投递经理.app.transaction.lock").symlink_to(outside)
+    assert install_macos_app(tmp_path / "missing-source", destination=apps, platform="darwin")["reason"] == "update_lock_unavailable"
+    assert rollback_macos_app(apps)["reason"] == "update_lock_unavailable"
+    assert outside.read_text(encoding="utf-8") == "untouched"
+
+
 def test_macos_consumer_app_installs_idempotently(tmp_path):
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"

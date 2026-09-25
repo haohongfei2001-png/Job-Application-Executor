@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import socket
@@ -269,7 +270,45 @@ def _candidate_starts(python: Path, release: Path) -> bool:
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
+def _acquire_app_transaction_lock(apps_dir: Path) -> int:
+    """Keep install and rollback mutually exclusive through final-path health."""
+    apps_dir.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+    fd = os.open(apps_dir / f".{APP_NAME}.app.transaction.lock", flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def install_macos_app(
+    repo_root: str | Path,
+    *,
+    destination: str | Path | None = None,
+    platform: str | None = None,
+) -> dict:
+    if (platform or sys.platform) != "darwin":
+        return _install_macos_app_unlocked(repo_root, destination=destination, platform=platform)
+    apps_dir = (Path(destination).expanduser().resolve() if destination is not None
+                else Path.home() / "Applications")
+    try:
+        lock_fd = _acquire_app_transaction_lock(apps_dir)
+    except BlockingIOError:
+        return {"ok": False, "reason": "update_in_progress",
+                "message": "应用安装或回退正在进行；没有修改当前应用。"}
+    except OSError:
+        return {"ok": False, "reason": "update_lock_unavailable",
+                "message": "无法安全锁定应用目录；没有修改当前应用。"}
+    try:
+        return _install_macos_app_unlocked(repo_root, destination=apps_dir, platform=platform)
+    finally:
+        os.close(lock_fd)
+
+
+def _install_macos_app_unlocked(
     repo_root: str | Path,
     *,
     destination: str | Path | None = None,
@@ -478,6 +517,25 @@ def install_macos_app(
 
 
 def rollback_macos_app(destination: str | Path) -> dict:
+    apps_dir = Path(destination).expanduser().resolve()
+    if not apps_dir.is_dir():
+        return {"ok": False, "reason": "rollback_unavailable",
+                "message": "回退副本不完整或路径已被占用；没有修改当前应用。"}
+    try:
+        lock_fd = _acquire_app_transaction_lock(apps_dir)
+    except BlockingIOError:
+        return {"ok": False, "reason": "update_in_progress",
+                "message": "应用安装或回退正在进行；没有修改当前应用。"}
+    except OSError:
+        return {"ok": False, "reason": "update_lock_unavailable",
+                "message": "无法安全锁定应用目录；没有修改当前应用。"}
+    try:
+        return _rollback_macos_app_unlocked(apps_dir)
+    finally:
+        os.close(lock_fd)
+
+
+def _rollback_macos_app_unlocked(destination: str | Path) -> dict:
     """Restore the retained app without deleting the failed candidate."""
     apps_dir = Path(destination).expanduser().resolve()
     app = apps_dir / f"{APP_NAME}.app"
