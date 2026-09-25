@@ -140,6 +140,41 @@ def test_copied_virtualenv_runs_after_source_checkout_is_removed(tmp_path):
     assert verify_runtime_candidate(runtime, release)
 
 
+
+def test_packaged_default_task_state_survives_release_replacement(tmp_path):
+    source = Path(__file__).resolve().parents[1]
+    candidate = tmp_path / "staged-release"
+    copy_source_candidate(source, candidate)
+    user_home = tmp_path / "synthetic-home"
+    user_home.mkdir()
+    expected = user_home / "Library" / "Application Support" / "AI投递经理" / "autonomy"
+    script = (
+        "import pathlib,sys;"
+        "sys.path.insert(0,sys.argv[1]);"
+        "from executor.autonomy.queue import RUNTIME,TaskQueue;"
+        "assert RUNTIME==pathlib.Path(sys.argv[2]);"
+        "TaskQueue()"
+    )
+    subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script, str(candidate), str(expected)],
+        env={**os.environ, "HOME": str(user_home)},
+        capture_output=True, text=True, timeout=20, check=True,
+    )
+    assert (expected / "tasks.sqlite3").is_file()
+    assert not (candidate / "runtime").exists()
+    assert verify_source_candidate(candidate)
+
+    replacement = tmp_path / "replacement-release"
+    copy_source_candidate(source, replacement)
+    subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script, str(replacement), str(expected)],
+        env={**os.environ, "HOME": str(user_home)},
+        capture_output=True, text=True, timeout=20, check=True,
+    )
+    assert (expected / "tasks.sqlite3").is_file()
+    assert not (replacement / "runtime").exists()
+    assert verify_source_candidate(replacement)
+
 def test_runtime_snapshot_refuses_an_unrelated_executable_alias(tmp_path):
     repo = _source(tmp_path)
     release = tmp_path / "release"
