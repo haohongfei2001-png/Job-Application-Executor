@@ -74,7 +74,7 @@
     },
     {
       "id": "JCR-08",
-      "status": "ACTIVE",
+      "status": "IN_PROGRESS",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-08 PR #20 remains the sole writer. Current staged installer requires a real isolated loopback /health handshake, exact loaded candidate source digest, pinned dependencies and user-only final-click actor before activation. The earlier zero-step Actions provisioning gate was externally retried by the owner: run 36119261941 attempt 2 allocated Ubuntu and hosted-Mac runners. Hosted Mac candidate/activation/rollback passed; full suite reported 496 passed and 3 dashboard browser assertion failures, while foundation failed the same diagnostic-preview test. Those failures came from assertions reading the dialog before its asynchronous GET completed and from calling the unavailable Python Locator.is_focused method. This coherent batch synchronizes on actual dialog/copy/focus states without skipping tests, changing product safety behavior, workflows or timeouts. It is not an exact-head CI PASS until the new candidate runs. Continue immutable independent runtime/dependency provenance, transactional update/migration and rollback, hosted Mac interaction, and retirement of in-place Git update. Exact-head certification is required for merge/closure. DFG-002/008 remain engineering debt; DFG-007 and real applicant/site/final-click evidence remain FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
+  "next_action": "JCR-08 sole writer PR #20 is active. The staged Mac app source and authenticated loopback health candidate were proven on exact head 396aa0485c6f2ca99598730991771db06e824eb3 by CI 36124397738. The next coherent candidate adds an app-owned runtime snapshot with pinned-requirements digest and independent-checkout startup regression; exact-head CI is pending. Continue transactional release/data migration and rollback, legacy in-place Git updater retirement, hosted Mac interaction, and automatable DFG-002/008 debt. DFG-007 and real applicant/site/final-click evidence remain FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

@@ -15,7 +15,8 @@ import stat
 import sys
 from pathlib import Path
 
-from .release import copy_source_candidate, verify_source_candidate
+from .release import (copy_source_candidate, copy_runtime_candidate,
+                      verify_runtime_candidate, verify_source_candidate)
 
 
 APP_NAME = "AI 投递经理"
@@ -91,7 +92,7 @@ def humanize_preflight(result: dict) -> str:
     return " ".join(messages)
 
 
-def _packaged_launcher(repo: Path) -> str:
+def _packaged_launcher_v1(repo: Path) -> str:
     repo_q = shlex.quote(str(repo))
 
     return f"""#!/bin/zsh
@@ -119,9 +120,39 @@ fi
 exit $STATUS
 """
 
-def _packaged_bundle_matches(executable: Path) -> bool:
+
+def _packaged_launcher() -> str:
+    return """#!/bin/zsh
+set -u
+RELEASE_ROOT="$(cd "$(dirname "$0")/../Resources/release" && pwd -P)"
+RUNTIME_ROOT="$(cd "$(dirname "$0")/../Resources/runtime" && pwd -P)"
+PYTHON="$RUNTIME_ROOT/bin/python"
+LOG_DIR="$HOME/Library/Logs/AI投递经理"
+LOG_FILE="$LOG_DIR/launcher.log"
+/bin/mkdir -p "$LOG_DIR"
+
+if [[ ! -x "$PYTHON" ]]; then
+  /usr/bin/osascript -e 'display dialog "AI 投递经理缺少运行环境。请重新安装本地入口。" buttons {"好"} default button "好" with icon caution'
+  exit 1
+fi
+
+cd "$RELEASE_ROOT" || exit 1
+export PYTHONPATH="$RELEASE_ROOT"
+export PYTHONDONTWRITEBYTECODE=1
+"$PYTHON" -B -m executor.autonomy.cli launch >>"$LOG_FILE" 2>&1
+STATUS=$?
+if [[ $STATUS -ne 0 ]]; then
+  /usr/bin/osascript -e 'display dialog "AI 投递经理没有成功就绪。现有任务不会被提交或丢失。请在 ChatGPT 中检查启动状态。" buttons {"好"} default button "好" with icon caution'
+fi
+exit $STATUS
+"""
+
+
+def _packaged_bundle_matches(executable: Path, runtime: Path) -> bool:
     try:
         launcher = executable.read_text(encoding="utf-8")
+        if runtime.exists():
+            return launcher == _packaged_launcher()
         assignments = [line for line in launcher.splitlines()
                        if line.startswith("REPO_ROOT=")]
         if len(assignments) != 1:
@@ -133,7 +164,7 @@ def _packaged_bundle_matches(executable: Path) -> bool:
         repo = Path(parsed[0])
         return (repo.name == "Job-Application-Executor"
                 and shlex.quote(str(repo)) == quoted
-                and launcher == _packaged_launcher(repo))
+                and launcher == _packaged_launcher_v1(repo))
     except (OSError, UnicodeError, ValueError):
         return False
 
@@ -146,9 +177,10 @@ def _trusted_bundle(app: Path) -> bool:
     macos = contents / "MacOS"
     resources = contents / "Resources"
     release = resources / "release"
+    runtime = resources / "runtime"
     info_path = contents / "Info.plist"
     executable = macos / "AIApplicationManager"
-    if (any(path.is_symlink() for path in (contents, macos, resources, release))
+    if (any(path.is_symlink() for path in (contents, macos, resources, release, runtime))
             or info_path.is_symlink() or executable.is_symlink()
             or not executable.is_file()):
         return False
@@ -160,7 +192,9 @@ def _trusted_bundle(app: Path) -> bool:
             and info.get("CFBundleIdentifier") == BUNDLE_ID
             and info.get("CFBundleExecutable") == "AIApplicationManager"
             and bool(executable.stat().st_mode & stat.S_IXUSR)
-            and (verify_source_candidate(release) and _packaged_bundle_matches(executable)
+            and (verify_source_candidate(release)
+                 and (verify_runtime_candidate(runtime, release) if runtime.exists() else True)
+                 and _packaged_bundle_matches(executable, runtime)
              if release.exists() else _legacy_bundle_matches(executable))
         )
     except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
@@ -241,7 +275,7 @@ def install_macos_app(
     destination: str | Path | None = None,
     platform: str | None = None,
 ) -> dict:
-    """Install a thin local .app bundle that launches the existing executor."""
+    """Stage a source-and-runtime snapshot, then atomically activate the Mac app."""
     current_platform = platform or sys.platform
     if current_platform != "darwin":
         return {
@@ -279,6 +313,7 @@ def install_macos_app(
     macos = staging / "Contents" / "MacOS"
     macos.mkdir(parents=True)
     release = staging / "Contents" / "Resources" / "release"
+    runtime = staging / "Contents" / "Resources" / "runtime"
     try:
         copy_source_candidate(repo, release)
     except (OSError, ValueError):
@@ -288,8 +323,17 @@ def install_macos_app(
             "reason": "source_snapshot_failed",
             "message": "无法准备完整的新版本；现有应用没有被替换。",
         }
+    try:
+        copy_runtime_candidate(repo / ".venv", runtime, release)
+    except (OSError, ValueError):
+        shutil.rmtree(staging)
+        return {
+            "ok": False,
+            "reason": "runtime_snapshot_failed",
+            "message": "无法准备独立运行环境；现有应用没有被替换。",
+        }
     executable = macos / "AIApplicationManager"
-    launcher = _packaged_launcher(repo)
+    launcher = _packaged_launcher()
 
     executable.write_text(launcher, encoding="utf-8")
     executable.chmod(
@@ -315,7 +359,8 @@ def install_macos_app(
     with (staging / "Contents" / "Info.plist").open("wb") as handle:
         plistlib.dump(info, handle, sort_keys=True)
 
-    if not _trusted_bundle(staging) or not verify_source_candidate(release):
+    if (not _trusted_bundle(staging) or not verify_source_candidate(release)
+            or not verify_runtime_candidate(runtime, release)):
         shutil.rmtree(staging)
         return {
             "ok": False,
@@ -323,7 +368,9 @@ def install_macos_app(
             "message": "新应用包未通过本机校验；现有应用没有被替换。",
         }
 
-    if not _candidate_starts(python, release) or not verify_source_candidate(release):
+    if (not _candidate_starts(runtime / "bin" / "python", release)
+            or not verify_source_candidate(release)
+            or not verify_runtime_candidate(runtime, release)):
         shutil.rmtree(staging)
         return {
             "ok": False,

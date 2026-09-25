@@ -18,9 +18,11 @@ from executor.autonomy.bootstrap import _version
 from executor.autonomy.release import (
     MANIFEST_NAME,
     copy_source_candidate,
+    copy_runtime_candidate,
     installed_dependencies_match,
     read_release_identity,
     source_manifest,
+    verify_runtime_candidate,
     verify_source_candidate,
 )
 
@@ -85,6 +87,35 @@ def test_candidate_dependency_check_rejects_missing_or_changed_versions(tmp_path
     assert not installed_dependencies_match(candidate)
     requirements.write_text("pydantic>=2\n", encoding="utf-8")
     assert not installed_dependencies_match(candidate)
+
+
+
+def test_runtime_snapshot_binds_interpreter_to_release_pins_and_rejects_symlink(tmp_path):
+    repo = _source(tmp_path)
+    release = tmp_path / "release"
+    copy_source_candidate(repo, release)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(sys.executable)
+    private = tmp_path / "private-token"
+    private.write_text("synthetic secret", encoding="utf-8")
+    (venv / "private").symlink_to(private)
+    with pytest.raises(ValueError, match="release_runtime_source_symlink"):
+        copy_runtime_candidate(venv, tmp_path / "refused", release)
+    assert not (tmp_path / "refused").exists()
+
+    (venv / "private").unlink()
+    runtime = tmp_path / "runtime"
+    manifest = copy_runtime_candidate(venv, runtime, release)
+    assert manifest["format"] == "jae-release-runtime-v1"
+    assert verify_runtime_candidate(runtime, release)
+    assert (runtime / "bin" / "python").is_file()
+    assert not (runtime / "bin" / "python").is_symlink()
+    assert not (runtime / "private").exists()
+    assert private.read_text() == "synthetic secret"
+
+    (release / "requirements.txt").write_text("pydantic==0.0.0\n")
+    assert not verify_runtime_candidate(runtime, release)
 
 
 def test_recovery_version_uses_verified_packaged_source(tmp_path):

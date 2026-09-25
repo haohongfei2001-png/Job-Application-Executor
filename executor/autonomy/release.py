@@ -11,6 +11,7 @@ import importlib.metadata
 import json
 import re
 import shutil
+import stat
 from pathlib import Path
 
 
@@ -87,6 +88,88 @@ def copy_source_candidate(repo_root: str | Path, destination: str | Path) -> dic
     )
     if not verify_source_candidate(target):
         raise ValueError("release_candidate_invalid")
+    return before
+
+
+
+RUNTIME_MANIFEST_NAME = "release-runtime-manifest.json"
+
+
+def runtime_manifest(root: str | Path, release: str | Path) -> dict:
+    """Hash the app-owned interpreter and dependency tree against pinned source."""
+    root = Path(root).expanduser()
+    release = Path(release).expanduser()
+    python = root / "bin" / "python"
+    requirements = release / "requirements.txt"
+    if (root.is_symlink() or not root.is_dir() or python.is_symlink()
+            or not python.is_file() or not python.stat().st_mode & stat.S_IXUSR
+            or not requirements.is_file() or requirements.is_symlink()):
+        raise ValueError("release_runtime_missing")
+    files = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("release_runtime_symlink")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError("release_runtime_invalid")
+        relative = path.relative_to(root).as_posix()
+        if relative == RUNTIME_MANIFEST_NAME:
+            continue
+        data = path.read_bytes()
+        files.append({
+            "path": relative,
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "executable": bool(path.stat().st_mode & stat.S_IXUSR),
+        })
+    encoded = json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "format": "jae-release-runtime-v1",
+        "requirements_sha256": hashlib.sha256(requirements.read_bytes()).hexdigest(),
+        "files": files,
+        "runtime_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def verify_runtime_candidate(root: str | Path, release: str | Path) -> bool:
+    root = Path(root).expanduser()
+    manifest_file = root / RUNTIME_MANIFEST_NAME
+    if manifest_file.is_symlink():
+        return False
+    try:
+        saved = json.loads(manifest_file.read_text(encoding="utf-8"))
+        return saved == runtime_manifest(root, release)
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return False
+
+
+def copy_runtime_candidate(venv: str | Path, destination: str | Path,
+                           release: str | Path) -> dict:
+    """Stage a private virtualenv snapshot; never link back to the checkout."""
+    source = Path(venv).expanduser()
+    target = Path(destination).expanduser()
+    if source.is_symlink() or not source.is_dir() or target.exists():
+        raise ValueError("release_runtime_source_invalid")
+    python = source / "bin" / "python"
+    if not python.is_file():
+        raise ValueError("release_runtime_source_invalid")
+    for path in source.rglob("*"):
+        if not path.is_symlink():
+            continue
+        relative = path.relative_to(source)
+        if (len(relative.parts) != 2 or relative.parts[0] != "bin"
+                or not re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", relative.name)
+                or not path.resolve().is_file()):
+            raise ValueError("release_runtime_source_symlink")
+    shutil.copytree(source, target, symlinks=False)
+    before = runtime_manifest(target, release)
+    (target / RUNTIME_MANIFEST_NAME).write_text(
+        json.dumps(before, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    if not verify_runtime_candidate(target, release):
+        raise ValueError("release_runtime_candidate_invalid")
     return before
 
 

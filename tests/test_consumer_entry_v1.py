@@ -18,9 +18,10 @@ from pathlib import Path
 import pytest
 
 from executor.autonomy import bootstrap, cli, preflight, release
-from executor.autonomy.consumer import install_macos_app, rollback_macos_app
+from executor.autonomy.consumer import (_candidate_starts, install_macos_app,
+                                        rollback_macos_app)
 from executor.autonomy.loopback_http import LoopbackHTTPServer
-from executor.autonomy.release import verify_source_candidate
+from executor.autonomy.release import verify_runtime_candidate, verify_source_candidate
 from executor.autonomy.dashboard import DASHBOARD_HTML
 
 
@@ -400,8 +401,12 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert (release / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\n"
     assert executable.stat().st_mode & stat.S_IXUSR
     launcher = executable.read_text(encoding="utf-8")
-    assert str(repo.resolve()) in launcher
+    assert str(repo.resolve()) not in launcher
+    assert 'RUNTIME_ROOT="$(cd "$(dirname "$0")/../Resources/runtime" && pwd -P)"' in launcher
+    assert 'PYTHON="$RUNTIME_ROOT/bin/python"' in launcher
     assert 'cd "$RELEASE_ROOT"' in launcher
+    runtime = app / "Contents" / "Resources" / "runtime"
+    assert verify_runtime_candidate(runtime, release)
     assert 'export PYTHONPATH="$RELEASE_ROOT"' in launcher
     assert "export PYTHONDONTWRITEBYTECODE=1" in launcher
     assert '"$PYTHON" -B -m executor.autonomy.cli launch' in launcher
@@ -439,6 +444,32 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert (app / "Contents" / "Resources" / "release" / "executor" / "consumer_entry.py").read_text() == "VERSION = 'fixture'\n"
     assert (apps / ".AI 投递经理.app.failed").is_dir()
     assert not rollback.exists()
+
+
+
+def test_packaged_app_runtime_survives_checkout_removal_and_rejects_tamper(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    release = app / "Contents" / "Resources" / "release"
+    runtime = app / "Contents" / "Resources" / "runtime"
+    assert verify_runtime_candidate(runtime, release)
+
+    repo.rename(tmp_path / "development-checkout-removed")
+    assert _candidate_starts(runtime / "bin" / "python", release)
+    assert verify_runtime_candidate(runtime, release)
+
+    python_copy = runtime / "bin" / "python"
+    with python_copy.open("ab") as handle:
+        handle.write(b"synthetic-tamper")
+    assert not verify_runtime_candidate(runtime, release)
+    assert rollback_macos_app(apps)["reason"] == "rollback_unavailable"
 
 
 def test_macos_candidate_rejects_dependency_drift_without_replacing_old_app(tmp_path):
