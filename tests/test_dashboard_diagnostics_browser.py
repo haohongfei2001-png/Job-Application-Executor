@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 from executor.autonomy.dashboard import DASHBOARD_HTML
 from executor.autonomy import bootstrap
@@ -41,10 +41,13 @@ def test_diagnostics_need_explicit_copy_and_clear_after_close():
               });
             }""")
             page.get_by_role("button", name="查看诊断").click()
-            assert page.locator("#diagnostics-dialog").is_visible()
+            dialog = page.locator("#diagnostics-dialog")
+            expect(dialog).to_be_visible()
+            assert dialog.is_visible()
             assert json.loads(page.locator("#diagnostics-report").inner_text()) == report
             assert page.evaluate("window.__copied.length") == 0
             page.get_by_role("button", name="复制报告").click()
+            page.wait_for_function("window.__copied.length === 1")
             assert json.loads(page.evaluate("window.__copied[0]")) == report
             page.get_by_role("button", name="关闭").click()
             assert not page.locator("#diagnostics-dialog").is_visible()
@@ -140,7 +143,7 @@ def test_readiness_details_are_read_only_and_restore_focus():
             page.get_by_role("button", name="运行条件").click()
             dialog = page.locator("#readiness-dialog")
             assert dialog.is_visible()
-            assert page.get_by_role("button", name="关闭").is_focused()
+            expect(page.locator("#readiness-close")).to_be_focused()
             assert "资料文件尚未就绪" in page.locator("#readiness-summary").inner_text()
             assert page.locator("#readiness-checks li").count() == 8
             assert "待处理" in page.locator("#readiness-checks").inner_text()
@@ -148,7 +151,7 @@ def test_readiness_details_are_read_only_and_restore_focus():
             assert all(method == "GET" for method, _ in requests)
             page.get_by_role("button", name="关闭").click()
             assert not dialog.is_visible()
-            assert page.get_by_role("button", name="运行条件").is_focused()
+            expect(page.get_by_role("button", name="运行条件")).to_be_focused()
 
             readiness_payload["ready_for_live_e2e"] = True
             readiness_payload["message"] = "已就绪"
@@ -206,8 +209,8 @@ def test_app_shell_keeps_tasks_visible_at_narrow_zoom_and_announces_once():
             assert changed > duplicate
 
             page.get_by_role("button", name="查看诊断").click()
-            assert page.locator("#diagnostics-dialog").is_visible()
-            page.get_by_role("button", name="关闭").click()
-            assert page.get_by_role("button", name="查看诊断").is_focused()
+            expect(page.locator("#diagnostics-dialog")).to_be_visible()
+            page.locator("#diagnostics-close").click()
+            expect(page.get_by_role("button", name="查看诊断")).to_be_focused()
         finally:
             browser.close()
