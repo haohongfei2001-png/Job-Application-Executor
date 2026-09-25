@@ -164,6 +164,13 @@ def copy_runtime_candidate(venv: str | Path, destination: str | Path,
         if not path.is_symlink():
             continue
         relative = path.relative_to(source)
+        # stdlib venv on Linux uses lib64 -> lib. Allow only that exact
+        # in-environment directory alias; copytree materializes it as files.
+        if (relative.as_posix() == "lib64"
+                and path.resolve() == (source / "lib").resolve()
+                and (source / "lib").is_dir()
+                and not (source / "lib").is_symlink()):
+            continue
         if (len(relative.parts) != 2 or relative.parts[0] != "bin"
                 or not re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", relative.name)
                 or not path.resolve().is_file()

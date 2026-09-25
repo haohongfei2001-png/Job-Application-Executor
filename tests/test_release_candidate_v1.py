@@ -157,6 +157,22 @@ def test_runtime_snapshot_refuses_an_unrelated_executable_alias(tmp_path):
 
 
 
+def test_runtime_snapshot_refuses_external_library_directory_alias(tmp_path):
+    repo = _source(tmp_path)
+    release = tmp_path / "release"
+    copy_source_candidate(repo, release)
+    venv_root = tmp_path / "venv"
+    (venv_root / "bin").mkdir(parents=True)
+    (venv_root / "bin" / "python").symlink_to(sys.executable)
+    external = tmp_path / "outside-library"
+    external.mkdir()
+    (external / "private-token").write_text("never-copy", encoding="utf-8")
+    (venv_root / "lib64").symlink_to(external, target_is_directory=True)
+    with pytest.raises(ValueError, match="release_runtime_source_symlink"):
+        copy_runtime_candidate(venv_root, tmp_path / "refused", release)
+    assert not (tmp_path / "refused").exists()
+
+
 def test_recovery_version_uses_verified_packaged_source(tmp_path):
     repo = _source(tmp_path)
     candidate = tmp_path / "candidate"
