@@ -601,6 +601,36 @@ def test_macos_consumer_app_preserves_tampered_release_on_install_and_rollback(t
 
 
 
+def test_macos_consumer_app_rejects_tampered_packaged_launcher(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    launcher = app / "Contents" / "MacOS" / "AIApplicationManager"
+    original = launcher.read_text(encoding="utf-8")
+    launcher.write_text(original + "echo tampered\\n", encoding="utf-8")
+
+    refused = install_macos_app(repo, destination=apps, platform="darwin")
+    assert refused["reason"] == "untrusted_app_path"
+    assert launcher.read_text(encoding="utf-8") == original + "echo tampered\\n"
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+
+    launcher.write_text(original, encoding="utf-8")
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    previous = apps / ".AI 投递经理.app.previous"
+    previous_launcher = previous / "Contents" / "MacOS" / "AIApplicationManager"
+    previous_launcher.write_text(original + "echo tampered\\n", encoding="utf-8")
+    refused_rollback = rollback_macos_app(apps)
+    assert refused_rollback["reason"] == "rollback_unavailable"
+    assert app.is_dir()
+    assert previous.is_dir()
+    assert not (apps / ".AI 投递经理.app.failed").exists()
+
+
 def test_macos_consumer_app_rejects_symlinked_release_directory(tmp_path):
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
