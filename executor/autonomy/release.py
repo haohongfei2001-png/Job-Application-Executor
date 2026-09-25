@@ -12,6 +12,7 @@ import json
 import re
 import shutil
 import stat
+import sys
 from pathlib import Path
 
 
@@ -154,13 +155,19 @@ def copy_runtime_candidate(venv: str | Path, destination: str | Path,
     python = source / "bin" / "python"
     if not python.is_file():
         raise ValueError("release_runtime_source_invalid")
+    # The interpreter may be a venv copy or alias, but never an arbitrary
+    # executable or a symlink to a private file outside the environment.
+    expected_python = hashlib.sha256(Path(sys.executable).read_bytes()).digest()
+    if hashlib.sha256(python.read_bytes()).digest() != expected_python:
+        raise ValueError("release_runtime_interpreter_mismatch")
     for path in source.rglob("*"):
         if not path.is_symlink():
             continue
         relative = path.relative_to(source)
         if (len(relative.parts) != 2 or relative.parts[0] != "bin"
                 or not re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", relative.name)
-                or not path.resolve().is_file()):
+                or not path.resolve().is_file()
+                or hashlib.sha256(path.read_bytes()).digest() != expected_python):
             raise ValueError("release_runtime_source_symlink")
     shutil.copytree(source, target, symlinks=False)
     before = runtime_manifest(target, release)

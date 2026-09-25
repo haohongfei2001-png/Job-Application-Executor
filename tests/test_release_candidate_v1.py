@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+import venv
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -116,6 +117,44 @@ def test_runtime_snapshot_binds_interpreter_to_release_pins_and_rejects_symlink(
 
     (release / "requirements.txt").write_text("pydantic==0.0.0\n")
     assert not verify_runtime_candidate(runtime, release)
+
+
+
+def test_copied_virtualenv_runs_after_source_checkout_is_removed(tmp_path):
+    repo = _source(tmp_path)
+    release = tmp_path / "release"
+    copy_source_candidate(repo, release)
+    source_venv = repo / ".venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(source_venv)
+    runtime = tmp_path / "runtime"
+    copy_runtime_candidate(source_venv, runtime, release)
+    assert verify_runtime_candidate(runtime, release)
+
+    repo.rename(tmp_path / "checkout-removed")
+    result = subprocess.run(
+        [str(runtime / "bin" / "python"), "-I", "-B", "-c",
+         "import pathlib,sys; print(pathlib.Path(sys.prefix).resolve())"],
+        capture_output=True, text=True, timeout=10, check=True,
+    )
+    assert result.stdout.strip() == str(runtime.resolve())
+    assert verify_runtime_candidate(runtime, release)
+
+
+def test_runtime_snapshot_refuses_an_unrelated_executable_alias(tmp_path):
+    repo = _source(tmp_path)
+    release = tmp_path / "release"
+    copy_source_candidate(repo, release)
+    venv_root = tmp_path / "venv"
+    (venv_root / "bin").mkdir(parents=True)
+    (venv_root / "bin" / "python").symlink_to(sys.executable)
+    unrelated = tmp_path / "other-executable"
+    unrelated.write_bytes(b"synthetic private executable")
+    unrelated.chmod(0o755)
+    (venv_root / "bin" / "python3").symlink_to(unrelated)
+    with pytest.raises(ValueError, match="release_runtime_source_symlink"):
+        copy_runtime_candidate(venv_root, tmp_path / "refused", release)
+    assert not (tmp_path / "refused").exists()
+
 
 
 def test_recovery_version_uses_verified_packaged_source(tmp_path):
