@@ -104,6 +104,27 @@ def test_candidate_dependency_check_rejects_missing_or_changed_versions(tmp_path
 
 
 
+def test_candidate_dependency_check_rejects_host_supplied_matching_pin(tmp_path, monkeypatch):
+    import importlib.metadata
+
+    repo = _source(tmp_path)
+    candidate = tmp_path / "candidate"
+    copy_source_candidate(repo, candidate)
+    assert installed_dependencies_match(candidate)
+
+    actual = importlib.metadata.distribution
+
+    class ExternalDistribution:
+        version = version("pydantic")
+
+        def locate_file(self, _name):
+            return tmp_path / "outside-runtime" / "site-packages"
+
+    monkeypatch.setattr(importlib.metadata, "distribution",
+                        lambda name: ExternalDistribution() if name == "pydantic" else actual(name))
+    assert not installed_dependencies_match(candidate)
+
+
 def test_runtime_snapshot_binds_interpreter_to_release_pins_and_rejects_symlink(tmp_path):
     repo = _source(tmp_path)
     release = tmp_path / "release"

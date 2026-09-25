@@ -204,9 +204,16 @@ def installed_dependencies_match(root: str | Path) -> bool:
         pins = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
         if not pins:
             return False
+        prefix = Path(sys.prefix).resolve()
         for pin in pins:
             match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([A-Za-z0-9][A-Za-z0-9_.!+~-]*)", pin)
-            if not match or importlib.metadata.version(match[1]) != match[2]:
+            if not match:
+                return False
+            distribution = importlib.metadata.distribution(match[1])
+            # A version supplied by the host or user site is not a packaged
+            # dependency. The candidate interpreter must own every pin.
+            if (distribution.version != match[2]
+                    or not Path(distribution.locate_file("")).resolve().is_relative_to(prefix)):
                 return False
         return True
     except (OSError, UnicodeError, importlib.metadata.PackageNotFoundError):
