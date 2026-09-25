@@ -42,7 +42,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 .diagnostics-dialog pre{max-height:48vh;overflow:auto;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .diagnostics-actions{display:flex;justify-content:flex-end;gap:8px}.diagnostics-actions button{min-height:36px}
 .toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
-@media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:none}}
+@media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:block;max-height:45vh;border-right:0;border-bottom:1px solid #e5e7eb}main{min-height:55vh}}
 </style>
 </head>
 <body>
@@ -106,7 +106,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
     <button id="diagnostics-copy" type="button">复制报告</button>
   </div>
 </dialog>
-<div id="toast" class="toast"></div>
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <script>
 const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),diagnosticsDialog=document.getElementById('diagnostics-dialog'),diagnosticsReport=document.getElementById('diagnostics-report'),diagnosticsCopy=document.getElementById('diagnostics-copy'),diagnosticsClose=document.getElementById('diagnostics-close'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
 const readinessBtn=document.getElementById('readiness-details'),readinessDialog=document.getElementById('readiness-dialog'),readinessSummary=document.getElementById('readiness-summary'),readinessChecks=document.getElementById('readiness-checks'),readinessClose=document.getElementById('readiness-close');
@@ -368,6 +368,7 @@ tasksEl.addEventListener('click',async event=>{
   }finally{button.disabled=false}
 });
 function notify(text){
+  if(toast.style.display==='block'&&toast.textContent===text)return;
   toast.textContent=text;toast.style.display='block';
   clearTimeout(notify.timer);notify.timer=setTimeout(()=>{toast.style.display='none'},4200);
 }
@@ -418,7 +419,10 @@ async function copyDiagnostics(){
     notify('复制诊断失败；现有任务未被修改。');
   }finally{diagnosticsCopy.disabled=false}
 }
-diagnosticsDialog.addEventListener('close',()=>{diagnosticsReport.textContent=''});
+diagnosticsDialog.addEventListener('close',()=>{
+  diagnosticsReport.textContent='';
+  diagnosticsBtn.focus();
+});
 diagnosticsClose.onclick=()=>{diagnosticsReport.textContent='';diagnosticsDialog.close()};
 diagnosticsCopy.onclick=copyDiagnostics;
 async function startUpdate(){

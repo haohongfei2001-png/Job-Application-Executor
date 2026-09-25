@@ -163,3 +163,51 @@ def test_readiness_details_are_read_only_and_restore_focus():
             assert all(method == "GET" for method, _ in requests)
         finally:
             browser.close()
+
+
+def test_app_shell_keeps_tasks_visible_at_narrow_zoom_and_announces_once():
+    """Task access, keyboard focus and status announcements survive a narrow window."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 600, "height": 800})
+        try:
+            def route_request(route):
+                path = route.request.url.split("shell-ui.test", 1)[-1]
+                if path in {"", "/"}:
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path.startswith("/ui/api/diagnostics"):
+                    route.fulfill(status=200, content_type="application/json",
+                                  body='{"reason":"service_healthy"}')
+                else:
+                    route.fulfill(status=200, content_type="application/json",
+                                  body='{"tasks":[],"ready_for_live_e2e":false}')
+
+            page.route("http://shell-ui.test/**", route_request)
+            page.goto("http://shell-ui.test/")
+            assert page.locator("aside").is_visible()
+            assert page.locator("#newtask").is_visible()
+            assert page.locator("#tasks").is_visible()
+            assert page.locator("#toast").get_attribute("role") == "status"
+            first, duplicate, changed = page.evaluate("""async () => {
+              const toast = document.getElementById('toast');
+              let count = 0;
+              new MutationObserver(() => count++).observe(toast, {
+                childList:true,subtree:true,characterData:true
+              });
+              notify('状态已更新'); await Promise.resolve();
+              const first = count;
+              notify('状态已更新'); await Promise.resolve();
+              const duplicate = count;
+              notify('需要你处理'); await Promise.resolve();
+              return [first,duplicate,count];
+            }""")
+            assert first > 0
+            assert duplicate == first
+            assert changed > duplicate
+
+            page.get_by_role("button", name="查看诊断").click()
+            assert page.locator("#diagnostics-dialog").is_visible()
+            page.get_by_role("button", name="关闭").click()
+            assert page.get_by_role("button", name="查看诊断").is_focused()
+        finally:
+            browser.close()
