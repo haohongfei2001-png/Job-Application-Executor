@@ -16,6 +16,10 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .headerbtn{border:1px solid #d7dce2;background:#fff;color:#111;padding:7px 11px;border-radius:9px;font-weight:600;font-size:13px}
 .headerbtn:hover{background:#f8fafc}.headerbtn:disabled{opacity:.45;cursor:default}
 .readiness{font-size:12px;color:#92400e;max-width:360px;line-height:1.35}
+.readiness-checks{display:grid;gap:8px;list-style:none;padding:0;margin:12px 0}
+.readiness-checks li{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #e2e8f0;padding:6px 0;font-size:13px}
+.readiness-checks .pass{color:#166534}.readiness-checks .pending{color:#92400e}
+.readiness-summary{font-size:13px;line-height:1.5;color:#475569}
 .metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:16px 0}
 .metric{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
@@ -70,6 +74,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <div class="statusbar">
     <div><span class="dot"></span><span id="health">本地服务</span></div>
     <span id="readiness" class="readiness" role="status">正在检查运行条件…</span>
+    <button id="readiness-details" class="headerbtn" type="button">运行条件</button>
     <button id="diagnostics" class="headerbtn" type="button">查看诊断</button>
     <button id="update" class="headerbtn" type="button">检查并更新</button>
   </div>
@@ -83,6 +88,15 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 </div>
 </main>
 </div>
+<dialog id="readiness-dialog" class="diagnostics-dialog" aria-labelledby="readiness-title">
+  <h2 id="readiness-title">运行条件</h2>
+  <p>这里仅显示本机运行条件的检查结果，不读取或展示个人资料内容。最终提交仍由你本人完成。</p>
+  <div id="readiness-summary" class="readiness-summary" role="status">正在检查…</div>
+  <ul id="readiness-checks" class="readiness-checks"></ul>
+  <div class="diagnostics-actions">
+    <button id="readiness-close" class="headerbtn" type="button">关闭</button>
+  </div>
+</dialog>
 <dialog id="diagnostics-dialog" class="diagnostics-dialog" aria-labelledby="diagnostics-title">
   <h2 id="diagnostics-title">诊断预览</h2>
   <p>此报告仅显示运行状态和恢复代码。请核对内容，再决定是否复制分享。</p>
@@ -95,6 +109,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 <div id="toast" class="toast"></div>
 <script>
 const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),diagnosticsDialog=document.getElementById('diagnostics-dialog'),diagnosticsReport=document.getElementById('diagnostics-report'),diagnosticsCopy=document.getElementById('diagnostics-copy'),diagnosticsClose=document.getElementById('diagnostics-close'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
+const readinessBtn=document.getElementById('readiness-details'),readinessDialog=document.getElementById('readiness-dialog'),readinessSummary=document.getElementById('readiness-summary'),readinessChecks=document.getElementById('readiness-checks'),readinessClose=document.getElementById('readiness-close');
 const newTaskForm=document.getElementById('newtask');
 const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -474,6 +489,29 @@ async function pollUpdate(){
 }
 diagnosticsBtn.onclick=previewDiagnostics;
 updateBtn.onclick=startUpdate;
+const readinessLabels={
+  live_browser_mode:'浏览器模式',chrome_installed:'Chrome 已安装',
+  existing_cdp_session:'专用浏览器连接',profile_configured:'资料位置已配置',
+  profile_exists:'资料文件可用',profile_loadable:'资料文件可读取',
+  deepseek_available:'DeepSeek 已连接',supervisor_running:'本地服务运行中'
+};
+function renderReadinessDetails(data){
+  readinessChecks.replaceChildren();
+  const checks=data&&data.checks&&typeof data.checks==='object'?data.checks:{};
+  for(const [key,label] of Object.entries(readinessLabels)){
+    const row=document.createElement('li'),name=document.createElement('span'),result=document.createElement('strong');
+    name.textContent=label;
+    const passed=checks[key]===true;
+    result.textContent=passed?'已通过':'待处理';result.className=passed?'pass':'pending';
+    row.append(name,result);readinessChecks.appendChild(row);
+  }
+  readinessSummary.textContent=data?.ready_for_live_e2e===true?
+    '运行条件已就绪。最终提交仍由你本人完成。':
+    (typeof data?.message==='string'&&data.message?'尚未就绪：'+data.message:'运行条件待检查；任务不会自动提交。');
+}
+readinessBtn.onclick=()=>{readinessDialog.showModal();readinessClose.focus()};
+readinessClose.onclick=()=>readinessDialog.close();
+readinessDialog.addEventListener('close',()=>readinessBtn.focus());
 async function readiness(){
   const label=document.getElementById('readiness');
   try{
@@ -481,7 +519,12 @@ async function readiness(){
     if(!r.ok)throw new Error();
     const data=await r.json();
     label.textContent=data.ready_for_live_e2e?'已就绪 · 最终提交由你确认':data.message||'运行条件待检查';
-  }catch(e){label.textContent='无法检查运行条件；任务不会自动提交'}
+    renderReadinessDetails(data);
+  }catch(e){
+    label.textContent='无法检查运行条件；任务不会自动提交';
+    readinessSummary.textContent='无法读取检查结果；任务不会自动提交。';
+    readinessChecks.replaceChildren();
+  }
 }
 async function state(){
   try{

@@ -96,3 +96,70 @@ def test_bootstrap_diagnostics_are_explicit_and_copy_safe(monkeypatch):
             assert json.loads(page.evaluate("window.__copied[0]")) == report
         finally:
             browser.close()
+
+
+def test_readiness_details_are_read_only_and_restore_focus():
+    """Onboarding shows only named checks and does not start an applicant action."""
+    readiness_payload = {
+        "ready_for_live_e2e": False,
+        "message": "资料文件尚未就绪。",
+        "checks": {
+            "live_browser_mode": True,
+            "chrome_installed": True,
+            "existing_cdp_session": False,
+            "profile_configured": False,
+            "profile_exists": False,
+            "profile_loadable": False,
+            "deepseek_available": False,
+            "supervisor_running": True,
+        },
+        "remediation": ["configure_profile_path"],
+        "profile_secret": "must-not-appear",
+        "final_click_actor": "user",
+        "submit_capability": False,
+    }
+    requests = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                requests.append((route.request.method, route.request.url))
+                path = route.request.url.split("readiness-ui.test", 1)[-1]
+                if path.startswith("/ui/api/readiness"):
+                    route.fulfill(status=200, content_type="application/json",
+                                  body=json.dumps(readiness_payload))
+                elif path in {"", "/"}:
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                else:
+                    route.fulfill(status=200, content_type="application/json",
+                                  body='{"tasks":[]}')
+
+            page.route("http://readiness-ui.test/**", route_request)
+            page.goto("http://readiness-ui.test/")
+            page.get_by_role("button", name="运行条件").click()
+            dialog = page.locator("#readiness-dialog")
+            assert dialog.is_visible()
+            assert page.get_by_role("button", name="关闭").is_focused()
+            assert "资料文件尚未就绪" in page.locator("#readiness-summary").inner_text()
+            assert page.locator("#readiness-checks li").count() == 8
+            assert "待处理" in page.locator("#readiness-checks").inner_text()
+            assert "must-not-appear" not in dialog.inner_text()
+            assert all(method == "GET" for method, _ in requests)
+            page.get_by_role("button", name="关闭").click()
+            assert not dialog.is_visible()
+            assert page.get_by_role("button", name="运行条件").is_focused()
+
+            readiness_payload["ready_for_live_e2e"] = True
+            readiness_payload["message"] = "已就绪"
+            readiness_payload["checks"] = {
+                key: True for key in readiness_payload["checks"]
+            }
+            page.evaluate("readiness()")
+            page.get_by_role("button", name="运行条件").click()
+            assert "运行条件已就绪" in page.locator("#readiness-summary").inner_text()
+            assert "最终提交仍由你本人完成" in dialog.inner_text()
+            assert "待处理" not in page.locator("#readiness-checks").inner_text()
+            assert all(method == "GET" for method, _ in requests)
+        finally:
+            browser.close()
