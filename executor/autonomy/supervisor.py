@@ -336,6 +336,8 @@ class Supervisor:
         with self._command_lock:
             if self.mutation_fenced():
                 raise RuntimeError("update in progress")
+            if self.queue.get(task_id)["revision"] != revision:
+                raise RuntimeError("stale task revision")
             context = self.worker.question_context(task_id, revision)
             if not context or field_key not in {item["key"] for item in context["items"]}:
                 raise ValueError("current site question context required")

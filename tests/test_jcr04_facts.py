@@ -9,7 +9,7 @@ from executor.autonomy.worker import Worker
 from executor.evidence import (ProfileBuilder, projects_for_task, set_project_exclusion,
                                set_user_confirmed_field, write_profile)
 from executor.models import (ApplicantProfile, ApplicationPlan, ApplicationStage,
-                             EvidenceRef, ProfileField, ResolutionStatus, WebField)
+                             EvidenceRef, FieldResolution, ProfileField, ResolutionStatus, WebField)
 from executor.review_certificate import certify_review
 
 
@@ -556,6 +556,14 @@ def test_local_browser_requires_explicit_checkbox_for_reusable_fact(tmp_path):
     tid = _task(queue, tmp_path)
     _wait_for_fact(queue, tid, "identity.current_city")
     worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    observed = queue.get(tid)
+    worker._remember_question_context(
+        tid, ApplicationPlan(execution_id=tid, target_url=observed["spec"]["target_url"],
+                             site_id="synthetic", unresolved_fields=[
+            FieldResolution(field_id="site-question", selector="#site-question",
+                            label="当前居住城市", canonical_key="identity.current_city",
+                            status=ResolutionStatus.UNRESOLVED, required=True)]),
+        observed["revision"])
     supervisor = Supervisor(queue, worker=worker)
     server = create_server(supervisor, port=0)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -566,7 +574,7 @@ def test_local_browser_requires_explicit_checkbox_for_reusable_fact(tmp_path):
                 page = browser.new_page()
                 page.goto(f"http://127.0.0.1:{server.server_port}/ui-login?ticket="
                           + supervisor.issue_ui_ticket())
-                page.get_by_label("identity.current_city").fill("Synthetic City")
+                page.get_by_label("当前居住城市").fill("Synthetic City")
                 checkbox = page.get_by_role("checkbox", name="保存为可复用事实")
                 assert not checkbox.is_checked()
                 checkbox.check()
@@ -594,6 +602,14 @@ def test_local_boolean_control_persists_false_as_boolean(tmp_path):
     tid = _task(queue, tmp_path)
     _wait_for_fact(queue, tid, "preferences.accept_travel")
     worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    observed = queue.get(tid)
+    worker._remember_question_context(
+        tid, ApplicationPlan(execution_id=tid, target_url=observed["spec"]["target_url"],
+                             site_id="synthetic", unresolved_fields=[
+            FieldResolution(field_id="site-question", selector="#site-question",
+                            label="是否接受出差", canonical_key="preferences.accept_travel",
+                            status=ResolutionStatus.UNRESOLVED, required=True)]),
+        observed["revision"])
     supervisor = Supervisor(queue, worker=worker)
     server = create_server(supervisor, port=0)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -604,7 +620,7 @@ def test_local_boolean_control_persists_false_as_boolean(tmp_path):
                 page = browser.new_page()
                 page.goto(f"http://127.0.0.1:{server.server_port}/ui-login?ticket="
                           + supervisor.issue_ui_ticket())
-                page.get_by_label("preferences.accept_travel").select_option(label="否")
+                page.get_by_label("是否接受出差").select_option(label="否")
                 page.get_by_role("checkbox", name="保存为可复用事实").check()
                 page.get_by_role("button", name="本地填写").click()
                 page.locator("button[data-answer]").wait_for(state="detached")

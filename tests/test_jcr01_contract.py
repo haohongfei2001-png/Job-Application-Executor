@@ -283,6 +283,14 @@ def test_ui_private_fact_input_is_local_scoped_and_revision_checked(tmp_path):
                      blocker="unknown_facts", details={"unresolved_keys": ["family.primary.role"]},
                      release=True)
     worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    observed = queue.get(tid)
+    worker._remember_question_context(
+        tid, ApplicationPlan(execution_id=tid, target_url=observed["spec"]["target_url"],
+                             site_id="synthetic", unresolved_fields=[
+            FieldResolution(field_id="family-role", selector="#family-role",
+                            label="家庭成员当前职业", canonical_key="family.primary.role",
+                            status=ResolutionStatus.UNRESOLVED, required=True)]),
+        observed["revision"])
     supervisor = Supervisor(queue, worker=worker)
     server = create_server(supervisor, port=0)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -325,6 +333,14 @@ def test_dashboard_fact_control_submits_only_to_local_service(tmp_path):
                      blocker="unknown_facts", details={"unresolved_keys": ["family.primary.role"]},
                      release=True)
     worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    observed = queue.get(tid)
+    worker._remember_question_context(
+        tid, ApplicationPlan(execution_id=tid, target_url=observed["spec"]["target_url"],
+                             site_id="synthetic", unresolved_fields=[
+            FieldResolution(field_id="family-role", selector="#family-role",
+                            label="家庭成员当前职业", canonical_key="family.primary.role",
+                            status=ResolutionStatus.UNRESOLVED, required=True)]),
+        observed["revision"])
 
     class ForbiddenProvider:
         available = True
@@ -344,7 +360,7 @@ def test_dashboard_fact_control_submits_only_to_local_service(tmp_path):
                 page = browser.new_page()
                 page.goto(f"http://127.0.0.1:{server.server_port}/ui-login?ticket="
                           + supervisor.issue_ui_ticket())
-                page.get_by_label("family.primary.role").fill(secret)
+                page.get_by_label("家庭成员当前职业").fill(secret)
                 page.get_by_role("button", name="本地填写").click()
                 page.locator("button[data-answer]").wait_for(state="detached")
             finally:
