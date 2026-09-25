@@ -67,7 +67,10 @@ def test_local_question_requires_current_site_label_and_revision(tmp_path):
                    "required": True, "scope_sha256": None}],
     }
     assert label not in json.dumps(supervisor.manager.state(), ensure_ascii=False)
+    assert label.encode("utf-8") not in queue.path.read_bytes()
     with pytest.raises(ValueError, match="question context"):
+        supervisor.run_local_fact(tid, "identity.other_city", "上海", revision)
+    with pytest.raises(RuntimeError, match="stale task revision"):
         supervisor.run_local_fact(tid, "identity.current_city", "上海", revision + 1)
 
     accepted = supervisor.run_local_fact(tid, "identity.current_city", "上海", revision)
