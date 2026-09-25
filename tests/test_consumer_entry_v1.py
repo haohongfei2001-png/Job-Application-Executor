@@ -228,6 +228,29 @@ def test_packaged_launch_refuses_unverified_source_before_service_start(tmp_path
     assert result["submit_capability"] is False
 
 
+def test_packaged_launch_refuses_removed_manifest_before_service_start(tmp_path, monkeypatch):
+    source = tmp_path / "AI 投递经理.app" / "Contents" / "Resources" / "release"
+    module = source / "executor" / "autonomy" / "cli.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# fixture\n", encoding="utf-8")
+    assert release.is_packaged_source(source)
+    monkeypatch.setattr(cli, "__file__", str(module))
+    monkeypatch.setattr(cli, "browser_mode", lambda: "live")
+    monkeypatch.setattr(cli, "ensure_chrome", lambda: pytest.fail("unverified app must not start Chrome"))
+    monkeypatch.setattr(cli, "lifecycle", lambda *_: pytest.fail("unverified app must not start"))
+    monkeypatch.setattr(preflight, "collect_live_preflight", lambda **kwargs: {
+        "ready_for_live_e2e": False, "remediation": [], "submit_capability": False
+    })
+    monkeypatch.setattr(bootstrap, "open_bootstrap", lambda *args: {
+        "ok": True, "opened": True
+    })
+    monkeypatch.setattr(cli, "open_ui", lambda *_: pytest.fail("unverified UI must not open"))
+
+    result = cli.launch_consumer(tmp_path / "runtime", 9344)
+    assert result["bootstrap_reason"] == "release_unverified"
+    assert result["submit_capability"] is False
+
+
 def test_consumer_launch_uses_final_healthy_service_after_start_timeout(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "browser_mode", lambda: "live")

@@ -186,6 +186,19 @@ def test_packaged_app_never_invokes_legacy_git_updater(tmp_path, monkeypatch):
     }
 
 
+def test_unverified_packaged_app_never_invokes_legacy_git_updater(tmp_path, monkeypatch):
+    _queue, _worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {"status": "unverified", "source_sha256": ""}
+    monkeypatch.setattr("executor.autonomy.supervisor.is_packaged_source", lambda _: True)
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.spawn_update",
+        lambda **_: pytest.fail("unverified packaged app must not launch Git updater"),
+    )
+    assert supervisor.begin_update(9344) == {
+        "ok": False, "status": "denied", "reason": "packaged_update_not_ready",
+    }
+
+
 def test_updater_requires_clean_main_and_expected_origin(tmp_path):
     repo = tmp_path / "repo"
     tracked = _init_git_repo(repo)

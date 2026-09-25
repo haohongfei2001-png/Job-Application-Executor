@@ -18,7 +18,7 @@ from .diagnostics import collect_diagnostics
 from .loopback_http import LoopbackHTTPServer
 from .manager import ManagerController, safe_task_view
 from .queue import TaskQueue, TaskSpec, private_dir
-from .release import read_release_identity
+from .release import is_packaged_source, read_release_identity
 from .updater import reconciled_update_state, safe_to_update, spawn_update
 from .worker import Worker
 
@@ -300,7 +300,8 @@ class Supervisor:
                 # A packaged release has no trusted Git checkout. Until the
                 # staged release updater is ready, never route it to the old
                 # in-place Git writer.
-                if self.release_identity.get("status") == "verified":
+                if (self.release_identity.get("status") == "verified"
+                        or is_packaged_source(Path(__file__).resolve().parents[2])):
                     return {
                         "ok": False,
                         "status": "denied",

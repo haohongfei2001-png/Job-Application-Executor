@@ -19,6 +19,16 @@ from pathlib import Path
 MANIFEST_NAME = "release-source-manifest.json"
 
 
+def is_packaged_source(root: str | Path) -> bool:
+    """Recognize an installed source even if its manifest was removed."""
+    root = Path(root).expanduser()
+    manifest = root / MANIFEST_NAME
+    return (manifest.exists() or manifest.is_symlink()
+            or (root.name == "release" and root.parent.name == "Resources"
+                and root.parent.parent.name == "Contents"
+                and root.parent.parent.parent.name.endswith(".app")))
+
+
 def source_manifest(root: str | Path) -> dict:
     root = Path(root).expanduser().resolve()
     package = root / "executor"

@@ -112,11 +112,11 @@ def launch_consumer(root, port):
 
     # A packaged app with a broken source manifest must not start any owned
     # browser or service. Development checkouts have no release manifest.
-    from .release import MANIFEST_NAME, read_release_identity, verify_runtime_candidate
+    from .release import is_packaged_source, read_release_identity, verify_runtime_candidate
     source = Path(__file__).resolve().parents[2]
     identity = read_release_identity(source)
     expected = identity.get("source_sha256") if identity.get("status") == "verified" else ""
-    packaged = (source / MANIFEST_NAME).exists() or (source / MANIFEST_NAME).is_symlink()
+    packaged = is_packaged_source(source)
     app_runtime = source.parent / "runtime"
     if packaged and (app_runtime.exists() or app_runtime.is_symlink()) and not verify_runtime_candidate(app_runtime, source):
         expected = ""
