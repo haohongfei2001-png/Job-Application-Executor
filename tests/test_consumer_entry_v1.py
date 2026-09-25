@@ -922,3 +922,57 @@ def test_dashboard_uses_consumer_facing_status_language():
     assert "/ui/api/diagnostics" in DASHBOARD_HTML
     assert "/ui/api/update" in DASHBOARD_HTML
     assert "otp_in_flight" in DASHBOARD_HTML
+
+
+def test_macos_rollback_refuses_unhealthy_retained_app_before_moving_current(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    previous = apps / ".AI 投递经理.app.previous"
+    current_manifest = (app / "Contents" / "Resources" / "release" / "release-source-manifest.json").read_bytes()
+    monkeypatch.setattr(consumer, "_candidate_starts", lambda *_: False)
+
+    result = rollback_macos_app(apps)
+
+    assert result["ok"] is False
+    assert result["reason"] == "rollback_unhealthy"
+    assert (app / "Contents" / "Resources" / "release" / "release-source-manifest.json").read_bytes() == current_manifest
+    assert previous.is_dir()
+    assert not (apps / ".AI 投递经理.app.failed").exists()
+
+
+def test_macos_rollback_restores_current_if_old_app_fails_after_activation(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    marker = app / "Contents" / "current.txt"
+    marker.write_text("keep", encoding="utf-8")
+    real_start = consumer._candidate_starts
+    attempts = 0
+
+    def fail_after_move(runtime_python, source):
+        nonlocal attempts
+        attempts += 1
+        return real_start(runtime_python, source) if attempts == 1 else False
+
+    monkeypatch.setattr(consumer, "_candidate_starts", fail_after_move)
+    result = rollback_macos_app(apps)
+
+    assert attempts == 2
+    assert result["ok"] is False
+    assert result["reason"] == "rollback_post_activation_unhealthy"
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert (apps / ".AI 投递经理.app.previous").is_dir()
+    assert not (apps / ".AI 投递经理.app.failed").exists()

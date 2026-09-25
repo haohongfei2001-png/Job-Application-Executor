@@ -478,6 +478,19 @@ def rollback_macos_app(destination: str | Path) -> dict:
             "reason": "rollback_unavailable",
             "message": "回退副本不完整或路径已被占用；没有修改当前应用。",
         }
+    # A retained self-contained app may have intact files but fail to start.
+    # Check it before moving the currently working app. Legacy bundles have no
+    # private runtime, so retain their existing identity-only rollback path.
+    previous_release = previous / "Contents" / "Resources" / "release"
+    previous_runtime = previous / "Contents" / "Resources" / "runtime"
+    if previous_runtime.exists() and not _candidate_starts(
+        previous_runtime / "bin" / "python", previous_release
+    ):
+        return {
+            "ok": False,
+            "reason": "rollback_unhealthy",
+            "message": "回退副本无法启动；当前应用保持不变。",
+        }
     try:
         app.rename(failed)
     except OSError:
@@ -497,6 +510,27 @@ def rollback_macos_app(destination: str | Path) -> dict:
             reason = "manual_recovery_required"
             message = "两个版本仍保留在原位置与失败位置，需要人工恢复。"
         return {"ok": False, "reason": reason, "message": message}
+    # The final bundle path can change virtualenv behavior. Restore the newer
+    # app if the old one stops responding after activation.
+    active_release = app / "Contents" / "Resources" / "release"
+    active_runtime = app / "Contents" / "Resources" / "runtime"
+    if active_runtime.exists() and not _candidate_starts(
+        active_runtime / "bin" / "python", active_release
+    ):
+        try:
+            app.rename(previous)
+            failed.rename(app)
+        except OSError:
+            return {
+                "ok": False,
+                "reason": "rollback_recovery_required",
+                "message": "回退版本启用后无法启动；两个版本已保留，需要人工核对恢复。",
+            }
+        return {
+            "ok": False,
+            "reason": "rollback_post_activation_unhealthy",
+            "message": "回退版本启用后无法启动；已恢复原应用。",
+        }
     return {
         "ok": True,
         "restored": True,
