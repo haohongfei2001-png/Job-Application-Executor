@@ -447,6 +447,18 @@ def install_macos_app(
                 "rollback_path": str(rollback) if rollback.exists() else None,
                 "message": "启用后健康检查未通过，两个版本已保留，需要人工核对恢复。",
             }
+        if replaced:
+            restored_release = app / "Contents" / "Resources" / "release"
+            restored_runtime = app / "Contents" / "Resources" / "runtime"
+            if (not _trusted_bundle(app)
+                    or (restored_runtime.exists() and not _candidate_starts(
+                        restored_runtime / "bin" / "python", restored_release))):
+                return {
+                    "ok": False,
+                    "reason": "post_activation_recovery_required",
+                    "failed_candidate_path": str(failed),
+                    "message": "新版本和已恢复的旧版均未通过健康检查；两个版本已保留，需要人工核对恢复。",
+                }
         return {
             "ok": False,
             "reason": "post_activation_unhealthy",

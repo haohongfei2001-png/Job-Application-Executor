@@ -489,17 +489,48 @@ def test_macos_post_activation_health_failure_restores_previous_bundle(tmp_path,
     def fail_only_after_activation(runtime_python, source):
         nonlocal attempts
         attempts += 1
-        return real_start(runtime_python, source) if attempts == 1 else False
+        return real_start(runtime_python, source) if attempts != 2 else False
 
     monkeypatch.setattr(consumer, "_candidate_starts", fail_only_after_activation)
     result = install_macos_app(repo, destination=apps, platform="darwin")
-    assert attempts == 2
+    assert attempts == 3
     assert result["ok"] is False
     assert result["reason"] == "post_activation_unhealthy"
     assert marker.read_text(encoding="utf-8") == "preserve"
     assert (apps / ".AI 投递经理.app.failed").is_dir()
     assert not (apps / ".AI 投递经理.app.previous").exists()
     assert verify_source_candidate(app / "Contents" / "Resources" / "release")
+
+
+
+def test_failed_candidate_does_not_claim_healthy_rollback_when_restored_app_fails(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    marker = app / "Contents" / "known-good.txt"
+    marker.write_text("preserve", encoding="utf-8")
+    calls = 0
+    real_start = consumer._candidate_starts
+
+    def fail_after_staging(runtime_python, source):
+        nonlocal calls
+        calls += 1
+        return real_start(runtime_python, source) if calls == 1 else False
+
+    monkeypatch.setattr(consumer, "_candidate_starts", fail_after_staging)
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert calls == 3
+    assert result["ok"] is False
+    assert result["reason"] == "post_activation_recovery_required"
+    assert marker.read_text(encoding="utf-8") == "preserve"
+    assert result["failed_candidate_path"] == str(apps / ".AI 投递经理.app.failed")
+    assert (apps / ".AI 投递经理.app.failed").is_dir()
+    assert not (apps / ".AI 投递经理.app.previous").exists()
 
 
 def test_first_install_post_activation_failure_keeps_candidate_for_diagnosis(tmp_path, monkeypatch):
