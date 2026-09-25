@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-08 sole writer PR #20 remains active. Exact head 834c8976d0866b42fd2f21897e7fda7e907f9f7d passed foundation, Ubuntu and hosted Mac CI 36182345383. The next coherent candidate fences all direct legacy Git updater entrypoints from packaged app sources before Git or mutable runtime access, including missing-manifest app layouts; targeted regression is added and exact-head CI is pending. Continue independent base-Python/dependency provenance, transactional data migration and rollback, hosted Mac interaction, and automatable DFG-002/008 debt. External/private and final-click evidence remain deferred; consumer certification is NOT_CERTIFIED and final submit remains user-only.",
+  "next_action": "JCR-08 sole writer PR #20 remains active. Exact head ca312b5a3331a232b4e6703f55b7fccb2bcf1f01 passed foundation, Ubuntu and hosted Mac CI 36188351496. The next coherent candidate prevents a missing or damaged installed-app manifest from falling back to host Git for its displayed version; regression verifies no Git invocation. Continue independent base-Python/dependency provenance, transactional data migration and rollback, hosted Mac interaction, and automatable DFG-002/008 debt. External/private and final-click evidence remain deferred; consumer certification is NOT_CERTIFIED and final submit remains user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

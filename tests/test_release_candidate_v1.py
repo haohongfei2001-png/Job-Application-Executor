@@ -232,6 +232,22 @@ def test_recovery_version_uses_verified_packaged_source(tmp_path):
     assert _version(candidate) == "unknown"
 
 
+def test_packaged_version_without_manifest_never_invokes_git(tmp_path, monkeypatch):
+    from executor.autonomy import bootstrap
+
+    source = tmp_path / "AI投递经理.app" / "Contents" / "Resources" / "release"
+    source.mkdir(parents=True)
+    invoked = []
+
+    def forbidden_git(*args, **kwargs):
+        invoked.append((args, kwargs))
+        raise AssertionError("installed app must not invoke Git")
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", forbidden_git)
+    assert bootstrap._version(source) == "unknown"
+    assert invoked == []
+
+
 def test_release_candidate_rejects_added_file_and_symlink(tmp_path):
     repo = _source(tmp_path)
     candidate = tmp_path / "candidate"

@@ -43,6 +43,11 @@ def _version(root: str | Path | None = None) -> str:
     identity = read_release_identity(source)
     if identity.get("status") == "verified":
         return identity["source_sha256"][:12]
+    # An installed app with a missing or damaged manifest is unverified. Never
+    # infer its identity from Git metadata on the host or invoke Git for it.
+    from .release import is_packaged_source
+    if is_packaged_source(source):
+        return "unknown"
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=source,
