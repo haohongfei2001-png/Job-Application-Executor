@@ -393,6 +393,14 @@ def install_macos_app(
             "reason": "rollback_pending",
             "message": "旧版应用或回退副本需要先核对；现有应用没有被替换。",
         }
+    failed = apps_dir / f".{APP_NAME}.app.failed"
+    if failed.exists() or failed.is_symlink():
+        shutil.rmtree(staging)
+        return {
+            "ok": False,
+            "reason": "failed_candidate_pending",
+            "message": "已有待诊断的失败版本；没有替换或删除任何应用。",
+        }
     replaced = app.exists()
     try:
         if replaced:
@@ -416,6 +424,36 @@ def install_macos_app(
                 "新版本未启用，原应用保持可用。"
                 if restored else "新版本未启用；旧版保存在回退位置，需要人工恢复。"
             ),
+        }
+    # Recheck at the final bundle path: moving a virtualenv can invalidate
+    # interpreter/framework references even when staging health succeeded.
+    active_release = app / "Contents" / "Resources" / "release"
+    active_runtime = app / "Contents" / "Resources" / "runtime"
+    if (not _trusted_bundle(app)
+            or not _candidate_starts(active_runtime / "bin" / "python", active_release)):
+        try:
+            app.rename(failed)
+            if replaced:
+                rollback.rename(app)
+        except OSError:
+            if failed.exists() and not app.exists():
+                try:
+                    failed.rename(app)
+                except OSError:
+                    pass
+            return {
+                "ok": False,
+                "reason": "post_activation_recovery_required",
+                "rollback_path": str(rollback) if rollback.exists() else None,
+                "message": "启用后健康检查未通过，两个版本已保留，需要人工核对恢复。",
+            }
+        return {
+            "ok": False,
+            "reason": "post_activation_unhealthy",
+            "rollback_path": None,
+            "failed_candidate_path": str(failed),
+            "message": ("新版本启用后未通过健康检查；已恢复上一版本。"
+                        if replaced else "新版本启用后未通过健康检查；失败候选已保留供诊断。"),
         }
     return {
         "ok": True,

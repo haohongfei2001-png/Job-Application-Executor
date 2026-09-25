@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from executor.autonomy import bootstrap, cli, preflight, release
+from executor.autonomy import bootstrap, cli, consumer, preflight, release
 from executor.autonomy.consumer import (_candidate_starts, install_macos_app,
                                         rollback_macos_app)
 from executor.autonomy.loopback_http import LoopbackHTTPServer
@@ -470,6 +470,61 @@ def test_packaged_app_runtime_survives_checkout_removal_and_rejects_tamper(tmp_p
         handle.write(b"synthetic-tamper")
     assert not verify_runtime_candidate(runtime, release)
     assert rollback_macos_app(apps)["reason"] == "rollback_unavailable"
+
+
+def test_macos_post_activation_health_failure_restores_previous_bundle(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    marker = app / "Contents" / "known-good.txt"
+    marker.write_text("preserve", encoding="utf-8")
+    real_start = consumer._candidate_starts
+    attempts = 0
+
+    def fail_only_after_activation(runtime_python, source):
+        nonlocal attempts
+        attempts += 1
+        return real_start(runtime_python, source) if attempts == 1 else False
+
+    monkeypatch.setattr(consumer, "_candidate_starts", fail_only_after_activation)
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert attempts == 2
+    assert result["ok"] is False
+    assert result["reason"] == "post_activation_unhealthy"
+    assert marker.read_text(encoding="utf-8") == "preserve"
+    assert (apps / ".AI 投递经理.app.failed").is_dir()
+    assert not (apps / ".AI 投递经理.app.previous").exists()
+    assert verify_source_candidate(app / "Contents" / "Resources" / "release")
+
+
+def test_first_install_post_activation_failure_keeps_candidate_for_diagnosis(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    attempts = 0
+    real_start = consumer._candidate_starts
+
+    def fail_only_after_activation(runtime_python, source):
+        nonlocal attempts
+        attempts += 1
+        return real_start(runtime_python, source) if attempts == 1 else False
+
+    monkeypatch.setattr(consumer, "_candidate_starts", fail_only_after_activation)
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert attempts == 2
+    assert result["reason"] == "post_activation_unhealthy"
+    assert result["ok"] is False
+    assert not (apps / "AI 投递经理.app").exists()
+    assert (apps / ".AI 投递经理.app.failed").is_dir()
+    assert not (apps / ".AI 投递经理.app.previous").exists()
 
 
 def test_macos_candidate_rejects_dependency_drift_without_replacing_old_app(tmp_path):
