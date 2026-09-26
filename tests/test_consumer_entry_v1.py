@@ -432,8 +432,21 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
             f"http://127.0.0.1:{service_port}/ui-login?ticket="
         )
         assert cli.lifecycle("health", runtime, service_port)["ok"] is True
-        assert len(children) == 2
-        assert all(command[1:3] == ["-I", "-B"] for command, _ in children)
+        # The supervisor is a child of the independent recovery process, so
+        # this parent's Popen recorder cannot see it. Read its real PID/argv.
+        assert len(children) == 1
+        assert children[0][0][1:3] == ["-I", "-B"]
+        service = json.loads((runtime / "service.json").read_text())
+        assert service["pid"] != process.pid
+        assert service["port"] == service_port
+        command = subprocess.run(
+            ["ps", "-ww", "-p", str(service["pid"]), "-o", "command="],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        assert shlex.split(command)[1:4] == ["-I", "-B", "-c"]
+        assert "executor.autonomy.cli" in command
+        assert str(runtime.resolve()) in command
+        assert str(Path(cli.__file__).resolve().parents[2]) in command
         assert not canary.exists()
     finally:
         cli.lifecycle("stop", runtime, service_port)
