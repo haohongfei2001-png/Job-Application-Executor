@@ -112,7 +112,12 @@ def _minimal_source(repo):
         (Path(__file__).resolve().parents[1] / "executor" / "autonomy" / "loopback_http.py")
         .read_text(encoding="utf-8"), encoding="utf-8"
     )
-    (repo / "requirements.txt").write_text(f"pydantic=={version('pydantic')}\n", encoding="utf-8")
+    # The candidate exercises the release lock, including transitive pins.
+    # A lone direct package is intentionally not a valid packaged release.
+    (repo / "requirements.txt").write_text(
+        (Path(__file__).resolve().parents[1] / "requirements.txt").read_text(),
+        encoding="utf-8",
+    )
 
 
 def _ready_preflight(*, supervisor_running):
@@ -1258,3 +1263,30 @@ def test_macos_update_proves_journal_compatibility_before_activation(
     # The transaction releases the fence after success or refusal.
     with ProcessLock(state / "worker.lock"):
         pass
+
+
+def test_candidate_with_open_dependency_graph_preserves_installed_app(tmp_path):
+    from executor.autonomy.release import read_release_identity
+
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    installed_source = app / "Contents" / "Resources" / "release"
+    known_identity = read_release_identity(installed_source)
+    assert known_identity["status"] == "verified"
+
+    # The current interpreter can import Pydantic and all its dependencies.
+    # Omitting their pins must nevertheless refuse this intact source candidate.
+    (repo / "requirements.txt").write_text(
+        f"pydantic=={version('pydantic')}\n", encoding="utf-8"
+    )
+    refused = install_macos_app(repo, destination=apps, platform="darwin")
+    assert refused["ok"] is False
+    assert refused["reason"] == "candidate_start_failed"
+    assert read_release_identity(installed_source) == known_identity
+    assert not list(apps.glob("*.staging.app"))
