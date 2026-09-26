@@ -38,6 +38,18 @@ def test_local_http_bind_does_not_resolve_hostname(monkeypatch):
         assert server.server_port > 0
 
 
+@pytest.fixture(autouse=True)
+def isolated_packaged_task_state(tmp_path, monkeypatch):
+    # Consumer app transactions must never share the hosted runner's HOME.
+    # Keep the production packaged path calculation, with a synthetic home.
+    from executor.autonomy import queue
+
+    actual = queue.default_runtime
+    monkeypatch.setattr(queue, "default_runtime",
+                        lambda source, *, home=None: actual(
+                            source, home=home if home is not None else tmp_path / "synthetic-home"))
+
+
 FAKE_CANDIDATE_CLI = """from __future__ import annotations
 VERSION = 'fixture'
 
@@ -1107,3 +1119,142 @@ def test_macos_rollback_refuses_a_live_task_state_owner(tmp_path):
     assert result["ok"] is False
     assert result["reason"] == "task_state_in_use"
     assert not (apps / "AI 投递经理.app").exists()
+
+
+def test_macos_install_refuses_live_task_state_before_staging(tmp_path):
+    from executor.autonomy.worker import ProcessLock
+
+    apps = tmp_path / "Applications"
+    state = tmp_path / "synthetic-state"
+    with ProcessLock(state / "worker.lock"):
+        result = install_macos_app(
+            tmp_path / "missing-source", destination=apps,
+            platform="darwin", task_state_root=state)
+    assert result["reason"] == "task_state_in_use"
+    assert not (apps / "AI 投递经理.app").exists()
+    assert not (apps / ".AI 投递经理.app.installing").exists()
+
+
+@pytest.mark.parametrize("name", [
+    "tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm", "worker.lock",
+])
+def test_macos_install_refuses_aliased_task_state_without_touching_it(tmp_path, name):
+    apps = tmp_path / "Applications"
+    state = tmp_path / "synthetic-state"
+    state.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("synthetic untouched")
+    (state / name).symlink_to(outside)
+    result = install_macos_app(
+        tmp_path / "missing-source", destination=apps,
+        platform="darwin", task_state_root=state)
+    assert result["reason"] == "task_state_unavailable"
+    assert outside.read_text() == "synthetic untouched"
+    assert not (apps / ".AI 投递经理.app.installing").exists()
+
+
+@pytest.mark.parametrize("destructive", [False, True])
+def test_macos_update_proves_journal_compatibility_before_activation(
+    tmp_path, monkeypatch, destructive
+):
+    import shutil
+    import sqlite3
+    from contextlib import closing
+    from executor.autonomy.worker import ProcessLock
+
+    repo = tmp_path / "Job-Application-Executor"
+    repo.mkdir()
+    actual = Path(__file__).resolve().parents[1]
+    shutil.copytree(actual / "executor", repo / "executor",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copy2(actual / "requirements.txt", repo / "requirements.txt")
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    apps = tmp_path / "Applications"
+    state = tmp_path / "synthetic-state"
+    assert install_macos_app(
+        repo, destination=apps, platform="darwin", task_state_root=state)["ok"]
+    app = apps / "AI 投递经理.app"
+    previous = apps / ".AI 投递经理.app.previous"
+    release = app / "Contents" / "Resources" / "release"
+    before_manifest = (release / "release-source-manifest.json").read_bytes()
+    marker = app / "Contents" / "known-good.txt"
+    marker.write_text("preserve")
+
+    # Keep a real committed WAL open. The installed candidate must see this
+    # task while its health process continues to use an empty scratch journal.
+    with closing(sqlite3.connect(state / "tasks.sqlite3")) as db:
+        db.executescript("""
+            CREATE TABLE tasks (
+                task_id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL,
+                spec TEXT NOT NULL, stage TEXT NOT NULL, checkpoint TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, owner TEXT, lease_until REAL,
+                next_run REAL NOT NULL DEFAULT 0, blocker TEXT,
+                details TEXT NOT NULL DEFAULT '{}', created REAL NOT NULL, updated REAL NOT NULL);
+            CREATE TABLE events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, at REAL,
+                kind TEXT NOT NULL, stage TEXT NOT NULL);
+        """)
+        assert db.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        db.execute("PRAGMA wal_autocheckpoint=0")
+        db.execute(
+            "INSERT INTO tasks(task_id,idempotency_key,spec,stage,checkpoint,blocker,created,updated) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            ("synthetic-task", "synthetic-key", '{"synthetic":true}', "BLOCKED",
+             "FORM_FILLED", "unknown_outcome", 1, 2))
+        db.execute("INSERT INTO events(task_id,at,kind,stage) VALUES(?,?,?,?)",
+                   ("synthetic-task", 2, "unknown_outcome", "BLOCKED"))
+        db.commit()
+        before = (db.execute("SELECT * FROM tasks").fetchall(),
+                  db.execute("SELECT * FROM events").fetchall())
+        assert (state / "tasks.sqlite3-wal").stat().st_size > 0
+
+        if destructive:
+            candidate_queue = repo / "executor" / "autonomy" / "queue.py"
+            with candidate_queue.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    "\n_original_init = TaskQueue.__init__\n"
+                    "def _destructive_init(self, root=RUNTIME, **kwargs):\n"
+                    "    _original_init(self, root, **kwargs)\n"
+                    "    with sqlite3.connect(Path(root)/'tasks.sqlite3') as db:\n"
+                    "        db.execute(\"UPDATE tasks SET blocker=NULL,stage='DISCOVERED'\")\n"
+                    "TaskQueue.__init__ = _destructive_init\n")
+
+        starts = []
+        real_start = consumer._candidate_starts
+
+        def checked_start(runtime_python, source):
+            # Both staging and final-path health must stay inside the fence.
+            with pytest.raises(RuntimeError, match="another local worker"):
+                with ProcessLock(state / "worker.lock"):
+                    pytest.fail("updater lost the daemon lock")
+            starts.append(source)
+            return real_start(runtime_python, source)
+
+        monkeypatch.setattr(consumer, "_candidate_starts", checked_start)
+        result = install_macos_app(
+            repo, destination=apps, platform="darwin", task_state_root=state)
+        assert (db.execute("SELECT * FROM tasks").fetchall(),
+                db.execute("SELECT * FROM events").fetchall()) == before
+        assert "revision" not in {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
+        assert not (state / "auth.token").exists()
+        assert not (state / "service.json").exists()
+        assert not (state / "tasks.sqlite3.pre-jcr01.sqlite3").exists()
+        if destructive:
+            assert result["reason"] == "candidate_state_incompatible"
+            assert len(starts) == 1
+            assert marker.read_text() == "preserve"
+            assert (release / "release-source-manifest.json").read_bytes() == before_manifest
+            assert not previous.exists()
+        else:
+            assert result["ok"] is True
+            assert result["replaced"] is True
+            assert len(starts) == 2
+            assert (previous / "Contents" / "known-good.txt").read_text() == "preserve"
+            assert (previous / "Contents" / "Resources" / "release" /
+                    "release-source-manifest.json").read_bytes() == before_manifest
+        assert not (apps / ".AI 投递经理.app.installing").exists()
+    # The transaction releases the fence after success or refusal.
+    with ProcessLock(state / "worker.lock"):
+        pass

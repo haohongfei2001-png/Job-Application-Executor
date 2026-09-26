@@ -289,6 +289,7 @@ def install_macos_app(
     *,
     destination: str | Path | None = None,
     platform: str | None = None,
+    task_state_root: str | Path | None = None,
 ) -> dict:
     if (platform or sys.platform) != "darwin":
         return _install_macos_app_unlocked(repo_root, destination=destination, platform=platform)
@@ -303,7 +304,22 @@ def install_macos_app(
         return {"ok": False, "reason": "update_lock_unavailable",
                 "message": "无法安全锁定应用目录；没有修改当前应用。"}
     try:
-        return _install_macos_app_unlocked(repo_root, destination=apps_dir, platform=platform)
+        from .queue import default_runtime
+        from .state_compatibility import task_state_guard
+
+        state_root = (Path(task_state_root).expanduser() if task_state_root is not None
+                      else default_runtime(apps_dir / f"{APP_NAME}.app" / "Contents" / "Resources" / "release"))
+        try:
+            with task_state_guard(state_root):
+                return _install_macos_app_unlocked(
+                    repo_root, destination=apps_dir, platform=platform,
+                    task_state_root=state_root)
+        except BlockingIOError:
+            return {"ok": False, "reason": "task_state_in_use",
+                    "message": "任务服务仍在使用当前状态；请先在应用中停止服务，当前应用保持不变。"}
+        except (OSError, ValueError):
+            return {"ok": False, "reason": "task_state_unavailable",
+                    "message": "无法安全核对任务状态；当前应用保持不变。"}
     finally:
         os.close(lock_fd)
 
@@ -313,6 +329,7 @@ def _install_macos_app_unlocked(
     *,
     destination: str | Path | None = None,
     platform: str | None = None,
+    task_state_root: Path | None = None,
 ) -> dict:
     """Stage a source-and-runtime snapshot, then atomically activate the Mac app."""
     current_platform = platform or sys.platform
@@ -440,6 +457,20 @@ def _install_macos_app_unlocked(
             "reason": "failed_candidate_pending",
             "message": "已有待诊断的失败版本；没有替换或删除任何应用。",
         }
+    # Health uses an empty temporary journal. Separately prove the staged
+    # queue can initialize a WAL-aware copy of the actual shared journal.
+    # The daemon lock remains held until activation/recovery has finished.
+    from .state_compatibility import task_state_candidate_compatible
+
+    if (task_state_root is None or not task_state_candidate_compatible(
+            runtime / "bin" / "python", release, task_state_root)):
+        shutil.rmtree(staging)
+        return {
+            "ok": False,
+            "reason": "candidate_state_incompatible",
+            "message": "新版本无法完整保留现有任务状态；现有应用和任务保持不变。",
+        }
+
     replaced = app.exists()
     try:
         if replaced:

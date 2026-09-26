@@ -1,4 +1,4 @@
-"""Read-only rollback compatibility against an isolated SQLite backup.
+"""Read-only release compatibility against an isolated SQLite backup.
 
 No candidate service or worker is started with applicant task state. Only the
 candidate queue's schema initializer runs against the disposable copy.
@@ -23,7 +23,7 @@ def _state_paths(root: Path):
 
 @contextmanager
 def task_state_guard(root: str | Path):
-    """Share the daemon's lock through the entire app rollback transaction."""
+    """Share the daemon's lock through the entire app install or rollback transaction."""
     root = Path(root).expanduser()
     if root.is_symlink():
         raise ValueError("task_state_path_invalid")
