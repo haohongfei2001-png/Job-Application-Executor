@@ -105,7 +105,7 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
         def __init__(self, *_):
             self.available = True
 
-    monkeypatch.setattr(diagnostics, "DeepSeekMapper", FakeMapper)
+    supervisor.manager.provider = FakeMapper()
     supervisor.release_identity = {"status": "verified", "source_sha256": "a" * 64}
     report = diagnostics.collect_diagnostics(
         supervisor,
@@ -1440,3 +1440,50 @@ def test_packaged_provenance_refuses_manifest_switched_during_runtime_verificati
     assert report["runtime_verified_now"] is False
     assert report["runtime_sha256"] == ""
     assert report["requirements_sha256"] == ""
+
+
+@pytest.mark.parametrize("available", [True, False, "fault"])
+def test_diagnostic_provider_state_never_loads_credentials_or_starts_processes(
+    tmp_path, monkeypatch, available
+):
+    candidate, _runtime, source, _payload = _diagnostic_packaged_fixture(tmp_path)
+    queue, _worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {
+        "status": "verified", "source_sha256": source["source_sha256"],
+    }
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    monkeypatch.setattr(diagnostics.browser, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(diagnostics.browser, "_alive", lambda: False)
+    from executor import resolver
+    monkeypatch.setattr(
+        resolver, "_keychain_key",
+        lambda *_args, **_kwargs: pytest.fail("diagnostics must not read Keychain"),
+    )
+    class ExistingProvider:
+        @property
+        def available(self):
+            if available == "fault":
+                raise RuntimeError("PRIVATE_PROVIDER_FAILURE_CANARY")
+            return available
+
+        def decide(self, *_args, **_kwargs):
+            pytest.fail("diagnostics must never invoke the model")
+
+    supervisor.manager.provider = ExistingProvider()
+    before = (queue.tasks(), queue.recent_events(1000))
+    report = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
+    assert report["system"]["deepseek_available"] is (available is True)
+    assert report["system"]["provider_state_basis"] == "loaded_configuration"
+    assert report["recovery"] == (
+        {"reason": "none", "action": "none"} if available is True else
+        {"reason": "provider_unavailable", "action": "check_provider_settings"}
+    )
+    assert report["loaded_source"]["sha256"] == source["source_sha256"]
+    assert report["packaged_release"]["loaded_source_matches_disk"] is True
+    assert report["packaged_release"]["runtime_verified_now"] is True
+    assert before == (queue.tasks(), queue.recent_events(1000))
+    serialized = json.dumps(report)
+    assert "PRIVATE_PROVIDER_FAILURE_CANARY" not in serialized
+    assert "very-private-profile" not in serialized
+    assert str(tmp_path) not in serialized
+    assert report["safety"]["submit_capability"] is False

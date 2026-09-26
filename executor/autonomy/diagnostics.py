@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from .. import browser
-from ..resolver import DeepSeekMapper
 from .manager import safe_task_view
 from .release import (is_packaged_source, read_release_identity,
                       verify_runtime_candidate, RUNTIME_MANIFEST_NAME)
@@ -176,7 +175,10 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
             pass
 
     try:
-        deepseek_available = DeepSeekMapper(supervisor.worker.settings).available
+        # Diagnostics observe the service's already-loaded provider. Building
+        # another mapper would re-read Keychain secrets and can prompt/block
+        # merely because the user asked to preview a copy-safe report.
+        deepseek_available = bool(supervisor.manager.provider.available)
     except Exception:
         deepseek_available = False
 
@@ -231,6 +233,7 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
             "browser_mode": browser_mode_value,
             "cdp_alive": cdp_alive,
             "deepseek_available": bool(deepseek_available),
+            "provider_state_basis": "loaded_configuration",
             "otp_waiting_tasks": len(waiting),
             "otp_buffered_tasks": buffered,
         },
