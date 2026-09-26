@@ -207,7 +207,7 @@ def _supervisor(queue):
     from types import SimpleNamespace
     from executor.autonomy.supervisor import Supervisor
     from executor.autonomy.manager import safe_task_view
-    return Supervisor(queue, worker=SimpleNamespace(),
+    return Supervisor(queue, worker=SimpleNamespace(active=False),
         manager=SimpleNamespace(state=lambda: {"tasks": [safe_task_view(task) for task in queue.tasks()]}),
         token="synthetic-private-service-token-0123456789")
 
@@ -311,6 +311,17 @@ def test_real_authenticated_field_recovery_http_keeps_journal_and_denies_wrong_c
             response = client.getresponse();assert response.status == 303
             cookie = response.getheader("Set-Cookie");assert "HttpOnly" in cookie;response.read()
             headers = {"Cookie": cookie.split(";", 1)[0]}
+            # The real dashboard requires a functioning state response before
+            # an observation button can exist. Keep the fixture worker contract
+            # complete and make a missing/failed state response fail directly.
+            client.request("GET", "/ui/api/state", headers=headers)
+            response = client.getresponse();assert response.status == 200
+            state = json.loads(response.read())
+            assert state["worker_active"] is False
+            assert len(state["tasks"]) == 1
+            assert state["tasks"][0]["task_id"] == tid
+            assert state["tasks"][0]["stage"] == "BLOCKED"
+            assert state["tasks"][0]["blocker"] == "unknown_outcome"
             client.request("GET", "/ui/api/observe?task_id=" + tid, headers=headers)
             response = client.getresponse();assert response.status == 200;result = json.loads(response.read())
             assert result["field_actions"]["dom_readback_unverified"] == 1
