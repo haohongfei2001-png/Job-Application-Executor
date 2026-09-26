@@ -242,6 +242,22 @@ with sync_playwright() as playwright:
         page.keyboard.press('Enter')
         expect(page.locator('#diagnostics-dialog')).to_be_visible()
         expect(page.locator('#diagnostics-report')).not_to_be_empty()
+        actual_report=json.loads(page.locator('#diagnostics-report').inner_text())
+        actual_payload=actual_report['packaged_release']
+        assert actual_report['repository']['branch']=='packaged'
+        assert actual_report['repository']['worktree_clean'] is None
+        assert actual_report['loaded_source']['verified_at_start'] is True
+        assert actual_payload['source_verified_now'] is True
+        assert actual_payload['source_sha256']==actual_report['loaded_source']['sha256']
+        assert actual_payload['loaded_source_matches_disk'] is True
+        assert actual_payload['runtime_verified_now'] is True
+        assert len(actual_payload['runtime_sha256'])==64
+        assert len(actual_payload['requirements_sha256'])==64
+        assert actual_payload['interpreter_owned'] is True
+        assert actual_payload['verification_scope']=='payload_integrity_only'
+        assert actual_payload['signed_distribution_certified'] is False
+        assert actual_report['safety']['submit_capability'] is False
+        assert actual_report['safety']['final_click_actor']=='user'
         probe_phase('keyboard_diagnostics_close')
         close=page.locator('#diagnostics-close')
         close.focus()

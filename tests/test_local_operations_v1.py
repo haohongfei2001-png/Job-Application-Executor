@@ -1259,3 +1259,184 @@ def test_retired_cli_never_touches_supplied_lock_or_restart_flags(tmp_path, monk
         "--port", "9344", "--lock-fd", "987654", "--restart-only",
     ]) == 1
     assert list(tmp_path.iterdir()) == []
+
+
+# The production diagnostics must work without a checkout or subprocess.
+# These are real manifest/byte fixtures, not mocked integrity decisions.
+def _diagnostic_packaged_fixture(tmp_path):
+    from executor.autonomy import release
+
+    source = tmp_path / "source"
+    package = source / "executor"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "main.py").write_text("VALUE = 'synthetic-release'\n")
+    (source / "requirements.txt").write_text("synthetic-package==1.0\n")
+    root = tmp_path / "Synthetic Manager.app" / "Contents" / "Resources"
+    candidate = root / "release"
+    source_identity = release.copy_source_candidate(source, candidate)
+    runtime = root / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    # If diagnostics executed this fake interpreter, the test would fail.
+    (runtime / "bin" / "python").write_text("#!/bin/sh\nexit 99\n")
+    (runtime / "bin" / "python").chmod(0o700)
+    (runtime / "owned-dependency.py").write_text("VALUE = 'synthetic-owned-dependency'\n")
+    runtime_identity = release.runtime_manifest(runtime, candidate)
+    (runtime / release.RUNTIME_MANIFEST_NAME).write_text(json.dumps(runtime_identity))
+    return candidate, runtime, source_identity, runtime_identity
+
+
+def _diagnostics_forbid_git_and_processes(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("packaged diagnostics must never invoke Git or a subprocess")
+
+    monkeypatch.setattr(diagnostics, "_git", forbidden)
+    monkeypatch.setattr(diagnostics.subprocess, "run", forbidden)
+
+
+def test_packaged_diagnostics_use_real_manifest_identity_without_git_or_execution(
+    tmp_path, monkeypatch
+):
+    candidate, runtime, source, payload = _diagnostic_packaged_fixture(tmp_path)
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    before = {str(path.relative_to(candidate.parent)): path.read_bytes()
+              for path in candidate.parent.rglob("*") if path.is_file()}
+    assert diagnostics.repository_state(candidate) == {
+        "version": source["source_sha256"][:12],
+        "branch": "packaged", "worktree_clean": None,
+    }
+    report = diagnostics.packaged_provenance(candidate)
+    assert report == {
+        "source_verified_now": True,
+        "source_sha256": source["source_sha256"],
+        "runtime_verified_now": True,
+        "runtime_sha256": payload["runtime_sha256"],
+        "requirements_sha256": payload["requirements_sha256"],
+        # The unit runner is not the synthetic app interpreter. Manifest
+        # integrity cannot turn this host process into an owned runtime.
+        "interpreter_owned": False,
+        "verification_scope": "payload_integrity_only",
+        "signed_distribution_certified": False,
+    }
+    assert before == {str(path.relative_to(candidate.parent)): path.read_bytes()
+                      for path in candidate.parent.rglob("*") if path.is_file()}
+    assert str(tmp_path) not in json.dumps(report)
+
+
+@pytest.mark.parametrize("damage", [
+    "missing_source_manifest", "changed_source", "unexpected_git",
+    "runtime_dependency_change", "missing_runtime_manifest", "runtime_alias",
+])
+def test_damaged_packaged_diagnostics_never_fall_back_to_git_or_claim_integrity(
+    tmp_path, monkeypatch, damage
+):
+    from executor.autonomy import release
+
+    candidate, runtime, _source, _payload = _diagnostic_packaged_fixture(tmp_path)
+    if damage == "missing_source_manifest":
+        (candidate / release.MANIFEST_NAME).unlink()
+    elif damage == "changed_source":
+        (candidate / "executor" / "main.py").write_text("PRIVATE_SOURCE_CANARY")
+    elif damage == "unexpected_git":
+        (candidate / ".git").mkdir()
+        (candidate / ".git" / "config").write_text("PRIVATE_GIT_CANARY")
+    elif damage == "runtime_dependency_change":
+        (runtime / "owned-dependency.py").write_text("PRIVATE_DEPENDENCY_CANARY")
+    elif damage == "missing_runtime_manifest":
+        (runtime / release.RUNTIME_MANIFEST_NAME).unlink()
+    else:
+        actual = runtime.with_name("private-runtime-canary")
+        runtime.rename(actual)
+        runtime.symlink_to(actual, target_is_directory=True)
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    state = diagnostics.repository_state(candidate)
+    report = diagnostics.packaged_provenance(candidate)
+    assert state["branch"] == "packaged"
+    assert state["worktree_clean"] is None
+    if damage in {"missing_source_manifest", "changed_source", "unexpected_git"}:
+        assert state["version"] == "unknown"
+        assert report["source_verified_now"] is False
+        assert report["source_sha256"] == ""
+    else:
+        assert report["source_verified_now"] is True
+    assert report["runtime_verified_now"] is False
+    assert report["runtime_sha256"] == ""
+    assert report["requirements_sha256"] == ""
+    assert report["interpreter_owned"] is False
+    serialized = json.dumps(report)
+    assert "PRIVATE_" not in serialized
+    assert "private-runtime-canary" not in serialized
+    assert str(tmp_path) not in serialized
+
+
+def test_packaged_diagnostics_report_current_drift_without_rewriting_loaded_identity(
+    tmp_path, monkeypatch
+):
+    from executor.autonomy import release
+
+    candidate, runtime, source, payload = _diagnostic_packaged_fixture(tmp_path)
+    queue, _worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {
+        "status": "verified", "source_sha256": source["source_sha256"],
+    }
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    monkeypatch.setattr(diagnostics.browser, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(diagnostics.browser, "_alive", lambda: False)
+    before_tasks, before_events = queue.tasks(), queue.recent_events(1000)
+
+    initial = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
+    assert initial["packaged_release"]["loaded_source_matches_disk"] is True
+    assert initial["packaged_release"]["runtime_verified_now"] is True
+    assert initial["loaded_source"]["sha256"] == source["source_sha256"]
+
+    (candidate / "executor" / "main.py").write_text("PRIVATE_RUNTIME_DRIFT_CANARY")
+    drift = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
+    assert drift["packaged_release"]["source_verified_now"] is False
+    assert drift["packaged_release"]["loaded_source_matches_disk"] is False
+    assert drift["loaded_source"] == initial["loaded_source"]
+    assert drift["recovery"] == {
+        "reason": "release_unverified", "action": "reinstall_verified_app",
+    }
+
+    # A new valid disk snapshot is still not what this process loaded.
+    next_source = release.source_manifest(candidate)
+    (candidate / release.MANIFEST_NAME).write_text(json.dumps(next_source))
+    changed = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
+    assert changed["packaged_release"]["source_verified_now"] is True
+    assert changed["packaged_release"]["loaded_source_matches_disk"] is False
+    assert changed["loaded_source"] == initial["loaded_source"]
+    assert changed["recovery"] == {
+        "reason": "release_changed", "action": "restart_verified_app",
+    }
+    assert queue.tasks() == before_tasks
+    assert queue.recent_events(1000) == before_events
+    for report in (initial, drift, changed):
+        serialized = json.dumps(report)
+        assert "PRIVATE_RUNTIME_DRIFT_CANARY" not in serialized
+        assert "very-private-profile" not in serialized
+        assert str(tmp_path) not in serialized
+        assert report["safety"]["final_click_actor"] == "user"
+        assert report["safety"]["submit_capability"] is False
+
+
+def test_packaged_provenance_refuses_manifest_switched_during_runtime_verification(
+    tmp_path, monkeypatch
+):
+    from executor.autonomy import release
+
+    candidate, runtime, _source, _payload = _diagnostic_packaged_fixture(tmp_path)
+    verify = diagnostics.verify_runtime_candidate
+    def switched(root, source):
+        passed = verify(root, source)
+        assert passed is True
+        path = runtime / release.RUNTIME_MANIFEST_NAME
+        forged = json.loads(path.read_text())
+        forged["runtime_sha256"] = "f" * 64
+        path.write_text(json.dumps(forged))
+        return passed
+    monkeypatch.setattr(diagnostics, "verify_runtime_candidate", switched)
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    report = diagnostics.packaged_provenance(candidate)
+    assert report["runtime_verified_now"] is False
+    assert report["runtime_sha256"] == ""
+    assert report["requirements_sha256"] == ""
