@@ -240,6 +240,25 @@ with sync_playwright() as playwright:
         unauthenticated=browser.new_context()
         assert unauthenticated.request.get(base+'/ui').status==401
         unauthenticated.close()
+        # Losing the actual HttpOnly session reaches the real supervisor 401
+        # boundary, through the same relocated executable/browser entry path.
+        page.locator('input[name="company"]').fill('UNSENT_COMPANY')
+        page.locator('#message').fill('UNSENT_LOCAL_MESSAGE')
+        context.clear_cookies()
+        with page.expect_response(lambda response:
+                urlsplit(response.url).path=='/ui/api/diagnostics') as expired:
+            diagnostics.click()
+        assert expired.value.status==401
+        assert expired.value.json()['error']=='ui_session_required'
+        expect(page.locator('#session-expired')).to_be_visible()
+        expect(page.locator('#session-expired')).to_be_focused()
+        assert page.locator('input[name="company"]').input_value()=='UNSENT_COMPANY'
+        assert page.locator('#message').input_value()=='UNSENT_LOCAL_MESSAGE'
+        assert page.locator('#message').get_attribute('readonly') is not None
+        expect(page.locator('#send')).to_be_disabled()
+        expect(update).to_be_disabled()
+        assert context.request.get(base+'/ui').status==401
+        assert context.request.get(url).status==401
         assert not errors and not external
     finally:
         browser.close()
@@ -247,7 +266,8 @@ with sync_playwright() as playwright:
 with Path(os.environ['JAE_TEST_BROWSER_REPORT']).open('a',encoding='utf-8') as file:
     file.write(json.dumps({'ui':True,'state':True,'readiness':True,
         'keyboard_diagnostics':True,'update_refused':True,
-        'session_required':True,'ticket_one_use':True,'no_external_request':True})+'\\n')
+        'session_required':True,'ticket_one_use':True,'expired_session_preserves_input':True,
+        'no_external_request':True})+'\\n')
 """, encoding="utf-8")
     browser_cache = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or (
         Path.home() / ("Library/Caches/ms-playwright" if sys.platform == "darwin"

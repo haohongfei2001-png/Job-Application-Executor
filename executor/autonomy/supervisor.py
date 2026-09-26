@@ -522,7 +522,7 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
             if is_ui:
                 if not supervisor.valid_ui_session(self._cookie_session()):
                     if parsed.path == "/ui":
-                        self._send_html(401, "<h1>AI 投递经理</h1><p>请从本地 CLI 重新打开面板。</p>")
+                        self._send_html(401, "<h1>AI 投递经理</h1><p>面板会话已失效，请重新打开 AI 投递经理。已有任务不会自动重试，最终提交仍由你本人完成。</p>")
                     else:
                         self._send_json(401, {"error": "ui_session_required"})
                     return

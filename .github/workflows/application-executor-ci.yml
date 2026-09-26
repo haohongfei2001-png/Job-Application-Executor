@@ -40,7 +40,7 @@ jobs:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
         run: |
           python -m pytest -q tests/test_local_operations_v1.py
-          python -m pytest -q tests/test_dashboard_diagnostics_browser.py -k diagnostics_need_explicit_copy
+          python -m pytest -q tests/test_dashboard_diagnostics_browser.py -k 'diagnostics_need_explicit_copy or expired_session'
       - name: Prepare digest-pinned standalone Python
         if: github.event_name == 'pull_request' && github.event.pull_request.draft
         run: |
