@@ -539,6 +539,7 @@ class GenericWebAdapter(SiteAdapter):
             if not self._visible(element):
                 actions.append({"field_id": resolution.field_id, "ok": False, "reason": "not visible"})
                 continue
+            action_id = None
             try:
                 input_type = (element.get_attribute("type") or element.evaluate("e=>e.tagName.toLowerCase()")).lower()
                 tag = element.evaluate("e=>e.tagName.toLowerCase()")
@@ -560,8 +561,22 @@ class GenericWebAdapter(SiteAdapter):
                     actions.append({"field_id": resolution.field_id, "ok": False,
                                     "reason": "upload_receipt_unsupported"})
                     continue
-                elif input_type == "combobox" or element.get_attribute("role") == "combobox":
+                elif not self._date_precision_supported(value, input_type):
+                    actions.append({"field_id": resolution.field_id, "ok": False,
+                                    "reason": "date_precision_unsupported"})
+                    continue
+                else:
+                    begin = getattr(self, "field_action_begin", None)
+                    finish = getattr(self, "field_action_finish", None)
+                    if callable(begin) != callable(finish):
+                        raise BrowserOwnershipError("field journal unavailable")
+                    if callable(begin):
+                        action_id = begin(resolution.field_id, resolution.selector,
+                                          document_epoch=page_document_epoch(self.page))
+                if input_type == "combobox" or element.get_attribute("role") == "combobox":
                     if not self._fill_combobox(element, resolution.selector, value):
+                        if action_id is not None:
+                            raise BrowserOwnershipError("combobox outcome unknown")
                         actions.append({"field_id": resolution.field_id, "ok": False,
                                         "reason": "combobox_exact_choice_unavailable"})
                         continue
@@ -570,6 +585,8 @@ class GenericWebAdapter(SiteAdapter):
                     getattr(self, "mutation_guard", lambda: None)()
                     selected_target = self._fill_select(element, value)
                     if selected_target is None:
+                        if action_id is not None:
+                            raise BrowserOwnershipError("select outcome unknown")
                         actions.append({"field_id": resolution.field_id, "ok": False, "reason": "no_matching_select_option"})
                         continue
                     expected_readback = ("select", selected_target)
@@ -580,10 +597,6 @@ class GenericWebAdapter(SiteAdapter):
                         getattr(self, "mutation_guard", lambda: None)()
                         element.click()
                 else:
-                    if not self._date_precision_supported(value, input_type):
-                        actions.append({"field_id": resolution.field_id, "ok": False,
-                                        "reason": "date_precision_unsupported"})
-                        continue
                     desired = self._control_text(value, input_type, resolution.label)
                     current = str(element.input_value() or "")
                     expected_readback = ("value", desired)
@@ -612,9 +625,13 @@ class GenericWebAdapter(SiteAdapter):
                     actual = str(current_element.input_value() or "")
                 if actual != expected:
                     raise BrowserOwnershipError("field readback outcome unknown")
+                if action_id is not None:
+                    self.field_action_finish(action_id, "DOM_READBACK_UNVERIFIED")
                 actions.append({"field_id": resolution.field_id, "ok": True,
                                 "source": resolution.source, "observed": "DOM_READBACK"})
             except Exception:
+                if action_id is not None:
+                    self.field_action_finish(action_id, "UNKNOWN_OUTCOME")
                 # The primitive may have reached the page before Playwright
                 # reported failure. Do not turn that uncertainty into a retry.
                 raise BrowserOwnershipError("field write outcome unknown") from None

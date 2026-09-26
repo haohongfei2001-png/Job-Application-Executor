@@ -280,7 +280,14 @@ with sync_playwright() as playwright:
             page.evaluate('readiness()')
         probe_phase('first_real_api401')
         assert expired.value.status==401
-        assert expired.value.json()['error']=='ui_session_required'
+        # The page deliberately stops consuming an unauthorized fetch at its
+        # headers. Read the same real read-only API through the browser's
+        # cookie jar; do not await that abandoned page response's CDP body.
+        probe_phase('expired_api_body_readback')
+        assert expired.value.request.method=='GET'
+        expired_body=context.request.get(expired.value.url)
+        assert expired_body.status==401
+        assert expired_body.json()['error']=='ui_session_required'
         probe_phase('expired_notice_focus')
         expect(page.locator('#session-expired')).to_be_visible()
         expect(page.locator('#session-expired')).to_be_focused()

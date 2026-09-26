@@ -186,6 +186,10 @@ class TaskQueue:
                 db.execute('''CREATE TABLE IF NOT EXISTS run_attempts (
                     attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner TEXT NOT NULL,
                     outcome TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS field_actions (
+                    action_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL,
+                    field_sha256 TEXT NOT NULL, outcome TEXT NOT NULL,
+                    created REAL NOT NULL, updated REAL NOT NULL)''')
                 db.execute('''CREATE TABLE IF NOT EXISTS browser_bindings (
                     task_id TEXT PRIMARY KEY, process_epoch TEXT NOT NULL,
                     target_id TEXT NOT NULL, updated REAL NOT NULL,
@@ -425,8 +429,71 @@ class TaskQueue:
             row = db.execute("SELECT outcome FROM run_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
             if row is None or row["outcome"] not in {"ATTEMPTED", outcome}:
                 raise RuntimeError("run attempt outcome conflict")
+            if outcome == "RETURNED_UNVERIFIED" and db.execute(
+                "SELECT 1 FROM field_actions WHERE attempt_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
+                (attempt_id,),
+            ).fetchone():
+                raise RuntimeError("field outcome requires reconciliation")
             db.execute("UPDATE run_attempts SET outcome=?,updated=? WHERE attempt_id=?",
                        (outcome, self.clock(), attempt_id))
+
+    def require_field_action_readbacks(self, attempt_id: str) -> None:
+        """Check bounded field outcomes before releasing the coarse run lease."""
+        with self.tx() as db:
+            if db.execute(
+                "SELECT 1 FROM field_actions WHERE attempt_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
+                (attempt_id,),
+            ).fetchone():
+                raise RuntimeError("field outcome requires reconciliation")
+
+    def begin_field_action(self, attempt_id: str, field_sha256: str) -> str:
+        """Commit a value-free intent before an owned field operation."""
+        if not isinstance(field_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", field_sha256):
+            raise ValueError("invalid field identity digest")
+        with self.tx() as db:
+            attempt = db.execute(
+                "SELECT r.outcome,r.owner,t.owner AS task_owner,t.lease_until FROM run_attempts r JOIN tasks t ON t.task_id=r.task_id WHERE r.attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if (attempt is None or attempt["outcome"] != "ATTEMPTED"
+                    or attempt["owner"] != attempt["task_owner"]
+                    or attempt["lease_until"] is None or attempt["lease_until"] <= self.clock()):
+                raise RuntimeError("field intent lease lost")
+            if db.execute(
+                "SELECT 1 FROM field_actions WHERE attempt_id=? AND (outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') OR field_sha256=?) LIMIT 1",
+                (attempt_id, field_sha256),
+            ).fetchone():
+                raise RuntimeError("field outcome requires reconciliation")
+            action_id = uuid.uuid4().hex
+            now = self.clock()
+            db.execute("INSERT INTO field_actions VALUES(?,?,?,?,?,?)",
+                       (action_id, attempt_id, field_sha256, "ATTEMPTED", now, now))
+            return action_id
+
+    def finish_field_action(self, action_id: str, outcome: str) -> None:
+        # DOM evidence does not certify a saved server draft or authorize replay.
+        if outcome not in {"DOM_READBACK_UNVERIFIED", "UNKNOWN_OUTCOME"}:
+            raise ValueError("invalid field outcome")
+        with self.tx() as db:
+            row = db.execute(
+                "SELECT f.outcome,r.outcome AS run_outcome,r.owner,t.owner AS task_owner,t.lease_until FROM field_actions f JOIN run_attempts r ON r.attempt_id=f.attempt_id JOIN tasks t ON t.task_id=r.task_id WHERE f.action_id=?",
+                (action_id,),
+            ).fetchone()
+            if row is None or row["outcome"] not in {"ATTEMPTED", outcome}:
+                raise RuntimeError("field action outcome conflict")
+            if outcome == "DOM_READBACK_UNVERIFIED" and (
+                    row["run_outcome"] != "ATTEMPTED" or row["owner"] != row["task_owner"]
+                    or row["lease_until"] is None or row["lease_until"] <= self.clock()):
+                raise RuntimeError("field readback lease lost")
+            db.execute("UPDATE field_actions SET outcome=?,updated=? WHERE action_id=?",
+                       (outcome, self.clock(), action_id))
+
+    def field_actions(self, tid: str) -> list[dict]:
+        with self.tx() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT f.* FROM field_actions f JOIN run_attempts r ON r.attempt_id=f.attempt_id WHERE r.task_id=? ORDER BY f.created,f.action_id",
+                (tid,),
+            )]
 
     def run_attempts(self, tid: str) -> list[dict]:
         with self.tx() as db:

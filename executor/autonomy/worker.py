@@ -125,6 +125,22 @@ class OperationalAudit:
         path.chmod(0o600)
         return path
 
+    def bind_run_attempt(self, queue, attempt_id):
+        self.action_queue, self.action_attempt_id = queue, attempt_id
+
+    def begin_field_action(self, field_id, selector, *, document_epoch):
+        self.guard()
+        # Hash only control identity. Never persist its value, label, source,
+        # URL, exception message, or any authentication input.
+        identity = json.dumps([document_epoch, field_id, selector], ensure_ascii=True, separators=(",", ":"))
+        return self.action_queue.begin_field_action(
+            self.action_attempt_id, hashlib.sha256(identity.encode("utf-8")).hexdigest())
+
+    def finish_field_action(self, action_id, outcome):
+        if outcome == "DOM_READBACK_UNVERIFIED":
+            self.guard()
+        self.action_queue.finish_field_action(action_id, outcome)
+
     def record_action(self, action):
         self.guard()
         # Queue events already record transitions. Do not retain arbitrary action text.
@@ -594,10 +610,14 @@ class Worker:
                     assets[key] = _task_attachment_asset(key, path, assets.get(key))
                     runner.plan.attachments[key] = path
             attempt_id = self.queue.begin_run_attempt(tid, owner)
+            audit.bind_run_attempt(self.queue, attempt_id)
             with self.answers_lock:
                 self.question_contexts.pop(tid, None)
             plan = runner.run()
             stage, blocker = outcome(plan)
+            # Refuse an unresolved field before publishing a runnable/ready
+            # checkpoint or releasing its lease.
+            self.queue.require_field_action_readbacks(attempt_id)
             checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields], "review_certificate": plan.metadata.get("review_certificate")}, release=True)
             if stage == "NEEDS_USER_INPUT":
                 self._remember_question_context(tid, plan, self.queue.get(tid)["revision"])

@@ -617,6 +617,11 @@ class ApplicationExecutor:
             if callable(verify):
                 verify()
         adapter.mutation_guard = guarded_browser_mutation
+        # Daemon field intents use its existing task journal and coarse run
+        # fence. Direct CLI audit stores do not acquire a second task authority.
+        if callable(getattr(self.audit, "begin_field_action", None)):
+            adapter.field_action_begin = self.audit.begin_field_action
+            adapter.field_action_finish = self.audit.finish_field_action
         adapter.existing_browser_only = self.existing_browser_only
         adapter.browser_binding_get = getattr(self, "browser_binding_get", None)
         adapter.browser_binding_set = getattr(self, "browser_binding_set", None)
