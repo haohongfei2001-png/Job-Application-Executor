@@ -416,3 +416,56 @@ not a shipped or certified native window: compiled native host, window reuse,
 persisted app context, keyboard/clipboard/zoom/accessibility and native hosted
 journey remain open with full task/onboarding/legacy transfer/DFG002/008 exits.
 JCR08 IN_PROGRESS, consumer NOT_CERTIFIED, JCR09 NOT_STARTED, final submit user-only.
+
+## Exact app presenter checkpoint — PASS
+
+Exact head3ee2fdd92a9b97c6a25818cbbc4e48aa5bedd4d9
+[CI36268765237](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36268765237)
+SUCCESS. Ubuntu foundation108478557972:25 privacy/no-submit,153 review/browser,
+56 operations,7 session/diagnostic and245 packaged/transaction/state/distribution
+PASS. HostedMac108478557840:245 packaged cases in368.51s and7 retired updater
+public/module cases PASS. All22 new app presentation cases execute on both
+platforms alongside every existing actual relocated archive/executable/service/
+headless UI/rollback oracle. Compile/JS/diff PASS; draft full-round job remains
+intentionally unrun. This proves the shared presentation transport/readiness
+foundation; synthetic app callbacks/direct HTTP do not prove NSWindow/WKWebView
+or a completed native consumer window. No unchanged-head rerun.
+
+## JCR-08 recovery admission — bounded production root and coherent repair
+
+Source review of the actual bootstrap POST /retry proves a distinct admission
+path: it called lifecycle start/health and issued a UI ticket on generic ok
+without the normal consumer launch's installed source/runtime verification or
+loaded_source_sha256 takeover fence. The initial release_unverified/mismatch
+page reason was only explanatory text; it did not prevent a later retry from
+admitting a damaged package or a healthy daemon loaded from another release.
+This is a production path gap, not a timeout, DNS, runner or browser oracle issue.
+
+Normal launch and authenticated recovery now share current disk identity plus
+service admission. A removed/damaged source or existing damaged/aliased runtime
+refuses before lifecycle actions. A healthy daemon with stale/missing loaded
+source identity must stop at the existing safe checkpoint, restart and match the
+current expected source digest; refusal or mismatch cannot mint a UI ticket.
+Disk identity is revalidated after startup/takeover before capability issuance,
+so source drift during startup is refused. Final verified health is authoritative
+even after an earlier start timeout. The retry redirect uses the shared validated
+ConsumerSurface dashboard factory. Existing authenticated Host/Origin/token,
+private bootstrap ownership/reuse, browser/app presenter and no-submit fences
+remain; no new owner data/permissions/system/browser authority is added.
+
+Ten direct production recovery HTTP cases use actual deterministic source/runtime
+manifests and the real independent recovery handler/server/credential publication:
+removed manifest, source bytes changed, runtime bytes changed, runtime alias,
+safe-point restart refusal, stale-after-restart, missing loaded digest, verified
+takeover, final healthy-after-timeout and source drift during startup. Service/
+ticket responses are injected fault boundaries; these are not whole native app/
+service process proofs. Actual unauthenticated GET403 is the server readiness
+handshake; authenticated same-origin POST must return503 without UI admission or
+303 only after matching health. Task/event authority and private canary survive;
+all previous actual child/archive/service/HttpOnly/browser/package cases remain.
+
+New stable repair candidate is NOT_RUN until its single automatic targeted cloud
+CI. No full certification, shortened fixture, removed assertion, skipped test,
+workflow/timeout/rerun/live operation or native-window claim. JCR08 IN_PROGRESS,
+consumer NOT_CERTIFIED; native/full task/onboarding/legacy transfer/retirement/
+DFG002/008 independent engineering stays open; final-submit user-only.

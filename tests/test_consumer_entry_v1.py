@@ -2086,3 +2086,148 @@ def test_actual_independent_bootstrap_can_be_presented_inside_app_and_reused(
             if child.poll() is None:
                 child.terminate()
             child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("scenario", [
+    "missing_manifest", "source_tamper", "runtime_tamper", "runtime_alias",
+    "stale_restart_refused", "stale_after_restart", "loaded_identity_missing",
+    "verified_takeover", "late_healthy", "source_drift",
+])
+def test_actual_recovery_retry_revalidates_packaged_identity_before_ui_admission(
+        tmp_path, monkeypatch, scenario):
+    import threading
+    from executor.autonomy.queue import TaskQueue
+
+    source = tmp_path / "AI 投递经理.app" / "Contents" / "Resources" / "release"
+    source.mkdir(parents=True)
+    _minimal_source(source)
+    manifest = release.source_manifest(source)
+    receipt = source / release.MANIFEST_NAME
+    receipt.write_text(json.dumps(manifest))
+    expected = manifest["source_sha256"]
+    module = source / "executor" / "autonomy" / "cli.py"
+    monkeypatch.setattr(cli, "__file__", str(module))
+    assert release.read_release_identity(source)["source_sha256"] == expected
+
+    if scenario == "missing_manifest":
+        receipt.unlink()
+    elif scenario == "source_tamper":
+        with module.open("a") as handle:
+            handle.write("\n# changed installed source\n")
+    elif scenario == "runtime_tamper":
+        owned_runtime = source.parent / "runtime"
+        python = owned_runtime / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_bytes(b"synthetic-owned-interpreter")
+        python.chmod(0o700)
+        runtime_manifest = release.runtime_manifest(owned_runtime, source)
+        (owned_runtime / release.RUNTIME_MANIFEST_NAME).write_text(json.dumps(runtime_manifest))
+        assert release.verify_runtime_candidate(owned_runtime, source)
+        with python.open("ab") as handle:
+            handle.write(b"changed")
+    elif scenario == "runtime_alias":
+        outside = tmp_path / "aliased-runtime"
+        outside.mkdir()
+        (source.parent / "runtime").symlink_to(outside, target_is_directory=True)
+
+    state = tmp_path / "recovery-state"
+    queue = TaskQueue(state)
+    before = (queue.tasks(), queue.recent_events(1000))
+    (state / "private-recovery-canary.txt").write_text("PRIVATE_RECOVERY_CANARY")
+    calls = []
+    issued = []
+    def lifecycle(action, _root, port):
+        assert _root == state.resolve() and port == 9344
+        calls.append(action)
+        if action == "start":
+            if scenario == "source_drift":
+                with module.open("a") as handle:
+                    handle.write("\n# source changed during start\n")
+            return {"ok": scenario != "late_healthy", "reason": "health_timeout"}
+        if action == "restart":
+            return {"ok": scenario != "stale_restart_refused",
+                    "reason": "worker_stopping_at_safe_checkpoint"}
+        assert action == "health"
+        if scenario == "loaded_identity_missing":
+            return {"ok": True}
+        loaded = expected
+        if scenario in {"stale_restart_refused", "stale_after_restart", "verified_takeover"}:
+            loaded = expected if scenario == "verified_takeover" and "restart" in calls else "old-release"
+        return {"ok": True, "loaded_source_sha256": loaded}
+    def issue(_root, port, path, data):
+        assert _root == state.resolve() and port == 9344
+        assert path == "/v1/ui-ticket" and data == {}
+        issued.append(True)
+        return {"ticket": "PRIVATE_RECOVERY_TICKET_CANARY"}
+    monkeypatch.setattr(cli, "lifecycle", lifecycle)
+    monkeypatch.setattr(cli, "request", issue)
+    monkeypatch.setattr(bootstrap, "_version", lambda: expected[:12])
+
+    created = threading.Event()
+    servers = []
+    actual_server = bootstrap.LoopbackHTTPServer
+    def record_server(*args, **kwargs):
+        server = actual_server(*args, **kwargs)
+        servers.append(server)
+        return server
+    actual_state_path = bootstrap._state_path
+    def record_state(root):
+        path = actual_state_path(root)
+        created.set()
+        return path
+    monkeypatch.setattr(bootstrap, "LoopbackHTTPServer", record_server)
+    # The event marks constructed server/state-path, so retry below verifies
+    # the actual credential publication, not a stubbed handler or health probe.
+    monkeypatch.setattr(bootstrap, "_state_path", record_state)
+    thread = threading.Thread(target=bootstrap.serve_bootstrap,
+        args=(state, 9344, "release_unverified"), daemon=True)
+    thread.start()
+    try:
+        assert created.wait(timeout=5)
+        # A real GET executes after atomic credential publication. The server
+        # starts serving only after the private state file has been replaced.
+        server = servers[0]
+        base = f"http://127.0.0.1:{server.server_port}"
+        # Do not race the state file: an unauthenticated request is itself a
+        # deterministic server readiness handshake, and must remain refused.
+        with pytest.raises(urllib.error.HTTPError) as unauthenticated:
+            urllib.request.urlopen(base + "/", timeout=5)
+        assert unauthenticated.value.code == 403
+        record = json.loads((state / "bootstrap.json").read_text())
+        url = base + "/retry?token=" + record["token"]
+        req = urllib.request.Request(url, data=b"", method="POST",
+                                     headers={"Origin": base})
+        opener = urllib.request.build_opener(
+            type("NoRecoveryRedirect", (urllib.request.HTTPRedirectHandler,),
+                 {"redirect_request": lambda self, *args: None})())
+        with pytest.raises(urllib.error.HTTPError) as result:
+            opener.open(req, timeout=5)
+        response = result.value
+        allowed = scenario in {"verified_takeover", "late_healthy"}
+        assert response.code == (303 if allowed else 503)
+        assert issued == ([True] if allowed else [])
+        if allowed:
+            assert response.headers["Location"] == (
+                "http://127.0.0.1:9344/ui-login?ticket=PRIVATE_RECOVERY_TICKET_CANARY")
+        else:
+            assert "Location" not in response.headers
+            body = response.read().decode()
+            assert "PRIVATE_RECOVERY_TICKET_CANARY" not in body
+            assert "PRIVATE_RECOVERY_CANARY" not in body
+            assert "不会提交申请" in body
+            assert "现有任务没有被修改" in body
+        if scenario in {"missing_manifest", "source_tamper", "runtime_tamper", "runtime_alias"}:
+            assert calls == []
+        elif scenario in {"stale_restart_refused", "stale_after_restart",
+                          "loaded_identity_missing", "verified_takeover"}:
+            assert calls == ["start", "health", "restart", "health"]
+        else:
+            assert calls == ["start", "health"]
+        assert before == (queue.tasks(), queue.recent_events(1000))
+        assert (state / "private-recovery-canary.txt").read_text() == "PRIVATE_RECOVERY_CANARY"
+        assert (state / "bootstrap.json").exists() or allowed
+    finally:
+        if servers:
+            servers[0].shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive()

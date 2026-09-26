@@ -109,7 +109,7 @@ h1{{font-size:21px}}p{{line-height:1.6}}button{{background:#111;color:white;bord
 
 
 def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "service_unavailable") -> None:
-    from .cli import lifecycle, request
+    from .cli import _start_consumer_service, request
 
     root = Path(root).expanduser().resolve()
     token = secrets.token_urlsafe(32)
@@ -152,16 +152,15 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
             if self.headers.get("Content-Length") not in {None, "0"}:
                 self.respond(400, "<h1>请求无效</h1>")
                 return
-            started = lifecycle("start", root, service_port)
-            health = lifecycle("health", root, service_port)
-            if started.get("ok") and health.get("ok"):
+            started, health = _start_consumer_service(root, service_port)
+            if health.get("ok"):
                 try:
                     ticket = request(root, service_port, "/v1/ui-ticket", {})["ticket"]
-                    target = f"http://127.0.0.1:{service_port}/ui-login?ticket={urllib.parse.quote(ticket)}"
+                    target = ConsumerSurface.dashboard(service_port, ticket).url
                     self.respond(303, "", location=target)
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
-                except (KeyError, OSError, urllib.error.URLError):
+                except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError):
                     pass
             self.respond(503, _page(str(started.get("reason") or "service_unavailable"), token))
 

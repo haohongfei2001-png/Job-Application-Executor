@@ -107,13 +107,8 @@ def open_ui(root, port, *, presenter=None):
     return {"ok": opened, "opened": opened}
 
 
-def launch_consumer(root, port, *, presenter=None):
-    loopback_origin(port)
-    from .consumer import humanize_preflight
-    from .preflight import collect_live_preflight
-
-    # A packaged app with a broken source manifest must not start any owned
-    # browser or service. Development checkouts have no release manifest.
+def _consumer_release_identity():
+    """Current disk identity for both ordinary launch and recovery retry."""
     from .release import is_packaged_source, read_release_identity, verify_runtime_candidate
     source = Path(__file__).resolve().parents[2]
     identity = read_release_identity(source)
@@ -122,27 +117,45 @@ def launch_consumer(root, port, *, presenter=None):
     app_runtime = source.parent / "runtime"
     if packaged and (app_runtime.exists() or app_runtime.is_symlink()) and not verify_runtime_candidate(app_runtime, source):
         expected = ""
+    return {"packaged": packaged, "expected": expected}
+
+
+def _start_consumer_service(root, port):
+    """Revalidate recovery admission; an old reason is never launch authority."""
+    loopback_origin(port)
+    identity = _consumer_release_identity()
+    expected = identity["expected"]
+    if identity["packaged"] and not expected:
+        return {"ok": False, "reason": "release_unverified"}, {"ok": False}
+    started = lifecycle("start", root, port)
+    health = lifecycle("health", root, port)
+    if expected and health.get("ok") and health.get("loaded_source_sha256") != expected:
+        restarted = lifecycle("restart", root, port)
+        health = lifecycle("health", root, port)
+        if not restarted.get("ok") or health.get("loaded_source_sha256") != expected:
+            return {"ok": False, "reason": "release_mismatch"}, {"ok": False}
+    # Recheck after service startup/safe-point takeover, before minting a UI
+    # capability. A changed/broken installed source cannot enter via recovery.
+    if _consumer_release_identity() != identity:
+        return {"ok": False, "reason": "release_unverified"}, {"ok": False}
+    return started, health
+
+
+def launch_consumer(root, port, *, presenter=None):
+    loopback_origin(port)
+    from .consumer import humanize_preflight
+    from .preflight import collect_live_preflight
+
+    # Check disk integrity before starting an owned browser, then revalidate
+    # again through the shared service/recovery admission path.
+    identity = _consumer_release_identity()
     live_mode = browser_mode() not in {"test", "isolated", "headless"}
-    if live_mode and (not packaged or expected):
+    if live_mode and (not identity["packaged"] or identity["expected"]):
         try:
-            # Browser startup is a repair attempt, not a gate to the local UI.
             ensure_chrome()
         except Exception:
             pass
-    if packaged and not expected:
-        started = {"ok": False, "reason": "release_unverified"}
-        health = {"ok": False}
-    else:
-        started = lifecycle("start", root, port)
-        health = lifecycle("health", root, port)
-        # A newly installed app must not silently reuse a daemon loaded from
-        # an old release. Stop at the worker's safe checkpoint and read back.
-        if expected and health.get("ok") and health.get("loaded_source_sha256") != expected:
-            restarted = lifecycle("restart", root, port)
-            health = lifecycle("health", root, port)
-            if not restarted.get("ok") or health.get("loaded_source_sha256") != expected:
-                started = {"ok": False, "reason": "release_mismatch"}
-                health = {"ok": False}
+    started, health = _start_consumer_service(root, port)
     result = collect_live_preflight(
         supervisor_running=bool(health.get("ok")),
     )
