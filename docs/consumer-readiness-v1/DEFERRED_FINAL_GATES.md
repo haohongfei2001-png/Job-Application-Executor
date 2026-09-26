@@ -539,3 +539,10 @@ remain independent engineering. Legacy authority transfer/pre-lock retirement,
 DFG002 independent durable server/other-action reconciliation and DFG008 dedicated
 drivers remain open. JCR08 IN_PROGRESS, consumer NOT_CERTIFIED/JCR09 NOT_STARTED;
 final submit permanently user-only.
+
+
+## Native-host CI collection failure — bounded fixture repair
+
+Exact2f67cdb4a97134185761b095995a19bd5a27943a CI36274768287 fails packaged-test collection on Ubuntu108495253775 andMac108495253650: new parameterized case uses pytest's reserved fixture name request. Both logs identify the same collection error before any native compilation/window or packaged case executes; this is TEST_FIXTURE, not native runtime/runner/timeout failure. Earlier Ubuntu25 privacy/no-submit,163 review/browser,56 operations and7 session/diagnostic PASS. No native-window proof is claimed.
+
+Coherent repair renames only that parameter to request_id; all7 invalid inputs, other cases, every assertion, fixture size/deadline, actual Mac compiler/window/cookie/route/process oracles and product source are retained. No workflow/timeout/product workaround or unchanged-head rerun. New stable fixture-repair candidate is NOT_RUN pending its single targeted CI. JCR08 stays IN_PROGRESS/consumer NOT_CERTIFIED with native installation/full task/legacy/DFG002/008 engineering open.

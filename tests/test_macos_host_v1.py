@@ -32,10 +32,10 @@ def test_native_command_preserves_private_surface_only_in_memory(surface):
     assert "PRIVATE_" not in json.dumps(surface.safe_summary())
 
 
-@pytest.mark.parametrize("request", [True, False, 0, -1, 1.0, "1", None])
-def test_native_command_rejects_non_integer_request(request):
+@pytest.mark.parametrize("request_id", [True, False, 0, -1, 1.0, "1", None])
+def test_native_command_rejects_non_integer_request(request_id):
     with pytest.raises(ValueError, match="invalid consumer presentation"):
-        native_command(ConsumerSurface.dashboard(43210, "opaque"), request)
+        native_command(ConsumerSurface.dashboard(43210, "opaque"), request_id)
 
 
 @pytest.mark.parametrize("surface", [
