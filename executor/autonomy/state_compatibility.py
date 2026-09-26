@@ -60,6 +60,64 @@ def _digest(db, table, columns):
     return count, digest.digest()
 
 
+
+def _schema_contract(db, table):
+    """Retain existing authority constraints while allowing additive columns.
+
+    SQLite ALTER ADD preserves the existing CREATE declaration. Keeping that
+    prefix also protects CHECK, collation, conflict and AUTOINCREMENT semantics
+    that row digests and PRAGMA table_info alone cannot prove.
+    """
+    row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if not row or not isinstance(row[0], str):
+        raise ValueError("task_state_schema")
+    head, close, tail = row[0].rpartition(")")
+    if not close:
+        raise ValueError("task_state_schema")
+    columns = {row[1]: tuple(row[2:]) for row in db.execute(
+        "PRAGMA table_xinfo(" + _quote(table) + ")")}
+    indexes = {}
+    for row in db.execute("PRAGMA index_list(" + _quote(table) + ")"):
+        name = row[1]
+        declaration = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,)
+        ).fetchone()
+        indexes[name] = (
+            tuple(row[2:]),
+            tuple(tuple(item[2:]) for item in db.execute(
+                "PRAGMA index_xinfo(" + _quote(name) + ")")),
+            declaration[0] if declaration else None,
+        )
+    return {
+        "head": head.rstrip(), "tail": tail.strip(), "columns": columns,
+        "indexes": indexes,
+        "foreign_keys": tuple(tuple(row) for row in db.execute(
+            "PRAGMA foreign_key_list(" + _quote(table) + ")")),
+        "triggers": dict(db.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?",
+            (table,))),
+    }
+
+
+def _schema_preserved(expected, actual):
+    if actual["tail"] != expected["tail"] or not actual["head"].startswith(expected["head"]):
+        return False
+    addition = actual["head"][len(expected["head"]):].lstrip()
+    if addition and not addition.startswith(","):
+        return False
+    return (
+        all(actual["columns"].get(name) == contract
+            for name, contract in expected["columns"].items())
+        and all(actual["indexes"].get(name) == contract
+                for name, contract in expected["indexes"].items())
+        and actual["foreign_keys"] == expected["foreign_keys"]
+        and all(actual["triggers"].get(name) == sql
+                for name, sql in expected["triggers"].items())
+    )
+
+
 def _snapshot(db):
     if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
         raise ValueError("task_state_integrity")
@@ -77,7 +135,7 @@ def _snapshot(db):
             columns = [c for c in columns if c != "run_state"]
         if not columns:
             raise ValueError("task_state_schema")
-        result[table] = (columns, _digest(db, table, columns))
+        result[table] = (columns, _digest(db, table, columns), _schema_contract(db, table))
     return result
 
 
@@ -125,10 +183,11 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
             with sqlite3.connect(copy.as_uri() + "?mode=ro", uri=True) as migrated:
                 if migrated.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                     return False
-                for table, (columns, expected) in before.items():
+                for table, (columns, expected, schema) in before.items():
                     if not set(columns).issubset(_columns(migrated, table)):
                         return False
-                    if _digest(migrated, table, columns) != expected:
+                    if (not _schema_preserved(schema, _schema_contract(migrated, table))
+                            or _digest(migrated, table, columns) != expected):
                         return False
             return True
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError):

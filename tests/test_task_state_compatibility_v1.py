@@ -135,3 +135,54 @@ def test_compatibility_refuses_unrecognized_or_corrupt_state(tmp_path):
 
 def test_empty_state_is_compatible_without_starting_any_candidate(tmp_path):
     assert task_state_candidate_compatible(tmp_path / "nonexistent-python", tmp_path, tmp_path / "absent")
+
+@pytest.mark.parametrize("mutation", [
+    "CREATE TABLE tasks_copy AS SELECT * FROM tasks; DROP TABLE tasks; ALTER TABLE tasks_copy RENAME TO tasks",
+    "CREATE TABLE events_copy(seq INTEGER PRIMARY KEY,task_id TEXT,at REAL,kind TEXT NOT NULL,stage TEXT NOT NULL); INSERT INTO events_copy SELECT * FROM events; DROP TABLE events; ALTER TABLE events_copy RENAME TO events",
+    "DROP INDEX task_authority_by_blocker",
+    "DROP INDEX task_unique_checkpoint",
+    "DROP TRIGGER task_stage_fence",
+    "DROP TRIGGER task_stage_fence; CREATE TRIGGER task_stage_fence BEFORE UPDATE ON tasks WHEN NEW.stage='SYNTHETIC_FORBIDDEN' BEGIN SELECT 1; END",
+])
+def test_equal_rows_cannot_hide_removed_authority_schema(tmp_path, mutation):
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        db.executescript("""
+            CREATE INDEX task_authority_by_blocker ON tasks(blocker,stage);
+            CREATE UNIQUE INDEX task_unique_checkpoint ON tasks(idempotency_key,checkpoint)
+                WHERE stage='BLOCKED';
+            CREATE TRIGGER task_stage_fence BEFORE UPDATE ON tasks
+                WHEN NEW.stage='SYNTHETIC_FORBIDDEN'
+                BEGIN SELECT RAISE(ABORT,'synthetic stage fence'); END;
+        """)
+        before = authority(db)
+        schema_before = db.execute(
+            "SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+        release = candidate(tmp_path, "db.executescript(" + repr(mutation) + ")")
+        with task_state_guard(root):
+            assert not task_state_candidate_compatible(Path(sys.executable), release, root)
+        assert authority(db) == before
+        assert db.execute(
+            "SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall() == schema_before
+
+
+def test_additive_queue_migration_keeps_existing_constraint_index_and_trigger_floor(tmp_path):
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        db.executescript("""
+            CREATE INDEX task_authority_by_blocker ON tasks(blocker,stage);
+            CREATE UNIQUE INDEX task_unique_checkpoint ON tasks(idempotency_key,checkpoint)
+                WHERE stage='BLOCKED';
+            CREATE TRIGGER task_stage_fence BEFORE UPDATE ON tasks
+                WHEN NEW.stage='SYNTHETIC_FORBIDDEN'
+                BEGIN SELECT RAISE(ABORT,'synthetic stage fence'); END;
+        """)
+        before = authority(db)
+        with task_state_guard(root):
+            assert task_state_candidate_compatible(
+                Path(sys.executable), Path(__file__).resolve().parents[1], root)
+        assert authority(db) == before
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("UPDATE tasks SET stage='SYNTHETIC_FORBIDDEN'")
+        db.rollback()
+        assert authority(db) == before

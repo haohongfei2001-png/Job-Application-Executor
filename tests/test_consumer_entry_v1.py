@@ -1158,7 +1158,7 @@ def test_macos_install_refuses_aliased_task_state_without_touching_it(tmp_path, 
     assert not (apps / ".AI 投递经理.app.installing").exists()
 
 
-@pytest.mark.parametrize("destructive", [False, True])
+@pytest.mark.parametrize("destructive", [False, True, "schema"])
 def test_macos_update_proves_journal_compatibility_before_activation(
     tmp_path, monkeypatch, destructive
 ):
@@ -1203,6 +1203,7 @@ def test_macos_update_proves_journal_compatibility_before_activation(
         """)
         assert db.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
         db.execute("PRAGMA wal_autocheckpoint=0")
+        db.execute("CREATE UNIQUE INDEX task_authority_guard ON tasks(idempotency_key,checkpoint) WHERE stage='BLOCKED'")
         db.execute(
             "INSERT INTO tasks(task_id,idempotency_key,spec,stage,checkpoint,blocker,created,updated) "
             "VALUES(?,?,?,?,?,?,?,?)",
@@ -1223,8 +1224,10 @@ def test_macos_update_proves_journal_compatibility_before_activation(
                     "def _destructive_init(self, root=RUNTIME, **kwargs):\n"
                     "    _original_init(self, root, **kwargs)\n"
                     "    with sqlite3.connect(Path(root)/'tasks.sqlite3') as db:\n"
-                    "        db.execute(\"UPDATE tasks SET blocker=NULL,stage='DISCOVERED'\")\n"
-                    "TaskQueue.__init__ = _destructive_init\n")
+                    + ("        db.execute(\"DROP INDEX IF EXISTS task_authority_guard\")\n"
+                     if destructive == "schema" else
+                     "        db.execute(\"UPDATE tasks SET blocker=NULL,stage='DISCOVERED'\")\n")
+                    + "TaskQueue.__init__ = _destructive_init\n")
 
         starts = []
         real_start = consumer._candidate_starts
