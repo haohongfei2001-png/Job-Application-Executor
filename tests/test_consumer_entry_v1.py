@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 from importlib.metadata import version
 import plistlib
@@ -1406,6 +1407,9 @@ def test_macos_update_proves_journal_compatibility_before_activation(
             with pytest.raises(RuntimeError, match="another local worker"):
                 with ProcessLock(state / "worker.lock"):
                     pytest.fail("updater lost the daemon lock")
+            with (state / "migration.lock").open("a+") as initializer:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(initializer, fcntl.LOCK_EX | fcntl.LOCK_NB)
             starts.append(source)
             return real_start(runtime_python, source)
 
@@ -1622,3 +1626,58 @@ def test_legacy_state_detection_accepts_explicit_same_authority_and_empty_locks(
     (state / "worker.lock").touch()
     (state / "migration.lock").touch()
     assert not consumer._legacy_state_migration_needed(repo, app, tmp_path / "new")
+
+
+@pytest.mark.parametrize("kind", ["hardlink", "fifo", "directory"])
+def test_app_install_and_rollback_refuse_nonordinary_transaction_lock_before_staging(
+    tmp_path, monkeypatch, kind
+):
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("synthetic app lock payload")
+    outside.chmod(0o644)
+    lock = apps / ".AI 投递经理.app.transaction.lock"
+    if kind == "hardlink":
+        os.link(outside, lock)
+    elif kind == "fifo":
+        os.mkfifo(lock, 0o644)
+    else:
+        lock.mkdir()
+    metadata = lock.stat()
+    monkeypatch.setattr(consumer, "_install_macos_app_unlocked",
+                        lambda *args, **kwargs: pytest.fail("invalid lock must not stage an app"))
+    monkeypatch.setattr(consumer, "_rollback_macos_app_unlocked",
+                        lambda *args, **kwargs: pytest.fail("invalid lock must not activate rollback"))
+    assert install_macos_app(tmp_path / "source", destination=apps, platform="darwin")["reason"] == "update_lock_unavailable"
+    assert rollback_macos_app(apps)["reason"] == "update_lock_unavailable"
+    assert list(apps.iterdir()) == [lock]
+    assert lock.stat().st_mode == metadata.st_mode
+    assert outside.read_text() == "synthetic app lock payload"
+    assert outside.stat().st_mode & 0o777 == 0o644
+
+
+def test_app_transactions_refuse_queue_initializer_before_candidate_start(tmp_path, monkeypatch):
+    import fcntl
+    from contextlib import closing
+    from test_task_state_compatibility_v1 import legacy_state, authority
+
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    state = tmp_path / "state"
+    monkeypatch.setattr(consumer, "_install_macos_app_unlocked",
+                        lambda *args, **kwargs: pytest.fail("initializer must fence install"))
+    monkeypatch.setattr(consumer, "_rollback_macos_app_unlocked",
+                        lambda *args, **kwargs: pytest.fail("initializer must fence rollback"))
+    with closing(legacy_state(state)) as db:
+        before = authority(db)
+        with (state / "migration.lock").open("a+") as initializer:
+            fcntl.flock(initializer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert install_macos_app(tmp_path / "source", destination=apps, platform="darwin",
+                                     task_state_root=state)["reason"] == "task_state_in_use"
+            assert rollback_macos_app(apps, task_state_root=state)["reason"] == "task_state_in_use"
+        assert authority(db) == before
+        assert not (apps / "AI 投递经理.app").exists()
+        from executor.autonomy.state_compatibility import task_state_guard
+        with task_state_guard(state):
+            pass

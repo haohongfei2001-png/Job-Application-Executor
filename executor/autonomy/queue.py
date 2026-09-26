@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import fcntl
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -18,6 +18,7 @@ from ..models import ApplicationStage
 from ..protected_targets import assert_target_not_protected, register_user_confirmed_target
 from ..discovery.core import normalize_component
 from .release import is_packaged_source
+from .state_compatibility import _private_lock_fd
 
 # A packaged release is immutable. Keep task state outside the app bundle so
 # replacing or rolling back source/runtime never replaces the applicant journal.
@@ -137,9 +138,10 @@ class TaskQueue:
         # schema can still read it if a rollback is needed; never overwrite it.
         backup_path = self.root / "tasks.sqlite3.pre-jcr01.sqlite3"
         migration_lock = self.root / "migration.lock"
-        with migration_lock.open("a+") as lock_handle:
-            migration_lock.chmod(0o600)
-            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        # Own the migration fence through both backup AND the complete schema
+        # transaction, so the app updater cannot certify a concurrently changing
+        # journal. Queue construction retains its existing blocking protocol.
+        with os.fdopen(_private_lock_fd(migration_lock, blocking=True), "a+") as lock_handle:
             if self.path.exists() and not backup_path.exists():
                 with sqlite3.connect(self.path) as source:
                     columns_before = {row[1] for row in source.execute("PRAGMA table_info(tasks)")}
@@ -147,53 +149,53 @@ class TaskQueue:
                         with sqlite3.connect(backup_path) as destination:
                             source.backup(destination)
                         backup_path.chmod(0o600)
-        with self.tx() as db:
-            db.executescript('''
-                CREATE TABLE IF NOT EXISTS tasks (
-                    task_id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL,
-                    spec TEXT NOT NULL, stage TEXT NOT NULL, checkpoint TEXT NOT NULL,
-                    attempts INTEGER NOT NULL DEFAULT 0, owner TEXT, lease_until REAL,
-                    next_run REAL NOT NULL DEFAULT 0, blocker TEXT, details TEXT NOT NULL DEFAULT '{}',
-                    created REAL NOT NULL, updated REAL NOT NULL);
-                CREATE TABLE IF NOT EXISTS events (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, at REAL,
-                    kind TEXT NOT NULL, stage TEXT NOT NULL);
-            ''')
-            columns = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
-            if "checkpoint_url" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN checkpoint_url TEXT")
-            if "revision" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
-            if "phase" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN phase TEXT NOT NULL DEFAULT 'DISCOVERED'")
-                db.execute("UPDATE tasks SET phase=checkpoint")
-            if "run_state" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN run_state TEXT NOT NULL DEFAULT 'RUNNABLE'")
-            if "wait_reason" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN wait_reason TEXT")
-                db.execute("UPDATE tasks SET wait_reason=blocker WHERE blocker IS NOT NULL")
-            if "paused_from" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN paused_from TEXT")
-                db.execute("UPDATE tasks SET paused_from='NEEDS_USER_INPUT' WHERE blocker='user_paused_from_input'")
-                db.execute("UPDATE tasks SET paused_from='NEEDS_USER_ACTION' WHERE blocker IN ('user_paused_from_action','user_paused_from_otp_waiting','user_paused_from_otp_ambiguous')")
-                db.execute("UPDATE tasks SET paused_from='BLOCKED' WHERE blocker IN ('user_paused_from_session_unavailable','user_paused_from_validation')")
-            db.execute("UPDATE tasks SET run_state=CASE WHEN stage='BLOCKED' AND blocker LIKE 'user_paused%' THEN 'PAUSED' WHEN stage IN ('BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION') THEN 'WAITING' WHEN stage='READY_TO_SUBMIT' THEN 'READY' WHEN stage IN ('SUBMITTED','VERIFIED') THEN 'DONE' WHEN stage='CANCELLED' THEN 'CANCELLED' WHEN stage='ERROR' THEN 'ERROR' WHEN owner IS NOT NULL AND lease_until>? THEN 'RUNNING' ELSE 'RUNNABLE' END", (self.clock(),))
-            db.execute('''CREATE TABLE IF NOT EXISTS commands (
-                command_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
-                action TEXT NOT NULL, receipt TEXT NOT NULL, created REAL NOT NULL)''')
-            db.execute('''CREATE TABLE IF NOT EXISTS run_attempts (
-                attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner TEXT NOT NULL,
-                outcome TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL)''')
-            db.execute('''CREATE TABLE IF NOT EXISTS browser_bindings (
-                task_id TEXT PRIMARY KEY, process_epoch TEXT NOT NULL,
-                target_id TEXT NOT NULL, updated REAL NOT NULL,
-                document_epoch TEXT)''')
-            binding_columns = {r[1] for r in db.execute("PRAGMA table_info(browser_bindings)")}
-            if "document_epoch" not in binding_columns:
-                db.execute("ALTER TABLE browser_bindings ADD COLUMN document_epoch TEXT")
-            db.execute('''CREATE TABLE IF NOT EXISTS profile_write_barriers (
-                profile_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL, created REAL NOT NULL)''')
-        self.path.chmod(0o600)
+            with self.tx() as db:
+                db.executescript('''
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        task_id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL,
+                        spec TEXT NOT NULL, stage TEXT NOT NULL, checkpoint TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0, owner TEXT, lease_until REAL,
+                        next_run REAL NOT NULL DEFAULT 0, blocker TEXT, details TEXT NOT NULL DEFAULT '{}',
+                        created REAL NOT NULL, updated REAL NOT NULL);
+                    CREATE TABLE IF NOT EXISTS events (
+                        seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, at REAL,
+                        kind TEXT NOT NULL, stage TEXT NOT NULL);
+                ''')
+                columns = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
+                if "checkpoint_url" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN checkpoint_url TEXT")
+                if "revision" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+                if "phase" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN phase TEXT NOT NULL DEFAULT 'DISCOVERED'")
+                    db.execute("UPDATE tasks SET phase=checkpoint")
+                if "run_state" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN run_state TEXT NOT NULL DEFAULT 'RUNNABLE'")
+                if "wait_reason" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN wait_reason TEXT")
+                    db.execute("UPDATE tasks SET wait_reason=blocker WHERE blocker IS NOT NULL")
+                if "paused_from" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN paused_from TEXT")
+                    db.execute("UPDATE tasks SET paused_from='NEEDS_USER_INPUT' WHERE blocker='user_paused_from_input'")
+                    db.execute("UPDATE tasks SET paused_from='NEEDS_USER_ACTION' WHERE blocker IN ('user_paused_from_action','user_paused_from_otp_waiting','user_paused_from_otp_ambiguous')")
+                    db.execute("UPDATE tasks SET paused_from='BLOCKED' WHERE blocker IN ('user_paused_from_session_unavailable','user_paused_from_validation')")
+                db.execute("UPDATE tasks SET run_state=CASE WHEN stage='BLOCKED' AND blocker LIKE 'user_paused%' THEN 'PAUSED' WHEN stage IN ('BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION') THEN 'WAITING' WHEN stage='READY_TO_SUBMIT' THEN 'READY' WHEN stage IN ('SUBMITTED','VERIFIED') THEN 'DONE' WHEN stage='CANCELLED' THEN 'CANCELLED' WHEN stage='ERROR' THEN 'ERROR' WHEN owner IS NOT NULL AND lease_until>? THEN 'RUNNING' ELSE 'RUNNABLE' END", (self.clock(),))
+                db.execute('''CREATE TABLE IF NOT EXISTS commands (
+                    command_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+                    action TEXT NOT NULL, receipt TEXT NOT NULL, created REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS run_attempts (
+                    attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner TEXT NOT NULL,
+                    outcome TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS browser_bindings (
+                    task_id TEXT PRIMARY KEY, process_epoch TEXT NOT NULL,
+                    target_id TEXT NOT NULL, updated REAL NOT NULL,
+                    document_epoch TEXT)''')
+                binding_columns = {r[1] for r in db.execute("PRAGMA table_info(browser_bindings)")}
+                if "document_epoch" not in binding_columns:
+                    db.execute("ALTER TABLE browser_bindings ADD COLUMN document_epoch TEXT")
+                db.execute('''CREATE TABLE IF NOT EXISTS profile_write_barriers (
+                    profile_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL, created REAL NOT NULL)''')
+            self.path.chmod(0o600)
 
     @contextmanager
     def tx(self):

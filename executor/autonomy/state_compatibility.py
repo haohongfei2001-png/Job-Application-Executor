@@ -54,6 +54,26 @@ def _refuse_live_service(root: Path):
     raise BlockingIOError("task_state_in_use")
 
 
+
+def _private_lock_fd(path: Path, *, blocking: bool = False) -> int:
+    """Acquire an owned ordinary single-link lock without reading its payload."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        metadata = os.fstat(fd)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()):
+            raise ValueError("transaction_lock_invalid")
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        current = path.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise ValueError("transaction_lock_replaced")
+        os.fchmod(fd, 0o600)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 @contextmanager
 def task_state_guard(root: str | Path):
     """Share the daemon's lock through the entire app install or rollback transaction."""
@@ -64,13 +84,18 @@ def task_state_guard(root: str | Path):
     if not root.is_dir() or any(p.is_symlink() for p in _state_paths(root)):
         raise ValueError("task_state_path_invalid")
     root.chmod(0o700)
-    fd = os.open(root / "worker.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    # A queue constructor writes schema/derived state under migration.lock even
+    # without starting a worker. Fence both writers through compatibility,
+    # activation and recovery; contention refuses promptly rather than waits.
+    fd = _private_lock_fd(root / "worker.lock")
+    migration_fd = None
     try:
-        os.fchmod(fd, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        migration_fd = _private_lock_fd(root / "migration.lock")
         _refuse_live_service(root)
         yield
     finally:
+        if migration_fd is not None:
+            os.close(migration_fd)
         os.close(fd)
 
 

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 import sqlite3
 import json
 import os
 import sys
+import fcntl
+import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -387,3 +390,138 @@ def test_ambiguous_encryption_authority_refuses_before_any_candidate_runs(
         assert authority(db) == before
         assert db.execute("SELECT * FROM task_answer_events").fetchall() == events
         assert outside.read_bytes() == outside_before
+
+
+def test_state_guard_fences_queue_schema_initializer_and_releases_after_refusal(tmp_path):
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        before = authority(db)
+        declaration = db.execute("SELECT sql FROM sqlite_master WHERE name='tasks'").fetchone()
+        with (root / "migration.lock").open("a+") as initializer:
+            fcntl.flock(initializer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with pytest.raises(BlockingIOError):
+                with task_state_guard(root):
+                    pytest.fail("guard cannot pass an active schema initializer")
+            # Failure to acquire the second fence releases the worker fence.
+            with ProcessLock(root / "worker.lock"):
+                pass
+        assert authority(db) == before
+        assert db.execute("SELECT sql FROM sqlite_master WHERE name='tasks'").fetchone() == declaration
+        with task_state_guard(root):
+            with (root / "migration.lock").open("a+") as initializer:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(initializer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with (root / "migration.lock").open("a+") as initializer:
+            fcntl.flock(initializer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_real_queue_constructor_cannot_initialize_guarded_state_in_another_process(tmp_path):
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        before = authority(db)
+        schema = db.execute("SELECT sql FROM sqlite_master WHERE name='tasks'").fetchone()
+        fields = ",".join('"' + row[1].replace('"', '""') + '"'
+                          for row in db.execute("PRAGMA table_info(tasks)"))
+        process = None
+        try:
+            with task_state_guard(root):
+                process = subprocess.Popen(
+                    [sys.executable, "-c",
+                     "from pathlib import Path; from executor.autonomy.queue import TaskQueue; "
+                     "import sys; print('starting', flush=True); "
+                     "TaskQueue(Path(sys.argv[1])); print('initialized', flush=True)",
+                     str(root)],
+                    cwd=Path(__file__).resolve().parents[1],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                assert process.stdout.readline().strip() == "starting"
+                with pytest.raises(subprocess.TimeoutExpired):
+                    process.communicate(timeout=0.3)
+                assert authority(db) == before
+                assert db.execute("SELECT sql FROM sqlite_master WHERE name='tasks'").fetchone() == schema
+            stdout, stderr = process.communicate(timeout=10)
+            assert process.returncode == 0, stderr
+            assert "initialized" in stdout
+            assert db.execute("SELECT " + fields + " FROM tasks").fetchall() == before[0]
+            assert db.execute("SELECT * FROM events").fetchall() == before[1]
+            assert "revision" in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("name", ["worker.lock", "migration.lock"])
+@pytest.mark.parametrize("kind", ["hardlink", "fifo", "directory"])
+def test_state_transaction_refuses_nonordinary_locks_without_changing_payload_or_permissions(
+    tmp_path, name, kind
+):
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        before = authority(db)
+        outside = tmp_path / "outside"
+        outside.write_text("synthetic immutable lock canary")
+        outside.chmod(0o644)
+        lock = root / name
+        if kind == "hardlink":
+            os.link(outside, lock)
+        elif kind == "fifo":
+            os.mkfifo(lock, 0o644)
+        else:
+            lock.mkdir()
+        metadata = lock.stat()
+        with pytest.raises((ValueError, OSError)):
+            with task_state_guard(root):
+                pytest.fail("nonordinary lock must refuse before candidate or activation")
+        assert authority(db) == before
+        assert lock.stat().st_mode == metadata.st_mode
+        assert outside.read_text() == "synthetic immutable lock canary"
+        assert outside.stat().st_mode & 0o777 == 0o644
+        lock.unlink() if kind != "directory" else lock.rmdir()
+        with task_state_guard(root):
+            pass
+
+
+def test_queue_keeps_migration_fence_through_schema_transaction(tmp_path, monkeypatch):
+    from executor.autonomy.queue import TaskQueue
+
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        before = authority(db)
+        entered, release_initializer = threading.Event(), threading.Event()
+        original_tx = TaskQueue.tx
+        errors = []
+
+        @contextmanager
+        def held_schema_transaction(queue):
+            entered.set()
+            if not release_initializer.wait(timeout=5):
+                raise RuntimeError("synthetic initializer release missing")
+            with original_tx(queue) as transaction:
+                yield transaction
+
+        monkeypatch.setattr(TaskQueue, "tx", held_schema_transaction)
+
+        def initialize():
+            try:
+                TaskQueue(root)
+            except BaseException as error:
+                errors.append(error)
+
+        writer = threading.Thread(target=initialize, daemon=True)
+        writer.start()
+        try:
+            assert entered.wait(timeout=5), "real initializer must reach schema boundary"
+            with pytest.raises(BlockingIOError):
+                with task_state_guard(root):
+                    pytest.fail("backup completion cannot release the schema writer fence")
+            assert authority(db) == before
+            assert "revision" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+        finally:
+            release_initializer.set()
+            writer.join(timeout=5)
+        assert not writer.is_alive()
+        assert not errors
+        assert "revision" in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+        with task_state_guard(root):
+            pass

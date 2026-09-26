@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import socket
@@ -356,16 +355,10 @@ def _candidate_starts(python: Path, release: Path) -> bool:
 
 def _acquire_app_transaction_lock(apps_dir: Path) -> int:
     """Keep install and rollback mutually exclusive through final-path health."""
+    from .state_compatibility import _private_lock_fd
+
     apps_dir.mkdir(parents=True, exist_ok=True)
-    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
-    fd = os.open(apps_dir / f".{APP_NAME}.app.transaction.lock", flags, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
+    return _private_lock_fd(apps_dir / f".{APP_NAME}.app.transaction.lock")
 
 
 def install_macos_app(
@@ -385,7 +378,7 @@ def install_macos_app(
     except BlockingIOError:
         return {"ok": False, "reason": "update_in_progress",
                 "message": "应用安装或回退正在进行；没有修改当前应用。"}
-    except OSError:
+    except (OSError, ValueError):
         return {"ok": False, "reason": "update_lock_unavailable",
                 "message": "无法安全锁定应用目录；没有修改当前应用。"}
     try:
@@ -661,7 +654,7 @@ def rollback_macos_app(destination: str | Path, *, task_state_root: str | Path |
     except BlockingIOError:
         return {"ok": False, "reason": "update_in_progress",
                 "message": "应用安装或回退正在进行；没有修改当前应用。"}
-    except OSError:
+    except (OSError, ValueError):
         return {"ok": False, "reason": "update_lock_unavailable",
                 "message": "无法安全锁定应用目录；没有修改当前应用。"}
     try:
