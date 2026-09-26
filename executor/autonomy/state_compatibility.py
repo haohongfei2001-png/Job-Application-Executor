@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 
@@ -330,3 +330,142 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
             return True
     except (ImportError, OSError, ValueError, TypeError, sqlite3.Error, subprocess.SubprocessError):
         return False
+
+
+def _backup_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def stage_task_state_backup(root: str | Path, destination: str | Path) -> dict:
+    """Publish a private, WAL-consistent journal/key backup, never activate it.
+
+    The source remains the sole task authority. Current worker/migration locks
+    and live-service refusal are required, but cannot certify retirement of
+    pre-lock legacy writers. No service token, log, profile or other private
+    file is copied. This receipt is scoped backup evidence, not migration or
+    permission to install/restore a candidate.
+    """
+    root = Path(root).expanduser().absolute()
+    destination = Path(destination).expanduser().absolute()
+    for path in (root, destination):
+        if any(part.is_symlink() for part in (path, *path.parents)):
+            raise ValueError("task_backup_path_invalid")
+    if (not root.is_dir() or not destination.parent.is_dir()
+            or destination.exists() or destination.is_relative_to(root)
+            or root.is_relative_to(destination)):
+        raise ValueError("task_backup_destination_unavailable")
+    database = root / "tasks.sqlite3"
+    if not database.is_file() or database.is_symlink():
+        raise ValueError("task_backup_database_unavailable")
+
+    created = {}
+    def owned_file(path):
+        metadata = path.stat(follow_symlinks=False)
+        created[path] = (metadata.st_dev, metadata.st_ino)
+
+    with task_state_guard(root):
+        # Hold an ordinary source descriptor and compare its identity again
+        # before publication. Never follow a replacement/alias as authority.
+        fd = os.open(database, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            metadata = os.fstat(fd)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_uid != os.geteuid()):
+                raise ValueError("task_backup_database_invalid")
+            key_path = root / "task-answers.key"
+            if key_path.exists() or key_path.is_symlink():
+                key_info = key_path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(key_info.st_mode) or key_info.st_nlink != 1:
+                    raise ValueError("task_backup_key_invalid")
+            key = _answer_key(root)
+            destination.mkdir(mode=0o700, exist_ok=False)
+            try:
+                copy = destination / "tasks.sqlite3"
+                copy_fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                  os.O_NOFOLLOW, 0o600)
+                os.close(copy_fd)
+                owned_file(copy)
+                with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as source:
+                    with closing(sqlite3.connect(copy)) as backup:
+                        deadline = time.monotonic() + 10
+                        def progress(_status, _remaining, _total):
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError("task_backup_snapshot_timeout")
+                        source.backup(backup, pages=256, progress=progress, sleep=0.01)
+                        # A transportable capsule must contain the whole
+                        # committed journal in one database, with no WAL/SHM
+                        # sidecars needed when reopened or compatibility-checked.
+                        if backup.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+                            raise ValueError("task_backup_journal_mode_invalid")
+                        before = _snapshot(backup)
+                        # Prove encrypted values match the copied key without
+                        # ever writing their plaintext or ephemeral HMAC secret.
+                        answers = _answer_contract(backup, key, os.urandom(32))
+                with copy.open("rb") as file:
+                    os.fsync(file.fileno())
+                if key is not None:
+                    target_key = destination / "task-answers.key"
+                    with os.fdopen(os.open(target_key, os.O_WRONLY | os.O_CREAT |
+                                           os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as file:
+                        owned_file(target_key)
+                        file.write(key)
+                        file.flush()
+                        os.fsync(file.fileno())
+                current = database.stat(follow_symlinks=False)
+                if ((current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)
+                        or _answer_key(root) != key):
+                    raise ValueError("task_backup_source_changed")
+                _refuse_live_service(root)
+                # Receipt appears last, atomically, after the complete payload
+                # is flushed. Its absence means an incomplete backup.
+                receipt = {
+                    "format": "jae-task-state-backup-v1",
+                    "scope": "task_journal_and_encrypted_task_answers",
+                    "database_sha256": _backup_digest(copy),
+                    "answer_key_sha256": hashlib.sha256(key).hexdigest() if key is not None else None,
+                    "table_count": len(before), "answer_task_count": len(answers),
+                    "activation": "NOT_AUTHORIZED",
+                    "legacy_writer_retirement": "NOT_CERTIFIED",
+                    "source_authority": "unchanged",
+                    "other_private_files": "excluded",
+                }
+                temporary = destination / ".backup-manifest.tmp"
+                with temporary.open("x", encoding="utf-8") as file:
+                    os.chmod(temporary, 0o600)
+                    owned_file(temporary)
+                    json.dump(receipt, file, sort_keys=True)
+                    file.write("\n")
+                    file.flush()
+                    os.fsync(file.fileno())
+                manifest = destination / "backup-manifest.json"
+                os.link(temporary, manifest)
+                owned_file(manifest)
+                temporary.unlink()
+                created.pop(temporary)
+                directory_fd = os.open(destination, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+                return receipt
+            except BaseException:
+                # Remove only our own known artifacts. Preserve any unexpected
+                # concurrent file or replacement for explicit diagnosis.
+                for path, identity in reversed(list(created.items())):
+                    try:
+                        actual = path.stat(follow_symlinks=False)
+                        if (actual.st_dev, actual.st_ino) == identity:
+                            path.unlink()
+                    except FileNotFoundError:
+                        pass
+                try:
+                    destination.rmdir()
+                except OSError:
+                    pass
+                raise
+        finally:
+            os.close(fd)

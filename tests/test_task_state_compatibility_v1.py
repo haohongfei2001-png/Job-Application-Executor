@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 import sqlite3
 import json
 import os
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from executor.autonomy.state_compatibility import (
-    task_state_candidate_compatible, task_state_guard,
+    task_state_candidate_compatible, task_state_guard, stage_task_state_backup,
 )
 from executor.autonomy.worker import ProcessLock
 
@@ -525,3 +525,190 @@ def test_queue_keeps_migration_fence_through_schema_transaction(tmp_path, monkey
         assert "revision" in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
         with task_state_guard(root):
             pass
+
+
+def test_durable_backup_captures_committed_wal_and_key_without_migrating_source(tmp_path):
+    import hashlib
+
+    root = tmp_path / "state"
+    destination = tmp_path / "private-backup"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        before = authority(db)
+        events = db.execute("SELECT * FROM task_answer_events").fetchall()
+        schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+        # Other private files remain exclusively in the source authority.
+        (root / "auth.token").write_text("PRIVATE_BACKUP_TOKEN_CANARY")
+        (root / "profile.json").write_text("PRIVATE_BACKUP_PROFILE_CANARY")
+        assert (root / "tasks.sqlite3-wal").stat().st_size > 0
+        receipt = stage_task_state_backup(root, destination)
+        assert sorted(path.name for path in destination.iterdir()) == [
+            "backup-manifest.json", "task-answers.key", "tasks.sqlite3"]
+        assert destination.stat().st_mode & 0o077 == 0
+        assert all(path.stat().st_mode & 0o077 == 0 for path in destination.iterdir())
+        assert json.loads((destination / "backup-manifest.json").read_text()) == receipt
+        assert receipt["format"] == "jae-task-state-backup-v1"
+        assert receipt["activation"] == "NOT_AUTHORIZED"
+        assert receipt["legacy_writer_retirement"] == "NOT_CERTIFIED"
+        assert receipt["source_authority"] == "unchanged"
+        assert receipt["other_private_files"] == "excluded"
+        assert receipt["answer_task_count"] == 2
+        assert receipt["database_sha256"] == hashlib.sha256(
+            (destination / "tasks.sqlite3").read_bytes()).hexdigest()
+        assert receipt["answer_key_sha256"] == hashlib.sha256(key).hexdigest()
+        with closing(sqlite3.connect(destination / "tasks.sqlite3")) as backup:
+            assert authority(backup) == before
+            assert backup.execute("SELECT * FROM task_answer_events").fetchall() == events
+            assert backup.execute("SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall() == schema
+        assert (destination / "task-answers.key").read_bytes() == key
+        saved = {path.name: path.read_bytes() for path in destination.iterdir()}
+        # Current candidate schema/decoder runs only against another disposable
+        # copy; the durable backup and original journal both stay immutable.
+        assert task_state_candidate_compatible(
+            Path(sys.executable), Path(__file__).resolve().parents[1], destination)
+        assert {path.name: path.read_bytes() for path in destination.iterdir()} == saved
+        with pytest.raises(ValueError, match="destination_unavailable"):
+            stage_task_state_backup(root, destination)
+        assert {path.name: path.read_bytes() for path in destination.iterdir()} == saved
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == events
+        assert db.execute("SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall() == schema
+        assert (root / "task-answers.key").read_bytes() == key
+        assert (root / "auth.token").read_text() == "PRIVATE_BACKUP_TOKEN_CANARY"
+        assert (root / "profile.json").read_text() == "PRIVATE_BACKUP_PROFILE_CANARY"
+        for path in destination.iterdir():
+            assert b"PRIVATE_LATEST_ANSWER_CANARY" not in path.read_bytes()
+            assert b"PRIVATE_BACKUP_TOKEN_CANARY" not in path.read_bytes()
+            assert b"PRIVATE_BACKUP_PROFILE_CANARY" not in path.read_bytes()
+        assert not (root / "tasks.sqlite3.pre-jcr01.sqlite3").exists()
+        assert not (root / "service.json").exists()
+
+
+@pytest.mark.parametrize("fence", ["worker", "migration", "legacy_service"])
+def test_backup_refuses_a_live_writer_before_creating_output(tmp_path, fence):
+    root = tmp_path / "state"
+    destination = tmp_path / "backup"
+    with closing(legacy_state(root)) as db:
+        before = authority(db)
+        if fence == "legacy_service":
+            (root / "service.json").write_text(json.dumps({"pid": os.getpid(), "port": 9344}))
+            guard = nullcontext()
+        elif fence == "worker":
+            guard = ProcessLock(root / "worker.lock")
+        else:
+            @contextmanager
+            def migration_guard():
+                with (root / "migration.lock").open("a+") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    yield
+            guard = migration_guard()
+        with guard:
+            with pytest.raises((BlockingIOError, RuntimeError)):
+                stage_task_state_backup(root, destination)
+        assert not destination.exists()
+        assert authority(db) == before
+
+
+@pytest.mark.parametrize("defect", ["missing_key", "bad_ciphertext", "hardlinked_key", "key_fifo"])
+def test_backup_never_publishes_unreadable_or_aliased_answer_authority(tmp_path, defect):
+    root = tmp_path / "state"
+    destination = tmp_path / "backup"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        key_path = root / "task-answers.key"
+        outside = tmp_path / "outside-key"
+        outside.write_bytes(key)
+        if defect == "missing_key":
+            key_path.unlink()
+        elif defect == "bad_ciphertext":
+            db.execute("UPDATE task_answer_events SET ciphertext=?", (b"unreadable",))
+            db.commit()
+        elif defect == "hardlinked_key":
+            key_path.unlink()
+            os.link(outside, key_path)
+        else:
+            key_path.unlink()
+            os.mkfifo(key_path)
+        before = authority(db)
+        with pytest.raises((ValueError, OSError)):
+            stage_task_state_backup(root, destination)
+        assert not destination.exists()
+        assert authority(db) == before
+        assert outside.read_bytes() == key
+
+
+def test_backup_publication_failure_preserves_unknown_artifact_and_original(tmp_path, monkeypatch):
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    destination = tmp_path / "backup"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        before = authority(db)
+        events = db.execute("SELECT * FROM task_answer_events").fetchall()
+        def fail_receipt(source, target):
+            assert Path(source).name == ".backup-manifest.tmp"
+            assert sorted(path.name for path in destination.iterdir()) == [
+                ".backup-manifest.tmp", "task-answers.key", "tasks.sqlite3"]
+            (destination / "unknown-concurrent-artifact").write_text("UNCHANGED_UNKNOWN_CANARY")
+            raise OSError("synthetic receipt publication failure")
+        monkeypatch.setattr(state_compatibility.os, "link", fail_receipt)
+        with pytest.raises(OSError, match="publication failure"):
+            stage_task_state_backup(root, destination)
+        assert sorted(path.name for path in destination.iterdir()) == ["unknown-concurrent-artifact"]
+        assert (destination / "unknown-concurrent-artifact").read_text() == "UNCHANGED_UNKNOWN_CANARY"
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == events
+        assert (root / "task-answers.key").read_bytes() == key
+        with pytest.raises(ValueError, match="destination_unavailable"):
+            stage_task_state_backup(root, destination)
+
+
+@pytest.mark.parametrize("path_kind", ["ancestor_alias", "inside_source", "existing"])
+def test_backup_refuses_destination_alias_overlap_or_existing_payload(tmp_path, path_kind):
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        before = authority(db)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        canary = outside / "canary"
+        canary.write_text("UNCHANGED_DESTINATION_CANARY")
+        if path_kind == "ancestor_alias":
+            alias = tmp_path / "alias"
+            alias.symlink_to(outside, target_is_directory=True)
+            destination = alias / "new"
+        elif path_kind == "inside_source":
+            destination = root / "backup"
+        else:
+            destination = outside
+        with pytest.raises(ValueError):
+            stage_task_state_backup(root, destination)
+        assert sorted(path.name for path in outside.iterdir()) == ["canary"]
+        assert canary.read_text() == "UNCHANGED_DESTINATION_CANARY"
+        assert not (root / "backup").exists()
+        assert authority(db) == before
+
+def test_backup_refuses_key_rotation_before_publication_without_repairing_source(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    destination = tmp_path / "backup"
+    with closing(legacy_state(root)) as db:
+        old_key = encrypted_answers(root, db)
+        rotated_key = Fernet.generate_key()
+        before = authority(db)
+        events = db.execute("SELECT * FROM task_answer_events").fetchall()
+        original_contract = state_compatibility._answer_contract
+        def rotate_after_snapshot(backup, key, secret):
+            result = original_contract(backup, key, secret)
+            (root / "task-answers.key").write_bytes(rotated_key)
+            return result
+        monkeypatch.setattr(state_compatibility, "_answer_contract", rotate_after_snapshot)
+        with pytest.raises(ValueError, match="source_changed"):
+            stage_task_state_backup(root, destination)
+        assert not destination.exists()
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == events
+        assert (root / "task-answers.key").read_bytes() == rotated_key
+        assert rotated_key != old_key
