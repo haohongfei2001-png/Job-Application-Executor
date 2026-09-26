@@ -1530,7 +1530,14 @@ def test_new_default_state_cannot_strand_legacy_wal_authority(tmp_path, monkeypa
             pytest.fail("state split must refuse before any candidate service starts")
         monkeypatch.setattr(consumer, "_candidate_starts", forbidden_start)
         result = install_macos_app(repo, destination=apps, platform="darwin")
-        assert result["reason"] == "legacy_state_migration_required"
+        # A runtime appended inside an immutable packaged source also makes
+        # that existing bundle untrusted. Preserve the established reason and
+        # assert the independent finite-path state detector still sees it.
+        if location == "old-packaged-release":
+            assert result["reason"] == "untrusted_app_path"
+            assert consumer._legacy_state_migration_needed(repo, app, tmp_path / "new")
+        else:
+            assert result["reason"] == "legacy_state_migration_required"
         assert authority(db) == before
         assert secret.read_bytes() == b"synthetic-private-answer-key-never-export"
         assert "synthetic-private" not in json.dumps(result)

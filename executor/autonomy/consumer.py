@@ -434,6 +434,12 @@ def _install_macos_app_unlocked(
     )
     apps_dir.mkdir(parents=True, exist_ok=True)
     app = apps_dir / f"{APP_NAME}.app"
+    if (app.exists() or app.is_symlink()) and not _trusted_bundle(app):
+        return {
+            "ok": False,
+            "reason": "untrusted_app_path",
+            "message": "现有应用包无法核对；没有替换或删除任何应用。",
+        }
     # Source-path health alone cannot prove continuity with a historical
     # repo-local journal. Refuse before staging or candidate startup so the
     # original app and its complete private/WAL state remain the authority.
@@ -529,13 +535,6 @@ def _install_macos_app_unlocked(
         }
 
     rollback = apps_dir / f".{APP_NAME}.app.previous"
-    if (app.exists() or app.is_symlink()) and not _trusted_bundle(app):
-        shutil.rmtree(staging)
-        return {
-            "ok": False,
-            "reason": "untrusted_app_path",
-            "message": "现有应用包无法核对；没有替换或删除任何应用。",
-        }
     if rollback.exists() or rollback.is_symlink():
         shutil.rmtree(staging)
         return {
