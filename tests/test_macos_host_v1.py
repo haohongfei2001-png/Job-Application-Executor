@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 import socketserver
 import subprocess
 import sys
@@ -395,3 +396,63 @@ def test_installer_cli_native_mode_is_explicit_and_default_options_stay_compatib
     assert calls[-1][1] == {"standalone_runtime": runtime, "native_presentation": True}
     assert len(calls) == 2
     assert '"ok": true' in capsys.readouterr().out.lower()
+
+
+@pytest.mark.parametrize("failure", ["connection_refused", "unauthorized_page"])
+def test_hosted_mac_native_failure_is_visible_without_retry_or_private_url(
+    compiled_host, failure
+):
+    attempts = []
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_GET(self):
+            attempts.append(self.path)
+            self.send_response(401)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+    class Loopback(ThreadingHTTPServer):
+        def server_bind(self):
+            socketserver.TCPServer.server_bind(self)
+            self.server_name = "127.0.0.1"
+            self.server_port = self.server_address[1]
+    server, thread, reserved = None, None, None
+    try:
+        if failure == "unauthorized_page":
+            server = Loopback(("127.0.0.1", 0), Handler)
+            port = server.server_port
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+        else:
+            # Reserve an actual loopback port without listening: deterministic
+            # connection refusal, not an arbitrary guessed port or callback mock.
+            reserved = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            reserved.bind(("127.0.0.1", 0))
+            port = reserved.getsockname()[1]
+        surface = ConsumerSurface.dashboard(port, "PRIVATE_FAILURE_TICKET")
+        result = subprocess.run(
+            [str(compiled_host / "AIApplicationWindow"), "--failure-smoke"],
+            input=json.dumps(native_command(surface, 1)) + "\n",
+            text=True, capture_output=True, timeout=25, check=False,
+        )
+        assert result.returncode == 0
+        assert "PRIVATE_FAILURE_TICKET" not in result.stdout + result.stderr
+        assert "127.0.0.1" not in result.stdout + result.stderr
+        replies = [json.loads(line) for line in result.stdout.splitlines()]
+        assert replies == [
+            {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1},
+            {"ok": True, "native_error_visible": True, "window_count": 1,
+             "no_automatic_retry": True},
+        ]
+        assert attempts == (
+            ["/ui-login?ticket=PRIVATE_FAILURE_TICKET"]
+            if failure == "unauthorized_page" else []
+        )
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=3)
+        if reserved is not None:
+            reserved.close()

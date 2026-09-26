@@ -72,6 +72,9 @@ static BOOL initial(NSDictionary *command) {
 @property NSString *serviceOrigin;
 @property BOOL smoke;
 @property BOOL consumerSmoke;
+@property BOOL failureSmoke;
+@property NSTextField *failureMessage;
+@property WKNavigation *activeNavigation;
 @property BOOL finished;
 - (BOOL)allows:(NSURL *)url;
 - (void)present:(NSDictionary *)command;
@@ -92,7 +95,19 @@ static BOOL initial(NSDictionary *command) {
     self.window.minSize = NSMakeSize(640, 480);
     self.window.releasedWhenClosed = NO;
     self.window.delegate = self;
-    self.window.contentView = self.view;
+    NSView *content = [[NSView alloc] initWithFrame:self.view.frame];
+    self.view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [content addSubview:self.view];
+    self.failureMessage = [NSTextField labelWithString:@"本机工作台暂不可用。请关闭窗口后重新打开；工作台没有自动重试，任务状态需重新连接后确认。"];
+    self.failureMessage.frame = NSMakeRect(24, 24, 976, 92);
+    self.failureMessage.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+    self.failureMessage.font = [NSFont systemFontOfSize:16];
+    self.failureMessage.maximumNumberOfLines = 0;
+    self.failureMessage.lineBreakMode = NSLineBreakByWordWrapping;
+    self.failureMessage.accessibilityLabel = self.failureMessage.stringValue;
+    self.failureMessage.hidden = YES;
+    [content addSubview:self.failureMessage];
+    self.window.contentView = content;
     [self.window center];
     NSMenu *menu = [NSMenu new], *edit = [NSMenu new], *viewMenu = [NSMenu new];
     NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"编辑" action:nil keyEquivalent:@""];
@@ -133,7 +148,8 @@ static BOOL initial(NSDictionary *command) {
     if (!initial(command)) { report(@{@"ok": @NO, @"reason": @"host_input_invalid"}); return; }
     NSURL *url = [NSURL URLWithString:command[@"url"]];
     self.surface = command[@"surface"]; self.initialOrigin = origin(url); self.serviceOrigin = command[@"service_origin"];
-    [self.view loadRequest:[NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:10]];
+    self.failureMessage.hidden = YES; self.view.hidden = NO;
+    self.activeNavigation = [self.view loadRequest:[NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:10]];
     [self.window makeKeyAndOrderFront:nil];
     report(@{@"ok": @YES, @"request": command[@"request"], @"surface": self.surface, @"window_count": @1});
 }
@@ -141,18 +157,38 @@ static BOOL initial(NSDictionary *command) {
     handler([self allows:action.request.URL] ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
 }
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationResponse:(WKNavigationResponse *)response decisionHandler:(void (^)(WKNavigationResponsePolicy))handler {
-    handler([self allows:response.response.URL] ? WKNavigationResponsePolicyAllow : WKNavigationResponsePolicyCancel);
+    BOOL permitted = [self allows:response.response.URL];
+    BOOL unhealthy = permitted && response.isForMainFrame && [response.response isKindOfClass:[NSHTTPURLResponse class]]
+        && ((NSHTTPURLResponse *)response.response).statusCode >= 400;
+    handler(permitted && !unhealthy ? WKNavigationResponsePolicyAllow : WKNavigationResponsePolicyCancel);
+    if (unhealthy) [self failed];
 }
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
-    [self failed];
+    if (navigation == self.activeNavigation && !([error.domain isEqual:NSURLErrorDomain] && error.code == NSURLErrorCancelled)) [self failed];
 }
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
-    [self failed];
+    if (navigation == self.activeNavigation && !([error.domain isEqual:NSURLErrorDomain] && error.code == NSURLErrorCancelled)) [self failed];
 }
 - (void)failed {
-    if (self.smoke && !self.finished) { self.finished = YES; report(@{@"ok": @NO, @"reason": @"native_page_failed"}); [NSApp terminate:nil]; }
+    // Static native recovery UI: never render an NSError, URL or capability.
+    self.view.hidden = YES; self.failureMessage.hidden = NO;
+    if (self.failureSmoke && !self.finished) {
+        self.finished = YES;
+        BOOL visible = !self.failureMessage.hidden && self.view.hidden
+            && [self.failureMessage.accessibilityLabel isEqual:self.failureMessage.stringValue];
+        report(@{@"ok": @(visible), @"native_error_visible": @(visible),
+                 @"window_count": @1, @"no_automatic_retry": @YES});
+        [NSApp terminate:nil];
+    } else if (self.smoke && !self.finished) {
+        self.finished = YES; report(@{@"ok": @NO, @"reason": @"native_page_failed"}); [NSApp terminate:nil];
+    }
 }
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    if (navigation != self.activeNavigation) return;
+    self.failureMessage.hidden = YES; self.view.hidden = NO;
+    if (self.failureSmoke && !self.finished) {
+        self.finished = YES; report(@{@"ok": @NO, @"reason": @"expected_native_failure_missing"}); [NSApp terminate:nil]; return;
+    }
     if (!self.smoke || self.finished) return;
     // Fixed cloud-only smoke probe, no arbitrary script input or task action.
     NSString *probe = self.consumerSmoke
@@ -160,6 +196,7 @@ static BOOL initial(NSDictionary *command) {
         : @"document.getElementById('native-canary')?.textContent === 'SYNTHETIC_NATIVE_CANARY'";
     [webView evaluateJavaScript:probe
         completionHandler:^(id result, NSError *error) {
+        if (navigation != self.activeNavigation || self.finished) return;
         self.finished = YES;
         [self zoomIn:nil]; BOOL zoom = self.view.pageZoom > 1.0; [self zoomReset:nil];
         BOOL denied = ![self allows:[NSURL URLWithString:@"https://example.invalid/"]]
@@ -178,7 +215,8 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         JAEHost *host = [JAEHost new];
         host.consumerSmoke = argc == 2 && strcmp(argv[1], "--consumer-smoke") == 0;
-        host.smoke = host.consumerSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
+        host.failureSmoke = argc == 2 && strcmp(argv[1], "--failure-smoke") == 0;
+        host.smoke = host.consumerSmoke || host.failureSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
         [NSApplication sharedApplication];
         NSApp.delegate = host;
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
