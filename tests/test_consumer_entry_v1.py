@@ -728,7 +728,7 @@ def test_macos_consumer_app_rejects_untrusted_existing_bundle(tmp_path):
 
 
 
-def test_macos_consumer_app_upgrades_and_rolls_back_exact_legacy_bundle(tmp_path):
+def test_macos_consumer_app_upgrades_but_refuses_legacy_write_rollback(tmp_path):
     repo = tmp_path / "Job-Application-Executor"
     python = repo / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
@@ -780,10 +780,13 @@ exit $STATUS
     assert (previous / "Contents" / "MacOS" / "AIApplicationManager").read_text() == old_launcher
     assert verify_source_candidate(app / "Contents" / "Resources" / "release")
 
+    active_launcher = executable.read_bytes()
     restored = rollback_macos_app(apps)
-    assert restored["ok"] is True
-    assert executable.read_text() == old_launcher
-    assert (apps / ".AI 投递经理.app.failed").is_dir()
+    assert restored["ok"] is False
+    assert restored["reason"] == "legacy_rollback_unsupported"
+    assert executable.read_bytes() == active_launcher
+    assert (previous / "Contents" / "MacOS" / "AIApplicationManager").read_text() == old_launcher
+    assert not (apps / ".AI 投递经理.app.failed").exists()
 
 
 def test_macos_consumer_app_preserves_tampered_release_on_install_and_rollback(tmp_path):

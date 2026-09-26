@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-08 sole writer PR #20 remains active. Prior head c82a38eddd4875cd47fba154c4fd4a8cf242776d passed foundation, Ubuntu and hosted Mac CI 36195439288; the new capability-matrix candidate still needs exact-head CI. It declares the actual production form driver capabilities: boss_campus is still routed to GenericWebAdapter; independent draft readback, page advance, repeated rows, attachments and unsupported controls remain uncertified. Continue packaged base-Python independence, transactional state migration and rollback, hosted Mac interaction, and DFG-002/008 read-only outcome recovery. External/private and final-click evidence remain deferred; consumer certification is NOT_CERTIFIED and final submit remains user-only.",
+  "next_action": "JCR-08 sole writer PR #20 remains active. Exact head 7df98a3c17d4c5b50439af7cebb9a63ef5a408b8 passed foundation, Ubuntu and hosted Mac CI 36202875140 for the production driver capability matrix. This next coherent candidate refuses manual rollback from a packaged app to an identity-only legacy bundle, preserving both app versions until state compatibility can be proven; exact-head CI is pending. Continue packaged base-Python independence, transactional legacy task-state migration and rollback, hosted Mac interaction, and DFG-002/008 read-only outcome recovery. External/private and final-click evidence remain deferred; consumer certification is NOT_CERTIFIED and final submit remains user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

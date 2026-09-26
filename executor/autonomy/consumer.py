@@ -548,12 +548,18 @@ def _rollback_macos_app_unlocked(destination: str | Path) -> dict:
             "reason": "rollback_unavailable",
             "message": "回退副本不完整或路径已被占用；没有修改当前应用。",
         }
-    # A retained self-contained app may have intact files but fail to start.
-    # Check it before moving the currently working app. Legacy bundles have no
-    # private runtime, so retain their existing identity-only rollback path.
+    # A pre-packaged legacy launcher depends on the mutable checkout and may
+    # write task state with an older schema. Its identity alone cannot prove a
+    # safe rollback after the packaged app has run. Preserve both bundles.
     previous_release = previous / "Contents" / "Resources" / "release"
     previous_runtime = previous / "Contents" / "Resources" / "runtime"
-    if previous_runtime.exists() and not _candidate_starts(
+    if not previous_runtime.is_dir():
+        return {
+            "ok": False,
+            "reason": "legacy_rollback_unsupported",
+            "message": "旧版应用缺少独立运行环境，无法证明任务状态兼容；当前应用保持不变。",
+        }
+    if not _candidate_starts(
         previous_runtime / "bin" / "python", previous_release
     ):
         return {
