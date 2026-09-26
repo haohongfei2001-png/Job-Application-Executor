@@ -174,3 +174,199 @@ def test_new_real_document_does_not_inherit_prior_same_selector_intent(tmp_path)
     assert len(actions) == 2
     assert len({row["field_sha256"] for row in actions}) == 2
     assert {row["outcome"] for row in actions} == {"DOM_READBACK_UNVERIFIED"}
+
+
+def _blocked_field(queue, tid, attempt, clock, *, outcome="ATTEMPTED"):
+    action = queue.begin_field_action(attempt, hashlib.sha256(b"PRIVATE_FIELD_REFERENCE").hexdigest())
+    if outcome != "ATTEMPTED":
+        queue.finish_field_action(action, outcome)
+    clock[0] += 11
+    assert queue.claim("replacement-worker") is None
+    assert queue.get(tid)["blocker"] == "unknown_outcome"
+    return action
+
+
+@pytest.mark.parametrize("outcome", ["ATTEMPTED", "DOM_READBACK_UNVERIFIED", "UNKNOWN_OUTCOME"])
+def test_field_recovery_snapshot_preserves_restart_uncertainty_and_never_authorizes_replay(tmp_path, outcome):
+    queue, tid, _owner, attempt, clock = _owned(tmp_path)
+    _blocked_field(queue, tid, attempt, clock, outcome=outcome)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    before = (rebuilt.get(tid), rebuilt.run_attempts(tid), rebuilt.field_actions(tid), rebuilt.recent_events(100))
+    snapshot = rebuilt.recovery_snapshot(tid, expected_revision=rebuilt.get(tid)["revision"])
+    assert snapshot["field_actions"][outcome.lower()] == 1
+    assert snapshot["field_actions"]["total"] == 1
+    assert snapshot["run_attempts"]["unknown_outcome"] == 1
+    assert snapshot["binding"] is None
+    assert "PRIVATE_FIELD_REFERENCE" not in json.dumps(snapshot)
+    assert before == (rebuilt.get(tid), rebuilt.run_attempts(tid), rebuilt.field_actions(tid), rebuilt.recent_events(100))
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        rebuilt.resume(tid)
+
+
+def _supervisor(queue):
+    from types import SimpleNamespace
+    from executor.autonomy.supervisor import Supervisor
+    from executor.autonomy.manager import safe_task_view
+    return Supervisor(queue, worker=SimpleNamespace(),
+        manager=SimpleNamespace(state=lambda: {"tasks": [safe_task_view(task) for task in queue.tasks()]}),
+        token="synthetic-private-service-token-0123456789")
+
+
+def test_field_recovery_snapshot_rejects_active_cancelled_and_stale_tasks(tmp_path):
+    queue, tid, _owner, attempt, clock = _owned(tmp_path)
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        queue.recovery_snapshot(tid)
+    _blocked_field(queue, tid, attempt, clock)
+    revision = queue.get(tid)["revision"]
+    for invalid in (True, -1, "1"):
+        with pytest.raises(ValueError, match="revision"):
+            queue.recovery_snapshot(tid, expected_revision=invalid)
+    with pytest.raises(ValueError, match="changed"):
+        queue.recovery_snapshot(tid, expected_revision=revision - 1)
+    queue.cancel(tid)
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        queue.recovery_snapshot(tid, expected_revision=revision)
+
+
+@pytest.mark.parametrize("mutation", ["cancel", "late_field_outcome", "binding"])
+def test_readonly_field_recovery_refuses_mixed_snapshot_during_browser_observation(tmp_path, monkeypatch, mutation):
+    from executor import browser
+    queue, tid, _owner, attempt, clock = _owned(tmp_path)
+    action = _blocked_field(queue, tid, attempt, clock)
+    supervisor = _supervisor(queue)
+    def observe(*_args):
+        if mutation == "cancel":
+            queue.cancel(tid)
+        elif mutation == "late_field_outcome":
+            queue.finish_field_action(action, "UNKNOWN_OUTCOME")
+        else:
+            with queue.tx() as db:
+                db.execute("INSERT INTO browser_bindings VALUES(?,?,?,?,?)",
+                    (tid, "epoch12345", "target12345", clock[0], "100.0"))
+        return {"status": "BOUND_DOCUMENT_OBSERVED", "replay_allowed": False}
+    monkeypatch.setattr(browser, "observe_bound_draft", observe)
+    with pytest.raises(ValueError):
+        supervisor.observe_task(tid)
+    assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
+    if mutation != "cancel":
+        with pytest.raises(ValueError, match="read-only reconciliation"):
+            queue.resume(tid)
+
+
+def test_readonly_field_recovery_never_echoes_unknown_journal_payload_or_claims_server_proof(tmp_path, monkeypatch):
+    from executor import browser
+    queue, tid, _owner, attempt, clock = _owned(tmp_path)
+    action = _blocked_field(queue, tid, attempt, clock)
+    with queue.tx() as db:
+        db.execute("UPDATE field_actions SET outcome=? WHERE action_id=?",
+                   ("PRIVATE_JOURNAL_CANARY", action))
+    monkeypatch.setattr(browser, "observe_bound_draft",
+        lambda *_args: {"status": "NO_TASK_BINDING", "replay_allowed": False})
+    result = _supervisor(queue).observe_task(tid)
+    assert result["field_actions"]["unrecognized"] == 1
+    assert result["field_actions"]["total"] == 1
+    assert result["journal_scope"] == "recorded_local_intents_only"
+    for key in ("server_persistence_verified", "draft_identity_verified", "replay_allowed", "submit_capability"):
+        assert result[key] is False
+    assert "PRIVATE_JOURNAL_CANARY" not in json.dumps(result)
+    assert "binding" not in result
+    assert "field_sha256" not in json.dumps(result)
+
+
+def _recovery_server(queue, monkeypatch):
+    from contextlib import contextmanager
+    from threading import Thread
+    from executor import browser
+    from executor.autonomy.supervisor import create_server
+    @contextmanager
+    def running():
+        supervisor = _supervisor(queue)
+        monkeypatch.setattr(supervisor, "readiness", lambda: {"ready_for_live_e2e": False, "checks": {}})
+        observed = []
+        monkeypatch.setattr(browser, "observe_bound_draft",
+            lambda *_args: observed.append(True) or {"status": "NO_TASK_BINDING", "replay_allowed": False})
+        server = create_server(supervisor, port=0)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield supervisor, server.server_address[1], observed
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+    return running()
+
+
+def test_real_authenticated_field_recovery_http_keeps_journal_and_denies_wrong_client(tmp_path, monkeypatch):
+    from http.client import HTTPConnection
+    queue, tid, _owner, attempt, clock = _owned(tmp_path)
+    _blocked_field(queue, tid, attempt, clock, outcome="DOM_READBACK_UNVERIFIED")
+    before = (queue.get(tid), queue.run_attempts(tid), queue.field_actions(tid), queue.recent_events(100))
+    with _recovery_server(queue, monkeypatch) as (supervisor, port, observed):
+        client = HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            client.request("GET", "/ui/api/observe?task_id=" + tid)
+            response = client.getresponse();assert response.status == 401;response.read();assert observed == []
+            client.request("GET", "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            response = client.getresponse();assert response.status == 303
+            cookie = response.getheader("Set-Cookie");assert "HttpOnly" in cookie;response.read()
+            headers = {"Cookie": cookie.split(";", 1)[0]}
+            client.request("GET", "/ui/api/observe?task_id=" + tid, headers=headers)
+            response = client.getresponse();assert response.status == 200;result = json.loads(response.read())
+            assert result["field_actions"]["dom_readback_unverified"] == 1
+            assert result["revision"] == queue.get(tid)["revision"]
+            assert result["server_persistence_verified"] is False
+            assert result["draft_identity_verified"] is False
+            assert result["replay_allowed"] is False
+            assert result["submit_capability"] is False
+            assert len(observed) == 1
+            client.request("GET", "/ui/api/observe?task_id=" + tid,
+                headers={**headers, "Origin": "https://outside.invalid"})
+            response = client.getresponse();assert response.status == 403;response.read();assert len(observed) == 1
+        finally:
+            client.close()
+    assert before == (queue.get(tid), queue.run_attempts(tid), queue.field_actions(tid), queue.recent_events(100))
+
+
+def test_real_field_recovery_consumer_ui_is_read_only_revision_bound_and_clears_on_expiry(tmp_path, monkeypatch):
+    from playwright.sync_api import sync_playwright, expect
+    queue, tid, _owner, attempt, clock = _owned(tmp_path)
+    _blocked_field(queue, tid, attempt, clock)
+    with _recovery_server(queue, monkeypatch) as (supervisor, port, observed):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            requests = []
+            page.on("request", lambda request: requests.append((request.method, request.url)))
+            try:
+                page.goto(f"http://127.0.0.1:{port}/ui-login?ticket=" + supervisor.issue_ui_ticket())
+                page.get_by_role("button", name="只读核对", exact=True).click()
+                report = page.locator("[data-field-recovery]")
+                expect(report).to_be_visible()
+                assert "1 项中断后结果未知" in report.inner_text()
+                assert "服务端保存和草稿身份仍未证明" in report.inner_text()
+                assert "不会自动重放" in report.inner_text()
+                assert page.get_by_role("button", name="继续", exact=True).count() == 0
+                assert all(method == "GET" for method, _url in requests)
+                assert len(observed) == 1
+                queue.pause(tid)
+                page.evaluate("state()")
+                expect(report).to_have_count(0)
+                page.get_by_role("button", name="只读核对", exact=True).click()
+                expect(report).to_be_visible()
+                page.locator("#message").fill("UNSENT_RECOVERY_NOTE")
+                with supervisor._ui_lock:
+                    supervisor._ui_sessions.clear()
+                page.evaluate("state()")
+                expect(page.locator("#session-expired")).to_be_visible()
+                expect(report).to_have_count(0)
+                assert page.locator("#message").input_value() == "UNSENT_RECOVERY_NOTE"
+                assert page.evaluate("recoveryObservations.size") == 0
+                assert page.get_by_role("button", name="继续", exact=True).count() == 0
+                assert all(method == "GET" for method, _url in requests)
+                assert queue.get(tid)["stage"] == "BLOCKED"
+                assert queue.run_attempts(tid)[0]["outcome"] == "UNKNOWN_OUTCOME"
+                with pytest.raises(ValueError, match="read-only reconciliation"):
+                    queue.resume(tid)
+            finally:
+                browser.close()

@@ -488,6 +488,52 @@ class TaskQueue:
             db.execute("UPDATE field_actions SET outcome=?,updated=? WHERE action_id=?",
                        (outcome, self.clock(), action_id))
 
+    def recovery_snapshot(self, tid: str, *, expected_revision: int | None = None) -> dict:
+        """Read one stopped-task journal snapshot; never certify a saved draft.
+
+        Counts are value-free. Browser identity stays internal to the observer.
+        Unknown/corrupt outcome names are counted, never echoed to the consumer.
+        """
+        if expected_revision is not None and (
+                type(expected_revision) is not int or expected_revision < 0):
+            raise ValueError("invalid recovery revision")
+        with self.tx() as db:
+            task = db.execute(
+                "SELECT revision,stage,blocker,owner FROM tasks WHERE task_id=?", (tid,),
+            ).fetchone()
+            if (task is None or task["owner"] or task["stage"] != "BLOCKED"
+                    or task["blocker"] not in {
+                        "unknown_outcome", "browser_ownership_unknown",
+                        "user_paused_from_unknown_outcome",
+                        "user_paused_from_browser_ownership_unknown"}):
+                raise ValueError("task is not waiting for read-only reconciliation")
+            if expected_revision is not None and task["revision"] != expected_revision:
+                raise ValueError("recovery observation changed")
+            fields = {"attempted": 0, "dom_readback_unverified": 0,
+                      "unknown_outcome": 0, "unrecognized": 0}
+            for row in db.execute(
+                    """SELECT CASE WHEN f.outcome IN ('ATTEMPTED','DOM_READBACK_UNVERIFIED','UNKNOWN_OUTCOME')
+                    THEN f.outcome ELSE 'UNRECOGNIZED' END AS kind,COUNT(*) AS count
+                    FROM field_actions f JOIN run_attempts r ON r.attempt_id=f.attempt_id
+                    WHERE r.task_id=? GROUP BY kind""", (tid,)):
+                fields[row["kind"].lower()] = row["count"]
+            fields["total"] = sum(fields.values())
+            attempts = {"attempted": 0, "returned_unverified": 0,
+                        "unknown_outcome": 0, "unrecognized": 0}
+            for row in db.execute(
+                    """SELECT CASE WHEN outcome IN ('ATTEMPTED','RETURNED_UNVERIFIED','UNKNOWN_OUTCOME')
+                    THEN outcome ELSE 'UNRECOGNIZED' END AS kind,COUNT(*) AS count
+                    FROM run_attempts WHERE task_id=? GROUP BY kind""", (tid,)):
+                attempts[row["kind"].lower()] = row["count"]
+            attempts["total"] = sum(attempts.values())
+            binding = db.execute(
+                "SELECT process_epoch,target_id,document_epoch,updated FROM browser_bindings WHERE task_id=?",
+                (tid,),
+            ).fetchone()
+            return {"revision": task["revision"], "field_actions": fields,
+                    "run_attempts": attempts,
+                    "binding": dict(binding) if binding else None}
+
     def field_actions(self, tid: str) -> list[dict]:
         with self.tx() as db:
             return [dict(row) for row in db.execute(

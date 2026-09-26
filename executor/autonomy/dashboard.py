@@ -114,10 +114,12 @@ const tasksEl=document.getElementById('tasks'),chat=document.getElementById('cha
 const readinessBtn=document.getElementById('readiness-details'),readinessDialog=document.getElementById('readiness-dialog'),readinessSummary=document.getElementById('readiness-summary'),readinessChecks=document.getElementById('readiness-checks'),readinessClose=document.getElementById('readiness-close');
 const newTaskForm=document.getElementById('newtask');
 const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
+const recoveryObservations=new Map();
 let uiSessionExpired=false;
 function expireUISession(){
   if(uiSessionExpired)return;
   uiSessionExpired=true;
+  recoveryObservations.clear();tasksEl.querySelectorAll('[data-field-recovery]').forEach(panel=>panel.remove());
   const notice=document.getElementById('session-expired');
   notice.hidden=false;
   document.getElementById('health').textContent='面板会话已失效';
@@ -207,6 +209,19 @@ function privateReviewHtml(review){
     <p>项目核验：${esc(coverage.status||'未知')} · 规范项目 ${esc((coverage.canonical_projects||[]).join('、'))} · 明确排除 ${esc((coverage.explicit_exclusions||[]).join('、'))}</p>
     <p>服务端结构化行只保存身份和摘要；请在招聘页面核对每条内容。</p>`;
 }
+function recoveryHtml(task){
+  const saved=recoveryObservations.get(task.task_id);
+  if(!saved)return '';
+  if(task.stage!=='BLOCKED'||saved.revision!==task.revision||!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(task.blocker)){recoveryObservations.delete(task.task_id);return ''}
+  const fields=saved.field_actions;
+  return '<div class="review warning" data-field-recovery role="status">上次只读核对的历史字段操作记录：'+fields.total+' 项；其中 '+fields.attempted+' 项中断后结果未知，'+fields.unknown_outcome+' 项已标为结果未知，'+fields.dom_readback_unverified+' 项仅有当时页面回读，'+fields.unrecognized+' 项记录无法解释。服务端保存和草稿身份仍未证明；任务保持暂停，不会自动重放，最终提交仍由你本人完成。</div>';
+}
+function acceptRecoveryObservation(taskId,observed){
+  if(!observed||typeof observed!=='object'||Array.isArray(observed))return false;
+  const fields=observed.field_actions,keys=['attempted','dom_readback_unverified','unknown_outcome','unrecognized','total'];
+  if(!Number.isSafeInteger(observed.revision)||observed.revision<0||observed.task_id!==taskId||observed.journal_scope!=='recorded_local_intents_only'||observed.server_persistence_verified!==false||observed.draft_identity_verified!==false||observed.replay_allowed!==false||observed.submit_capability!==false||!fields||typeof fields!=='object'||Array.isArray(fields)||Object.keys(fields).some(k=>!keys.includes(k))||!keys.every(k=>Number.isSafeInteger(fields[k])&&fields[k]>=0)||fields.total!==keys.slice(0,4).reduce((n,k)=>n+fields[k],0))return false;
+  recoveryObservations.set(taskId,{revision:observed.revision,field_actions:{...fields}});return true;
+}
 function render(state){
   if(uiSessionExpired)return;
   const counts={running:0,need:0,ready:0,done:0};
@@ -220,6 +235,7 @@ function render(state){
       <div class="title">${esc(t.company)} · ${esc(t.role)}</div>
       <div class="meta">${esc(t.target_host||'')} ${t.blocker?'· '+esc(humanBlocker(t.blocker)):''}</div>
       <span class="stage">${esc(humanStage(t.stage))}</span>
+      ${recoveryHtml(t)}
       ${t.stage==='READY_TO_SUBMIT'?(t.review_summary?.status==='last_verified'?`
         <div class="review">上次独立核验：${Number(t.review_summary.field_count)||0} 项填写、${Number(t.review_summary.row_count)||0} 条经历、${Number(t.review_summary.attachment_count)||0} 个附件，${Number(t.review_summary.check_count)||0} 项检查通过。请在申请页面再次核对完整内容；最终提交只能由你本人点击。</div>`:
         '<div class="review warning">核验摘要不可用，请勿提交。任务需要重新核验。</div>'):''}
@@ -311,6 +327,7 @@ tasksEl.addEventListener('click',async event=>{
       const r=await uiRequest('/ui/api/observe?task_id='+encodeURIComponent(task_id),{credentials:'same-origin'});
       if(!r.ok)throw new Error();
       const observed=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
+      if(!acceptRecoveryObservation(task_id,observed))throw new Error();await state();
       notify(observed.status==='BOUND_DOCUMENT_OBSERVED'?'已找到原任务页面；草稿和写入结果仍待证明，任务保持暂停。':'原任务页面尚无法核实；任务保持暂停。');
     }catch(e){notify('只读核对暂不可用；任务保持暂停。')}
     finally{button.disabled=uiSessionExpired}

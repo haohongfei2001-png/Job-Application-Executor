@@ -469,3 +469,20 @@ CI. No full certification, shortened fixture, removed assertion, skipped test,
 workflow/timeout/rerun/live operation or native-window claim. JCR08 IN_PROGRESS,
 consumer NOT_CERTIFIED; native/full task/onboarding/legacy transfer/retirement/
 DFG002/008 independent engineering stays open; final-submit user-only.
+
+
+## Exact recovery admission checkpoint — PASS
+
+Exact `93ef2dc18a5c7c20c8ef5e6460b079f34744c046` [CI36269568925](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36269568925) SUCCESS: Ubuntu foundation108480804719 passes25 privacy/no-submit,153 review/browser,56 operations,7 session/diagnostics and255 packaged cases; hostedMac108480804625 passes255 packaged cases and7 retired updater cases. All10 new authenticated recovery/real-manifest fault cases and all22 parent app-presenter cases execute on both platforms with the original actual archive/service/HTTP/browser/rollback gates retained. Compile/JS/diff PASS; full round test job remains unrun while draft. No native/full-round/JCR08 closure or merge claim.
+
+## JCR-08 value-free read-only field recovery — coherent candidate
+
+The stopped-task observer previously read stage/ownership only before browser observation. Cancellation, a late journal outcome or changed owned-document binding during that read could publish an observation against a mixed task state. The per-field intent journal also did not reach the consumer recovery view; a generic page-found toast could not distinguish interrupted field writes from old DOM-only readback.
+
+TaskQueue now reads one stopped/unowned task revision, fixed value-free field/run outcome counts and internal binding under its existing transaction. Unknown stored outcome strings are counted as unrecognized, never exposed. Supervisor fences task revision, complete aggregate snapshot and binding on both sides of the read-only browser observation. Changed/cancelled task, late field completion or binding changes refuse the result. This does not write journal rows, elevate a task or add browser/action authority.
+
+The authenticated consumer panel explicitly shows the last observed historical field counts, including interrupted/unknown/DOM-readback-only records and unrecognized outcomes. It is revision-bound and transient; task changes and UI-session expiry remove the report. Server persistence and draft identity remain unproved, replay and submit capability false. No local intent count is a saved-draft certificate or an authorization to continue. DFG-002 independent server/other-action reconciliation remains open.
+
+Ten added cloud-targeted cases preserve all original tests: three restart/outcome snapshots with unchanged task/journal/events and replay refusal; active/stale/cancelled/invalid revision guards; three cancellation/late-outcome/binding races during observation; corrupt private outcome redaction and fixed false authority; real loopback authenticated HTTP with one-use/HttpOnly session, unauthenticated/wrong-Origin refusal and unchanged durable records; actual service/dashboard/headless Chrome recovery report, revision invalidation, expired session cleanup, unsent draft preservation and GET-only observation. Browser ownership is an injected observation boundary in these new cases, not a server-save/native-app certification. Existing real browser ownership/archive/service/process/transaction/rollback tests remain.
+
+Candidate NOT_RUN until its one automatic targeted cloud CI on the new stable head. Existing targeted workflow includes the field journal file; no workflow, timeout, unchanged-head rerun, shortened fixture, removed assertion, original-test skip or full-round certification change. JCR08 IN_PROGRESS, consumer NOT_CERTIFIED, JCR09 NOT_STARTED. Native single-window/persistent context/hosted native journey, full task/onboarding, genuine legacy authority transfer/pre-lock writer retirement and dedicated drivers remain executable engineering. Device/signing/live gates remain scoped; final submit permanently user-only.

@@ -201,10 +201,23 @@ class Supervisor:
             "user_paused_from_unknown_outcome", "user_paused_from_browser_ownership_unknown",
         }:
             raise ValueError("task is not waiting for read-only reconciliation")
+        before = self.queue.recovery_snapshot(tid, expected_revision=task["revision"])
         observed = browser.observe_bound_draft(
-            task["spec"]["target_url"], self.queue.browser_binding(tid)
+            task["spec"]["target_url"], before["binding"]
         )
-        return {"ok": True, "task_id": tid, **observed}
+        # An observation can yield to cancellation, a late field outcome or a
+        # changed owned-document binding. Do not publish a mixed old/new result.
+        after = self.queue.recovery_snapshot(tid, expected_revision=before["revision"])
+        if after != before:
+            raise ValueError("recovery observation changed")
+        return {"ok": True, "task_id": tid, **observed,
+                "revision": before["revision"],
+                "field_actions": before["field_actions"],
+                "run_attempts": before["run_attempts"],
+                "journal_scope": "recorded_local_intents_only",
+                "server_persistence_verified": False,
+                "draft_identity_verified": False,
+                "replay_allowed": False, "submit_capability": False}
 
     def observe_submission(self, tid: str):
         """Inspect the already-owned task tab after a possible human submit."""
