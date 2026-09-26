@@ -620,6 +620,50 @@ def test_native_field_unknown_readback_stops_before_the_next_write(
         assert adapter.page.evaluate("window.submits") == 0
 
 
+@pytest.mark.parametrize("rejection", ["selection", "option_value"])
+def test_select_expected_target_is_frozen_before_delayed_page_rejection(
+    tmp_path, monkeypatch, rejection
+):
+    from executor.browser import BrowserOwnershipError
+
+    html = tmp_path / "select-delayed-rejection.html"
+    html.write_text("""<!doctype html><body>
+      <select id='first'><option value=''>Choose</option>
+        <option value='yes'>Synthetic Choice</option></select>
+      <input id='next'><button id='submit' type='button'>Submit</button>
+      <script>window.nextWrites=0;window.submits=0;
+        document.querySelector('#next').oninput=()=>window.nextWrites++;
+        document.querySelector('#submit').onclick=()=>window.submits++;
+        window.rejectChoice=kind=>new Promise(resolve=>requestAnimationFrame(()=>{
+          const node=document.querySelector('#first');
+          if(kind==='selection') node.selectedIndex=0;
+          else node.options[1].value='rejected';
+          resolve();
+        }));
+      </script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        select = adapter._fill_select
+
+        def reject_after_primitive(element, value):
+            target = select(element, value)
+            # Force the precise interleaving from the hosted browser failure:
+            # selection returns, then the page rejects it before outer readback.
+            adapter.page.evaluate("kind => window.rejectChoice(kind)", rejection)
+            return target
+
+        monkeypatch.setattr(adapter, "_fill_select", reject_after_primitive)
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown"):
+            adapter.apply_resolutions([
+                FieldResolution(field_id="first", selector="#first", label="First",
+                    status=ResolutionStatus.RESOLVED, value="Synthetic Choice"),
+                FieldResolution(field_id="next", selector="#next", label="Next",
+                    status=ResolutionStatus.RESOLVED, value="NEVER_WRITTEN"),
+            ])
+        assert adapter.page.locator("#next").input_value() == ""
+        assert adapter.page.evaluate("window.nextWrites") == 0
+        assert adapter.page.evaluate("window.submits") == 0
+
+
 def test_retained_native_control_values_get_only_dom_readback_evidence(tmp_path):
     html = tmp_path / "retained-controls.html"
     html.write_text("""<!doctype html><body>

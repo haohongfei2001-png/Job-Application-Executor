@@ -415,9 +415,9 @@ class GenericWebAdapter(SiteAdapter):
             return False
         return 1 <= int(text[5:7]) <= 12
 
-    def _fill_select(self, element, value) -> bool:
+    def _fill_select(self, element, value) -> tuple[str, int] | None:
         if element.get_attribute("multiple") is not None:
-            return False
+            return None
         candidates = value if isinstance(value, list) else [value]
         expanded = []
         for candidate in candidates:
@@ -430,7 +430,7 @@ class GenericWebAdapter(SiteAdapter):
         opts = element.locator("option")
         normalized = [str(x).strip().casefold().removesuffix("市") for x in expanded]
         if not normalized or any(not target for target in normalized):
-            return False
+            return None
         matches = []
         for i in range(opts.count()):
             opt = opts.nth(i)
@@ -440,12 +440,16 @@ class GenericWebAdapter(SiteAdapter):
             if any(target in hay for target in normalized):
                 matches.append(i)
         if len(matches) != 1:
-            return False
+            return None
+        # Freeze the intended option before dispatching change/input. A reactive
+        # page may revert between the primitive and the later render readback;
+        # its observed value must never redefine the expected result.
+        expected = (opts.nth(matches[0]).evaluate("e => e.value"), matches[0])
         getattr(self, "mutation_guard", lambda: None)()
         element.select_option(index=matches[0])
         if not element.evaluate("(e, index) => e.selectedIndex === index", matches[0]):
             raise BrowserOwnershipError("select choice outcome unknown")
-        return True
+        return expected
 
     def _fill_combobox(self, element, selector: str, value) -> bool:
         if not isinstance(value, (str, int, float)):
@@ -564,11 +568,11 @@ class GenericWebAdapter(SiteAdapter):
                     expected_readback = ("combobox", str(value).strip())
                 elif tag == "select":
                     getattr(self, "mutation_guard", lambda: None)()
-                    if not self._fill_select(element, value):
+                    selected_target = self._fill_select(element, value)
+                    if selected_target is None:
                         actions.append({"field_id": resolution.field_id, "ok": False, "reason": "no_matching_select_option"})
                         continue
-                    expected_readback = ("select", (element.input_value(),
-                        element.evaluate("e => e.selectedIndex")))
+                    expected_readback = ("select", selected_target)
                 elif input_type in {"checkbox", "radio"}:
                     desired = bool(value)
                     expected_readback = ("checked", desired)
