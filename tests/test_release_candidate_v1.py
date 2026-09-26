@@ -352,3 +352,110 @@ def test_packaged_candidate_starts_on_loopback_and_answers_health_without_fqdn(t
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+
+
+def _synthetic_wheel(tmp_path, monkeypatch):
+    import base64
+    import hashlib
+    import importlib.metadata
+    from types import SimpleNamespace
+
+    prefix = tmp_path / "candidate-runtime"
+    base = prefix / "lib" / "site-packages"
+    base.mkdir(parents=True)
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "requirements.txt").write_text("synthetic-package==1.0\n")
+    payload = {
+        "synthetic_package/__init__.py": b"VALUE = 'verified'\n",
+        "synthetic_package/native.so": b"synthetic-native-payload",
+        "../../bin/synthetic-entry": b"synthetic-entry-script",
+        "synthetic_package-1.0.dist-info/METADATA": b"Name: synthetic-package\nVersion: 1.0\n",
+        "synthetic_package-1.0.dist-info/RECORD": b"synthetic-record\n",
+    }
+
+    class RecordedPath:
+        def __init__(self, name, data):
+            self.name = name
+            self.size = len(data)
+            self.hash = None if name.endswith("/RECORD") else SimpleNamespace(
+                mode="sha256", value=base64.urlsafe_b64encode(
+                    hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii"))
+        def __str__(self):
+            return self.name
+
+    files = []
+    for name, data in payload.items():
+        path = base / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        files.append(RecordedPath(name, data))
+    distribution = SimpleNamespace(
+        version="1.0", files=files,
+        locate_file=lambda name: base / str(name))
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: distribution)
+    return release, base, distribution
+
+
+def test_dependency_provenance_accepts_owned_native_payload_and_entry_script(tmp_path, monkeypatch):
+    release, base, distribution = _synthetic_wheel(tmp_path, monkeypatch)
+    assert installed_dependencies_match(release)
+    assert (base / "../../bin/synthetic-entry").is_file()
+    # Optional generated caches are separately covered by runtime_manifest,
+    # and cannot make a correctly installed wheel require compilation here.
+    cache = type(distribution.files[0])("synthetic_package/__pycache__/__init__.pyc", b"")
+    cache.hash = None
+    distribution.files.append(cache)
+    assert installed_dependencies_match(release)
+
+
+@pytest.mark.parametrize("name", [
+    "synthetic_package/__init__.py", "synthetic_package/native.so",
+    "../../bin/synthetic-entry", "synthetic_package-1.0.dist-info/METADATA",
+])
+def test_matching_dependency_version_does_not_hide_corrupt_or_missing_payload(
+    tmp_path, monkeypatch, name
+):
+    release, base, _distribution = _synthetic_wheel(tmp_path, monkeypatch)
+    assert installed_dependencies_match(release)
+    path = base / name
+    original = path.read_bytes()
+    path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+    assert not installed_dependencies_match(release), "same-size tampering must fail"
+    path.write_bytes(original)
+    assert installed_dependencies_match(release)
+    path.unlink()
+    assert not installed_dependencies_match(release)
+
+
+def test_dependency_metadata_inside_runtime_cannot_hide_external_module_alias(tmp_path, monkeypatch):
+    release, base, _distribution = _synthetic_wheel(tmp_path, monkeypatch)
+    path = base / "synthetic_package/native.so"
+    outside = tmp_path / "host-library"
+    outside.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(outside)
+    assert not installed_dependencies_match(release)
+    assert outside.read_bytes() == b"synthetic-native-payload"
+
+
+@pytest.mark.parametrize("defect", [
+    "missing-record", "empty-files", "unhashed-code", "weak-hash",
+    "wrong-size", "absolute-payload",
+])
+def test_incomplete_dependency_payload_provenance_fails_closed(tmp_path, monkeypatch, defect):
+    release, base, distribution = _synthetic_wheel(tmp_path, monkeypatch)
+    if defect == "missing-record":
+        distribution.files = [p for p in distribution.files if not str(p).endswith("/RECORD")]
+    elif defect == "empty-files":
+        distribution.files = None
+    elif defect == "unhashed-code":
+        distribution.files[0].hash = None
+    elif defect == "weak-hash":
+        distribution.files[0].hash.mode = "md5"
+    elif defect == "wrong-size":
+        distribution.files[0].size += 1
+    else:
+        distribution.files[0].name = str(base / str(distribution.files[0]))
+    assert not installed_dependencies_match(release)
