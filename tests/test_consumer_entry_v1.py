@@ -1061,3 +1061,49 @@ def test_macos_rollback_restores_current_if_old_app_fails_after_activation(tmp_p
     assert marker.read_text(encoding="utf-8") == "keep"
     assert (apps / ".AI 投递经理.app.previous").is_dir()
     assert not (apps / ".AI 投递经理.app.failed").exists()
+
+
+def test_macos_rollback_refuses_incompatible_task_journal_without_moving_either_app(tmp_path, monkeypatch):
+    from executor.autonomy import state_compatibility
+
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    previous = apps / ".AI 投递经理.app.previous"
+    current_manifest = (app / "Contents" / "Resources" / "release" / "release-source-manifest.json").read_bytes()
+    state_root = tmp_path / "synthetic-state"
+    calls = []
+
+    def incompatible(runtime_python, source, state):
+        calls.append((runtime_python, source, state))
+        return False
+
+    monkeypatch.setattr(state_compatibility, "task_state_candidate_compatible", incompatible)
+    result = rollback_macos_app(apps, task_state_root=state_root)
+
+    assert result["ok"] is False
+    assert result["reason"] == "rollback_state_incompatible"
+    assert calls == [(previous / "Contents" / "Resources" / "runtime" / "bin" / "python",
+                      previous / "Contents" / "Resources" / "release", state_root)]
+    assert (app / "Contents" / "Resources" / "release" / "release-source-manifest.json").read_bytes() == current_manifest
+    assert previous.is_dir()
+    assert not (apps / ".AI 投递经理.app.failed").exists()
+
+
+def test_macos_rollback_refuses_a_live_task_state_owner(tmp_path):
+    from executor.autonomy.worker import ProcessLock
+
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    state = tmp_path / "synthetic-state"
+    with ProcessLock(state / "worker.lock"):
+        result = rollback_macos_app(apps, task_state_root=state)
+    assert result["ok"] is False
+    assert result["reason"] == "task_state_in_use"
+    assert not (apps / "AI 投递经理.app").exists()

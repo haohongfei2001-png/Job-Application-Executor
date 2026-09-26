@@ -516,7 +516,7 @@ def _install_macos_app_unlocked(
     }
 
 
-def rollback_macos_app(destination: str | Path) -> dict:
+def rollback_macos_app(destination: str | Path, *, task_state_root: str | Path | None = None) -> dict:
     apps_dir = Path(destination).expanduser().resolve()
     if not apps_dir.is_dir():
         return {"ok": False, "reason": "rollback_unavailable",
@@ -530,12 +530,25 @@ def rollback_macos_app(destination: str | Path) -> dict:
         return {"ok": False, "reason": "update_lock_unavailable",
                 "message": "无法安全锁定应用目录；没有修改当前应用。"}
     try:
-        return _rollback_macos_app_unlocked(apps_dir)
+        from .queue import default_runtime
+        from .state_compatibility import task_state_guard
+
+        state_root = (Path(task_state_root).expanduser() if task_state_root is not None
+                      else default_runtime(apps_dir / f"{APP_NAME}.app" / "Contents" / "Resources" / "release"))
+        try:
+            with task_state_guard(state_root):
+                return _rollback_macos_app_unlocked(apps_dir, task_state_root=state_root)
+        except BlockingIOError:
+            return {"ok": False, "reason": "task_state_in_use",
+                    "message": "任务服务仍在使用当前状态；请先在应用中停止服务，当前应用保持不变。"}
+        except (OSError, ValueError):
+            return {"ok": False, "reason": "task_state_unavailable",
+                    "message": "无法安全核对任务状态；当前应用和回退副本保持不变。"}
     finally:
         os.close(lock_fd)
 
 
-def _rollback_macos_app_unlocked(destination: str | Path) -> dict:
+def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Path) -> dict:
     """Restore the retained app without deleting the failed candidate."""
     apps_dir = Path(destination).expanduser().resolve()
     app = apps_dir / f"{APP_NAME}.app"
@@ -566,6 +579,16 @@ def _rollback_macos_app_unlocked(destination: str | Path) -> dict:
             "ok": False,
             "reason": "rollback_unhealthy",
             "message": "回退副本无法启动；当前应用保持不变。",
+        }
+    from .state_compatibility import task_state_candidate_compatible
+
+    if not task_state_candidate_compatible(
+        previous_runtime / "bin" / "python", previous_release, task_state_root
+    ):
+        return {
+            "ok": False,
+            "reason": "rollback_state_incompatible",
+            "message": "旧版不能安全保留当前任务记录；当前应用和回退副本保持不变。",
         }
     try:
         app.rename(failed)
