@@ -1305,7 +1305,7 @@ def test_macos_install_refuses_aliased_task_state_without_touching_it(tmp_path, 
     assert not (apps / ".AI 投递经理.app.installing").exists()
 
 
-@pytest.mark.parametrize("destructive", [False, True, "schema"])
+@pytest.mark.parametrize("destructive", [False, True, "schema", "answers"])
 def test_macos_update_proves_journal_compatibility_before_activation(
     tmp_path, monkeypatch, destructive
 ):
@@ -1358,12 +1358,34 @@ def test_macos_update_proves_journal_compatibility_before_activation(
              "FORM_FILLED", "unknown_outcome", 1, 2))
         db.execute("INSERT INTO events(task_id,at,kind,stage) VALUES(?,?,?,?)",
                    ("synthetic-task", 2, "unknown_outcome", "BLOCKED"))
+        from cryptography.fernet import Fernet
+        key = Fernet.generate_key()
+        key_path = state / "task-answers.key"
+        key_path.write_bytes(key)
+        key_path.chmod(0o600)
+        db.execute("""CREATE TABLE task_answer_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL, field_key TEXT NOT NULL, ciphertext BLOB NOT NULL,
+            answer_version INTEGER NOT NULL, source TEXT NOT NULL,
+            task_revision INTEGER NOT NULL, created REAL NOT NULL,
+            reuse_requested INTEGER NOT NULL DEFAULT 0,
+            reuse_applied INTEGER NOT NULL DEFAULT 0)""")
+        db.execute("""INSERT INTO task_answer_events
+            (task_id,field_key,ciphertext,answer_version,source,task_revision,created)
+            VALUES(?,?,?,?,?,?,?)""", ("synthetic-task", "family.primary.role",
+                Fernet(key).encrypt(json.dumps("PRIVATE_ACTIVATION_ANSWER_CANARY").encode()),
+                1, "user_explicit_task", 0, 2))
         db.commit()
+        answer_before = db.execute("SELECT * FROM task_answer_events").fetchall()
         before = (db.execute("SELECT * FROM tasks").fetchall(),
                   db.execute("SELECT * FROM events").fetchall())
         assert (state / "tasks.sqlite3-wal").stat().st_size > 0
 
-        if destructive:
+        if destructive == "answers":
+            candidate_answers = repo / "executor" / "facts" / "answers.py"
+            with candidate_answers.open("a", encoding="utf-8") as handle:
+                handle.write("\nTaskAnswerStore.load = lambda self, task_id: {}\n")
+        elif destructive:
             candidate_queue = repo / "executor" / "autonomy" / "queue.py"
             with candidate_queue.open("a", encoding="utf-8") as handle:
                 handle.write(
@@ -1393,6 +1415,10 @@ def test_macos_update_proves_journal_compatibility_before_activation(
         assert (db.execute("SELECT * FROM tasks").fetchall(),
                 db.execute("SELECT * FROM events").fetchall()) == before
         assert "revision" not in {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == answer_before
+        assert key_path.read_bytes() == key
+        assert key_path.stat().st_mode & 0o077 == 0
+        assert b"PRIVATE_ACTIVATION_ANSWER_CANARY" not in (state / "tasks.sqlite3-wal").read_bytes()
         assert not (state / "auth.token").exists()
         assert not (state / "service.json").exists()
         assert not (state / "tasks.sqlite3.pre-jcr01.sqlite3").exists()

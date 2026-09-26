@@ -269,3 +269,121 @@ def test_service_fifo_is_refused_without_blocking_or_consuming_it(tmp_path):
     with pytest.raises(ValueError, match="task_service_record_invalid"):
         with task_state_guard(root):
             pass
+
+def encrypted_answers(root, db):
+    from cryptography.fernet import Fernet
+    key = Fernet.generate_key()
+    path = root / "task-answers.key"
+    path.write_bytes(key)
+    path.chmod(0o600)
+    db.execute("""CREATE TABLE task_answer_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL, field_key TEXT NOT NULL, ciphertext BLOB NOT NULL,
+        answer_version INTEGER NOT NULL, source TEXT NOT NULL,
+        task_revision INTEGER NOT NULL, created REAL NOT NULL,
+        reuse_requested INTEGER NOT NULL DEFAULT 0,
+        reuse_applied INTEGER NOT NULL DEFAULT 0)""")
+    values = [
+        ("synthetic-task", "family.primary.role", "PRIVATE_OLD_ANSWER_CANARY", 1),
+        ("synthetic-task", "family.primary.role", "PRIVATE_LATEST_ANSWER_CANARY", 2),
+        ("synthetic-task", "preferences.accept_travel", False, 1),
+        ("synthetic-task", "education.highest.graduation_date", 2026, 1),
+        ("another-task", "family.primary.role", "PRIVATE_OTHER_TASK_CANARY", 1),
+    ]
+    for task, field, value, version in values:
+        db.execute("""INSERT INTO task_answer_events
+            (task_id,field_key,ciphertext,answer_version,source,task_revision,created)
+            VALUES(?,?,?,?,?,?,?)""", (task, field, Fernet(key).encrypt(
+                json.dumps(value).encode()), version, "user_explicit_task", 1, 2))
+    db.commit()
+    return key
+
+
+def answer_candidate(tmp_path, mutation=""):
+    import shutil
+    release = tmp_path / "answer-release"
+    actual = Path(__file__).resolve().parents[1]
+    shutil.copytree(actual / "executor", release / "executor",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if mutation:
+        with (release / "executor" / "facts" / "answers.py").open("a") as handle:
+            handle.write("\n_original_load = TaskAnswerStore.load\n"
+                         "def _changed_load(self, task_id):\n"
+                         "    values = _original_load(self, task_id)\n"
+                         + mutation + "\n"
+                         "TaskAnswerStore.load = _changed_load\n")
+    return release
+
+
+@pytest.mark.parametrize("mutation,compatible", [
+    ("", True),
+    ("    return {}", False),
+    ("    return {'family.primary.role': 'guessed substitute'}", False),
+    ("    return {key: str(value) for key,value in values.items()}", False),
+    ("    raise RuntimeError('synthetic unreadable answer')", False),
+    ("    (self.queue.root/'task-answers.key').write_bytes(Fernet.generate_key())\n"
+     "    return values", False),
+])
+def test_candidate_must_recover_latest_typed_encrypted_answers_with_the_same_key(
+    tmp_path, mutation, compatible
+):
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        before = authority(db)
+        events = db.execute("SELECT * FROM task_answer_events").fetchall()
+        assert (root / "tasks.sqlite3-wal").stat().st_size > 0
+        release = answer_candidate(tmp_path, mutation)
+        with task_state_guard(root):
+            assert task_state_candidate_compatible(
+                Path(sys.executable), release, root) is compatible
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == events
+        assert (root / "task-answers.key").read_bytes() == key
+        assert (root / "task-answers.key").stat().st_mode & 0o077 == 0
+        assert not (root / ".answer-compatibility.json").exists()
+        assert not (root / "auth.token").exists()
+        assert not (root / "service.json").exists()
+        for path in root.iterdir():
+            if path.is_file():
+                assert b"PRIVATE_LATEST_ANSWER_CANARY" not in path.read_bytes()
+
+
+@pytest.mark.parametrize("defect", ["missing", "invalid", "public", "symlink", "fifo", "ciphertext"])
+def test_ambiguous_encryption_authority_refuses_before_any_candidate_runs(
+    tmp_path, monkeypatch, defect
+):
+    from executor.autonomy import state_compatibility
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        encrypted_answers(root, db)
+        key = root / "task-answers.key"
+        outside = tmp_path / "outside-key"
+        outside.write_bytes(key.read_bytes())
+        if defect == "missing":
+            key.unlink()
+        elif defect == "invalid":
+            key.write_bytes(b"!" * 44)
+        elif defect == "public":
+            key.chmod(0o644)
+        elif defect == "symlink":
+            key.unlink()
+            key.symlink_to(outside)
+        elif defect == "fifo":
+            key.unlink()
+            os.mkfifo(key)
+        else:
+            db.execute("UPDATE task_answer_events SET ciphertext=?", (b"unreadable",))
+            db.commit()
+        before = authority(db)
+        events = db.execute("SELECT * FROM task_answer_events").fetchall()
+        outside_before = outside.read_bytes()
+
+        def forbidden_candidate(*_args, **_kwargs):
+            pytest.fail("unreadable key/answer must refuse before candidate startup")
+
+        monkeypatch.setattr(state_compatibility.subprocess, "run", forbidden_candidate)
+        assert not task_state_candidate_compatible(Path(sys.executable), tmp_path, root)
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == events
+        assert outside.read_bytes() == outside_before

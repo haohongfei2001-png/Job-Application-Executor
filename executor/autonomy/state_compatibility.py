@@ -173,6 +173,58 @@ def _snapshot(db):
     return result
 
 
+def _answer_key(root: Path):
+    """Read only the owned, bounded task-answer key; never create or repair it."""
+    path = root / "task-answers.key"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077 or info.st_size != 44):
+            raise ValueError("task_answer_key_invalid")
+        key = handle.read(45)
+    if len(key) != 44:
+        raise ValueError("task_answer_key_invalid")
+    from cryptography.fernet import Fernet
+    Fernet(key)
+    return key
+
+
+def _answer_contract(db, key, secret):
+    """Expected latest typed answers, reduced to ephemeral keyed digests.
+
+    The journal's complete encrypted history remains covered by row/schema
+    snapshots. This also proves the candidate's actual consumer decoder can
+    recover the same latest values, rather than merely retaining ciphertext.
+    """
+    import hmac
+    from cryptography.fernet import Fernet, InvalidToken
+
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_answer_events'"
+    ).fetchone()
+    if not exists:
+        return []
+    latest = {}
+    for task_id, field_key, ciphertext in db.execute(
+            "SELECT task_id,field_key,ciphertext FROM task_answer_events ORDER BY sequence"):
+        if key is None:
+            raise ValueError("task_answer_key_missing")
+        try:
+            value = json.loads(Fernet(key).decrypt(ciphertext))
+        except (InvalidToken, ValueError, TypeError):
+            raise ValueError("task_answer_unreadable") from None
+        latest.setdefault(task_id, {})[field_key] = value
+    return [{"task_id": task_id,
+             "digest": hmac.new(secret, json.dumps(values, ensure_ascii=False,
+                 sort_keys=True, separators=(",", ":")).encode("utf-8"),
+                 hashlib.sha256).hexdigest()}
+            for task_id, values in sorted(latest.items())]
+
+
 def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> bool:
     """Reject any candidate migration that loses or changes journal authority."""
     root = Path(root).expanduser()
@@ -181,11 +233,12 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
         return True
     if root.is_symlink() or not root.is_dir() or any(p.is_symlink() for p in _state_paths(root)):
         return False
-    if not database.exists():
-        return not any(p.exists() for p in _state_paths(root)[1:])
-    if not database.is_file():
-        return False
     try:
+        key = _answer_key(root)
+        if not database.exists():
+            return key is None and not any(p.exists() for p in _state_paths(root)[1:])
+        if not database.is_file():
+            return False
         with tempfile.TemporaryDirectory(prefix="jae-state-compatibility-") as directory:
             copy = Path(directory) / "tasks.sqlite3"
             # SQLite backup includes committed WAL rows; file copying does not.
@@ -199,12 +252,36 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
 
                     source.backup(destination, pages=256, progress=progress, sleep=0.01)
                     before = _snapshot(destination)
+                    secret = os.urandom(32)
+                    answers = _answer_contract(destination, key, secret)
             copy.chmod(0o600)
+            if key is not None:
+                copied_key = Path(directory) / "task-answers.key"
+                with os.fdopen(os.open(copied_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                       0o600), "wb") as handle:
+                    handle.write(key)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                check = Path(directory) / ".answer-compatibility.json"
+                check.write_text(json.dumps({"secret": secret.hex(), "tasks": answers}),
+                                 encoding="utf-8")
+                check.chmod(0o600)
             script = (
                 "import pathlib,sys;sys.dont_write_bytecode=True;"
                 "sys.path.insert(0,str(pathlib.Path(sys.argv[1]).resolve()));"
                 "from executor.autonomy.queue import TaskQueue;"
-                "TaskQueue(pathlib.Path(sys.argv[2]))"
+                "root=pathlib.Path(sys.argv[2]);queue=TaskQueue(root);"
+                "\nif (root/'task-answers.key').exists():"
+                "\n import hashlib,hmac,json"
+                "\n from executor.facts.answers import TaskAnswerStore"
+                "\n check=json.loads((root/'.answer-compatibility.json').read_text())"
+                "\n answers=TaskAnswerStore(queue)"
+                "\n for item in check['tasks']:"
+                "\n  payload=json.dumps(answers.load(item['task_id']),ensure_ascii=False,"
+                "sort_keys=True,separators=(',',':')).encode('utf-8')"
+                "\n  actual=hmac.new(bytes.fromhex(check['secret']),payload,hashlib.sha256).hexdigest()"
+                "\n  assert hmac.compare_digest(actual,item['digest'])"
+
             )
             completed = subprocess.run(
                 [str(python), "-I", "-B", "-c", script, str(release), directory],
@@ -213,6 +290,8 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
                 env={**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"},
             )
             if completed.returncode != 0 or copy.is_symlink() or not copy.is_file():
+                return False
+            if _answer_key(root) != key or _answer_key(Path(directory)) != key:
                 return False
             with sqlite3.connect(copy.as_uri() + "?mode=ro", uri=True) as migrated:
                 if migrated.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
@@ -224,5 +303,5 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
                             or _digest(migrated, table, columns) != expected):
                         return False
             return True
-    except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError):
+    except (ImportError, OSError, ValueError, TypeError, sqlite3.Error, subprocess.SubprocessError):
         return False
