@@ -427,13 +427,20 @@ def test_task_workspace_keyboard_context_survives_reorder_without_implicit_actio
             expect(beta).to_have_attribute("aria-pressed", "true")
             assert page.locator('[data-current-task="true"]').count() == 1
             page.locator("#message").fill("未发送的完整消息\n保留第二行")
-            page.locator('input[name="company"]').fill("未发送公司")
+            company_input = page.locator('input[name="company"]')
+            company_input.fill("未发送公司")
+            expect(company_input).to_be_focused()
             with page.expect_response("https://workspace.test/ui/api/state"):
                 page.evaluate("state()")
-            expect(beta).to_be_focused()
+            # Filling the company field moved focus there. Readback must
+            # preserve that actual editing focus, never steal it for a card.
+            expect(company_input).to_be_focused()
+            expect(beta).to_have_attribute("aria-pressed", "true")
             assert page.locator("#message").input_value() == "未发送的完整消息\n保留第二行"
             assert page.locator('input[name="company"]').input_value() == "未发送公司"
 
+            beta.focus()
+            expect(beta).to_be_focused()
             tasks[:] = [task for task in tasks if task["task_id"] != "b"]
             with page.expect_response("https://workspace.test/ui/api/state"):
                 page.evaluate("state()")
