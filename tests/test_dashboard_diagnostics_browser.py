@@ -371,3 +371,179 @@ def test_expired_session_discards_late_diagnostics_without_refreshing_private_ui
             expect(page.locator("#session-expired")).to_be_focused()
         finally:
             browser.close()
+
+
+def test_task_workspace_keyboard_context_survives_reorder_without_implicit_actions():
+    """The actual task surface preserves orientation without granting a command."""
+    tasks = [
+        {"task_id": "a", "company": "Alpha", "role": "Engineer", "stage": "DISCOVERED", "revision": 1},
+        {"task_id": "b", "company": "Beta", "role": "Designer", "stage": "DISCOVERED", "revision": 2},
+        {"task_id": "c", "company": "Gamma", "role": "Reviewer", "stage": "READY_TO_SUBMIT", "revision": 3},
+    ]
+    requests, errors = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 600, "height": 800})
+        try:
+            def route_request(route):
+                path = route.request.url.split("workspace.test", 1)[-1]
+                requests.append((route.request.method, path, route.request.post_data))
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                else:
+                    route.fulfill(status=200, content_type="application/json",
+                        body=json.dumps({"tasks": tasks, "ready_for_live_e2e": False}))
+
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://workspace.test/**", route_request)
+            page.goto("https://workspace.test/")
+            alpha = page.get_by_role("button", name="查看任务 · Alpha · Engineer", exact=True)
+            beta = page.get_by_role("button", name="查看任务 · Beta · Designer", exact=True)
+            gamma = page.get_by_role("button", name="查看任务 · Gamma · Reviewer", exact=True)
+            expect(alpha).to_be_visible()
+            expect(page.locator("#task-context")).to_contain_text("尚未选中")
+            alpha.focus()
+            alpha.press("ArrowDown")
+            expect(beta).to_be_focused()
+            assert beta.get_attribute("aria-pressed") == "false"
+            beta.press("Enter")
+            expect(beta).to_have_attribute("aria-pressed", "true")
+            expect(page.locator("#task-context")).to_contain_text("Beta · Designer")
+            beta.press("End")
+            expect(gamma).to_be_focused()
+            gamma.press("Home")
+            expect(alpha).to_be_focused()
+            alpha.press("ArrowUp")
+            expect(alpha).to_be_focused()
+            gamma.focus()
+            gamma.press("ArrowDown")
+            expect(gamma).to_be_focused()
+
+            beta.focus()
+            tasks[:] = [tasks[2], tasks[1], tasks[0]]
+            with page.expect_response("https://workspace.test/ui/api/state"):
+                page.evaluate("state()")
+            expect(beta).to_be_focused()
+            expect(beta).to_have_attribute("aria-pressed", "true")
+            assert page.locator('[data-current-task="true"]').count() == 1
+            page.locator("#message").fill("未发送的完整消息\n保留第二行")
+            page.locator('input[name="company"]').fill("未发送公司")
+            with page.expect_response("https://workspace.test/ui/api/state"):
+                page.evaluate("state()")
+            expect(beta).to_be_focused()
+            assert page.locator("#message").input_value() == "未发送的完整消息\n保留第二行"
+            assert page.locator('input[name="company"]').input_value() == "未发送公司"
+
+            tasks[:] = [task for task in tasks if task["task_id"] != "b"]
+            with page.expect_response("https://workspace.test/ui/api/state"):
+                page.evaluate("state()")
+            expect(page.locator("#task-context")).to_be_focused()
+            expect(page.locator("#task-context")).to_contain_text("尚未选中")
+            assert page.locator('[data-current-task="true"]').count() == 0
+            assert page.locator("[data-task-select]").count() == 2
+            assert all(method == "GET" for method, _, _ in requests)
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert errors == []
+        finally:
+            browser.close()
+
+
+def test_task_workspace_selection_never_retargets_an_explicit_card_command():
+    """Orientation is not command authority: another card retains its exact ID/revision."""
+    tasks = [
+        {"task_id": "first", "company": "<img src=x onerror=alert(1)>", "role": "Engineer",
+         "stage": "DISCOVERED", "revision": 7},
+        {"task_id": "second", "company": "Second", "role": "Designer",
+         "stage": "DISCOVERED", "revision": 9},
+    ]
+    commands, errors = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("commands-workspace.test", 1)[-1]
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/command":
+                    commands.append(json.loads(route.request.post_data))
+                    route.fulfill(status=200, content_type="application/json", body='{"accepted":true}')
+                else:
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({"tasks": tasks}))
+
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://commands-workspace.test/**", route_request)
+            page.goto("https://commands-workspace.test/")
+            page.get_by_role("button", name="查看任务 · Second · Designer", exact=True).click()
+            expect(page.locator("#task-context")).to_contain_text("Second · Designer")
+            assert commands == []
+            assert page.locator("#tasks img").count() == 0
+            first_card = page.locator('[data-task-card="first"]')
+            expect(first_card).to_contain_text("<img src=x onerror=alert(1)>")
+            first_card.get_by_role("button", name="暂停", exact=True).click()
+            expect(page.locator("#toast")).to_contain_text("任务已暂停")
+            assert len(commands) == 1
+            assert commands[0]["task_id"] == "first"
+            assert commands[0]["expected_revision"] == 7
+            assert commands[0]["action"] == "PAUSE"
+            assert commands[0]["command_id"].startswith("ui-")
+            expect(page.locator('[data-task-select="second"]')).to_have_attribute("aria-pressed", "true")
+            assert errors == []
+        finally:
+            browser.close()
+
+
+def test_task_workspace_expiry_clears_orientation_and_never_replays_selection():
+    """A stale page preserves unsent facts but cannot keep a live task context."""
+    expired = False
+    requests, errors = [], []
+    task = {"task_id": "answer", "company": "Synthetic", "role": "Engineer",
+            "stage": "NEEDS_USER_INPUT", "revision": 4, "blocker": "unknown_facts",
+            "question_context": {"status": "current", "items": [
+                {"key": "motivation", "label": "申请原因", "required": True}]},
+            "unresolved_keys": ["motivation"], "boolean_keys": [], "reusable_keys": []}
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("expired-workspace.test", 1)[-1]
+                requests.append((route.request.method, path))
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif expired:
+                    route.fulfill(status=401, content_type="application/json", body='{"error":"ui_session_required"}')
+                else:
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({"tasks": [task]}))
+
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://expired-workspace.test/**", route_request)
+            page.goto("https://expired-workspace.test/")
+            selection = page.get_by_role("button", name="查看任务 · Synthetic · Engineer", exact=True)
+            selection.click()
+            expect(selection).to_have_attribute("aria-pressed", "true")
+            page.get_by_label("申请原因", exact=True).fill("未发送的本人回答")
+            with page.expect_response("https://expired-workspace.test/ui/api/state"):
+                page.evaluate("state()")
+            assert page.get_by_label("申请原因", exact=True).input_value() == "未发送的本人回答"
+            expect(selection).to_have_attribute("aria-pressed", "true")
+            expired = True
+            page.evaluate("readiness()")
+            expect(page.locator("#session-expired")).to_be_visible()
+            expect(page.locator("#task-context")).to_contain_text("面板会话已失效")
+            expect(selection).to_have_attribute("aria-pressed", "false")
+            expect(selection).to_be_disabled()
+            checkpoint = list(requests)
+            page.evaluate("""() => {
+              const trigger=document.querySelector('[data-task-select]');
+              trigger.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+              trigger.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
+            }""")
+            expect(page.locator("#session-expired")).to_be_focused()
+            assert requests == checkpoint
+            assert all(method == "GET" for method, _ in requests)
+            assert page.get_by_label("申请原因", exact=True).input_value() == "未发送的本人回答"
+            expect(selection).to_have_attribute("aria-pressed", "false")
+            assert errors == []
+        finally:
+            browser.close()

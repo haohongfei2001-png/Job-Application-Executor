@@ -23,7 +23,7 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:16px 0}
 .metric{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
-.task .title{font-weight:650}.task .meta{font-size:12px;color:#64748b;margin-top:4px}.stage{font-size:11px;border-radius:999px;padding:3px 7px;background:#eef2ff;display:inline-block;margin-top:7px}
+.task .title{font-weight:650}.task[data-current-task="true"]{border-color:#64748b;box-shadow:0 0 0 1px #64748b}.task-select{width:100%;display:block;padding:7px 0;text-align:left;background:transparent;color:inherit;border-radius:5px;font:inherit;font-weight:650}.task-select:focus-visible{outline:3px solid #2563eb;outline-offset:3px}.task-context{font-size:12px;line-height:1.45;color:#475569;margin:10px 0;overflow-wrap:anywhere}.task .meta{font-size:12px;color:#64748b;margin-top:4px}.stage{font-size:11px;border-radius:999px;padding:3px 7px;background:#eef2ff;display:inline-block;margin-top:7px}
 .review{font-size:12px;line-height:1.5;margin-top:9px;padding:9px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0}.review.warning{background:#fff7ed;border-color:#fed7aa;color:#9a3412}
 .private-review{max-height:52vh;overflow:auto;white-space:pre-wrap}.private-review table{width:100%;border-collapse:collapse;margin-top:8px}.private-review th,.private-review td{border:1px solid #cbd5e1;padding:6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 .taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
@@ -68,7 +68,8 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
     <button type="submit">查找岗位</button>
   </form>
   <div id="candidates" class="candidates"></div>
-  <div id="tasks" class="empty">正在读取任务…</div>
+  <p id="task-context" class="task-context" role="status" tabindex="-1">尚未选中任务。可用键盘浏览任务卡片。</p>
+  <div id="tasks" class="empty" role="region" aria-label="任务列表">正在读取任务…</div>
 </aside>
 <main>
 <header>
@@ -116,9 +117,41 @@ const newTaskForm=document.getElementById('newtask');
 const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
 const recoveryObservations=new Map();
 let uiSessionExpired=false;
+let currentTaskId=null;
+const taskContext=document.getElementById('task-context');
+function updateTaskContext(){
+  const cards=[...tasksEl.querySelectorAll('[data-task-card]')];
+  const current=cards.find(card=>card.dataset.taskCard===currentTaskId);
+  if(!current)currentTaskId=null;
+  for(const card of cards){
+    const selected=card===current;
+    card.dataset.currentTask=String(selected);
+    card.querySelector('[data-task-select]').setAttribute('aria-pressed',String(selected));
+  }
+  const title=current?.querySelector('[data-task-select]').textContent;
+  const message=uiSessionExpired?'面板会话已失效，请重新打开应用。':
+    title?'当前查看：'+title+'。任务操作请使用该卡片按钮。':'尚未选中任务。可用键盘浏览任务卡片。';
+  if(taskContext.textContent!==message)taskContext.textContent=message;
+}
+tasksEl.addEventListener('click',event=>{
+  const button=event.target.closest('button[data-task-select]');
+  if(!button||uiSessionExpired)return;
+  currentTaskId=button.dataset.taskSelect;updateTaskContext();
+});
+tasksEl.addEventListener('keydown',event=>{
+  const button=event.target.closest('button[data-task-select]');
+  if(!button||uiSessionExpired||!['ArrowUp','ArrowDown','Home','End'].includes(event.key))return;
+  const buttons=[...tasksEl.querySelectorAll('button[data-task-select]')];
+  const index=buttons.indexOf(button);if(index<0)return;
+  event.preventDefault();
+  const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:
+    Math.max(0,Math.min(buttons.length-1,index+(event.key==='ArrowUp'?-1:1)));
+  buttons[next]?.focus();
+});
 function expireUISession(){
   if(uiSessionExpired)return;
   uiSessionExpired=true;
+  currentTaskId=null;updateTaskContext();
   recoveryObservations.clear();tasksEl.querySelectorAll('[data-field-recovery]').forEach(panel=>panel.remove());
   const notice=document.getElementById('session-expired');
   notice.hidden=false;
@@ -228,11 +261,16 @@ function render(state){
   (state.tasks||[]).forEach(t=>counts[stageGroup(t.stage)]++);
   Object.entries(counts).forEach(([k,v])=>document.getElementById(k).textContent=v);
   document.getElementById('health').textContent='本地服务已连接';
-  if(!(state.tasks||[]).length){tasksEl.className='empty';tasksEl.textContent='暂无任务';return}
+  const focusedTask=document.activeElement?.dataset?.taskSelect;
+  if(!(state.tasks||[]).length){
+    tasksEl.className='empty';tasksEl.textContent='暂无任务';updateTaskContext();
+    if(focusedTask!==undefined)taskContext.focus();
+    return;
+  }
   tasksEl.className='';
   tasksEl.innerHTML=(state.tasks||[]).map(t=>`
-    <div class="task">
-      <div class="title">${esc(t.company)} · ${esc(t.role)}</div>
+    <div class="task" data-task-card="${esc(t.task_id)}">
+      <div class="title"><button class="task-select" type="button" data-task-select="${esc(t.task_id)}" aria-label="查看任务 · ${esc(t.company)} · ${esc(t.role)}" aria-pressed="false">${esc(t.company)} · ${esc(t.role)}</button></div>
       <div class="meta">${esc(t.target_host||'')} ${t.blocker?'· '+esc(humanBlocker(t.blocker)):''}</div>
       <span class="stage">${esc(humanStage(t.stage))}</span>
       ${recoveryHtml(t)}
@@ -263,6 +301,11 @@ function render(state){
       </div>
       ${t.stage==='READY_TO_SUBMIT'?`<div id="review-${esc(t.task_id)}" class="review private-review" data-private-review-panel role="region" aria-label="完整申请复核" tabindex="-1" hidden></div>`:''}
     </div>`).join('');
+  updateTaskContext();
+  if(focusedTask!==undefined){
+    const restored=[...tasksEl.querySelectorAll('[data-task-select]')].find(button=>button.dataset.taskSelect===focusedTask);
+    (restored||taskContext).focus({preventScroll:true});
+  }
 }
 tasksEl.addEventListener('click',event=>{
   const button=event.target.closest('button[data-close-private-review]');if(!button)return;
