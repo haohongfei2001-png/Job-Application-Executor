@@ -80,8 +80,10 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - name: Install Python dependencies
-        run: python -m pip install -r requirements.txt
+      - name: Install Python dependencies and hosted headless UI oracle
+        run: |
+          python -m pip install -r requirements.txt
+          python -m playwright install chromium
       - name: Prepare digest-pinned standalone Python
         run: |
           python scripts/prepare_standalone_runtime.py "$RUNNER_TEMP/jae-standalone"

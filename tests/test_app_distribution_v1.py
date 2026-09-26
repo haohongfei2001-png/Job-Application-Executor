@@ -4,6 +4,9 @@ import hashlib
 import json
 import os
 import shutil
+import shlex
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -13,6 +16,7 @@ from executor.autonomy.app_distribution import (
     ARCHIVE_NAME, RECEIPT_NAME, _archive_app, build_macos_distribution,
 )
 from executor.autonomy.consumer import APP_NAME, _candidate_starts
+from executor.autonomy.process_entry import CLI_ENTRY_SCRIPT
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.release import (
     copy_source_candidate, source_manifest, verify_runtime_candidate,
@@ -175,4 +179,123 @@ def test_real_archive_relocates_without_checkout_runtime_or_private_build_state(
     # Installer-health journals and tokens are temporary build resources.
     assert not (release / "runtime").exists()
     assert not (runtime / "auth.token").exists()
+    assert json.loads((output / RECEIPT_NAME).read_text()) == receipt
+
+    # Launch the real relocated app entry, not a fixture CLI or direct health
+    # helper. The browser oracle follows the exact issued ticket into the real
+    # authenticated consumer UI without opening the hosted runner's desktop.
+    # It substitutes only the URL-opening transport, never app/service code.
+    home = tmp_path / "consumer-home"
+    home.mkdir()
+    report = tmp_path / "opened-consumer.jsonl"
+    browser_probe = tmp_path / "browser_probe.py"
+    browser_probe.write_text("""import json,os,sys
+from pathlib import Path
+from urllib.parse import urlsplit
+from playwright.sync_api import sync_playwright,expect
+url=sys.argv[1]
+parsed=urlsplit(url)
+assert parsed.scheme=='http' and parsed.hostname=='127.0.0.1'
+assert parsed.path=='/ui-login' and parsed.query.startswith('ticket=')
+base=parsed.scheme+'://'+parsed.netloc
+with sync_playwright() as playwright:
+    browser=playwright.chromium.launch(headless=True)
+    try:
+        context=browser.new_context(viewport={'width':1024,'height':900})
+        page=context.new_page()
+        errors=[]
+        external=[]
+        page.on('pageerror',lambda error:errors.append(str(error)))
+        context.on('request',lambda request:external.append(request.url)
+            if urlsplit(request.url).hostname!='127.0.0.1' else None)
+        response=page.goto(url,wait_until='domcontentloaded')
+        assert response.status==200 and page.url==base+'/ui'
+        expect(page.get_by_role('button',name='查看诊断',exact=True)).to_be_visible()
+        cookies=context.cookies()
+        assert len(cookies)==1 and cookies[0]['name']=='application_executor_session'
+        assert cookies[0]['httpOnly'] is True and cookies[0]['sameSite']=='Strict'
+        state=context.request.get(base+'/ui/api/state')
+        assert state.status==200 and state.json()['tasks']==[]
+        readiness=context.request.get(base+'/ui/api/readiness')
+        assert readiness.status==200 and isinstance(readiness.json(),dict)
+        diagnostics=page.get_by_role('button',name='查看诊断',exact=True)
+        diagnostics.focus()
+        page.keyboard.press('Enter')
+        expect(page.locator('#diagnostics-dialog')).to_be_visible()
+        expect(page.locator('#diagnostics-report')).not_to_be_empty()
+        close=page.locator('#diagnostics-close')
+        close.focus()
+        page.keyboard.press('Enter')
+        expect(page.locator('#diagnostics-dialog')).not_to_be_visible()
+        # Actual consumer action and feedback; no direct invocation of an updater.
+        update=page.get_by_role('button',name='检查并更新',exact=True)
+        with page.expect_response(lambda response:
+                urlsplit(response.url).path=='/ui/api/update') as outcome:
+            update.click()
+        assert outcome.value.status==409
+        assert outcome.value.json()['reason']=='packaged_update_not_ready'
+        expect(page.locator('#toast')).to_contain_text('当前安装包尚不支持安全更新')
+        expect(update).to_be_enabled()
+        assert context.request.get(url).status==401
+        unauthenticated=browser.new_context()
+        assert unauthenticated.request.get(base+'/ui').status==401
+        unauthenticated.close()
+        assert not errors and not external
+    finally:
+        browser.close()
+# Retain only booleans; no ticket, cookie, token, URL or private diagnostic value.
+with Path(os.environ['JAE_TEST_BROWSER_REPORT']).open('a',encoding='utf-8') as file:
+    file.write(json.dumps({'ui':True,'state':True,'readiness':True,
+        'keyboard_diagnostics':True,'update_refused':True,
+        'session_required':True,'ticket_one_use':True,'no_external_request':True})+'\\n')
+""", encoding="utf-8")
+    browser_cache = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or (
+        Path.home() / ("Library/Caches/ms-playwright" if sys.platform == "darwin"
+                       else ".cache/ms-playwright")))
+    env = {**os.environ, "HOME": str(home),
+           "PLAYWRIGHT_BROWSERS_PATH": str(browser_cache),
+           "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated",
+           "BROWSER": shlex.join([str(runtime / "bin" / "python"), "-I", "-B", str(browser_probe), "%s"]),
+           "JAE_TEST_BROWSER_REPORT": str(report),
+           "PYTHONHOME": str(poison), "PYTHONPATH": str(poison)}
+    shell = "/bin/zsh" if sys.platform == "darwin" else "/bin/bash"
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    state_root = home / "Library" / "Application Support" / "AI投递经理" / "autonomy"
+    command = [str(runtime / "bin" / "python"), "-I", "-B", "-c", CLI_ENTRY_SCRIPT,
+               str(release), "--runtime", str(state_root), "--port", "9344"]
+    try:
+        first = None
+        for count in (1, 2):
+            launched = subprocess.run([shell, str(executable)], cwd=poison,
+                env=env, capture_output=True, text=True, timeout=30)
+            log = home / "Library" / "Logs" / "AI投递经理" / "launcher.log"
+            assert launched.returncode == 0, log.read_text() if log.exists() else launched.stderr
+            assert report.is_file(), "actual app must deliver its one-use UI ticket to the browser oracle"
+            opened = [json.loads(line) for line in report.read_text().splitlines()]
+            assert len(opened) == count
+            assert all(all(row.values()) for row in opened)
+            service = json.loads((state_root / "service.json").read_text())
+            assert service["port"] == 9344 and service["pid"] > 0
+            if first is None:
+                first = service
+            else:
+                assert service == first, "second app open must reuse exactly the same service writer"
+            health = subprocess.run(command + ["health"], cwd=poison, env=env,
+                capture_output=True, text=True, timeout=10)
+            assert health.returncode == 0
+            actual = json.loads(health.stdout)
+            assert actual["ok"] is True and actual["worker_active"] is None
+            assert actual["loaded_source_sha256"] == receipt["source_sha256"]
+            assert actual["final_click_actor"] == "user"
+            assert not (state_root / "update-state.json").exists()
+            assert not (state_root / "updater.log").exists()
+            assert not (state_root / "bootstrap.json").exists()
+            assert verify_source_candidate(release)
+            assert verify_standalone_runtime(runtime, release)
+    finally:
+        stopped = subprocess.run(command + ["stop"], cwd=poison, env=env,
+            capture_output=True, text=True, timeout=15)
+        assert stopped.returncode == 0, "real packaged service must stop at its safe checkpoint"
+    assert not (state_root / "service.json").exists()
+    assert not list(release.rglob("__pycache__"))
     assert json.loads((output / RECEIPT_NAME).read_text()) == receipt
