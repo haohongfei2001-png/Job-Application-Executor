@@ -464,8 +464,10 @@ def test_begin_update_waits_for_inflight_mutation_to_drain(tmp_path, monkeypatch
     update_thread.join(2)
 
     assert finished.is_set()
-    assert update_result["status"] == "started"
-    assert len(spawned) == 1
+    assert update_result == {
+        "ok": False, "status": "denied", "reason": "legacy_update_retired",
+    }
+    assert spawned == [], "drained mutation cannot admit the retired Git writer"
 
 
 def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
@@ -1073,3 +1075,88 @@ def test_supervisor_fences_mutations_while_update_is_running(
     assert supervisor.dispatch("GET", "/v1/diagnostics", {})["format"] == (
         "application-executor-diagnostics-v1"
     )
+
+
+@pytest.mark.parametrize("task_gate", ["empty", "worker", "runnable", "otp", "security"])
+def test_consumer_retired_update_admission_never_spawns_checkout_writer(
+    tmp_path, monkeypatch, task_gate
+):
+    q, worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {"status": "unverified", "source_sha256": ""}
+    monkeypatch.setattr("executor.autonomy.supervisor.is_packaged_source", lambda _: False)
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.spawn_update",
+        lambda **_: pytest.fail("consumer must never admit the retired Git writer"),
+    )
+    monkeypatch.setattr(updater, "_run", lambda *a, **k: pytest.fail("no Git process"))
+    if task_gate == "worker":
+        worker.active = "synthetic-active"
+    elif task_gate != "empty":
+        task = q.enqueue(_spec(tmp_path))
+        if task_gate in {"otp", "security"}:
+            claimed = q.claim("synthetic-owner")
+            q.checkpoint(task["task_id"], claimed["owner"], "NEEDS_USER_ACTION",
+                         blocker="otp_waiting" if task_gate == "otp" else "security_challenge",
+                         release=True)
+    tasks, events = q.tasks(), q.recent_events(1000)
+    expected = {"worker": "worker_active", "runnable": "runnable_task_pending",
+                "otp": "otp_in_flight"}.get(task_gate, "legacy_update_retired")
+    assert supervisor.begin_update(9344) == {
+        "ok": False, "status": "denied", "reason": expected,
+    }
+    assert q.tasks() == tasks
+    assert q.recent_events(1000) == events
+    assert not (q.root / "updater.log").exists()
+    assert not (q.root / "update-state.json").exists()
+
+
+def test_authenticated_consumer_update_route_is_readonly_after_legacy_retirement(
+    tmp_path, monkeypatch
+):
+    q, _, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {"status": "unverified", "source_sha256": ""}
+    monkeypatch.setattr("executor.autonomy.supervisor.is_packaged_source", lambda _: False)
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.spawn_update",
+        lambda **_: pytest.fail("actual authenticated UI cannot launch Git writer"),
+    )
+    tasks, events = q.tasks(), q.recent_events(1000)
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+    )
+    try:
+        ticket_request = urllib.request.Request(
+            base + "/v1/ui-ticket", data=b"{}",
+            headers={"Authorization": "Bearer " + "x" * 40,
+                     "Content-Type": "application/json"}, method="POST")
+        with opener.open(ticket_request, timeout=5) as response:
+            ticket = json.load(response)["ticket"]
+        with opener.open(base + "/ui-login?ticket=" + ticket, timeout=5):
+            pass
+        for _ in range(2):
+            request = urllib.request.Request(
+                base + "/ui/api/update", data=b"{}",
+                headers={"Content-Type": "application/json", "Origin": base},
+                method="POST")
+            with pytest.raises(urllib.error.HTTPError) as refused:
+                opener.open(request, timeout=5)
+            assert refused.value.code == 409
+            assert json.load(refused.value) == {
+                "ok": False, "status": "denied", "reason": "legacy_update_retired",
+            }
+        with opener.open(base + "/ui/api/update-status", timeout=5) as response:
+            assert json.load(response)["status"] == "idle"
+        assert q.tasks() == tasks
+        assert q.recent_events(1000) == events
+        assert not (q.root / "updater.log").exists()
+        assert not (q.root / "update-state.json").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()

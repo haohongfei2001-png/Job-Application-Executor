@@ -314,11 +314,14 @@ class Supervisor:
                         "status": "denied",
                         "reason": reason,
                     }
-                return spawn_update(
-                    repo_root=Path(__file__).resolve().parents[2],
-                    runtime=self.queue.root,
-                    port=port,
-                )
+                # Consumer admission is read-only for the retired checkout
+                # writer. Keep busy/task/OTP fences, but never launch a Git
+                # mutation or a second task-state writer from the application.
+                return {
+                    "ok": False,
+                    "status": "denied",
+                    "reason": "legacy_update_retired",
+                }
 
     def run_local_command(self, command: CommandEnvelope):
         # Serialize admission with the updater's final safety check and spawn.

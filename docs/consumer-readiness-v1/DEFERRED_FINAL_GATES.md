@@ -218,3 +218,12 @@ Bounded updater audit found a separate writer: TaskQueue initializes schema/deri
 The app and state fences now inspect lock descriptors as owned ordinary single-link files before chmod/flock use; symlink/FIFO/directory/hardlink ambiguity refuses without reading payload, altering external permissions, staging or activation. Thirteen new regressions retain real WAL authority/schema, prove cross-process real queue construction waits through the guarded transaction, ensure second-lock refusal releases the worker fence, and exercise production install/rollback refusals and lock cleanup. Existing tests/budgets/timeouts remain unchanged. New coherent cloud candidate pending.
 
 This closes an independent transaction concurrency defect only after cloud evidence. It does not prove old pre-lock writer retirement, transfer legacy private state, close DFG-002/008, certify hosted app UI interaction, or authorize real owner state migration/final submit. Those canonical engineering exits remain open.
+
+
+## JCR-08 consumer admission retirement batch
+
+Exact `da3e5b1c3130bf1986cc0b1794972bf4cb7b35e2` / [CI36224112822](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36224112822) PASS: Ubuntu25/137/7/174, hosted Mac174. The whole queue initialization/migration fence and13 added lock/concurrency regressions preserve the previous161 cases.
+
+The consumer source-checkout UI still admitted the historical in-place Git writer. It now retains existing busy/task/OTP/mutation-drain fences and returns safe `legacy_update_retired` before any spawn. Packaged verified/unverified refusal and all auth/no-submit/privacy gates remain. Dashboard explains the unavailable update path without claiming release health. Five task-state cases and an actual authenticated loopback UI request repeated twice assert no writer, task/event mutation or updater artifacts. The historical drain-success assertion is explicitly superseded by the canonical retirement requirement: real mutation drains, zero Git writers admitted. Its concurrency setup/assertions and all historical legacy-engine tests stay.
+
+This closes only consumer admission when its affected cloud gates pass. Direct legacy module/CLI invocation, transactional old-state transfer and process retirement remain ENGINEERING_DEBT; the complete old updater is not claimed retired. Existing missing/ambiguous/WAL legacy authority still refuses app activation. No live migration, new permission/channel/payment, unchanged-head rerun, full certification or final submission performed.
