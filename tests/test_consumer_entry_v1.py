@@ -362,13 +362,32 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         service_port = reservation.getsockname()[1]
-    env = {**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"}
-    process = subprocess.Popen(
-        [sys.executable, "-m", "executor.autonomy.cli", "--runtime", str(runtime),
-         "--port", str(service_port), "bootstrap-serve", "--reason", "service_start_failed"],
-        env=env, cwd=os.getcwd(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    poison = tmp_path / "inherited-python"
+    poison.mkdir()
+    canary = tmp_path / "inherited-import-executed"
+    (poison / "sitecustomize.py").write_text(
+        f"from pathlib import Path;Path({str(canary)!r}).write_text('unsafe')\n"
     )
+    monkeypatch.setenv("APPLICATION_EXECUTOR_BROWSER_MODE", "isolated")
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "missing-python-home"))
+    monkeypatch.setenv("PYTHONPATH", str(poison))
+    opened = []
+    monkeypatch.setattr(bootstrap.webbrowser, "open",
+                        lambda value, **kwargs: opened.append(value) or True)
+    children = []
+    real_popen = subprocess.Popen
+    def record_child(command, **kwargs):
+        child = real_popen(command, **kwargs)
+        if "-I" in command and "-c" in command and any(
+                "executor.autonomy.cli" in str(part) for part in command):
+            children.append((command, child))
+        return child
+    monkeypatch.setattr(subprocess, "Popen", record_child)
+    process = None
     try:
+        assert bootstrap.open_bootstrap(runtime, service_port, "service_start_failed")["opened"]
+        assert len(children) == 1
+        process = children[0][1]
         state_path = runtime / "bootstrap.json"
         for _ in range(600):
             if state_path.exists():
@@ -386,10 +405,9 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
         assert "提交申请" in body
         assert "本地服务启动失败" in body
         assert "本地版本：" in body
-        opened = []
-        monkeypatch.setattr(bootstrap.webbrowser, "open", lambda value, **kwargs: opened.append(value) or True)
         assert bootstrap.open_bootstrap(runtime, service_port)["opened"] is True
-        assert opened == [url]
+        assert opened == [url, url]
+        assert len(children) == 1  # Reuse the owned recovery page, no second writer.
         with pytest.raises(urllib.error.HTTPError) as denied:
             urllib.request.urlopen(base + "/")
         assert denied.value.code == 403
@@ -414,10 +432,18 @@ def test_independent_bootstrap_recovers_isolated_supervisor(tmp_path, monkeypatc
             f"http://127.0.0.1:{service_port}/ui-login?ticket="
         )
         assert cli.lifecycle("health", runtime, service_port)["ok"] is True
+        assert len(children) == 2
+        assert all(command[1:3] == ["-I", "-B"] for command, _ in children)
+        assert not canary.exists()
     finally:
         cli.lifecycle("stop", runtime, service_port)
-        process.terminate()
-        process.wait(timeout=5)
+        if process is not None:
+            process.terminate()
+            process.wait(timeout=5)
+        for _, child in children:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
 
 
 def test_macos_app_install_and_rollback_refuse_concurrent_transaction(tmp_path):
@@ -475,9 +501,10 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert 'cd "$RELEASE_ROOT"' in launcher
     runtime = app / "Contents" / "Resources" / "runtime"
     assert verify_runtime_candidate(runtime, release)
-    assert 'export PYTHONPATH="$RELEASE_ROOT"' in launcher
-    assert "export PYTHONDONTWRITEBYTECODE=1" in launcher
-    assert '"$PYTHON" -B -m executor.autonomy.cli launch' in launcher
+    assert "export PYTHONPATH" not in launcher
+    assert "export PYTHONDONTWRITEBYTECODE" not in launcher
+    assert '"$PYTHON" -I -B -c ' in launcher
+    assert '"$RELEASE_ROOT" launch' in launcher
     assert "submit" not in launcher.casefold()
 
     with info_path.open("rb") as handle:
@@ -513,6 +540,113 @@ def test_macos_consumer_app_installs_idempotently(tmp_path):
     assert (apps / ".AI 投递经理.app.failed").is_dir()
     assert not rollback.exists()
 
+
+
+def test_packaged_launcher_executes_owned_source_despite_poisoned_python_environment(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    candidate_cli = repo / "executor" / "autonomy" / "cli.py"
+    candidate_cli.write_text(FAKE_CANDIDATE_CLI + """
+if __name__ == '__main__' and sys.argv[-1] == 'launch':
+    import os
+    Path(os.environ['JAE_TEST_STARTUP_REPORT']).write_text(json.dumps({
+        'source': str(Path(__file__).resolve().parents[2]),
+        'argv': sys.argv[1:], 'isolated': sys.flags.isolated,
+        'no_user_site': sys.flags.no_user_site,
+        'dont_write_bytecode': sys.dont_write_bytecode,
+        'path': sys.path,
+    }), encoding='utf-8')
+""", encoding="utf-8")
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    source = app / "Contents" / "Resources" / "release"
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    repo.rename(tmp_path / "development-checkout-removed")
+    poison = tmp_path / "ambient"
+    poison.mkdir()
+    canary = tmp_path / "ambient-code-executed"
+    code = f"from pathlib import Path;Path({str(canary)!r}).write_text('unsafe');raise RuntimeError('ambient import')\n"
+    (poison / "sitecustomize.py").write_text(code)
+    (poison / "executor").mkdir()
+    (poison / "executor" / "__init__.py").write_text(code)
+    report = tmp_path / "startup.json"
+    home = tmp_path / "launcher-home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home), "PYTHONHOME": str(tmp_path / "missing-base"),
+           "PYTHONPATH": str(poison), "PYTHONUSERBASE": str(poison),
+           "JAE_TEST_STARTUP_REPORT": str(report)}
+    shell = "/bin/zsh" if sys.platform == "darwin" else "/bin/bash"
+    launched = subprocess.run([shell, str(executable)], cwd=poison, env=env,
+                              capture_output=True, text=True, timeout=15)
+    log = home / "Library" / "Logs" / "AI投递经理" / "launcher.log"
+    assert launched.returncode == 0, log.read_text() if log.exists() else launched.stderr
+    actual = json.loads(report.read_text())
+    assert actual["source"] == str(source.resolve())
+    assert actual["argv"] == ["launch"]
+    assert actual["isolated"] == 1 and actual["no_user_site"] == 1
+    assert actual["dont_write_bytecode"] is True
+    assert str(poison) not in actual["path"]
+    assert not canary.exists()
+    assert not list(source.rglob("__pycache__"))
+    assert verify_source_candidate(source)
+
+
+def test_historical_packaged_launcher_can_upgrade_but_cannot_claim_isolated_rollback(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    old = consumer._packaged_launcher_v2()
+    executable.write_text(old, encoding="utf-8")
+    assert consumer._trusted_bundle(app)
+    assert not consumer._isolated_bundle_startup(app)
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    current = executable.read_bytes()
+    previous = apps / ".AI 投递经理.app.previous"
+    old_executable = previous / "Contents" / "MacOS" / "AIApplicationManager"
+    assert old_executable.read_text() == old
+    refused = rollback_macos_app(apps)
+    assert refused["reason"] == "rollback_startup_isolation_unsupported"
+    assert executable.read_bytes() == current
+    assert old_executable.read_text() == old
+    assert not (apps / ".AI 投递经理.app.failed").exists()
+
+
+def test_failed_upgrade_preserves_historical_packaged_app_without_healthy_claim(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    assert install_macos_app(repo, destination=apps, platform="darwin")["ok"]
+    app = apps / "AI 投递经理.app"
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    old = consumer._packaged_launcher_v2()
+    executable.write_text(old, encoding="utf-8")
+    real_start = consumer._candidate_starts
+    attempts = 0
+    def fail_after_staging(python, source):
+        nonlocal attempts
+        attempts += 1
+        return real_start(python, source) if attempts == 1 else False
+    monkeypatch.setattr(consumer, "_candidate_starts", fail_after_staging)
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert result["reason"] == "post_activation_recovery_required"
+    assert result["ok"] is False
+    assert executable.read_text() == old
+    assert consumer._trusted_bundle(app)
+    assert (apps / ".AI 投递经理.app.failed").is_dir()
+    assert not (apps / ".AI 投递经理.app.previous").exists()
 
 
 def test_packaged_app_runtime_survives_checkout_removal_and_rejects_tamper(tmp_path):

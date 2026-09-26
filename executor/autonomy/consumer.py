@@ -20,6 +20,9 @@ from .release import (copy_source_candidate, copy_runtime_candidate,
                       verify_runtime_candidate, verify_source_candidate)
 
 
+from .process_entry import CLI_ENTRY_SCRIPT
+
+
 APP_NAME = "AI 投递经理"
 BUNDLE_ID = "com.local.job-application-executor.ai-application-manager"
 
@@ -122,7 +125,8 @@ exit $STATUS
 """
 
 
-def _packaged_launcher() -> str:
+def _packaged_launcher_v2() -> str:
+    # Exact historical template: recognition for upgrade, not startup proof.
     return """#!/bin/zsh
 set -u
 RELEASE_ROOT="$(cd "$(dirname "$0")/../Resources/release" && pwd -P)"
@@ -149,11 +153,34 @@ exit $STATUS
 """
 
 
+def _packaged_launcher() -> str:
+    command = (
+        '"$PYTHON" -I -B -c ' + shlex.quote(CLI_ENTRY_SCRIPT)
+        + ' "$RELEASE_ROOT" launch >>"$LOG_FILE" 2>&1'
+    )
+    return _packaged_launcher_v2().replace(
+        'export PYTHONPATH="$RELEASE_ROOT"\n'
+        'export PYTHONDONTWRITEBYTECODE=1\n'
+        '"$PYTHON" -B -m executor.autonomy.cli launch >>"$LOG_FILE" 2>&1',
+        command,
+    )
+
+
+def _isolated_bundle_startup(app: Path) -> bool:
+    """Historical owned bundles are upgradeable, never isolated-start certified."""
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    runtime = app / "Contents" / "Resources" / "runtime"
+    try:
+        return runtime.is_dir() and executable.read_text(encoding="utf-8") == _packaged_launcher()
+    except (OSError, UnicodeError):
+        return False
+
+
 def _packaged_bundle_matches(executable: Path, runtime: Path) -> bool:
     try:
         launcher = executable.read_text(encoding="utf-8")
         if runtime.exists():
-            return launcher == _packaged_launcher()
+            return launcher in {_packaged_launcher(), _packaged_launcher_v2()}
         assignments = [line for line in launcher.splitlines()
                        if line.startswith("REPO_ROOT=")]
         if len(assignments) != 1:
@@ -520,14 +547,14 @@ def _install_macos_app_unlocked(
         if replaced:
             restored_release = app / "Contents" / "Resources" / "release"
             restored_runtime = app / "Contents" / "Resources" / "runtime"
-            if (not _trusted_bundle(app)
+            if (not _trusted_bundle(app) or not _isolated_bundle_startup(app)
                     or (restored_runtime.exists() and not _candidate_starts(
                         restored_runtime / "bin" / "python", restored_release))):
                 return {
                     "ok": False,
                     "reason": "post_activation_recovery_required",
                     "failed_candidate_path": str(failed),
-                    "message": "新版本和已恢复的旧版均未通过健康检查；两个版本已保留，需要人工核对恢复。",
+                    "message": "新版本启动失败，旧版已恢复但尚未证明安全启动；两个版本已保留，需要人工核对恢复。",
                 }
         return {
             "ok": False,
@@ -602,6 +629,12 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
             "ok": False,
             "reason": "legacy_rollback_unsupported",
             "message": "旧版应用缺少独立运行环境，无法证明任务状态兼容；当前应用保持不变。",
+        }
+    if not _isolated_bundle_startup(previous):
+        return {
+            "ok": False,
+            "reason": "rollback_startup_isolation_unsupported",
+            "message": "旧版入口无法证明隔离启动；当前应用和回退副本保持不变。",
         }
     if not _candidate_starts(
         previous_runtime / "bin" / "python", previous_release

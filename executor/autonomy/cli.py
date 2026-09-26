@@ -16,6 +16,7 @@ from pathlib import Path
 from ..otp.bridge import OtpBridge
 from ..browser import browser_mode, ensure_chrome
 from .queue import RUNTIME, TaskQueue, private_dir
+from .process_entry import isolated_cli_command
 from .supervisor import Supervisor, create_server, local_token
 from .worker import ProcessLock, Worker
 
@@ -62,7 +63,7 @@ def lifecycle(action, root, port):
             info = json.loads(state.read_text())
             pid = int(info["pid"])
             # Refuse stale PID reuse: exact module and runtime must be present.
-            command = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+            command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
             if "executor.autonomy.cli" in command and "serve" in command and str(Path(root).resolve()) in command:
                 os.kill(pid, signal.SIGTERM)
                 for _ in range(100):
@@ -85,7 +86,7 @@ def lifecycle(action, root, port):
         log = Path(root) / "service.log"
         with log.open("ab") as stream:
             log.chmod(0o600)
-            child = subprocess.Popen([sys.executable, "-B", "-m", "executor.autonomy.cli", "--runtime", str(Path(root).resolve()), "--port", str(port), "serve"],
+            child = subprocess.Popen(isolated_cli_command("--runtime", str(Path(root).resolve()), "--port", str(port), "serve"),
                 cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL, stdout=stream, stderr=stream, start_new_session=True)
         for _ in range(50):
             if child.poll() is not None:
