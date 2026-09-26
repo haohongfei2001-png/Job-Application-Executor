@@ -20,6 +20,8 @@ from .release import (copy_source_candidate, copy_runtime_candidate,
                       verify_runtime_candidate, verify_source_candidate)
 
 
+from .standalone_runtime import (STANDALONE_MARKER, copy_standalone_runtime_candidate,
+                                 verify_standalone_runtime)
 from .process_entry import CLI_ENTRY_SCRIPT
 
 
@@ -284,6 +286,10 @@ def _candidate_starts(python: Path, release: Path) -> bool:
     """Require the staged service to answer authenticated loopback health."""
     from .release import source_manifest
 
+    runtime = python.parent.parent
+    marker = runtime / STANDALONE_MARKER
+    if (marker.exists() or marker.is_symlink()) and not verify_standalone_runtime(runtime, release):
+        return False
     expected_digest = source_manifest(release)["source_sha256"]
     script = (
         "import pathlib,runpy,sys;sys.dont_write_bytecode=True;"
@@ -368,6 +374,7 @@ def install_macos_app(
     destination: str | Path | None = None,
     platform: str | None = None,
     task_state_root: str | Path | None = None,
+    standalone_runtime: str | Path | None = None,
 ) -> dict:
     if (platform or sys.platform) != "darwin":
         return _install_macos_app_unlocked(repo_root, destination=destination, platform=platform)
@@ -391,7 +398,7 @@ def install_macos_app(
             with task_state_guard(state_root):
                 return _install_macos_app_unlocked(
                     repo_root, destination=apps_dir, platform=platform,
-                    task_state_root=state_root)
+                    task_state_root=state_root, standalone_runtime=standalone_runtime)
         except BlockingIOError:
             return {"ok": False, "reason": "task_state_in_use",
                     "message": "任务服务仍在使用当前状态；请先在应用中停止服务，当前应用保持不变。"}
@@ -408,6 +415,7 @@ def _install_macos_app_unlocked(
     destination: str | Path | None = None,
     platform: str | None = None,
     task_state_root: Path | None = None,
+    standalone_runtime: str | Path | None = None,
 ) -> dict:
     """Stage a source-and-runtime snapshot, then atomically activate the Mac app."""
     current_platform = platform or sys.platform
@@ -420,7 +428,7 @@ def _install_macos_app_unlocked(
 
     repo = Path(repo_root).expanduser().resolve()
     python = repo / ".venv" / "bin" / "python"
-    if not python.is_file():
+    if standalone_runtime is None and not python.is_file():
         return {
             "ok": False,
             "reason": "venv_missing",
@@ -480,7 +488,10 @@ def _install_macos_app_unlocked(
             "message": "无法准备完整的新版本；现有应用没有被替换。",
         }
     try:
-        copy_runtime_candidate(repo / ".venv", runtime, release)
+        if standalone_runtime is None:
+            copy_runtime_candidate(repo / ".venv", runtime, release)
+        else:
+            copy_standalone_runtime_candidate(standalone_runtime, runtime, release)
     except (OSError, ValueError):
         shutil.rmtree(staging)
         return {

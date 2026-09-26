@@ -177,8 +177,10 @@ def main(argv=None):
     parser.add_argument("--runtime", type=Path, default=RUNTIME)
     parser.add_argument("--port", type=int, default=9344)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch", "install-app"):
+    for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch"):
         commands.add_parser(name)
+    installer = commands.add_parser("install-app")
+    installer.add_argument("--standalone-runtime", type=Path)
     bootstrap = commands.add_parser("bootstrap-serve")
     bootstrap.add_argument("--reason", default="service_unavailable")
     preflight = commands.add_parser("preflight")
@@ -223,7 +225,9 @@ def main(argv=None):
         elif args.command == "install-app":
             from .consumer import install_macos_app
 
-            result = install_macos_app(Path(__file__).resolve().parents[2])
+            options = ({"standalone_runtime": args.standalone_runtime}
+                       if args.standalone_runtime is not None else {})
+            result = install_macos_app(Path(__file__).resolve().parents[2], **options)
         elif args.command == "enqueue":
             result = request(args.runtime, args.port, "/v1/tasks", json.loads(args.file.read_text()))
         elif args.command in {"tasks", "events"}:
