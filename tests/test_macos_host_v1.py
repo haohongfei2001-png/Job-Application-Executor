@@ -7,6 +7,8 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
+from http.client import HTTPConnection
 
 import pytest
 
@@ -112,19 +114,32 @@ def compiled_host(tmp_path_factory):
 
 def test_hosted_mac_actual_cocoa_window_loopback_redirect_cookie_and_page(compiled_host):
     state = {"admissions": 0, "authenticated_pages": 0}
+    accepted_cookies = []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+        def _native_cookie(self):
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+            except Exception:
+                return ""
+            morsel = cookie.get("native")
+            return morsel.value if morsel else ""
         def do_GET(self):
             if self.path == "/ui-login?ticket=PRIVATE_NATIVE_TICKET" and not state["admissions"]:
                 state["admissions"] += 1
                 self.send_response(303)
                 self.send_header("Location", "/ui")
                 self.send_header("Set-Cookie", "native=SYNTHETIC_COOKIE; HttpOnly; SameSite=Strict; Path=/ui")
+                # Persistent WebKit contexts carry other loopback cookies too;
+                # authentication binds the named capability, not the whole header.
+                self.send_header("Set-Cookie", "unrelated_native_fixture=SYNTHETIC_OTHER; HttpOnly; SameSite=Strict; Path=/ui")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-            elif self.path == "/ui" and self.headers.get("Cookie") == "native=SYNTHETIC_COOKIE":
+            elif self.path == "/ui" and self._native_cookie() == "SYNTHETIC_COOKIE":
                 state["authenticated_pages"] += 1
+                accepted_cookies.append(self.headers.get("Cookie", ""))
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
@@ -142,6 +157,18 @@ def test_hosted_mac_actual_cocoa_window_loopback_redirect_cookie_and_page(compil
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        # Additional cookies cannot substitute for the authenticated capability.
+        for cookie in ("unrelated_native_fixture=SYNTHETIC_OTHER",
+                       "unrelated_native_fixture=SYNTHETIC_OTHER; native=WRONG_CAPABILITY"):
+            connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+            try:
+                connection.request("GET", "/ui", headers={"Cookie": cookie})
+                response = connection.getresponse()
+                assert response.status == 401
+                response.read()
+            finally:
+                connection.close()
+        assert state == {"admissions": 0, "authenticated_pages": 0}
         surface = ConsumerSurface.dashboard(server.server_port, "PRIVATE_NATIVE_TICKET")
         result = subprocess.run([str(compiled_host / "AIApplicationWindow"), "--smoke"],
                                 input=json.dumps(native_command(surface, 1)) + "\n",
@@ -153,6 +180,10 @@ def test_hosted_mac_actual_cocoa_window_loopback_redirect_cookie_and_page(compil
         assert replies[-1] == {"ok": True, "native_page": True, "window_count": 1,
                                "zoom_reset": True, "external_navigation_denied": True}
         assert state == {"admissions": 1, "authenticated_pages": 1}
+        assert len(accepted_cookies) == 1
+        cookies = SimpleCookie(accepted_cookies[0])
+        assert cookies["native"].value == "SYNTHETIC_COOKIE"
+        assert cookies["unrelated_native_fixture"].value == "SYNTHETIC_OTHER"
     finally:
         server.shutdown()
         server.server_close()
