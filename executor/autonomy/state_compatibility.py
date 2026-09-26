@@ -469,3 +469,128 @@ def stage_task_state_backup(root: str | Path, destination: str | Path) -> dict:
                 raise
         finally:
             os.close(fd)
+
+def _private_backup_digest(path: Path) -> tuple[str, tuple[int, int]]:
+    """Read an owned capsule payload without alias/device/FIFO traversal."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as file:
+        metadata = os.fstat(file.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077
+                or (path.name == "backup-manifest.json" and metadata.st_size > 65536)
+                or (path.name == "task-answers.key" and metadata.st_size != 44)):
+            raise ValueError("task_backup_payload_invalid")
+        if path.name == "tasks.sqlite3":
+            header = file.read(20)
+            if header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x01\x01":
+                raise ValueError("task_backup_not_standalone")
+            file.seek(0)
+        digest = hashlib.sha256()
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+        identity = (metadata.st_dev, metadata.st_ino)
+        current = path.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != identity:
+            raise ValueError("task_backup_payload_replaced")
+        return digest.hexdigest(), identity
+
+
+def verify_task_state_backup(destination: str | Path, receipt: dict) -> bool:
+    """Read-only capsule proof bound to the caller's original external receipt.
+
+    A self-consistent edited manifest cannot establish authority. The trusted
+    receipt must come from staging, not be reread from the capsule. Verification
+    never restores state, creates/repairs a key or certifies an old writer stop.
+    """
+    try:
+        if type(receipt) is not dict:
+            return False
+        expected = dict(receipt)
+        keys = {"format", "scope", "database_sha256", "answer_key_sha256",
+                "table_count", "answer_task_count", "activation",
+                "legacy_writer_retirement", "source_authority", "other_private_files"}
+        sha256 = lambda value: (isinstance(value, str) and len(value) == 64
+                                and all(char in "0123456789abcdef" for char in value))
+        if (set(expected) != keys
+                or expected["format"] != "jae-task-state-backup-v1"
+                or expected["scope"] != "task_journal_and_encrypted_task_answers"
+                or expected["activation"] != "NOT_AUTHORIZED"
+                or expected["legacy_writer_retirement"] != "NOT_CERTIFIED"
+                or expected["source_authority"] != "unchanged"
+                or expected["other_private_files"] != "excluded"
+                or not sha256(expected["database_sha256"])
+                or (expected["answer_key_sha256"] is not None
+                    and not sha256(expected["answer_key_sha256"]))
+                or type(expected["table_count"]) is not int or expected["table_count"] < 2
+                or type(expected["answer_task_count"]) is not int
+                or expected["answer_task_count"] < 0):
+            return False
+        root = Path(destination).expanduser().absolute()
+        if any(part.is_symlink() for part in (root, *root.parents)):
+            return False
+        metadata = root.stat(follow_symlinks=False)
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o077):
+            return False
+        root_identity = (metadata.st_dev, metadata.st_ino)
+        names = {"backup-manifest.json", "tasks.sqlite3"}
+        if expected["answer_key_sha256"] is not None:
+            names.add("task-answers.key")
+        if {path.name for path in root.iterdir()} != names:
+            return False
+        hashes = {name: _private_backup_digest(root / name) for name in names}
+        manifest = root / "backup-manifest.json"
+        fd = os.open(manifest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as file:
+            info = os.fstat(file.fileno())
+            if ((info.st_dev, info.st_ino) != hashes[manifest.name][1]
+                    or not stat.S_ISREG(info.st_mode) or info.st_size > 65536):
+                return False
+            observed = json.loads(file.read(65537))
+        if (type(observed) is not dict or observed != expected
+                or type(observed.get("table_count")) is not int
+                or type(observed.get("answer_task_count")) is not int
+                or hashes["tasks.sqlite3"][0] != expected["database_sha256"]
+                or ("task-answers.key" in names
+                    and hashes["task-answers.key"][0] != expected["answer_key_sha256"])):
+            return False
+        key = _answer_key(root)
+        if (key is None) != (expected["answer_key_sha256"] is None):
+            return False
+        # immutable+read-only prevents SQLite from creating auxiliary files or
+        # opening the original source WAL. A valid capsule is one DELETE DB.
+        with closing(sqlite3.connect((root / "tasks.sqlite3").as_uri()
+                                     + "?mode=ro&immutable=1", uri=True)) as db:
+            if db.execute("PRAGMA journal_mode").fetchone() != ("delete",):
+                return False
+            tables = _snapshot(db)
+            answers = _answer_contract(db, key, os.urandom(32))
+        if (len(tables) != expected["table_count"]
+                or len(answers) != expected["answer_task_count"]):
+            return False
+        # File identity and bytes must remain the independently bound payload
+        # throughout the read, including manifest/key and unexpected inventory.
+        current = root.stat(follow_symlinks=False)
+        return ((current.st_dev, current.st_ino) == root_identity
+                and {path.name for path in root.iterdir()} == names
+                and all(_private_backup_digest(root / name) == hashes[name]
+                        for name in names))
+    except (ImportError, OSError, ValueError, TypeError, sqlite3.Error):
+        return False
+
+
+def task_state_backup_candidate_compatible(
+    python: Path, release: Path, destination: str | Path, receipt: dict,
+) -> bool:
+    """Prove candidate migration on a disposable copy of a bound durable capsule."""
+    if type(receipt) is not dict:
+        return False
+    expected = dict(receipt)
+    if not verify_task_state_backup(destination, expected):
+        return False
+    # The candidate never opens/migrates the durable capsule or source journal.
+    # Its real queue schema and typed answer decoder run in the existing private
+    # disposable compatibility copy, preserving every authority/history field.
+    if not task_state_candidate_compatible(python, release, Path(destination)):
+        return False
+    return verify_task_state_backup(destination, expected)

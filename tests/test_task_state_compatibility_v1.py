@@ -14,6 +14,7 @@ import pytest
 
 from executor.autonomy.state_compatibility import (
     task_state_candidate_compatible, task_state_guard, stage_task_state_backup,
+    verify_task_state_backup, task_state_backup_candidate_compatible,
 )
 from executor.autonomy.worker import ProcessLock
 
@@ -712,3 +713,184 @@ def test_backup_refuses_key_rotation_before_publication_without_repairing_source
         assert db.execute("SELECT * FROM task_answer_events").fetchall() == events
         assert (root / "task-answers.key").read_bytes() == rotated_key
         assert rotated_key != old_key
+
+def test_bound_backup_preflight_uses_real_candidate_decoder_without_touching_capsule(tmp_path):
+    root = tmp_path / "state"
+    capsule = tmp_path / "capsule"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        before = authority(db)
+        history = db.execute("SELECT * FROM task_answer_events").fetchall()
+        receipt = stage_task_state_backup(root, capsule)
+        payload = {path.name: path.read_bytes() for path in capsule.iterdir()}
+        assert verify_task_state_backup(capsule, receipt)
+        assert task_state_backup_candidate_compatible(
+            Path(sys.executable), Path(__file__).resolve().parents[1], capsule, receipt)
+        assert {path.name: path.read_bytes() for path in capsule.iterdir()} == payload
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == history
+        assert (root / "task-answers.key").read_bytes() == key
+        assert "revision" not in {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
+        assert not (capsule / "tasks.sqlite3.pre-jcr01.sqlite3").exists()
+        assert not (root / "service.json").exists()
+
+
+def test_bound_backup_preflight_accepts_a_journal_without_answers_or_key(tmp_path):
+    root = tmp_path / "state"
+    capsule = tmp_path / "capsule"
+    with closing(legacy_state(root)) as db:
+        before = authority(db)
+        receipt = stage_task_state_backup(root, capsule)
+        assert receipt["answer_key_sha256"] is None
+        assert receipt["answer_task_count"] == 0
+        payload = {p.name: p.read_bytes() for p in capsule.iterdir()}
+        assert verify_task_state_backup(capsule, receipt)
+        assert task_state_backup_candidate_compatible(
+            Path(sys.executable), Path(__file__).resolve().parents[1], capsule, receipt)
+        assert {p.name: p.read_bytes() for p in capsule.iterdir()} == payload
+        assert not (capsule / "task-answers.key").exists()
+        assert not (root / "task-answers.key").exists()
+        assert authority(db) == before
+
+
+@pytest.mark.parametrize("defect", [
+    "missing_manifest", "extra_file", "database_alias", "key_alias", "manifest_alias",
+    "hardlinked_database", "hardlinked_key", "key_fifo", "public_directory",
+    "public_database", "public_key", "invalid_manifest", "oversized_manifest",
+    "rotated_key", "edited_database_and_manifest",
+])
+def test_bound_backup_refuses_payload_drift_before_any_candidate_runs(tmp_path, monkeypatch, defect):
+    import hashlib
+    from cryptography.fernet import Fernet
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    capsule = tmp_path / "capsule"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        before = authority(db)
+        receipt = stage_task_state_backup(root, capsule)
+        manifest = capsule / "backup-manifest.json"
+        if defect == "missing_manifest":
+            manifest.unlink()
+        elif defect == "extra_file":
+            (capsule / "unexpected").write_text("UNKNOWN_PAYLOAD_CANARY")
+        elif defect.endswith("_alias") or defect in {"hardlinked_database", "hardlinked_key", "key_fifo"}:
+            name = ("tasks.sqlite3" if "database" in defect else
+                    "task-answers.key" if "key" in defect else "backup-manifest.json")
+            path = capsule / name
+            outside = tmp_path / ("outside-" + name)
+            outside.write_bytes(path.read_bytes())
+            outside.chmod(0o600)
+            path.unlink()
+            if defect.endswith("_alias"):
+                path.symlink_to(outside)
+            elif defect == "key_fifo":
+                os.mkfifo(path)
+            else:
+                os.link(outside, path)
+        elif defect == "public_directory":
+            capsule.chmod(0o755)
+        elif defect in {"public_database", "public_key"}:
+            (capsule / ("tasks.sqlite3" if defect == "public_database"
+                        else "task-answers.key")).chmod(0o644)
+        elif defect == "invalid_manifest":
+            manifest.write_text("not a receipt")
+        elif defect == "oversized_manifest":
+            manifest.write_text("x" * 65537)
+        elif defect == "rotated_key":
+            (capsule / "task-answers.key").write_bytes(Fernet.generate_key())
+        else:
+            with closing(sqlite3.connect(capsule / "tasks.sqlite3")) as changed:
+                changed.execute("UPDATE tasks SET blocker=NULL")
+                changed.commit()
+            forged = {**receipt, "database_sha256": hashlib.sha256(
+                (capsule / "tasks.sqlite3").read_bytes()).hexdigest()}
+            manifest.write_text(json.dumps(forged))
+        def forbidden_candidate(*args):
+            pytest.fail("an unbound/changed backup must refuse before candidate execution")
+        monkeypatch.setattr(state_compatibility, "task_state_candidate_compatible", forbidden_candidate)
+        assert verify_task_state_backup(capsule, receipt) is False
+        assert task_state_backup_candidate_compatible(
+            Path(sys.executable), Path(__file__).resolve().parents[1], capsule, receipt) is False
+        assert authority(db) == before
+        assert (root / "task-answers.key").read_bytes() == key
+        if defect == "extra_file":
+            assert (capsule / "unexpected").read_text() == "UNKNOWN_PAYLOAD_CANARY"
+        if defect.endswith("_alias") or defect.startswith("hardlinked_") or defect == "key_fifo":
+            assert outside.exists()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("activation", "AUTHORIZED"), ("legacy_writer_retirement", "CERTIFIED"),
+    ("table_count", True), ("table_count", 999), ("answer_task_count", False),
+    ("answer_task_count", 999), ("database_sha256", "unknown"),
+])
+def test_bound_backup_refuses_invalid_receipt_authority_or_counts(tmp_path, field, value):
+    root = tmp_path / "state"
+    capsule = tmp_path / "capsule"
+    with closing(legacy_state(root)):
+        receipt = stage_task_state_backup(root, capsule)
+        invalid = {**receipt, field: value}
+        # Even a matching on-disk manifest cannot promote authority or hide
+        # wrong typed counts; receipt binding and actual DB inventory both matter.
+        (capsule / "backup-manifest.json").write_text(json.dumps(invalid))
+        assert verify_task_state_backup(capsule, invalid) is False
+
+
+@pytest.mark.parametrize("mutation", [
+    "    return {}",
+    "    values = _original_load(self, task_id); values['preferences.accept_travel'] = 0; return values",
+])
+def test_bound_backup_candidate_preflight_refuses_decoder_loss_or_type_coercion(tmp_path, mutation):
+    root = tmp_path / "state"
+    capsule = tmp_path / "capsule"
+    with closing(legacy_state(root)) as db:
+        encrypted_answers(root, db)
+        receipt = stage_task_state_backup(root, capsule)
+        before = authority(db)
+        payload = {p.name: p.read_bytes() for p in capsule.iterdir()}
+        release = answer_candidate(tmp_path, mutation)
+        assert task_state_backup_candidate_compatible(
+            Path(sys.executable), release, capsule, receipt) is False
+        assert verify_task_state_backup(capsule, receipt) is True
+        assert {p.name: p.read_bytes() for p in capsule.iterdir()} == payload
+        assert authority(db) == before
+
+
+def test_bound_backup_is_rechecked_after_candidate_probe_and_never_repairs_changes(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    capsule = tmp_path / "capsule"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        before = authority(db)
+        receipt = stage_task_state_backup(root, capsule)
+        changed_key = Fernet.generate_key()
+        def probe(*args):
+            (capsule / "task-answers.key").write_bytes(changed_key)
+            return True
+        monkeypatch.setattr(state_compatibility, "task_state_candidate_compatible", probe)
+        assert task_state_backup_candidate_compatible(
+            Path(sys.executable), Path(__file__).resolve().parents[1], capsule, receipt) is False
+        assert (capsule / "task-answers.key").read_bytes() == changed_key
+        assert (root / "task-answers.key").read_bytes() == key
+        assert authority(db) == before
+
+def test_bound_backup_requires_delete_journal_header_even_with_matching_external_digest(tmp_path):
+    import hashlib
+
+    root = tmp_path / "state"
+    capsule = tmp_path / "capsule"
+    with closing(legacy_state(root)):
+        receipt = stage_task_state_backup(root, capsule)
+        with closing(sqlite3.connect(capsule / "tasks.sqlite3")) as changed:
+            assert changed.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        observed = {**receipt, "database_sha256": hashlib.sha256(
+            (capsule / "tasks.sqlite3").read_bytes()).hexdigest()}
+        (capsule / "backup-manifest.json").write_text(json.dumps(observed))
+        before = {p.name: p.read_bytes() for p in capsule.iterdir()}
+        assert verify_task_state_backup(capsule, observed) is False
+        assert {p.name: p.read_bytes() for p in capsule.iterdir()} == before
