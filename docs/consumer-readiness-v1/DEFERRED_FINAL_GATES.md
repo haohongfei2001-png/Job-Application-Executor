@@ -493,3 +493,49 @@ Candidate NOT_RUN until its one automatic targeted cloud CI on the new stable he
 Exact aaeb24e39671237957dd0bef73a9f583bc57228a CI36272269476 foundation108488350757 passes25 privacy/no-submit and162 review/browser cases but the new real consumer UI case cannot find its task button. Bounded source diagnosis identifies the complete chain: the synthetic Worker used by the new recovery helper omits the existing required `active` attribute; real Supervisor.ui_state reads self.worker.active, so /ui/api/state fails and the dashboard cannot render tasks. This is a new fixture contract defect, not a product browser/runtime/hostname/timeout or runner failure. Nine of the ten new recovery cases passed; the tenth has not exercised its UI assertions.
 
 The fixture now supplies active=False and the actual authenticated HTTP case first requires /ui/api/state200, worker_active false and the correct BLOCKED/unknown_outcome task before proceeding to observation. All task/journal/state/race/privacy and real headless UI assertions remain. Production runtime and CI/timeout/fixture sizes unchanged. New coherent repaired candidate is NOT_RUN until one automatic targeted CI; no unchanged-head rerun or superseded-head full certification. JCR08 remains IN_PROGRESS/consumer NOT_CERTIFIED; independent canonical engineering remains open and final submit user-only.
+
+## Exact field-recovery repair checkpoint — PASS
+
+Exact35e9deeba54a501f2178f9c9931554f2e9120d35 [CI36272602203](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36272602203) SUCCESS. Ubuntu108489268537:25 privacy/no-submit,163 review/browser (all10 new readonly field recovery cases),56 operations,7 session/diagnostic and255 packaged PASS. HostedMac108489268694:255 packaged plus7 retired updater public/module cases PASS. The actual dashboard now reaches state200 with correct paused task, completes readonly observation, invalidates revision-bound evidence and clears expired-session evidence while retaining the unsent note. The Mac packaged suite preserves actual relocated executable/service/headless UI/rollback oracles; the new10 field-recovery cases run on Ubuntu, not falsely claimed as native Mac. Full-round remains intentionally unrun while draft.
+
+## JCR-08 compiled Cocoa/WebKit presentation foundation
+
+The existing ConsumerSurface presenter now has a concrete native backend:
+a fixed Cocoa/WKWebView host source is included in the ordinary manifested Python
+release, compiled only with the system xcrun/clang/frameworks into a fresh exclusive
+candidate. A separate receipt binds exact native source and executable hashes;
+verification rejects changed code/binary, nonexecutable mode, alias paths and
+unrecognized payload. This unsigned digest receipt is not signing or certification.
+
+NativePresenter revalidates even manually constructed surface descriptors, uses
+only in-memory private routes over stdin (never argv, environment, repr or public
+report), and requires an exact revision-numbered metadata acknowledgement. Invalid/
+unavailable/tampered hosts fail without spawning or falling back to an external
+browser. Repeated presentation through one presenter reuses the same actual
+process/NSWindow. Bootstrap-to-known-service handoff and initial login remain
+strict loopback/known routes; external/file/unknown-loopback navigation is refused.
+The WebKit host supplies standard editing menu actions, bounded zoom, window sizing
+and an accessibility label. No task writer, automation final-click capability,
+new provider, credential store, system permission or real external action.
+
+New targeted protocol/source/binary/refusal tests run with the existing packaged
+suite. Hosted Mac additionally compiles actual Cocoa/WebKit and runs a real
+NSWindow/WKWebView against a synthetic loopback one-use redirect + HttpOnly cookie
+page, checks actual rendered canary, zoom/reset and denied route predicates, and
+proves actual native process reuse with external browser forbidden. Those tests
+are Mac-specific by platform; no prior test is skipped or replaced. Their test
+server bypasses HTTPServer hostname/FQDN resolution via deterministic TCP loopback
+bind. Synthetic cookie/page proof is not an actual ATS/server-save certificate or
+whole consumer app/window certification. Existing real service/cookie/standalone/
+rollback/privacy tests remain unchanged.
+
+The new coherent candidate is NOT_RUN until its single automatic targeted cloud
+CI. Draft targeted file lists add the new native cases only; no full round, timeout,
+runner workaround, unchanged-head rerun, fixture shrink or original assertion
+removal. CFBundleExecutable remains the verified isolated Python launcher: actual
+native installer/launcher integration, cross-launch singleton/persisted context,
+full keyboard/clipboard/accessibility and consumer onboarding/review journeys
+remain independent engineering. Legacy authority transfer/pre-lock retirement,
+DFG002 independent durable server/other-action reconciliation and DFG008 dedicated
+drivers remain open. JCR08 IN_PROGRESS, consumer NOT_CERTIFIED/JCR09 NOT_STARTED;
+final submit permanently user-only.
