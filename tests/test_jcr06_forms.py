@@ -572,3 +572,123 @@ def test_form_observation_and_fill_plan_do_not_expose_values_in_receipts():
         FillPlan.bind(observation, [FieldResolution(
             field_id="other", selector="#other", label="Other",
             status=ResolutionStatus.RESOLVED, value="x")])
+
+
+@pytest.mark.parametrize(("control", "event", "revert", "value"), [
+    ("<input id='first'>", "input", "node.value='';", "CANARY_PERSON"),
+    ("<input id='first'>", "input",
+     "requestAnimationFrame(()=>node.value='');", "CANARY_PERSON"),
+    ("<input id='first'>", "input",
+     "node.outerHTML='<input id=first>';", "CANARY_PERSON"),
+    ("<input id='first'>", "input",
+     "node.outerHTML='<textarea id=first>CANARY_PERSON</textarea>';", "CANARY_PERSON"),
+    ("<input id='first'>", "input",
+     "node.insertAdjacentHTML('afterend','<input id=first value=CANARY_PERSON>');", "CANARY_PERSON"),
+    ("<input id='first' type='checkbox'>", "click",
+     "node.checked=false;", True),
+    ("<input id='first' type='checkbox'>", "click",
+     "requestAnimationFrame(()=>node.checked=false);", True),
+    ("<select id='first'><option value=''>Choose</option>"
+     "<option value='yes'>Synthetic Choice</option></select>", "change",
+     "requestAnimationFrame(()=>node.selectedIndex=0);", "Synthetic Choice"),
+])
+def test_native_field_unknown_readback_stops_before_the_next_write(
+    tmp_path, control, event, revert, value
+):
+    from executor.browser import BrowserOwnershipError
+
+    html = tmp_path / "unknown-readback.html"
+    html.write_text("<!doctype html><body>" + control
+        + "<input id='next'><button id='submit' type='button'>Submit</button>"
+        + "<script>window.submits=0;window.nextWrites=0;"
+        + "document.querySelector('#submit').onclick=()=>window.submits++;"
+        + "document.querySelector('#next').oninput=()=>window.nextWrites++;"
+        + "document.querySelector('#first').addEventListener(" + json.dumps(event)
+        + ", event=>{const node=event.currentTarget;" + revert + "});</script>",
+        encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions([
+                FieldResolution(field_id="first", selector="#first", label="First",
+                    status=ResolutionStatus.RESOLVED, value=value),
+                FieldResolution(field_id="next", selector="#next", label="Next",
+                    status=ResolutionStatus.RESOLVED, value="NEVER_WRITTEN"),
+            ])
+        assert "CANARY_PERSON" not in str(caught.value)
+        assert adapter.page.locator("#next").input_value() == ""
+        assert adapter.page.evaluate("window.nextWrites") == 0
+        assert adapter.page.evaluate("window.submits") == 0
+
+
+def test_retained_native_control_values_get_only_dom_readback_evidence(tmp_path):
+    html = tmp_path / "retained-controls.html"
+    html.write_text("""<!doctype html><body>
+        <input id='name'><input id='accepted' type='checkbox'>
+        <select id='city'><option value=''>Choose</option>
+        <option value='a'>Synthetic City</option></select>
+        <input id='month' type='month'>
+        <button id='submit' type='button' onclick='window.submits++'>Submit</button>
+        <script>window.submits=0;window.writes=0;
+        for(const node of document.querySelectorAll('input,select'))
+            node.addEventListener('input',()=>window.writes++);
+        </script>""", encoding="utf-8")
+    resolutions = [
+        FieldResolution(field_id=name, selector="#" + name, label=name,
+                        status=ResolutionStatus.RESOLVED, value=value)
+        for name, value in [("name", "CANARY_PERSON"), ("accepted", True),
+                            ("city", "Synthetic City"), ("month", "2026-09")]
+    ]
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions(resolutions)
+        assert len(actions) == 4
+        assert all(action["ok"] and action["observed"] == "DOM_READBACK"
+                   for action in actions)
+        assert "CANARY_PERSON" not in json.dumps(actions)
+        assert "server" not in json.dumps(actions)
+        writes = adapter.page.evaluate("window.writes")
+        second = adapter.apply_resolutions(resolutions)
+        assert all(action["observed"] == "DOM_READBACK" for action in second)
+        # Native text, month and checkbox no-op paths avoid duplicate effects.
+        # select_option may dispatch input for its already matching selection.
+        assert adapter.page.locator("#name").input_value() == "CANARY_PERSON"
+        assert adapter.page.locator("#month").input_value() == "2026-09"
+        assert adapter.page.evaluate("window.writes") <= writes + 1
+        assert adapter.page.evaluate("window.submits") == 0
+
+
+def test_reactive_replacement_retaining_the_same_control_contract_is_readable(tmp_path):
+    html = tmp_path / "retained-reactive.html"
+    html.write_text("""<!doctype html><body><input id='name'>
+      <script>document.querySelector('#name').oninput=event=>{
+        const replacement=event.currentTarget.cloneNode();
+        replacement.value=event.currentTarget.value;
+        event.currentTarget.replaceWith(replacement);
+      };</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="name", selector="#name", label="Name",
+            status=ResolutionStatus.RESOLVED, value="Synthetic")])
+        assert actions[0]["ok"] is True
+        assert actions[0]["observed"] == "DOM_READBACK"
+
+
+def test_worker_retains_unknown_attempt_when_native_field_reverts(tmp_path, monkeypatch):
+    from executor.autonomy.worker import Worker
+
+    runner, html = _runner(tmp_path, monkeypatch, """
+      <label>姓名<input id='name' name='full_name' required></label>
+      <input id='later' name='email'><button type='button'>Submit application</button>
+      <script>document.querySelector('#name').oninput=event=>event.currentTarget.value='';</script>
+    """)
+    queue = TaskQueue(tmp_path / "runtime")
+    task = queue.enqueue(TaskSpec(
+        company="Synthetic", role="Engineer", target_url=html.as_uri(),
+        profile_ref=str(runner.profile_path)))
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    assert worker.run_once() is True
+    blocked = queue.get(task["task_id"])
+    assert blocked["stage"] == "BLOCKED"
+    assert blocked["blocker"] == "browser_ownership_unknown"
+    assert queue.run_attempts(task["task_id"])[0]["outcome"] == "UNKNOWN_OUTCOME"
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        queue.resume(task["task_id"])

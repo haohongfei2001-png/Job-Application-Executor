@@ -539,6 +539,15 @@ class GenericWebAdapter(SiteAdapter):
                 input_type = (element.get_attribute("type") or element.evaluate("e=>e.tagName.toLowerCase()")).lower()
                 tag = element.evaluate("e=>e.tagName.toLowerCase()")
                 value = resolution.value
+                # Identity is captured without applicant values. A reactive
+                # replacement may retain the control contract, but an ordinal
+                # shift, relabel or type change cannot inherit its write proof.
+                signature_script = """e => [e.tagName.toLowerCase(), e.getAttribute('type'),
+                    e.id, e.getAttribute('name'), e.getAttribute('role'),
+                    e.getAttribute('aria-label'),
+                    [...(e.labels || [])].map(label => label.textContent.trim())]"""
+                control_signature = element.evaluate(signature_script)
+                expected_readback = None
                 if input_type == "file":
                     # A browser file input only proves that a local file was
                     # selected. Generic sites provide no trustworthy upload
@@ -552,13 +561,17 @@ class GenericWebAdapter(SiteAdapter):
                         actions.append({"field_id": resolution.field_id, "ok": False,
                                         "reason": "combobox_exact_choice_unavailable"})
                         continue
+                    expected_readback = ("combobox", str(value).strip())
                 elif tag == "select":
                     getattr(self, "mutation_guard", lambda: None)()
                     if not self._fill_select(element, value):
                         actions.append({"field_id": resolution.field_id, "ok": False, "reason": "no_matching_select_option"})
                         continue
+                    expected_readback = ("select", (element.input_value(),
+                        element.evaluate("e => e.selectedIndex")))
                 elif input_type in {"checkbox", "radio"}:
                     desired = bool(value)
+                    expected_readback = ("checked", desired)
                     if element.is_checked() != desired:
                         getattr(self, "mutation_guard", lambda: None)()
                         element.click()
@@ -569,10 +582,34 @@ class GenericWebAdapter(SiteAdapter):
                         continue
                     desired = self._control_text(value, input_type, resolution.label)
                     current = str(element.input_value() or "")
+                    expected_readback = ("value", desired)
                     if current != desired:
                         getattr(self, "mutation_guard", lambda: None)()
                         element.fill(desired)
-                actions.append({"field_id": resolution.field_id, "ok": True, "source": resolution.source})
+                # A primitive returning does not prove that the page kept its
+                # value. Observe the newly rendered control before another field
+                # writes; this remains DOM evidence, never a server-save receipt.
+                self.await_form_render()
+                getattr(self, "mutation_guard", lambda: None)()
+                current_element = self._locate(resolution.selector)
+                if (current_element.count() != 1 or not self._visible(current_element)
+                        or current_element.evaluate(signature_script) != control_signature):
+                    raise BrowserOwnershipError("field readback identity unknown")
+                kind, expected = expected_readback
+                if kind == "checked":
+                    actual = current_element.is_checked()
+                elif kind == "combobox":
+                    actual = str(current_element.evaluate(
+                        "e => e.value ?? e.getAttribute('aria-valuetext') ?? (e.innerText || '').trim()")).strip()
+                elif kind == "select":
+                    actual = (current_element.input_value(),
+                              current_element.evaluate("e => e.selectedIndex"))
+                else:
+                    actual = str(current_element.input_value() or "")
+                if actual != expected:
+                    raise BrowserOwnershipError("field readback outcome unknown")
+                actions.append({"field_id": resolution.field_id, "ok": True,
+                                "source": resolution.source, "observed": "DOM_READBACK"})
             except Exception:
                 # The primitive may have reached the page before Playwright
                 # reported failure. Do not turn that uncertainty into a retry.

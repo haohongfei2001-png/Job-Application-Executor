@@ -34,7 +34,7 @@ jobs:
         if: github.event_name == 'pull_request' && github.event.pull_request.draft
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
-        run: python -m pytest -q tests/test_jcr07_review_certificate.py tests/test_application_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py
+        run: python -m pytest -q tests/test_jcr07_review_certificate.py tests/test_application_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py tests/test_jcr06_forms.py tests/test_generic_browser_v1.py
       - name: Validate update-state privacy readback
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
