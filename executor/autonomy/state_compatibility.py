@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
+import stat
 import os
 import sqlite3
 import subprocess
@@ -19,6 +21,37 @@ from pathlib import Path
 def _state_paths(root: Path):
     return [root / name for name in (
         "tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm")]
+
+
+def _refuse_live_service(root: Path):
+    """A legacy daemon may not honor worker.lock; probe only, never signal it."""
+    registry = root / "service.json"
+    if not registry.exists() and not registry.is_symlink():
+        return
+    # No symlink, device, FIFO or unbounded registry read. An ambiguous record
+    # cannot certify that the old writer is stopped, even with the new lock.
+    with os.fdopen(os.open(registry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK),
+                   encoding="utf-8") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError("task_service_record_invalid")
+        raw = handle.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("task_service_record_invalid")
+    try:
+        record = json.loads(raw)
+    except (UnicodeError, ValueError):
+        raise ValueError("task_service_record_invalid") from None
+    pid = record.get("pid") if isinstance(record, dict) else None
+    if type(pid) is not int or not 0 < pid <= 2147483647:
+        raise ValueError("task_service_record_invalid")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        # A process that cannot be inspected is not evidence of a stopped one.
+        pass
+    raise BlockingIOError("task_state_in_use")
 
 
 @contextmanager
@@ -35,6 +68,7 @@ def task_state_guard(root: str | Path):
     try:
         os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _refuse_live_service(root)
         yield
     finally:
         os.close(fd)

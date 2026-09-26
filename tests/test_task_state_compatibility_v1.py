@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import closing
 import sqlite3
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -111,7 +113,7 @@ def test_state_guard_uses_the_live_daemon_lock_even_for_a_new_state_directory(tm
         pass
 
 
-@pytest.mark.parametrize("name", ["tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm", "worker.lock"])
+@pytest.mark.parametrize("name", ["tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm", "worker.lock", "service.json"])
 def test_state_guard_refuses_symlinked_state_and_never_writes_the_target(tmp_path, name):
     root = tmp_path / "state"
     root.mkdir()
@@ -186,3 +188,84 @@ def test_additive_queue_migration_keeps_existing_constraint_index_and_trigger_fl
             db.execute("UPDATE tasks SET stage='SYNTHETIC_FORBIDDEN'")
         db.rollback()
         assert authority(db) == before
+
+def test_state_guard_refuses_live_legacy_service_even_when_worker_lock_is_free(tmp_path):
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        before = authority(db)
+        registry = root / "service.json"
+        registry.write_text(json.dumps({"pid": os.getpid(), "port": 12345,
+                                       "private_canary": "synthetic-only"}))
+        before_record = registry.read_bytes()
+        with pytest.raises(BlockingIOError, match="task_state_in_use") as failure:
+            with task_state_guard(root):
+                pytest.fail("live pre-lock daemon must block release mutation")
+        assert "private_canary" not in str(failure.value)
+        assert authority(db) == before
+        assert registry.read_bytes() == before_record
+        # Failure released the flock; the service is still alive and untouched.
+        with ProcessLock(root / "worker.lock"):
+            pass
+        assert os.getpid() == json.loads(registry.read_text())["pid"]
+
+
+@pytest.mark.parametrize("raw", [
+    "not-json", "[]", "{}", '{"pid":true}', '{"pid":"1"}',
+    '{"pid":0}', '{"pid":-1}', '{"pid":2147483648}', " " * 65537,
+])
+def test_ambiguous_service_record_cannot_certify_a_stopped_writer(tmp_path, raw):
+    root = tmp_path / "state"
+    root.mkdir()
+    registry = root / "service.json"
+    registry.write_text(raw)
+    with pytest.raises(ValueError, match="task_service_record_invalid"):
+        with task_state_guard(root):
+            pytest.fail("ambiguous writer must refuse")
+    assert registry.read_text() == raw
+
+
+def test_dead_service_record_is_retained_without_killing_or_starting_a_process(tmp_path, monkeypatch):
+    from executor.autonomy import state_compatibility
+    root = tmp_path / "state"
+    root.mkdir()
+    registry = root / "service.json"
+    raw = json.dumps({"pid": 12345, "port": 34567})
+    registry.write_text(raw)
+    calls = []
+
+    def dead(pid, signal):
+        calls.append((pid, signal))
+        raise ProcessLookupError
+
+    monkeypatch.setattr(state_compatibility.os, "kill", dead)
+    with task_state_guard(root):
+        pass
+    assert calls == [(12345, 0)], "probe never terminates a process"
+    assert registry.read_text() == raw
+
+
+def test_uninspectable_service_pid_is_not_a_stopped_writer(tmp_path, monkeypatch):
+    from executor.autonomy import state_compatibility
+    root = tmp_path / "state"
+    root.mkdir()
+    registry = root / "service.json"
+    registry.write_text(json.dumps({"pid": 12345}))
+
+    def denied(pid, signal):
+        assert (pid, signal) == (12345, 0)
+        raise PermissionError
+
+    monkeypatch.setattr(state_compatibility.os, "kill", denied)
+    with pytest.raises(BlockingIOError):
+        with task_state_guard(root):
+            pytest.fail("permission denial is not proof of absence")
+    assert json.loads(registry.read_text())["pid"] == 12345
+
+
+def test_service_fifo_is_refused_without_blocking_or_consuming_it(tmp_path):
+    root = tmp_path / "state"
+    root.mkdir()
+    os.mkfifo(root / "service.json")
+    with pytest.raises(ValueError, match="task_service_record_invalid"):
+        with task_state_guard(root):
+            pass

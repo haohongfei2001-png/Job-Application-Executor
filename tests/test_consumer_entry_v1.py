@@ -1288,7 +1288,7 @@ def test_macos_install_refuses_live_task_state_before_staging(tmp_path):
 
 
 @pytest.mark.parametrize("name", [
-    "tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm", "worker.lock",
+    "tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm", "worker.lock", "service.json",
 ])
 def test_macos_install_refuses_aliased_task_state_without_touching_it(tmp_path, name):
     apps = tmp_path / "Applications"
@@ -1440,3 +1440,44 @@ def test_candidate_with_open_dependency_graph_preserves_installed_app(tmp_path):
     assert refused["reason"] == "candidate_start_failed"
     assert read_release_identity(installed_source) == known_identity
     assert not list(apps.glob("*.staging.app"))
+
+@pytest.mark.parametrize("record,reason", [
+    ("live", "task_state_in_use"), ("malformed", "task_state_unavailable"),
+])
+def test_app_install_and_rollback_refuse_unlocked_legacy_daemon_before_any_activation(
+    tmp_path, monkeypatch, record, reason
+):
+    from contextlib import closing
+    from test_task_state_compatibility_v1 import legacy_state, authority
+
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    app = apps / "AI 投递经理.app"
+    previous = apps / ".AI 投递经理.app.previous"
+    app.mkdir()
+    previous.mkdir()
+    (app / "known-good").write_text("current")
+    (previous / "retained").write_text("previous")
+    state = tmp_path / "synthetic-state"
+    with closing(legacy_state(state)) as db:
+        before = authority(db)
+        registry = state / "service.json"
+        registry.write_text(json.dumps({"pid": os.getpid()}) if record == "live" else "invalid")
+        before_record = registry.read_bytes()
+
+        def forbidden_start(*args, **kwargs):
+            pytest.fail("a live or ambiguous old writer must refuse before candidate startup")
+
+        monkeypatch.setattr(consumer, "_candidate_starts", forbidden_start)
+        installed = install_macos_app(
+            tmp_path / "missing-candidate", destination=apps, platform="darwin",
+            task_state_root=state)
+        rolled_back = rollback_macos_app(apps, task_state_root=state)
+        assert installed["reason"] == reason
+        assert rolled_back["reason"] == reason
+        assert authority(db) == before
+        assert registry.read_bytes() == before_record
+    assert (app / "known-good").read_text() == "current"
+    assert (previous / "retained").read_text() == "previous"
+    assert not (apps / ".AI 投递经理.app.installing").exists()
+    assert not (apps / ".AI 投递经理.app.failed").exists()
