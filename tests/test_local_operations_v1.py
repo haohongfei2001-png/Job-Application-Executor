@@ -105,7 +105,8 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
         def __init__(self, *_):
             self.available = True
 
-    supervisor.manager.provider = FakeMapper()
+    supervisor.manager = ManagerController(
+        q, worker, provider=FakeMapper(), settings=supervisor.manager.settings)
     supervisor.release_identity = {"status": "verified", "source_sha256": "a" * 64}
     report = diagnostics.collect_diagnostics(
         supervisor,
@@ -1442,7 +1443,7 @@ def test_packaged_provenance_refuses_manifest_switched_during_runtime_verificati
     assert report["requirements_sha256"] == ""
 
 
-@pytest.mark.parametrize("available", [True, False, "fault"])
+@pytest.mark.parametrize("available", [True, False, "fault", None])
 def test_diagnostic_provider_state_never_loads_credentials_or_starts_processes(
     tmp_path, monkeypatch, available
 ):
@@ -1469,11 +1470,21 @@ def test_diagnostic_provider_state_never_loads_credentials_or_starts_processes(
         def decide(self, *_args, **_kwargs):
             pytest.fail("diagnostics must never invoke the model")
 
-    supervisor.manager.provider = ExistingProvider()
+    monkeypatch.setattr(
+        "executor.autonomy.manager.DeepSeekManagerProvider",
+        lambda *_args, **_kwargs: pytest.fail("diagnostics must not initialize provider"),
+    )
+    supervisor.manager = ManagerController(
+        queue, _worker, provider=ExistingProvider() if available is not None else None,
+        settings=supervisor.manager.settings,
+    )
     before = (queue.tasks(), queue.recent_events(1000))
     report = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
     assert report["system"]["deepseek_available"] is (available is True)
     assert report["system"]["provider_state_basis"] == "loaded_configuration"
+    assert report["system"]["provider_state"] == (
+        "available" if available is True else
+        "not_loaded" if available is None else "unavailable")
     assert report["recovery"] == (
         {"reason": "none", "action": "none"} if available is True else
         {"reason": "provider_unavailable", "action": "check_provider_settings"}

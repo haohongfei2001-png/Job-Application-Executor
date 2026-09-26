@@ -178,8 +178,10 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
         # Diagnostics observe the service's already-loaded provider. Building
         # another mapper would re-read Keychain secrets and can prompt/block
         # merely because the user asked to preview a copy-safe report.
-        deepseek_available = bool(supervisor.manager.provider.available)
+        provider_state = supervisor.manager.loaded_provider_state()
+        deepseek_available = provider_state["available"] is True
     except Exception:
+        provider_state = {"state": "unavailable", "available": False}
         deepseek_available = False
 
     try:
@@ -234,6 +236,7 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
             "cdp_alive": cdp_alive,
             "deepseek_available": bool(deepseek_available),
             "provider_state_basis": "loaded_configuration",
+            "provider_state": provider_state["state"],
             "otp_waiting_tasks": len(waiting),
             "otp_buffered_tasks": buffered,
         },

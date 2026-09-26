@@ -163,6 +163,12 @@ class GenericWebAdapter(SiteAdapter):
         return loc
 
     def discover_fields(self) -> list[WebField]:
+        fields, complete = self._discover_form_snapshot()
+        if not complete:
+            raise FormObservationError("form collection limit exceeded")
+        return fields
+
+    def _discover_form_snapshot(self) -> tuple[list[WebField], bool]:
         """Snapshot the whole form in one browser round-trip.
 
         The previous implementation crossed the Playwright boundary repeatedly for
@@ -215,7 +221,12 @@ class GenericWebAdapter(SiteAdapter):
             return '';
           };
 
-          return [...document.querySelectorAll(selector)].slice(0, 350).map((e, index) => {
+          const controls = [...document.querySelectorAll(selector)];
+          // Limits bound metadata cost, never certify a silently partial form.
+          // Count before visibility filtering because ordinal locators use that order.
+          const complete = controls.length <= 350 && !controls.some(e =>
+            visible(e) && e.tagName.toLowerCase() === "select" && e.options.length > 200);
+          const fields = controls.slice(0, 350).map((e, index) => {
             const tag = e.tagName.toLowerCase();
             const inputType = e.getAttribute('role') === 'combobox' ? 'combobox'
               : (e.getAttribute('type') || tag).toLowerCase();
@@ -263,13 +274,18 @@ class GenericWebAdapter(SiteAdapter):
               section: section(e),
             };
           }).filter(x => x.visible);
+          return {fields, complete};
         }"""
         try:
-            snapshot = self.page.evaluate(script) or []
+            result = self.page.evaluate(script)
+            if (not isinstance(result, dict) or not isinstance(result.get("fields"), list)
+                    or type(result.get("complete")) is not bool):
+                raise ValueError("invalid form snapshot")
+            snapshot = result["fields"]
         except Exception:
             raise FormObservationError("field observation unavailable") from None
 
-        return [
+        fields = [
             WebField(
                 field_id=item["fieldId"],
                 selector=item["selector"],
@@ -297,10 +313,11 @@ class GenericWebAdapter(SiteAdapter):
             )
             for item in snapshot
         ]
+        return fields, result["complete"]
 
     def observe_form(self) -> FormObservation:
         """Read form structure separately from any intended fill actions."""
-        fields = self.discover_fields()
+        fields, complete = self._discover_form_snapshot()
         try:
             signals = self.page.evaluate(r"""() => {
               const visible = e => {
@@ -365,6 +382,7 @@ class GenericWebAdapter(SiteAdapter):
         return FormObservation.from_fields(
             self.page.url, epoch, fields,
             rows=rows, dependencies=dependencies,
+            collection_complete=complete,
             hidden_required_count=int(signals.get("hiddenRequired") or 0),
             unsupported_component_count=int(signals.get("unsupported") or 0),
             ambiguous_selector_count=ambiguous,
@@ -483,6 +501,25 @@ class GenericWebAdapter(SiteAdapter):
             raise BrowserOwnershipError("combobox selection outcome unknown")
         return True
 
+    def _collection_complete_now(self) -> bool:
+        """Read current bounds without labels, values, secrets or side effects."""
+        try:
+            return self.page.evaluate(r"""() => {
+              const controls = [...document.querySelectorAll(
+                'input:not([type="hidden"]), textarea, select, [role="combobox"]:not(input):not(textarea):not(select)')];
+              if (controls.length > 350) return false;
+              return !controls.some(e => {
+                if (e.tagName.toLowerCase() !== 'select' || e.options.length <= 200)
+                  return false;
+                const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden'
+                  && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+                  && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+              });
+            }""") is True
+        except Exception:
+            raise FormObservationError("form collection bounds unavailable") from None
+
     def apply_resolutions(self, resolutions: Iterable[FieldResolution]) -> list[dict]:
         resolutions = list(resolutions)
         # Explicit site dependency metadata permits a bounded parent-first
@@ -531,6 +568,10 @@ class GenericWebAdapter(SiteAdapter):
                 continue
             if dependency:
                 self.await_form_render()
+            if not self._collection_complete_now():
+                actions.append({"field_id": resolution.field_id, "ok": False,
+                                "reason": "form_collection_limit_exceeded"})
+                break
             element = self._locate(resolution.selector, resolution.label)
             if element.count() != 1:
                 actions.append({"field_id": resolution.field_id, "ok": False,

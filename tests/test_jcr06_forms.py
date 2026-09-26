@@ -8,7 +8,7 @@ import pytest
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.application import ApplicationExecutor
 from executor.forms import FillPlan, FormObservation, FormObservationError
-from executor.models import (ApplicationStage, FieldResolution, ResolutionStatus,
+from executor.models import (ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus,
                              WebField)
 from executor.autonomy.worker import outcome
 from executor.autonomy.queue import TaskQueue, TaskSpec
@@ -736,3 +736,149 @@ def test_worker_retains_unknown_attempt_when_native_field_reverts(tmp_path, monk
     assert queue.run_attempts(task["task_id"])[0]["outcome"] == "UNKNOWN_OUTCOME"
     with pytest.raises(ValueError, match="read-only reconciliation"):
         queue.resume(task["task_id"])
+
+
+def _collection_limit_page(case):
+    name = "<label>姓名<input id='name' name='full_name' required></label>"
+    submit = "<button type='button' onclick='window.submits++'>Submit application</button>"
+    counters = """<script>window.submits=0;window.writes=0;window.starts=0;
+      document.addEventListener('input',()=>window.writes++);</script>"""
+    if case == "field_overflow":
+        controls = name + "".join(f"<input id='extra-{i}'>" for i in range(350))
+    elif case == "hidden_prefix":
+        controls = "".join(
+            f"<input id='hidden-{i}' style='display:none'>" for i in range(350)) + name
+    elif case == "option_overflow":
+        controls = name + "<select id='choice'>" + "".join(
+            f"<option value='{i}'>PRIVATE_OPTION_CANARY_{i}</option>"
+            for i in range(201)) + "</select>"
+    else:
+        raise AssertionError("unknown fixture")
+    return controls + submit + counters
+
+
+@pytest.mark.parametrize("case", ["field_overflow", "hidden_prefix", "option_overflow"])
+def test_partial_form_collection_blocks_before_any_application_effect(
+        tmp_path, monkeypatch, case):
+    runner, html = _runner(tmp_path, monkeypatch, _collection_limit_page(case))
+
+    class NoPartialEffects(GenericWebAdapter):
+        def apply_resolutions(self, _resolutions):
+            pytest.fail("partial collection must block before field writes")
+
+        def start_application(self):
+            pytest.fail("partial collection must not infer an empty entry page")
+
+        def save_draft(self):
+            pytest.fail("partial collection must not trigger draft save")
+
+        def advance(self):
+            pytest.fail("partial collection must not trigger navigation")
+
+    with NoPartialEffects(html.as_uri()) as adapter:
+        observation = adapter.observe_form()
+        assert observation.collection_complete is False
+        assert observation.unsafe_structure
+        assert len(observation.fields) <= 350
+        assert len(adapter.page.locator("input,select").all()) == (
+            2 if case == "option_overflow" else 351)
+        if case == "hidden_prefix":
+            assert observation.fields == ()
+            assert adapter.page.locator("#name").is_visible()
+        if case == "option_overflow":
+            assert adapter.page.locator("#choice option").count() == 201
+        summary = json.dumps(observation.safe_summary())
+        assert "PRIVATE_OPTION_CANARY" not in summary
+        with pytest.raises(ValueError, match="supported unique"):
+            FillPlan.bind(observation, [])
+        with pytest.raises(FormObservationError, match="collection limit"):
+            adapter.discover_fields()
+        assert adapter.page.evaluate("[window.writes,window.submits,window.starts]") == [0, 0, 0]
+
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: NoPartialEffects(url))
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "form structure unsupported or incomplete"
+    assert "form_collection_limit_exceeded" in plan.metadata["capability_limitations"]
+    assert plan.metadata["form_observation"]["collection_complete"] is False
+    assert plan.fields == []
+
+
+def test_collection_at_exact_limits_preserves_full_snapshot_and_dom_readback(tmp_path):
+    html = tmp_path / "at-limits.html"
+    options = "".join(
+        f"<option value='{i}'>Synthetic Option {i}</option>" for i in range(200))
+    controls = "".join(f"<input id='extra-{i}'>" for i in range(349))
+    html.write_text("<!doctype html><body>" + controls
+        + "<select id='choice'>" + options + "</select>"
+        + "<script>window.writes=0;document.addEventListener('input',()=>window.writes++);</script>",
+        encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        observed = adapter.observe_form()
+        assert observed.collection_complete is True
+        assert len(observed.fields) == 350
+        choice = next(field for field in observed.fields if field.selector == "#choice")
+        assert len(choice.options) == 200
+        assert choice.options[-1] == "Synthetic Option 199"
+        resolutions = [FieldResolution(
+            field_id="choice", selector="#choice", label="choice",
+            status=ResolutionStatus.RESOLVED, value="Synthetic Option 199")]
+        assert FillPlan.bind(observed, resolutions).actions == tuple(resolutions)
+        actions = adapter.apply_resolutions(resolutions)
+        assert actions[0]["ok"] is True
+        assert actions[0]["observed"] == "DOM_READBACK"
+        assert adapter.page.locator("#choice").input_value() == "199"
+        assert adapter.page.evaluate("window.writes") == 1
+
+
+def test_redraw_exceeding_collection_limit_stops_remaining_writes(tmp_path):
+    html = tmp_path / "collection-redraw.html"
+    html.write_text("""<!doctype html><body><input id='first'><input id='later'>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.laterWrites=0;window.submits=0;
+      document.querySelector('#later').addEventListener('input',()=>window.laterWrites++);
+      document.querySelector('#first').oninput=()=>{
+        for(let i=0;i<349;i++){
+          const node=document.createElement('input');node.id='new-'+i;
+          document.body.appendChild(node);
+        }
+      };</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        before = adapter.observe_form()
+        assert before.collection_complete is True
+        resolutions = [
+            FieldResolution(field_id=key, selector="#" + key, label=key,
+                            status=ResolutionStatus.RESOLVED, value=value)
+            for key, value in [("first", "Synthetic"), ("later", "NEVER_WRITTEN")]
+        ]
+        actions = adapter.apply_resolutions(resolutions)
+        assert actions[0]["ok"] is True
+        assert actions[1]["ok"] is False
+        assert actions[1]["reason"] == "form_collection_limit_exceeded"
+        assert adapter.page.locator("input").count() == 351
+        assert adapter.page.locator("#later").input_value() == ""
+        assert adapter.page.evaluate("[window.laterWrites,window.submits]") == [0, 0]
+        after = adapter.observe_form()
+        assert after.collection_complete is False
+        assert after.structure_digest != before.structure_digest
+        plan = ApplicationPlan(
+            execution_id="collection-redraw", target_url=html.as_uri(), site_id="generic_web")
+        assert adapter.validate(plan).ok is False
+        with pytest.raises(FormObservationError, match="collection limit"):
+            adapter.apply_resolutions(resolutions[1:])
+
+
+def test_partial_observation_cannot_inherit_complete_observation_digest():
+    field = WebField(field_id="name", selector="#name", label="PRIVATE_LABEL_CANARY",
+                     input_type="text", current_value="PRIVATE_VALUE_CANARY")
+    complete = FormObservation.from_fields("https://synthetic.example.test", "epoch", [field])
+    partial = FormObservation.from_fields(
+        "https://synthetic.example.test", "epoch", [field], collection_complete=False)
+    assert complete.structure_digest != partial.structure_digest
+    assert complete.safe_summary()["collection_complete"] is True
+    assert partial.safe_summary()["collection_complete"] is False
+    assert partial.unsafe_structure
+    summary = json.dumps(partial.safe_summary())
+    assert "PRIVATE_LABEL_CANARY" not in summary
+    assert "PRIVATE_VALUE_CANARY" not in summary
