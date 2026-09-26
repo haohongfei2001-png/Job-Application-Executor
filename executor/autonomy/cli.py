@@ -274,8 +274,9 @@ def main(argv=None):
 
             options = ({"standalone_runtime": args.standalone_runtime}
                        if args.standalone_runtime is not None else {})
-            result = install_macos_app(Path(__file__).resolve().parents[2],
-                                       native_presentation=args.native_presentation, **options)
+            if args.native_presentation:
+                options["native_presentation"] = True
+            result = install_macos_app(Path(__file__).resolve().parents[2], **options)
         elif args.command == "enqueue":
             result = request(args.runtime, args.port, "/v1/tasks", json.loads(args.file.read_text()))
         elif args.command in {"tasks", "events"}:

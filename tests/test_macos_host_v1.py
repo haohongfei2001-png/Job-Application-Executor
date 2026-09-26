@@ -259,7 +259,12 @@ def test_hosted_mac_installed_native_app_opens_actual_ui_twice_without_checkout_
     task = TaskQueue(f["state"]).enqueue(TaskSpec(company="Synthetic native",
         role="Engineer", target_url="https://example.invalid/jobs/native",
         profile_ref="synthetic-profile.json"))
-    before = TaskQueue(f["state"]).get(task["task_id"])
+    # A runnable task is deliberately claimed by the existing supervisor.
+    # Preserve the user's explicit pause across installation/launch instead of
+    # treating ordinary scheduler progress as a native presentation mutation.
+    before = TaskQueue(f["state"]).pause(task["task_id"])
+    assert before["run_state"] == "PAUSED" and before["attempts"] == 0
+    assert before["wait_reason"] == "user_paused"
     f["repo"].rename(tmp_path / "checkout-removed")
     source = f["app"] / "Contents/Resources/release"
     runtime = f["app"] / "Contents/Resources/runtime"
@@ -341,3 +346,21 @@ def test_hosted_mac_native_compile_and_post_activation_fault_preserve_known_good
     assert consumer._trusted_bundle(f["app"]) and consumer._isolated_bundle_startup(f["app"])
     assert program.read_bytes() == image and source_manifest(source) == initial
     assert (f["apps"] / ('.' + consumer.APP_NAME + '.app.failed')).is_dir()
+
+
+def test_installer_cli_native_mode_is_explicit_and_default_options_stay_compatible(
+    tmp_path, monkeypatch, capsys
+):
+    from executor.autonomy import cli, consumer
+
+    calls = []
+    runtime = tmp_path / "prepared-runtime"
+    monkeypatch.setattr(consumer, "install_macos_app",
+        lambda repo, **kwargs: calls.append((repo, kwargs)) or {"ok": True})
+    assert cli.main(["install-app"]) == 0
+    assert calls[-1][1] == {}
+    assert cli.main(["install-app", "--native-presentation",
+                     "--standalone-runtime", str(runtime)]) == 0
+    assert calls[-1][1] == {"standalone_runtime": runtime, "native_presentation": True}
+    assert len(calls) == 2
+    assert '"ok": true' in capsys.readouterr().out.lower()
