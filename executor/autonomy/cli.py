@@ -189,6 +189,31 @@ def launch_consumer(root, port, *, presenter=None):
     }
 
 
+
+def launch_native_consumer(root, port, *, smoke=False):
+    """Run the owned installed app through one verified native presenter."""
+    from .consumer import _native_packaged_launcher, _trusted_bundle
+    from .macos_host import NativePresenter
+
+    source = Path(__file__).resolve().parents[2]
+    app = source.parent.parent.parent
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    if (type(smoke) is not bool or sys.platform != "darwin"
+            or not _trusted_bundle(app)
+            or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
+        return {"ok": False, "opened": False, "reason": "native_bundle_unverified"}
+    presenter = NativePresenter(source.parent / "native-host", consumer_smoke=smoke)
+    try:
+        result = launch_consumer(root, port, presenter=presenter)
+        opened = result.get("opened") is True and result.get("ok") is True
+        closed = presenter.wait_for_close() if opened else False
+        return {"ok": opened and closed, "opened": opened,
+                "native_window": opened, "native_page": closed if smoke else None,
+                "final_click_actor": "user"}
+    finally:
+        presenter.close()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="application-autonomy")
     parser.add_argument("--runtime", type=Path, default=RUNTIME)
@@ -196,8 +221,11 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch"):
         commands.add_parser(name)
+    native = commands.add_parser("native-launch")
+    native.add_argument("--native-smoke", action="store_true")
     installer = commands.add_parser("install-app")
     installer.add_argument("--standalone-runtime", type=Path)
+    installer.add_argument("--native-presentation", action="store_true")
     bootstrap = commands.add_parser("bootstrap-serve")
     bootstrap.add_argument("--reason", default="service_unavailable")
     preflight = commands.add_parser("preflight")
@@ -239,12 +267,15 @@ def main(argv=None):
             )
         elif args.command == "launch":
             result = launch_consumer(args.runtime, args.port)
+        elif args.command == "native-launch":
+            result = launch_native_consumer(args.runtime, args.port, smoke=args.native_smoke)
         elif args.command == "install-app":
             from .consumer import install_macos_app
 
             options = ({"standalone_runtime": args.standalone_runtime}
                        if args.standalone_runtime is not None else {})
-            result = install_macos_app(Path(__file__).resolve().parents[2], **options)
+            result = install_macos_app(Path(__file__).resolve().parents[2],
+                                       native_presentation=args.native_presentation, **options)
         elif args.command == "enqueue":
             result = request(args.runtime, args.port, "/v1/tasks", json.loads(args.file.read_text()))
         elif args.command in {"tasks", "events"}:

@@ -175,3 +175,169 @@ def test_hosted_mac_presenter_reuses_actual_native_process_without_external_brow
         assert presenter.sequence == 2
     finally:
         presenter.close()
+
+
+def test_retained_native_receipt_is_bound_to_its_owned_source_without_execution(tmp_path, monkeypatch):
+    from executor.autonomy import consumer
+    root = _candidate(tmp_path)
+    release = tmp_path / "release"
+    source = release / "executor" / "autonomy" / "macos_host.py"
+    source.parent.mkdir(parents=True)
+    historical = "SYNTHETIC_OLD_HOST_SOURCE"
+    source.write_text("raise RuntimeError('CANDIDATE_SOURCE_MUST_NOT_EXECUTE')\nHOST_SOURCE = " + repr(historical))
+    receipt = json.loads((root / HOST_RECEIPT).read_text())
+    receipt["source_sha256"] = hashlib.sha256(historical.encode()).hexdigest()
+    (root / HOST_RECEIPT).write_text(json.dumps(receipt))
+    monkeypatch.setattr(consumer, "verify_source_candidate", lambda _root: True)
+    assert not verify_native_host(root)
+    assert consumer._native_bundle_matches(release, root)
+    source.write_text("HOST_SOURCE = 'changed'")
+    assert not consumer._native_bundle_matches(release, root)
+    source.write_text("HOST_SOURCE = " + repr(historical) + "\nHOST_SOURCE = " + repr(historical))
+    assert not consumer._native_bundle_matches(release, root)
+    source.write_text("HOST_SOURCE = lambda: 'untrusted'")
+    assert not consumer._native_bundle_matches(release, root)
+
+
+def test_native_receipt_refuses_non_file_without_reading_fifo(tmp_path):
+    import os
+    root = _candidate(tmp_path)
+    (root / HOST_RECEIPT).unlink()
+    os.mkfifo(root / HOST_RECEIPT)
+    assert not verify_native_host(root)
+
+
+def test_unverified_native_app_never_starts_service_or_browser(tmp_path, monkeypatch):
+    from executor.autonomy import cli
+    monkeypatch.setattr(cli, "launch_consumer", lambda *a, **k: pytest.fail("unverified app started service"))
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: pytest.fail("external fallback"))
+    result = cli.launch_native_consumer(tmp_path / "state", 9344)
+    assert result == {"ok": False, "opened": False, "reason": "native_bundle_unverified"}
+
+
+@pytest.mark.parametrize("mode", [None, 0, 1, "native"])
+def test_native_presenter_mode_requires_strict_bool(mode):
+    with pytest.raises(ValueError, match="native_host_mode_invalid"):
+        NativePresenter("unused", consumer_smoke=mode)
+
+
+@pytest.fixture
+def native_installed_app(tmp_path):
+    import os
+    from pathlib import Path
+    from executor.autonomy import consumer
+    from executor.autonomy.release import copy_source_candidate
+    if sys.platform != "darwin":
+        pytest.skip("Installed native application uses hosted macOS Cocoa/WebKit")
+    runtime = Path(os.environ["JAE_STANDALONE_RUNTIME"])
+    repo = tmp_path / "source"
+    copy_source_candidate(Path(__file__).resolve().parents[1], repo)
+    apps = tmp_path / "Applications"
+    home = tmp_path / "home"
+    home.mkdir()
+    state = home / "Library" / "Application Support" / "AI投递经理" / "autonomy"
+    result = consumer.install_macos_app(repo, destination=apps,
+        standalone_runtime=runtime, task_state_root=state, native_presentation=True)
+    assert result["ok"] is True and result["presentation"] == "native"
+    app = apps / (consumer.APP_NAME + ".app")
+    assert consumer._trusted_bundle(app) and consumer._isolated_bundle_startup(app)
+    assert consumer._native_bundle_matches(app / "Contents/Resources/release",
+                                          app / "Contents/Resources/native-host")
+    return {"repo": repo, "apps": apps, "home": home, "state": state,
+            "app": app, "runtime": runtime}
+
+
+def test_hosted_mac_installed_native_app_opens_actual_ui_twice_without_checkout_or_browser(
+    native_installed_app, tmp_path
+):
+    import os
+    from pathlib import Path
+    from executor.autonomy.process_entry import CLI_ENTRY_SCRIPT
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+
+    f = native_installed_app
+    task = TaskQueue(f["state"]).enqueue(TaskSpec(company="Synthetic native",
+        role="Engineer", target_url="https://example.invalid/jobs/native",
+        profile_ref="synthetic-profile.json"))
+    before = TaskQueue(f["state"]).get(task["task_id"])
+    f["repo"].rename(tmp_path / "checkout-removed")
+    source = f["app"] / "Contents/Resources/release"
+    runtime = f["app"] / "Contents/Resources/runtime"
+    executable = f["app"] / "Contents/MacOS/AIApplicationManager"
+    poison = tmp_path / "ambient"
+    poison.mkdir()
+    (poison / "sitecustomize.py").write_text("raise RuntimeError('ambient startup')")
+    env = {**os.environ, "HOME": str(f["home"]), "PYTHONHOME": str(poison),
+           "PYTHONPATH": str(poison), "BROWSER": "/usr/bin/false",
+           "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"}
+    command = [str(runtime / "bin/python"), "-I", "-B", "-c", CLI_ENTRY_SCRIPT,
+               str(source), "--runtime", str(f["state"]), "--port", "9344"]
+    first = None
+    try:
+        for _ in range(2):
+            launched = subprocess.run(["/bin/zsh", str(executable), "--native-smoke"],
+                cwd=poison, env=env, capture_output=True, text=True, timeout=30)
+            log = f["home"] / "Library/Logs/AI投递经理/launcher.log"
+            actual = log.read_text()
+            assert launched.returncode == 0, actual
+            assert '/ui-login?' not in actual and 'ticket=' not in actual and 'Bearer ' not in actual
+            # Each isolated launch logs only safe result booleans, never a capability.
+            # Two launches reuse the same real supervisor writer and task authority.
+            decoder = json.JSONDecoder()
+            results, rest = [], actual
+            while rest.strip():
+                result, end = decoder.raw_decode(rest.lstrip())
+                results.append(result)
+                rest = rest.lstrip()[end:]
+            assert all(r == {"ok": True, "opened": True, "native_window": True,
+                "native_page": True, "final_click_actor": "user"} for r in results)
+            service = json.loads((f["state"] / "service.json").read_text())
+            first = service if first is None else first
+            assert service == first
+            health = subprocess.run(command + ["health"], cwd=poison, env=env,
+                capture_output=True, text=True, timeout=10)
+            assert health.returncode == 0
+            observed = json.loads(health.stdout)
+            assert observed["ok"] is True and observed["worker_active"] is None
+            assert observed["final_click_actor"] == "user"
+            assert TaskQueue(f["state"]).get(task["task_id"]) == before
+        assert not list(source.rglob("__pycache__"))
+    finally:
+        stopped = subprocess.run(command + ["stop"], cwd=poison, env=env,
+            capture_output=True, text=True, timeout=15)
+        assert stopped.returncode == 0
+    assert not (f["state"] / "service.json").exists()
+
+
+def test_hosted_mac_native_compile_and_post_activation_fault_preserve_known_good_app(
+    native_installed_app, monkeypatch
+):
+    from executor.autonomy import consumer
+    from executor.autonomy.release import source_manifest
+
+    f = native_installed_app
+    source = f["app"] / "Contents/Resources/release"
+    initial = source_manifest(source)
+    program = f["app"] / "Contents/Resources/native-host/AIApplicationWindow"
+    image = program.read_bytes()
+    real_stage = consumer._stage_native_host
+    monkeypatch.setattr(consumer, "_stage_native_host", lambda *a: False)
+    refused = consumer.install_macos_app(f["repo"], destination=f["apps"],
+        standalone_runtime=f["runtime"], task_state_root=f["state"], native_presentation=True)
+    assert refused["reason"] == "native_candidate_failed" and refused["ok"] is False
+    assert program.read_bytes() == image and source_manifest(source) == initial
+    assert not (f["apps"] / ('.' + consumer.APP_NAME + '.app.previous')).exists()
+    assert not (f["apps"] / ('.' + consumer.APP_NAME + '.app.installing')).exists()
+    monkeypatch.setattr(consumer, "_stage_native_host", real_stage)
+    real_health, calls = consumer._candidate_starts, []
+    def fail_only_active(python, release):
+        calls.append(str(release))
+        return False if len(calls) == 2 else real_health(python, release)
+    monkeypatch.setattr(consumer, "_candidate_starts", fail_only_active)
+    failed = consumer.install_macos_app(f["repo"], destination=f["apps"],
+        standalone_runtime=f["runtime"], task_state_root=f["state"], native_presentation=True)
+    assert failed["reason"] == "post_activation_unhealthy" and failed["ok"] is False
+    assert len(calls) == 3
+    assert consumer._trusted_bundle(f["app"]) and consumer._isolated_bundle_startup(f["app"])
+    assert program.read_bytes() == image and source_manifest(source) == initial
+    assert (f["apps"] / ('.' + consumer.APP_NAME + '.app.failed')).is_dir()

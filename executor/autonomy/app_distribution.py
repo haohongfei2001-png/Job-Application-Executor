@@ -50,7 +50,10 @@ def _runtime_payload_without_state(root: Path) -> None:
 
 def _bundle_members(app: Path) -> list[Path]:
     outer = {"Contents", "Contents/Info.plist", "Contents/MacOS",
-             "Contents/MacOS/AIApplicationManager", "Contents/Resources"}
+             "Contents/MacOS/AIApplicationManager", "Contents/Resources",
+             "Contents/Resources/native-host",
+             "Contents/Resources/native-host/AIApplicationWindow",
+             "Contents/Resources/native-host/native-host-manifest.json"}
     members = [app, *sorted(app.rglob("*"))]
     for path in members:
         relative = path.relative_to(app)
@@ -107,9 +110,12 @@ def _sha256(path: Path) -> str:
 def build_macos_distribution(repo_root: str | Path, *,
                              standalone_runtime: str | Path,
                              output_dir: str | Path,
-                             platform: str | None = None) -> dict:
+                             platform: str | None = None,
+                             native_presentation: bool = False) -> dict:
     if (platform or sys.platform) != "darwin":
         raise ValueError("distribution_macos_required")
+    if type(native_presentation) is not bool:
+        raise ValueError("distribution_presentation_invalid")
     repo = Path(repo_root).expanduser().absolute()
     runtime = Path(standalone_runtime).expanduser().absolute()
     output = Path(output_dir).expanduser().absolute()
@@ -138,7 +144,7 @@ def build_macos_distribution(repo_root: str | Path, *,
             result = install_macos_app(
                 isolated_source, destination=apps, platform=platform,
                 task_state_root=work / "empty-build-state",
-                standalone_runtime=runtime)
+                standalone_runtime=runtime, native_presentation=native_presentation)
             if result.get("ok") is not True or result.get("replaced") is not False:
                 raise ValueError("distribution_candidate_failed")
             app = apps / (APP_NAME + ".app")
@@ -167,6 +173,7 @@ def build_macos_distribution(repo_root: str | Path, *,
                 "signing": "unsigned", "certification": "NOT_CERTIFIED",
                 "final_click_actor": "user",
                 "task_state": "excluded", "build_host_metadata": "excluded",
+                **({"presentation": "native"} if native_presentation else {}),
             }
             manifest = work / RECEIPT_NAME
             with manifest.open("x", encoding="utf-8") as file:

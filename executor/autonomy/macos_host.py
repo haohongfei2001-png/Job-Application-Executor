@@ -1,8 +1,8 @@
-"""Compiled Cocoa/WebKit consumer presenter, separate from app activation.
+"""Compiled Cocoa/WebKit presenter for the opt-in owned app bootstrap.
 
 The host accepts in-memory ConsumerSurface routes only. This provides one window
-per presenter; installing it as CFBundleExecutable and cross-launch reuse remain
-separate consumer release gates. No external-browser fallback or task writer.
+per presenter; cross-launch reuse/default native promotion remain separate gates.
+No external-browser fallback or task writer.
 """
 from __future__ import annotations
 
@@ -71,6 +71,7 @@ static BOOL initial(NSDictionary *command) {
 @property NSString *initialOrigin;
 @property NSString *serviceOrigin;
 @property BOOL smoke;
+@property BOOL consumerSmoke;
 @property BOOL finished;
 - (BOOL)allows:(NSURL *)url;
 - (void)present:(NSDictionary *)command;
@@ -154,7 +155,10 @@ static BOOL initial(NSDictionary *command) {
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     if (!self.smoke || self.finished) return;
     // Fixed cloud-only smoke probe, no arbitrary script input or task action.
-    [webView evaluateJavaScript:@"document.getElementById('native-canary')?.textContent === 'SYNTHETIC_NATIVE_CANARY'"
+    NSString *probe = self.consumerSmoke
+        ? @"!!(document.getElementById('readiness') && document.getElementById('message') && document.querySelector('input[name=company]'))"
+        : @"document.getElementById('native-canary')?.textContent === 'SYNTHETIC_NATIVE_CANARY'";
+    [webView evaluateJavaScript:probe
         completionHandler:^(id result, NSError *error) {
         self.finished = YES;
         [self zoomIn:nil]; BOOL zoom = self.view.pageZoom > 1.0; [self zoomReset:nil];
@@ -173,7 +177,8 @@ static BOOL initial(NSDictionary *command) {
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         JAEHost *host = [JAEHost new];
-        host.smoke = argc == 2 && strcmp(argv[1], "--smoke") == 0;
+        host.consumerSmoke = argc == 2 && strcmp(argv[1], "--consumer-smoke") == 0;
+        host.smoke = host.consumerSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
         [NSApplication sharedApplication];
         NSApp.delegate = host;
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -202,16 +207,20 @@ def _no_alias(path: Path) -> None:
         raise ValueError("native_host_path_invalid")
 
 
-def verify_native_host(directory: str | Path) -> bool:
+def verify_native_host(directory: str | Path, *, expected_source_sha256: str | None = None) -> bool:
+    expected = (hashlib.sha256(HOST_SOURCE.encode()).hexdigest()
+                if expected_source_sha256 is None else expected_source_sha256)
+    if not isinstance(expected, str) or len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        return False
     root = Path(directory).absolute()
     executable, receipt = root / "AIApplicationWindow", root / HOST_RECEIPT
     try:
         _no_alias(root)
-        if executable.is_symlink() or receipt.is_symlink() or not executable.is_file():
+        if executable.is_symlink() or receipt.is_symlink() or not executable.is_file() or not receipt.is_file():
             return False
         saved = json.loads(receipt.read_text(encoding="utf-8"))
         return (saved == {"format": "jae-native-host-v1",
-                         "source_sha256": hashlib.sha256(HOST_SOURCE.encode()).hexdigest(),
+                         "source_sha256": expected,
                          "executable_sha256": _digest(executable)}
                 and bool(executable.stat().st_mode & stat.S_IXUSR)
                 and {path.name for path in root.iterdir()} == {"AIApplicationWindow", HOST_RECEIPT})
@@ -282,7 +291,10 @@ def native_command(surface: ConsumerSurface, request: int) -> dict:
 
 class NativePresenter:
     """One trusted native window, no fallback and no credential report."""
-    def __init__(self, directory: str | Path):
+    def __init__(self, directory: str | Path, *, consumer_smoke: bool = False):
+        if type(consumer_smoke) is not bool:
+            raise ValueError("native_host_mode_invalid")
+        self.consumer_smoke = consumer_smoke
         self.directory = Path(directory).absolute()
         self.process = None
         self.sequence = 0
@@ -298,7 +310,8 @@ class NativePresenter:
                 return False
             if self.process is None or self.process.poll() is not None:
                 self.process = subprocess.Popen(
-                    [str(self.directory / "AIApplicationWindow")],
+                    [str(self.directory / "AIApplicationWindow"),
+                     *(["--consumer-smoke"] if self.consumer_smoke else [])],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, text=True, bufsize=1)
             self.process.stdin.write(json.dumps(command, ensure_ascii=False) + "\n")
@@ -319,6 +332,25 @@ class NativePresenter:
         except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
             self.close()
             return False
+
+
+    def wait_for_close(self) -> bool:
+        """Parent lifetime follows its actual NSWindow, without a second writer."""
+        if self.process is None:
+            return False
+        process = self.process
+        try:
+            closed = process.wait() == 0
+            if self.consumer_smoke:
+                reply = json.loads(process.stdout.readline(4096))
+                return (closed and reply == {"ok": True, "native_page": True,
+                    "window_count": 1, "zoom_reset": True,
+                    "external_navigation_denied": True})
+            return closed
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            return False
+        finally:
+            self.close()
 
     def close(self) -> None:
         process, self.process = self.process, None

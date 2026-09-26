@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import ast
+import hashlib
 import os
 import socket
 import sqlite3
@@ -169,12 +171,70 @@ def _packaged_launcher() -> str:
     )
 
 
+
+def _native_packaged_launcher() -> str:
+    # Keep the existing isolated owned-Python boundary. URLs/tickets stay stdin
+    # on the verified native child; no ambient browser fallback is requested.
+    return _packaged_launcher().replace(
+        ' "$RELEASE_ROOT" launch >>"$LOG_FILE" 2>&1',
+        ' "$RELEASE_ROOT" native-launch "$@" >>"$LOG_FILE" 2>&1')
+
+
+def _native_bundle_matches(release: Path, directory: Path) -> bool:
+    """Bind retained native images to THEIR owned source, including rollback."""
+    from .macos_host import verify_native_host
+
+    try:
+        if not verify_source_candidate(release):
+            return False
+        source = release / "executor" / "autonomy" / "macos_host.py"
+        if source.is_symlink() or not source.is_file():
+            return False
+        module = ast.parse(source.read_text(encoding="utf-8"))
+        declarations = [node for node in module.body if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == "HOST_SOURCE"
+                                for target in node.targets)]
+        if len(declarations) != 1:
+            return False
+        body = ast.literal_eval(declarations[0].value)
+        if not isinstance(body, str):
+            return False
+        return verify_native_host(directory,
+            expected_source_sha256=hashlib.sha256(body.encode()).hexdigest())
+    except (OSError, UnicodeError, ValueError, TypeError, SyntaxError):
+        return False
+
+
+def _stage_native_host(python: Path, release: Path, target: Path) -> bool:
+    # Compile through the verified staged runtime/source, never import a
+    # candidate module into the manager/installer process or use a checkout path.
+    script = (
+        "import pathlib,sys;sys.dont_write_bytecode=True;"
+        "sys.path.insert(0,str(pathlib.Path(sys.argv[1]).resolve()));"
+        "from executor.autonomy.macos_host import build_native_host;"
+        "build_native_host(sys.argv[2])"
+    )
+    try:
+        if not verify_runtime_candidate(python.parent.parent, release):
+            return False
+        result = subprocess.run([str(python), "-I", "-B", "-c", script,
+                                 str(release), str(target)],
+            cwd=release, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=75, check=False)
+        return result.returncode == 0 and _native_bundle_matches(release, target)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
 def _isolated_bundle_startup(app: Path) -> bool:
     """Historical owned bundles are upgradeable, never isolated-start certified."""
     executable = app / "Contents" / "MacOS" / "AIApplicationManager"
     runtime = app / "Contents" / "Resources" / "runtime"
     try:
-        return runtime.is_dir() and executable.read_text(encoding="utf-8") == _packaged_launcher()
+        launcher = executable.read_text(encoding="utf-8")
+        return (runtime.is_dir() and (launcher == _packaged_launcher()
+            or (launcher == _native_packaged_launcher()
+                and _native_bundle_matches(runtime.parent / "release", runtime.parent / "native-host"))))
     except (OSError, UnicodeError):
         return False
 
@@ -183,7 +243,7 @@ def _packaged_bundle_matches(executable: Path, runtime: Path) -> bool:
     try:
         launcher = executable.read_text(encoding="utf-8")
         if runtime.exists():
-            return launcher in {_packaged_launcher(), _packaged_launcher_v2()}
+            return launcher in {_packaged_launcher(), _packaged_launcher_v2(), _native_packaged_launcher()}
         assignments = [line for line in launcher.splitlines()
                        if line.startswith("REPO_ROOT=")]
         if len(assignments) != 1:
@@ -226,6 +286,9 @@ def _trusted_bundle(app: Path) -> bool:
             and (verify_source_candidate(release)
                  and (verify_runtime_candidate(runtime, release) if runtime.exists() else True)
                  and _packaged_bundle_matches(executable, runtime)
+                 and (_native_bundle_matches(release, resources / "native-host")
+                      if executable.read_text(encoding="utf-8") == _native_packaged_launcher()
+                      else not ((resources / "native-host").exists() or (resources / "native-host").is_symlink()))
              if release.exists() else _legacy_bundle_matches(executable))
         )
     except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
@@ -399,6 +462,7 @@ def install_macos_app(
     platform: str | None = None,
     task_state_root: str | Path | None = None,
     standalone_runtime: str | Path | None = None,
+    native_presentation: bool = False,
 ) -> dict:
     if (platform or sys.platform) != "darwin":
         return _install_macos_app_unlocked(repo_root, destination=destination, platform=platform)
@@ -424,6 +488,7 @@ def install_macos_app(
                 result = _install_macos_app_unlocked(
                     repo_root, destination=apps_dir, platform=platform,
                     task_state_root=state_root, standalone_runtime=standalone_runtime,
+                    native_presentation=native_presentation,
                     _state_backup_evidence=backup_evidence)
                 return {**result, "task_state_backup": backup_evidence} if backup_evidence else result
         except BlockingIOError:
@@ -443,6 +508,7 @@ def _install_macos_app_unlocked(
     platform: str | None = None,
     task_state_root: Path | None = None,
     standalone_runtime: str | Path | None = None,
+    native_presentation: bool = False,
     _state_backup_evidence: dict | None = None,
 ) -> dict:
     """Stage a source-and-runtime snapshot, then atomically activate the Mac app."""
@@ -454,6 +520,9 @@ def _install_macos_app_unlocked(
             "message": "AI 投递经理.app 只在 macOS 上安装。",
         }
 
+    if type(native_presentation) is not bool:
+        return {"ok": False, "reason": "presentation_mode_invalid",
+                "message": "应用呈现方式无法核对；现有应用保持不变。"}
     repo = Path(repo_root).expanduser().resolve()
     python = repo / ".venv" / "bin" / "python"
     if standalone_runtime is None and not python.is_file():
@@ -528,7 +597,12 @@ def _install_macos_app_unlocked(
             "message": "无法准备独立运行环境；现有应用没有被替换。",
         }
     executable = macos / "AIApplicationManager"
-    launcher = _packaged_launcher()
+    if native_presentation and not _stage_native_host(
+            runtime / "bin" / "python", release, staging / "Contents" / "Resources" / "native-host"):
+        shutil.rmtree(staging)
+        return {"ok": False, "reason": "native_candidate_failed",
+                "message": "原生窗口候选未通过校验；现有应用和任务保持不变。"}
+    launcher = _native_packaged_launcher() if native_presentation else _packaged_launcher()
 
     executable.write_text(launcher, encoding="utf-8")
     executable.chmod(
@@ -671,6 +745,7 @@ def _install_macos_app_unlocked(
     return {
         "ok": True,
         "installed": True,
+        **({"presentation": "native"} if native_presentation else {}),
         "replaced": replaced,
         "app_path": str(app),
         "rollback_path": str(rollback) if replaced else None,
