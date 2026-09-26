@@ -189,16 +189,30 @@ def test_real_archive_relocates_without_checkout_runtime_or_private_build_state(
     home.mkdir()
     report = tmp_path / "opened-consumer.jsonl"
     browser_probe = tmp_path / "browser_probe.py"
-    browser_probe.write_text("""import json,os,sys
+    phase_report = tmp_path / "browser-phase.json"
+    browser_probe.write_text("""import json,os,sys,time
 from pathlib import Path
 from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright,expect
+began=time.monotonic()
+current_phase='probe_imported'
+def probe_phase(name,error_class=None):
+    global current_phase
+    current_phase=name
+    # Fixed stage names/timing/exception class only: never record URLs,
+    # tickets, cookies, tokens, inputs, diagnostics or exception messages.
+    Path(os.environ['JAE_TEST_BROWSER_PHASE']).write_text(json.dumps({
+        'phase':name,'elapsed':round(time.monotonic()-began,3),
+        'error_class':error_class}),encoding='utf-8')
+probe_phase(current_phase)
 url=sys.argv[1]
 parsed=urlsplit(url)
 assert parsed.scheme=='http' and parsed.hostname=='127.0.0.1'
 assert parsed.path=='/ui-login' and parsed.query.startswith('ticket=')
 base=parsed.scheme+'://'+parsed.netloc
+probe_phase('playwright_start')
 with sync_playwright() as playwright:
+    probe_phase('chromium_launch')
     browser=playwright.chromium.launch(headless=True)
     try:
         context=browser.new_context(viewport={'width':1024,'height':900})
@@ -208,26 +222,33 @@ with sync_playwright() as playwright:
         page.on('pageerror',lambda error:errors.append(str(error)))
         context.on('request',lambda request:external.append(request.url)
             if urlsplit(request.url).hostname!='127.0.0.1' else None)
+        probe_phase('ticket_navigation')
         response=page.goto(url,wait_until='domcontentloaded')
         assert response.status==200 and page.url==base+'/ui'
         expect(page.get_by_role('button',name='查看诊断',exact=True)).to_be_visible()
+        probe_phase('cookie_contract')
         cookies=context.cookies()
         assert len(cookies)==1 and cookies[0]['name']=='application_executor_session'
         assert cookies[0]['httpOnly'] is True and cookies[0]['sameSite']=='Strict'
+        probe_phase('authenticated_state')
         state=context.request.get(base+'/ui/api/state')
         assert state.status==200 and state.json()['tasks']==[]
+        probe_phase('authenticated_readiness')
         readiness=context.request.get(base+'/ui/api/readiness')
         assert readiness.status==200 and isinstance(readiness.json(),dict)
+        probe_phase('keyboard_diagnostics_open')
         diagnostics=page.get_by_role('button',name='查看诊断',exact=True)
         diagnostics.focus()
         page.keyboard.press('Enter')
         expect(page.locator('#diagnostics-dialog')).to_be_visible()
         expect(page.locator('#diagnostics-report')).not_to_be_empty()
+        probe_phase('keyboard_diagnostics_close')
         close=page.locator('#diagnostics-close')
         close.focus()
         page.keyboard.press('Enter')
         expect(page.locator('#diagnostics-dialog')).not_to_be_visible()
         # Actual consumer action and feedback; no direct invocation of an updater.
+        probe_phase('update_refusal')
         update=page.get_by_role('button',name='检查并更新',exact=True)
         with page.expect_response(lambda response:
                 urlsplit(response.url).path=='/ui/api/update') as outcome:
@@ -236,25 +257,31 @@ with sync_playwright() as playwright:
         assert outcome.value.json()['reason']=='packaged_update_not_ready'
         expect(page.locator('#toast')).to_contain_text('当前安装包尚不支持安全更新')
         expect(update).to_be_enabled()
+        probe_phase('consumed_ticket_refusal')
         assert context.request.get(url).status==401
         unauthenticated=browser.new_context()
         assert unauthenticated.request.get(base+'/ui').status==401
         unauthenticated.close()
         # Losing the actual HttpOnly session reaches the real supervisor 401
         # boundary, through the same relocated executable/browser entry path.
+        probe_phase('fill_unsent_company')
         page.locator('input[name="company"]').fill('UNSENT_COMPANY')
+        probe_phase('fill_unsent_message')
         page.locator('#message').fill('UNSENT_LOCAL_MESSAGE')
         # Register before deleting the real HttpOnly cookie: a background
         # poll may truthfully expire/disable the UI before another button click.
         # Accept the first real authenticated API401, without stubbing a route,
         # stopping polling, refreshing auth or forcing a disabled action.
+        probe_phase('real_cookie_loss')
         with page.expect_response(lambda response:
                 urlsplit(response.url).path.startswith('/ui/api/')
                 and response.status==401) as expired:
             context.clear_cookies()
             page.evaluate('readiness()')
+        probe_phase('first_real_api401')
         assert expired.value.status==401
         assert expired.value.json()['error']=='ui_session_required'
+        probe_phase('expired_notice_focus')
         expect(page.locator('#session-expired')).to_be_visible()
         expect(page.locator('#session-expired')).to_be_focused()
         assert page.locator('input[name="company"]').input_value()=='UNSENT_COMPANY'
@@ -262,14 +289,20 @@ with sync_playwright() as playwright:
         assert page.locator('#message').get_attribute('readonly') is not None
         expect(page.locator('#send')).to_be_disabled()
         expect(update).to_be_disabled()
+        probe_phase('expired_diagnostics_refusal')
         refused_diagnostics=context.request.get(base+'/ui/api/diagnostics')
         assert refused_diagnostics.status==401
         assert refused_diagnostics.json()['error']=='ui_session_required'
         assert context.request.get(base+'/ui').status==401
         assert context.request.get(url).status==401
         assert not errors and not external
+        probe_phase('browser_assertions_complete')
+    except BaseException as error:
+        probe_phase(current_phase,type(error).__name__)
+        raise
     finally:
         browser.close()
+probe_phase('browser_closed')
 # Retain only booleans; no ticket, cookie, token, URL or private diagnostic value.
 with Path(os.environ['JAE_TEST_BROWSER_REPORT']).open('a',encoding='utf-8') as file:
     file.write(json.dumps({'ui':True,'state':True,'readiness':True,
@@ -285,6 +318,7 @@ with Path(os.environ['JAE_TEST_BROWSER_REPORT']).open('a',encoding='utf-8') as f
            "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated",
            "BROWSER": shlex.join([str(runtime / "bin" / "python"), "-I", "-B", str(browser_probe), "%s"]),
            "JAE_TEST_BROWSER_REPORT": str(report),
+           "JAE_TEST_BROWSER_PHASE": str(phase_report),
            "PYTHONHOME": str(poison), "PYTHONPATH": str(poison)}
     shell = "/bin/zsh" if sys.platform == "darwin" else "/bin/bash"
     executable = app / "Contents" / "MacOS" / "AIApplicationManager"
@@ -294,8 +328,18 @@ with Path(os.environ['JAE_TEST_BROWSER_REPORT']).open('a',encoding='utf-8') as f
     try:
         first = None
         for count in (1, 2):
-            launched = subprocess.run([shell, str(executable)], cwd=poison,
-                env=env, capture_output=True, text=True, timeout=30)
+            phase_report.unlink(missing_ok=True)
+            try:
+                launched = subprocess.run([shell, str(executable)], cwd=poison,
+                    env=env, capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired as error:
+                phase = {"phase": "probe_not_started"}
+                if phase_report.is_file():
+                    observed = json.loads(phase_report.read_text(encoding="utf-8"))
+                    phase = {key: observed[key] for key in
+                             ("phase", "elapsed", "error_class") if key in observed}
+                raise AssertionError("actual app deadline; app_open=" + str(count)
+                                     + "; safe_browser_phase=" + json.dumps(phase)) from error
             log = home / "Library" / "Logs" / "AI投递经理" / "launcher.log"
             assert launched.returncode == 0, log.read_text() if log.exists() else launched.stderr
             assert report.is_file(), "actual app must deliver its one-use UI ticket to the browser oracle"

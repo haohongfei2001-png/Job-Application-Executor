@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-08 sole PR#20 IN_PROGRESS; consumer NOT_CERTIFIED. Exact79ca8b CI36262518597 failed: foundation25/137/43 PASS, session6/7; Mac222/223 packaged PASS. Bounded oracle repair aligns synthetic HTTPS secure context with actual trustworthy loopback crypto.randomUUID, proves first401 exact endpoint and no pageerror, preserves polls/all old assertions. Actual archive cookie-loss oracle observes first real API401 before deleting real HttpOnly cookie; read-only readiness initiates if needed, real diagnostics401/body separately required; no auth/route/runtime/deadline/workflow changes. New stable coherent candidate affected cloud proof pending. Full task/native/legacy transfer/DFG002/008 and full-round gates remain open, final-submit user-only.",
+  "next_action": "JCR08 sole PR20 IN_PROGRESS, consumer NOT_CERTIFIED. Exact3e0744ad CI36263218544: all7 session/diagnostics cases PASS and25/137/43 PASS; Ubuntu+Mac each222/223 packaged PASS but actual archive app exceeds unchanged outer30s deadline. Prior cookie/poll race does not establish remaining root. Bounded diagnostic adds only fixed synthetic browser phase/timing/error class to failure; no runtime/workflow/assertion/deadline change. Await new candidate cloud stage evidence before further launch repair; independent native/task/legacy/DFG002/008 engineering remains open. Final submit user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,
