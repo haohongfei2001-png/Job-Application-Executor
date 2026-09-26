@@ -222,7 +222,9 @@ def test_app_shell_keeps_tasks_visible_at_narrow_zoom_and_announces_once():
 def test_expired_session_preserves_unsent_input_and_refuses_replay(trigger):
     """The first real API 401 latches a truthful, read-only consumer page."""
     requests = []
+    errors = []
     expired = False
+    first_401 = None
     tasks = [
         {"task_id": "question", "company": "Synthetic", "role": "Engineer",
          "stage": "NEEDS_USER_INPUT", "revision": 2, "blocker": "unknown_facts",
@@ -240,11 +242,17 @@ def test_expired_session_preserves_unsent_input_and_refuses_replay(trigger):
         page = browser.new_page()
         try:
             def route_request(route):
+                nonlocal first_401
                 path = route.request.url.split("expired-ui.test", 1)[-1]
                 requests.append((route.request.method, path))
                 if path == "/":
                     route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
-                elif expired:
+                # Keep real background polling active. The first injected 401
+                # belongs to this parameter's endpoint; afterward every API is
+                # expired. Otherwise a state poll can preempt the button case.
+                elif expired and (first_401 is not None or path == "/ui/api/" + trigger):
+                    if first_401 is None:
+                        first_401 = (route.request.method, path)
                     route.fulfill(status=401, content_type="application/json",
                                   body='{"error":"ui_session_required"}')
                 elif path.startswith("/ui/api/review-values"):
@@ -259,8 +267,13 @@ def test_expired_session_preserves_unsent_input_and_refuses_replay(trigger):
                     route.fulfill(status=200, content_type="application/json",
                                   body=json.dumps({"tasks": tasks, "ready_for_live_e2e": False}))
 
-            page.route("http://expired-ui.test/**", route_request)
-            page.goto("http://expired-ui.test/")
+            # Production loopback is a trustworthy origin. HTTPS gives the
+            # routed fixture the same secure-context randomUUID contract,
+            # without changing runtime UUID creation or making network calls.
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://expired-ui.test/**", route_request)
+            page.goto("https://expired-ui.test/")
+            assert page.evaluate("isSecureContext && typeof crypto.randomUUID === 'function'")
             expect(page.get_by_label("申请原因", exact=True)).to_be_visible()
             page.get_by_role("button", name="查看完整复核值", exact=True).click()
             expect(page.locator('[data-private-review-panel][data-private-review-open="review"]')).to_contain_text("PRIVATE_REVIEW_CANARY")
@@ -309,6 +322,9 @@ def test_expired_session_preserves_unsent_input_and_refuses_replay(trigger):
             expect(page.locator("#send")).to_be_disabled()
             expect(page.locator("#update")).to_be_disabled()
             assert page.locator("#message").input_value() == "未发送消息\n保留第二行"
+            assert first_401 == ("POST" if trigger in {"command", "chat"} else "GET",
+                                 "/ui/api/" + trigger)
+            assert errors == []
             posts = [path for method, path in requests if method == "POST"]
             assert posts == (["/ui/api/" + trigger] if trigger in {"command", "chat"} else [])
             assert all(path.startswith("/ui/api/") or path == "/" for _, path in requests)

@@ -244,10 +244,15 @@ with sync_playwright() as playwright:
         # boundary, through the same relocated executable/browser entry path.
         page.locator('input[name="company"]').fill('UNSENT_COMPANY')
         page.locator('#message').fill('UNSENT_LOCAL_MESSAGE')
-        context.clear_cookies()
+        # Register before deleting the real HttpOnly cookie: a background
+        # poll may truthfully expire/disable the UI before another button click.
+        # Accept the first real authenticated API401, without stubbing a route,
+        # stopping polling, refreshing auth or forcing a disabled action.
         with page.expect_response(lambda response:
-                urlsplit(response.url).path=='/ui/api/diagnostics') as expired:
-            diagnostics.click()
+                urlsplit(response.url).path.startswith('/ui/api/')
+                and response.status==401) as expired:
+            context.clear_cookies()
+            page.evaluate('readiness()')
         assert expired.value.status==401
         assert expired.value.json()['error']=='ui_session_required'
         expect(page.locator('#session-expired')).to_be_visible()
@@ -257,6 +262,9 @@ with sync_playwright() as playwright:
         assert page.locator('#message').get_attribute('readonly') is not None
         expect(page.locator('#send')).to_be_disabled()
         expect(update).to_be_disabled()
+        refused_diagnostics=context.request.get(base+'/ui/api/diagnostics')
+        assert refused_diagnostics.status==401
+        assert refused_diagnostics.json()['error']=='ui_session_required'
         assert context.request.get(base+'/ui').status==401
         assert context.request.get(url).status==401
         assert not errors and not external
