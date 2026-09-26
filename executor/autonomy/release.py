@@ -248,26 +248,56 @@ def _distribution_payload_owned(distribution, prefix: Path) -> bool:
 
 
 def installed_dependencies_match(root: str | Path) -> bool:
-    """Require the candidate interpreter to have the pinned release set."""
+    """Require owned pins and a closed, interpreter-compatible dependency set."""
     try:
+        from packaging.requirements import Requirement
+        from packaging.specifiers import SpecifierSet
+        from packaging.utils import canonicalize_name
+        from packaging.version import Version
+
         lines = (Path(root) / "requirements.txt").read_text(encoding="utf-8").splitlines()
         pins = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
         if not pins:
             return False
-        prefix = Path(sys.prefix).resolve()
+        locked = {}
         for pin in pins:
             match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([A-Za-z0-9][A-Za-z0-9_.!+~-]*)", pin)
             if not match:
                 return False
-            distribution = importlib.metadata.distribution(match[1])
-            # A version supplied by the host or user site is not a packaged
-            # dependency. The candidate interpreter must own every pin.
-            if (distribution.version != match[2]
+            name = canonicalize_name(match[1])
+            if name in locked:
+                return False
+            locked[name] = Version(match[2])
+        prefix = Path(sys.prefix).resolve()
+        python_version = Version(".".join(str(part) for part in sys.version_info[:3]))
+        for name, version_pin in locked.items():
+            distribution = importlib.metadata.distribution(name)
+            metadata = distribution.metadata
+            # Metadata naming, versions and the actual interpreter are part
+            # of provenance; matching RECORD bytes alone cannot prove a lock.
+            if (canonicalize_name(metadata["Name"] or "") != name
+                    or Version(distribution.version) != version_pin
                     or not Path(distribution.locate_file("")).resolve().is_relative_to(prefix)
                     or not _distribution_payload_owned(distribution, prefix)):
                 return False
+            requires_python = metadata.get_all("Requires-Python") or []
+            if len(requires_python) > 1 or any(
+                    not SpecifierSet(value).contains(python_version, prereleases=True)
+                    for value in requires_python):
+                return False
+            for value in metadata.get_all("Requires-Dist") or []:
+                dependency = Requirement(value)
+                # Optional extras are not enabled by the plain exact-pin
+                # release format. Default/platform/Python dependencies are.
+                if dependency.marker and not dependency.marker.evaluate({"extra": ""}):
+                    continue
+                dependency_name = canonicalize_name(dependency.name)
+                if (dependency.url is not None or dependency.extras
+                        or dependency_name not in locked
+                        or not dependency.specifier.contains(locked[dependency_name], prereleases=True)):
+                    return False
         return True
-    except (OSError, UnicodeError, ValueError, TypeError, AttributeError,
+    except (ImportError, OSError, UnicodeError, ValueError, TypeError, AttributeError,
             importlib.metadata.PackageNotFoundError):
         return False
 

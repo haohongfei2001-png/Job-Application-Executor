@@ -47,7 +47,10 @@ def _source(tmp_path):
     (package / "autonomy").mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "autonomy" / "cli.py").write_text("VERSION = 'one'\n", encoding="utf-8")
-    (repo / "requirements.txt").write_text(f"pydantic=={version('pydantic')}\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text(
+        (Path(__file__).resolve().parents[1] / "requirements.txt").read_text(),
+        encoding="utf-8",
+    )
     (repo / "config").mkdir()
     (repo / "config" / "private-token.json").write_text('{"secret":"never-copy"}')
     return repo
@@ -390,9 +393,19 @@ def _synthetic_wheel(tmp_path, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         files.append(RecordedPath(name, data))
-    distribution = SimpleNamespace(
-        version="1.0", files=files,
-        locate_file=lambda name: base / str(name))
+    from email import message_from_bytes
+
+    class SyntheticDistribution:
+        version = "1.0"
+        def locate_file(self, name):
+            return base / str(name)
+        @property
+        def metadata(self):
+            return message_from_bytes(
+                (base / "synthetic_package-1.0.dist-info/METADATA").read_bytes())
+
+    distribution = SyntheticDistribution()
+    distribution.files = files
     monkeypatch.setattr(sys, "prefix", str(prefix))
     monkeypatch.setattr(importlib.metadata, "distribution", lambda name: distribution)
     return release, base, distribution
@@ -458,4 +471,67 @@ def test_incomplete_dependency_payload_provenance_fails_closed(tmp_path, monkeyp
         distribution.files[0].size += 1
     else:
         distribution.files[0].name = str(base / str(distribution.files[0]))
+    assert not installed_dependencies_match(release)
+
+def _wheel_metadata(base, distribution, extra):
+    """Create an internally intact wheel whose dependency contract is tested."""
+    name = "synthetic_package-1.0.dist-info/METADATA"
+    data = (b"Name: synthetic-package\nVersion: 1.0\n" + extra.encode("utf-8"))
+    (base / name).write_bytes(data)
+    index = next(i for i, entry in enumerate(distribution.files) if str(entry) == name)
+    distribution.files[index] = type(distribution.files[index])(name, data)
+
+
+@pytest.mark.parametrize("metadata", [
+    "Requires-Dist: missing-package>=1\n",
+    "Requires-Dist: synthetic-package>=2\n",
+    "Requires-Dist: synthetic-package @ https://example.invalid/package.whl\n",
+    "Requires-Dist: synthetic-package[unsupported-extra]==1\n",
+    "Requires-Dist: malformed (>=\n",
+    "Requires-Python: >=99\n",
+    "Requires-Python: invalid\n",
+    "Requires-Python: >=3\nRequires-Python: >=3\n",
+])
+def test_intact_payload_cannot_hide_open_dependency_graph_or_wrong_python(
+    tmp_path, monkeypatch, metadata
+):
+    release, base, distribution = _synthetic_wheel(tmp_path, monkeypatch)
+    assert installed_dependencies_match(release)
+    _wheel_metadata(base, distribution, metadata)
+    assert not installed_dependencies_match(release)
+
+
+def test_dependency_graph_accepts_normalized_pin_and_inactive_extra_or_platform(
+    tmp_path, monkeypatch
+):
+    release, base, distribution = _synthetic_wheel(tmp_path, monkeypatch)
+    (release / "requirements.txt").write_text("Synthetic_Package==1.0\n")
+    _wheel_metadata(base, distribution,
+                    "Requires-Python: >=3\n"
+                    "Requires-Dist: synthetic.package>=1,<2\n"
+                    "Requires-Dist: optional-package; extra == 'optional'\n"
+                    "Requires-Dist: other-platform; python_version >= '99'\n")
+    assert installed_dependencies_match(release)
+
+
+@pytest.mark.parametrize("pins", [
+    "synthetic-package==1.0\nSynthetic_Package==1.0\n",
+    "synthetic-package==1.0\nsynthetic.package==2.0\n",
+])
+def test_ambiguous_normalized_duplicate_pins_fail_closed(tmp_path, monkeypatch, pins):
+    release, _base, _distribution = _synthetic_wheel(tmp_path, monkeypatch)
+    (release / "requirements.txt").write_text(pins)
+    assert not installed_dependencies_match(release)
+
+
+def test_intact_wheel_with_wrong_distribution_name_is_not_a_locked_dependency(
+    tmp_path, monkeypatch
+):
+    release, base, distribution = _synthetic_wheel(tmp_path, monkeypatch)
+    _wheel_metadata(base, distribution, "")
+    name = "synthetic_package-1.0.dist-info/METADATA"
+    data = b"Name: other-package\nVersion: 1.0\n"
+    (base / name).write_bytes(data)
+    index = next(i for i, entry in enumerate(distribution.files) if str(entry) == name)
+    distribution.files[index] = type(distribution.files[index])(name, data)
     assert not installed_dependencies_match(release)
