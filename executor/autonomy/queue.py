@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import fcntl
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -17,8 +17,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from ..models import ApplicationStage
 from ..protected_targets import assert_target_not_protected, register_user_confirmed_target
 from ..discovery.core import normalize_component
+from .release import is_packaged_source
+from .state_compatibility import _private_lock_fd
 
-RUNTIME = Path(__file__).resolve().parents[2] / "runtime" / "autonomy"
+# A packaged release is immutable. Keep task state outside the app bundle so
+# replacing or rolling back source/runtime never replaces the applicant journal.
+def default_runtime(source_root: Path, *, home: Path | None = None) -> Path:
+    source_root = Path(source_root)
+    if is_packaged_source(source_root):
+        return (home or Path.home()) / "Library" / "Application Support" / "AI投递经理" / "autonomy"
+    return source_root / "runtime" / "autonomy"
+
+
+_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME = default_runtime(_SOURCE_ROOT)
 SAFE_STAGES = {"DISCOVERED", "PROFILE_RESOLVED", "FORM_FILLED", "VALIDATED"}
 STOPPED = {"READY_TO_SUBMIT", "SUBMITTED", "VERIFIED", "CANCELLED"}
 STAGES = {str(x) for x in ApplicationStage}
@@ -126,9 +138,10 @@ class TaskQueue:
         # schema can still read it if a rollback is needed; never overwrite it.
         backup_path = self.root / "tasks.sqlite3.pre-jcr01.sqlite3"
         migration_lock = self.root / "migration.lock"
-        with migration_lock.open("a+") as lock_handle:
-            migration_lock.chmod(0o600)
-            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        # Own the migration fence through both backup AND the complete schema
+        # transaction, so the app updater cannot certify a concurrently changing
+        # journal. Queue construction retains its existing blocking protocol.
+        with os.fdopen(_private_lock_fd(migration_lock, blocking=True), "a+") as lock_handle:
             if self.path.exists() and not backup_path.exists():
                 with sqlite3.connect(self.path) as source:
                     columns_before = {row[1] for row in source.execute("PRAGMA table_info(tasks)")}
@@ -136,53 +149,57 @@ class TaskQueue:
                         with sqlite3.connect(backup_path) as destination:
                             source.backup(destination)
                         backup_path.chmod(0o600)
-        with self.tx() as db:
-            db.executescript('''
-                CREATE TABLE IF NOT EXISTS tasks (
-                    task_id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL,
-                    spec TEXT NOT NULL, stage TEXT NOT NULL, checkpoint TEXT NOT NULL,
-                    attempts INTEGER NOT NULL DEFAULT 0, owner TEXT, lease_until REAL,
-                    next_run REAL NOT NULL DEFAULT 0, blocker TEXT, details TEXT NOT NULL DEFAULT '{}',
-                    created REAL NOT NULL, updated REAL NOT NULL);
-                CREATE TABLE IF NOT EXISTS events (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, at REAL,
-                    kind TEXT NOT NULL, stage TEXT NOT NULL);
-            ''')
-            columns = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
-            if "checkpoint_url" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN checkpoint_url TEXT")
-            if "revision" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
-            if "phase" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN phase TEXT NOT NULL DEFAULT 'DISCOVERED'")
-                db.execute("UPDATE tasks SET phase=checkpoint")
-            if "run_state" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN run_state TEXT NOT NULL DEFAULT 'RUNNABLE'")
-            if "wait_reason" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN wait_reason TEXT")
-                db.execute("UPDATE tasks SET wait_reason=blocker WHERE blocker IS NOT NULL")
-            if "paused_from" not in columns:
-                db.execute("ALTER TABLE tasks ADD COLUMN paused_from TEXT")
-                db.execute("UPDATE tasks SET paused_from='NEEDS_USER_INPUT' WHERE blocker='user_paused_from_input'")
-                db.execute("UPDATE tasks SET paused_from='NEEDS_USER_ACTION' WHERE blocker IN ('user_paused_from_action','user_paused_from_otp_waiting','user_paused_from_otp_ambiguous')")
-                db.execute("UPDATE tasks SET paused_from='BLOCKED' WHERE blocker IN ('user_paused_from_session_unavailable','user_paused_from_validation')")
-            db.execute("UPDATE tasks SET run_state=CASE WHEN stage='BLOCKED' AND blocker LIKE 'user_paused%' THEN 'PAUSED' WHEN stage IN ('BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION') THEN 'WAITING' WHEN stage='READY_TO_SUBMIT' THEN 'READY' WHEN stage IN ('SUBMITTED','VERIFIED') THEN 'DONE' WHEN stage='CANCELLED' THEN 'CANCELLED' WHEN stage='ERROR' THEN 'ERROR' WHEN owner IS NOT NULL AND lease_until>? THEN 'RUNNING' ELSE 'RUNNABLE' END", (self.clock(),))
-            db.execute('''CREATE TABLE IF NOT EXISTS commands (
-                command_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
-                action TEXT NOT NULL, receipt TEXT NOT NULL, created REAL NOT NULL)''')
-            db.execute('''CREATE TABLE IF NOT EXISTS run_attempts (
-                attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner TEXT NOT NULL,
-                outcome TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL)''')
-            db.execute('''CREATE TABLE IF NOT EXISTS browser_bindings (
-                task_id TEXT PRIMARY KEY, process_epoch TEXT NOT NULL,
-                target_id TEXT NOT NULL, updated REAL NOT NULL,
-                document_epoch TEXT)''')
-            binding_columns = {r[1] for r in db.execute("PRAGMA table_info(browser_bindings)")}
-            if "document_epoch" not in binding_columns:
-                db.execute("ALTER TABLE browser_bindings ADD COLUMN document_epoch TEXT")
-            db.execute('''CREATE TABLE IF NOT EXISTS profile_write_barriers (
-                profile_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL, created REAL NOT NULL)''')
-        self.path.chmod(0o600)
+            with self.tx() as db:
+                db.executescript('''
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        task_id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE NOT NULL,
+                        spec TEXT NOT NULL, stage TEXT NOT NULL, checkpoint TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0, owner TEXT, lease_until REAL,
+                        next_run REAL NOT NULL DEFAULT 0, blocker TEXT, details TEXT NOT NULL DEFAULT '{}',
+                        created REAL NOT NULL, updated REAL NOT NULL);
+                    CREATE TABLE IF NOT EXISTS events (
+                        seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, at REAL,
+                        kind TEXT NOT NULL, stage TEXT NOT NULL);
+                ''')
+                columns = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
+                if "checkpoint_url" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN checkpoint_url TEXT")
+                if "revision" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+                if "phase" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN phase TEXT NOT NULL DEFAULT 'DISCOVERED'")
+                    db.execute("UPDATE tasks SET phase=checkpoint")
+                if "run_state" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN run_state TEXT NOT NULL DEFAULT 'RUNNABLE'")
+                if "wait_reason" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN wait_reason TEXT")
+                    db.execute("UPDATE tasks SET wait_reason=blocker WHERE blocker IS NOT NULL")
+                if "paused_from" not in columns:
+                    db.execute("ALTER TABLE tasks ADD COLUMN paused_from TEXT")
+                    db.execute("UPDATE tasks SET paused_from='NEEDS_USER_INPUT' WHERE blocker='user_paused_from_input'")
+                    db.execute("UPDATE tasks SET paused_from='NEEDS_USER_ACTION' WHERE blocker IN ('user_paused_from_action','user_paused_from_otp_waiting','user_paused_from_otp_ambiguous')")
+                    db.execute("UPDATE tasks SET paused_from='BLOCKED' WHERE blocker IN ('user_paused_from_session_unavailable','user_paused_from_validation')")
+                db.execute("UPDATE tasks SET run_state=CASE WHEN stage='BLOCKED' AND blocker LIKE 'user_paused%' THEN 'PAUSED' WHEN stage IN ('BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION') THEN 'WAITING' WHEN stage='READY_TO_SUBMIT' THEN 'READY' WHEN stage IN ('SUBMITTED','VERIFIED') THEN 'DONE' WHEN stage='CANCELLED' THEN 'CANCELLED' WHEN stage='ERROR' THEN 'ERROR' WHEN owner IS NOT NULL AND lease_until>? THEN 'RUNNING' ELSE 'RUNNABLE' END", (self.clock(),))
+                db.execute('''CREATE TABLE IF NOT EXISTS commands (
+                    command_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+                    action TEXT NOT NULL, receipt TEXT NOT NULL, created REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS run_attempts (
+                    attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, owner TEXT NOT NULL,
+                    outcome TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS field_actions (
+                    action_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL,
+                    field_sha256 TEXT NOT NULL, outcome TEXT NOT NULL,
+                    created REAL NOT NULL, updated REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS browser_bindings (
+                    task_id TEXT PRIMARY KEY, process_epoch TEXT NOT NULL,
+                    target_id TEXT NOT NULL, updated REAL NOT NULL,
+                    document_epoch TEXT)''')
+                binding_columns = {r[1] for r in db.execute("PRAGMA table_info(browser_bindings)")}
+                if "document_epoch" not in binding_columns:
+                    db.execute("ALTER TABLE browser_bindings ADD COLUMN document_epoch TEXT")
+                db.execute('''CREATE TABLE IF NOT EXISTS profile_write_barriers (
+                    profile_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL, created REAL NOT NULL)''')
+            self.path.chmod(0o600)
 
     @contextmanager
     def tx(self):
@@ -412,8 +429,71 @@ class TaskQueue:
             row = db.execute("SELECT outcome FROM run_attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
             if row is None or row["outcome"] not in {"ATTEMPTED", outcome}:
                 raise RuntimeError("run attempt outcome conflict")
+            if outcome == "RETURNED_UNVERIFIED" and db.execute(
+                "SELECT 1 FROM field_actions WHERE attempt_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
+                (attempt_id,),
+            ).fetchone():
+                raise RuntimeError("field outcome requires reconciliation")
             db.execute("UPDATE run_attempts SET outcome=?,updated=? WHERE attempt_id=?",
                        (outcome, self.clock(), attempt_id))
+
+    def require_field_action_readbacks(self, attempt_id: str) -> None:
+        """Check bounded field outcomes before releasing the coarse run lease."""
+        with self.tx() as db:
+            if db.execute(
+                "SELECT 1 FROM field_actions WHERE attempt_id=? AND outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') LIMIT 1",
+                (attempt_id,),
+            ).fetchone():
+                raise RuntimeError("field outcome requires reconciliation")
+
+    def begin_field_action(self, attempt_id: str, field_sha256: str) -> str:
+        """Commit a value-free intent before an owned field operation."""
+        if not isinstance(field_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", field_sha256):
+            raise ValueError("invalid field identity digest")
+        with self.tx() as db:
+            attempt = db.execute(
+                "SELECT r.outcome,r.owner,t.owner AS task_owner,t.lease_until FROM run_attempts r JOIN tasks t ON t.task_id=r.task_id WHERE r.attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if (attempt is None or attempt["outcome"] != "ATTEMPTED"
+                    or attempt["owner"] != attempt["task_owner"]
+                    or attempt["lease_until"] is None or attempt["lease_until"] <= self.clock()):
+                raise RuntimeError("field intent lease lost")
+            if db.execute(
+                "SELECT 1 FROM field_actions WHERE attempt_id=? AND (outcome IN ('ATTEMPTED','UNKNOWN_OUTCOME') OR field_sha256=?) LIMIT 1",
+                (attempt_id, field_sha256),
+            ).fetchone():
+                raise RuntimeError("field outcome requires reconciliation")
+            action_id = uuid.uuid4().hex
+            now = self.clock()
+            db.execute("INSERT INTO field_actions VALUES(?,?,?,?,?,?)",
+                       (action_id, attempt_id, field_sha256, "ATTEMPTED", now, now))
+            return action_id
+
+    def finish_field_action(self, action_id: str, outcome: str) -> None:
+        # DOM evidence does not certify a saved server draft or authorize replay.
+        if outcome not in {"DOM_READBACK_UNVERIFIED", "UNKNOWN_OUTCOME"}:
+            raise ValueError("invalid field outcome")
+        with self.tx() as db:
+            row = db.execute(
+                "SELECT f.outcome,r.outcome AS run_outcome,r.owner,t.owner AS task_owner,t.lease_until FROM field_actions f JOIN run_attempts r ON r.attempt_id=f.attempt_id JOIN tasks t ON t.task_id=r.task_id WHERE f.action_id=?",
+                (action_id,),
+            ).fetchone()
+            if row is None or row["outcome"] not in {"ATTEMPTED", outcome}:
+                raise RuntimeError("field action outcome conflict")
+            if outcome == "DOM_READBACK_UNVERIFIED" and (
+                    row["run_outcome"] != "ATTEMPTED" or row["owner"] != row["task_owner"]
+                    or row["lease_until"] is None or row["lease_until"] <= self.clock()):
+                raise RuntimeError("field readback lease lost")
+            db.execute("UPDATE field_actions SET outcome=?,updated=? WHERE action_id=?",
+                       (outcome, self.clock(), action_id))
+
+    def field_actions(self, tid: str) -> list[dict]:
+        with self.tx() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT f.* FROM field_actions f JOIN run_attempts r ON r.attempt_id=f.attempt_id WHERE r.task_id=? ORDER BY f.created,f.action_id",
+                (tid,),
+            )]
 
     def run_attempts(self, tid: str) -> list[dict]:
         with self.tx() as db:

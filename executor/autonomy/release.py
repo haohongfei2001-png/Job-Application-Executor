@@ -1,0 +1,314 @@
+"""Deterministic source snapshot for a staged consumer release.
+
+This manifest detects source drift and copy corruption. It is not a signature or
+a dependency lock; those are separate release gates.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import importlib.metadata
+import json
+import re
+import shutil
+import stat
+import sys
+from pathlib import Path
+
+
+MANIFEST_NAME = "release-source-manifest.json"
+
+
+def is_packaged_source(root: str | Path) -> bool:
+    """Recognize an installed source even if its manifest was removed."""
+    root = Path(root).expanduser()
+    manifest = root / MANIFEST_NAME
+    return (manifest.exists() or manifest.is_symlink()
+            or (root.name == "release" and root.parent.name == "Resources"
+                and root.parent.parent.name == "Contents"
+                and root.parent.parent.parent.name.endswith(".app")))
+
+
+def source_manifest(root: str | Path) -> dict:
+    root = Path(root).expanduser().resolve()
+    package = root / "executor"
+    requirements = root / "requirements.txt"
+    if (not package.is_dir() or package.is_symlink()
+            or not (package / "__init__.py").is_file()
+            or not requirements.is_file() or requirements.is_symlink()):
+        raise ValueError("release_source_missing")
+    if any(path.is_symlink() for path in package.rglob("*")):
+        raise ValueError("release_source_symlink")
+
+    paths = [requirements, *sorted(package.rglob("*.py"))]
+    files = []
+    for path in paths:
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("release_source_invalid")
+        data = path.read_bytes()
+        files.append({
+            "path": path.relative_to(root).as_posix(),
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        })
+    encoded = json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "format": "jae-release-source-v1",
+        "files": files,
+        "source_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def verify_source_candidate(root: str | Path) -> bool:
+    supplied = Path(root).expanduser()
+    if supplied.is_symlink():
+        return False
+    root = supplied.resolve()
+    manifest_file = root / MANIFEST_NAME
+    if manifest_file.is_symlink():
+        return False
+    try:
+        saved = json.loads(manifest_file.read_text(encoding="utf-8"))
+        if saved != source_manifest(root):
+            return False
+        allowed = {entry["path"] for entry in saved["files"]} | {MANIFEST_NAME}
+        for path in root.rglob("*"):
+            if path.is_symlink() or (path.is_file() and path.relative_to(root).as_posix() not in allowed):
+                return False
+        return True
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return False
+
+
+def copy_source_candidate(repo_root: str | Path, destination: str | Path) -> dict:
+    """Copy only declared source files, then verify source and candidate."""
+    source = Path(repo_root).expanduser().resolve()
+    target = Path(destination).expanduser()
+    before = source_manifest(source)
+    target.mkdir(parents=True, exist_ok=False)
+    for entry in before["files"]:
+        relative = Path(entry["path"])
+        output = target / relative
+        output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / relative, output)
+    if source_manifest(source) != before or source_manifest(target) != before:
+        raise ValueError("release_source_changed")
+    (target / MANIFEST_NAME).write_text(
+        json.dumps(before, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    if not verify_source_candidate(target):
+        raise ValueError("release_candidate_invalid")
+    return before
+
+
+
+RUNTIME_MANIFEST_NAME = "release-runtime-manifest.json"
+
+
+def runtime_manifest(root: str | Path, release: str | Path) -> dict:
+    """Hash the app-owned interpreter and dependency tree against pinned source."""
+    root = Path(root).expanduser()
+    release = Path(release).expanduser()
+    python = root / "bin" / "python"
+    requirements = release / "requirements.txt"
+    if (root.is_symlink() or not root.is_dir() or python.is_symlink()
+            or not python.is_file() or not python.stat().st_mode & stat.S_IXUSR
+            or not requirements.is_file() or requirements.is_symlink()):
+        raise ValueError("release_runtime_missing")
+    files = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("release_runtime_symlink")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError("release_runtime_invalid")
+        relative = path.relative_to(root).as_posix()
+        if relative == RUNTIME_MANIFEST_NAME:
+            continue
+        data = path.read_bytes()
+        files.append({
+            "path": relative,
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "executable": bool(path.stat().st_mode & stat.S_IXUSR),
+        })
+    encoded = json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "format": "jae-release-runtime-v1",
+        "requirements_sha256": hashlib.sha256(requirements.read_bytes()).hexdigest(),
+        "files": files,
+        "runtime_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def verify_runtime_candidate(root: str | Path, release: str | Path) -> bool:
+    root = Path(root).expanduser()
+    manifest_file = root / RUNTIME_MANIFEST_NAME
+    if manifest_file.is_symlink():
+        return False
+    try:
+        saved = json.loads(manifest_file.read_text(encoding="utf-8"))
+        return saved == runtime_manifest(root, release)
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return False
+
+
+def copy_runtime_candidate(venv: str | Path, destination: str | Path,
+                           release: str | Path) -> dict:
+    """Stage a private virtualenv snapshot; never link back to the checkout."""
+    source = Path(venv).expanduser()
+    target = Path(destination).expanduser()
+    if source.is_symlink() or not source.is_dir() or target.exists():
+        raise ValueError("release_runtime_source_invalid")
+    python = source / "bin" / "python"
+    if not python.is_file():
+        raise ValueError("release_runtime_source_invalid")
+    # The interpreter may be a venv copy or alias, but never an arbitrary
+    # executable or a symlink to a private file outside the environment.
+    expected_python = hashlib.sha256(Path(sys.executable).read_bytes()).digest()
+    if hashlib.sha256(python.read_bytes()).digest() != expected_python:
+        raise ValueError("release_runtime_interpreter_mismatch")
+    for path in source.rglob("*"):
+        if not path.is_symlink():
+            continue
+        relative = path.relative_to(source)
+        # stdlib venv on Linux uses lib64 -> lib. Allow only that exact
+        # in-environment directory alias; copytree materializes it as files.
+        if (relative.as_posix() == "lib64"
+                and path.resolve() == (source / "lib").resolve()
+                and (source / "lib").is_dir()
+                and not (source / "lib").is_symlink()):
+            continue
+        if (len(relative.parts) != 2 or relative.parts[0] != "bin"
+                or not re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", relative.name)
+                or not path.resolve().is_file()
+                or hashlib.sha256(path.read_bytes()).digest() != expected_python):
+            raise ValueError("release_runtime_source_symlink")
+    shutil.copytree(source, target, symlinks=False)
+    before = runtime_manifest(target, release)
+    (target / RUNTIME_MANIFEST_NAME).write_text(
+        json.dumps(before, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    if not verify_runtime_candidate(target, release):
+        raise ValueError("release_runtime_candidate_invalid")
+    return before
+
+
+
+def _distribution_payload_owned(distribution, prefix: Path) -> bool:
+    """Check declared wheel payloads, including native code and entry scripts.
+
+    Generated bytecode is optional installation cache; the staged runtime
+    manifest separately hashes any cache that was copied into the app.
+    RECORD has no self-hash. This is local integrity/provenance, not signing.
+    """
+    files = distribution.files
+    if not files:
+        return False
+    record_seen = False
+    for entry in files:
+        relative = Path(str(entry))
+        if relative.is_absolute():
+            return False
+        resolved = Path(distribution.locate_file(entry)).resolve()
+        # Wheel entry scripts may use ../../bin; only the resolved app-owned
+        # prefix matters. A module/native-library alias into host state fails.
+        if not resolved.is_relative_to(prefix):
+            return False
+        if relative.suffix == ".pyc" and "__pycache__" in relative.parts:
+            continue
+        if not resolved.is_file():
+            return False
+        declared = entry.hash
+        if declared is None:
+            if relative.name != "RECORD" or not any(
+                    part.endswith(".dist-info") for part in relative.parts[:-1]):
+                return False
+            record_seen = True
+            continue
+        if declared.mode not in {"sha256", "sha384", "sha512"}:
+            return False
+        digest = hashlib.new(declared.mode)
+        size = 0
+        with resolved.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        if entry.size is not None and size != entry.size:
+            return False
+        actual = base64.urlsafe_b64encode(digest.digest()).rstrip(b"=").decode("ascii")
+        if not hmac.compare_digest(actual, declared.value):
+            return False
+    return record_seen
+
+
+def installed_dependencies_match(root: str | Path) -> bool:
+    """Require owned pins and a closed, interpreter-compatible dependency set."""
+    try:
+        from packaging.requirements import Requirement
+        from packaging.specifiers import SpecifierSet
+        from packaging.utils import canonicalize_name
+        from packaging.version import Version
+
+        lines = (Path(root) / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        pins = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+        if not pins:
+            return False
+        locked = {}
+        for pin in pins:
+            match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([A-Za-z0-9][A-Za-z0-9_.!+~-]*)", pin)
+            if not match:
+                return False
+            name = canonicalize_name(match[1])
+            if name in locked:
+                return False
+            locked[name] = Version(match[2])
+        prefix = Path(sys.prefix).resolve()
+        python_version = Version(".".join(str(part) for part in sys.version_info[:3]))
+        for name, version_pin in locked.items():
+            distribution = importlib.metadata.distribution(name)
+            metadata = distribution.metadata
+            # Metadata naming, versions and the actual interpreter are part
+            # of provenance; matching RECORD bytes alone cannot prove a lock.
+            if (canonicalize_name(metadata["Name"] or "") != name
+                    or Version(distribution.version) != version_pin
+                    or not Path(distribution.locate_file("")).resolve().is_relative_to(prefix)
+                    or not _distribution_payload_owned(distribution, prefix)):
+                return False
+            requires_python = metadata.get_all("Requires-Python") or []
+            if len(requires_python) > 1 or any(
+                    not SpecifierSet(value).contains(python_version, prereleases=True)
+                    for value in requires_python):
+                return False
+            for value in metadata.get_all("Requires-Dist") or []:
+                dependency = Requirement(value)
+                # Optional extras are not enabled by the plain exact-pin
+                # release format. Default/platform/Python dependencies are.
+                if dependency.marker and not dependency.marker.evaluate({"extra": ""}):
+                    continue
+                dependency_name = canonicalize_name(dependency.name)
+                if (dependency.url is not None or dependency.extras
+                        or dependency_name not in locked
+                        or not dependency.specifier.contains(locked[dependency_name], prereleases=True)):
+                    return False
+        return True
+    except (ImportError, OSError, UnicodeError, ValueError, TypeError, AttributeError,
+            importlib.metadata.PackageNotFoundError):
+        return False
+
+
+def read_release_identity(root: str | Path) -> dict:
+    """Read a verified packaged-source identity without exposing local paths."""
+    root = Path(root).expanduser().resolve()
+    if not verify_source_candidate(root):
+        return {"status": "unverified", "source_sha256": ""}
+    try:
+        manifest = json.loads((root / MANIFEST_NAME).read_text(encoding="utf-8"))
+        return {"status": "verified", "source_sha256": manifest["source_sha256"]}
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        return {"status": "unverified", "source_sha256": ""}

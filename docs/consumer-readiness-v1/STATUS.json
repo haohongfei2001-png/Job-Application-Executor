@@ -74,7 +74,7 @@
     },
     {
       "id": "JCR-08",
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "authorized": true
     },
     {
@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "JCR-07 PR #19 final head 928cfa485c3885a2c3d80b42eff62af212bba8e8 passed CI 36012392907, merged at 90fc2176e6cd14c7aa5866a4953c15405be937d7, and exact-main CI 36013050660 passed. See receipts/JCR-07-ENGINEERING.md and receipts/JCR-07-MAIN-INTEGRATION.md. Start JCR-08 as the sole writer: consumer Mac app shell, transactional local release/update and rollback, safe diagnostics and final-review workbench. DFG-002/008 remain automatable engineering debt; DFG-007 and real applicant/site/final-click evidence remain FINAL_LIVE_NOT_RUN. Consumer certification remains NOT_CERTIFIED; final submit remains user-only.",
+  "next_action": "JCR08 sole draft PR20 IN_PROGRESS/consumer NOT_CERTIFIED. Exact parent3ee2fdd CI36268765237 SUCCESS: Ubuntu25 privacy153 review/browser56 operations7 sessions245 packaged; hostedMac245 packaged+7 retired entries, including22 shared ConsumerSurface/app presenter cases. No full-round/native certification. Next coherent recovery admission batch reuses normal launch source/runtime and loaded-source identity fences for authenticated bootstrap retry; removed/tampered source/runtime, aliased runtime, safe-point restart refusal/stale/missing loaded identity and source drift refuse before UI ticket; only current verified health can hand off. Ten new actual authenticated HTTP/real-manifest/fault cases retain all prior tests; candidate NOT_RUN until cloud evidence, no unchanged rerun. Native compiled single-window/persistent context/actual hosted journey, full task/onboarding, genuine legacy-root transfer/retirement, DFG002 server/other actions and DFG008 drivers remain open; final submit user-only.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,

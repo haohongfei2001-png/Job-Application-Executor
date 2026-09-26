@@ -163,6 +163,12 @@ class GenericWebAdapter(SiteAdapter):
         return loc
 
     def discover_fields(self) -> list[WebField]:
+        fields, complete = self._discover_form_snapshot()
+        if not complete:
+            raise FormObservationError("form collection limit exceeded")
+        return fields
+
+    def _discover_form_snapshot(self) -> tuple[list[WebField], bool]:
         """Snapshot the whole form in one browser round-trip.
 
         The previous implementation crossed the Playwright boundary repeatedly for
@@ -215,7 +221,12 @@ class GenericWebAdapter(SiteAdapter):
             return '';
           };
 
-          return [...document.querySelectorAll(selector)].slice(0, 350).map((e, index) => {
+          const controls = [...document.querySelectorAll(selector)];
+          // Limits bound metadata cost, never certify a silently partial form.
+          // Count before visibility filtering because ordinal locators use that order.
+          const complete = controls.length <= 350 && !controls.some(e =>
+            visible(e) && e.tagName.toLowerCase() === "select" && e.options.length > 200);
+          const fields = controls.slice(0, 350).map((e, index) => {
             const tag = e.tagName.toLowerCase();
             const inputType = e.getAttribute('role') === 'combobox' ? 'combobox'
               : (e.getAttribute('type') || tag).toLowerCase();
@@ -263,13 +274,18 @@ class GenericWebAdapter(SiteAdapter):
               section: section(e),
             };
           }).filter(x => x.visible);
+          return {fields, complete};
         }"""
         try:
-            snapshot = self.page.evaluate(script) or []
+            result = self.page.evaluate(script)
+            if (not isinstance(result, dict) or not isinstance(result.get("fields"), list)
+                    or type(result.get("complete")) is not bool):
+                raise ValueError("invalid form snapshot")
+            snapshot = result["fields"]
         except Exception:
             raise FormObservationError("field observation unavailable") from None
 
-        return [
+        fields = [
             WebField(
                 field_id=item["fieldId"],
                 selector=item["selector"],
@@ -297,10 +313,11 @@ class GenericWebAdapter(SiteAdapter):
             )
             for item in snapshot
         ]
+        return fields, result["complete"]
 
     def observe_form(self) -> FormObservation:
         """Read form structure separately from any intended fill actions."""
-        fields = self.discover_fields()
+        fields, complete = self._discover_form_snapshot()
         try:
             signals = self.page.evaluate(r"""() => {
               const visible = e => {
@@ -365,6 +382,7 @@ class GenericWebAdapter(SiteAdapter):
         return FormObservation.from_fields(
             self.page.url, epoch, fields,
             rows=rows, dependencies=dependencies,
+            collection_complete=complete,
             hidden_required_count=int(signals.get("hiddenRequired") or 0),
             unsupported_component_count=int(signals.get("unsupported") or 0),
             ambiguous_selector_count=ambiguous,
@@ -415,9 +433,9 @@ class GenericWebAdapter(SiteAdapter):
             return False
         return 1 <= int(text[5:7]) <= 12
 
-    def _fill_select(self, element, value) -> bool:
+    def _fill_select(self, element, value) -> tuple[str, int] | None:
         if element.get_attribute("multiple") is not None:
-            return False
+            return None
         candidates = value if isinstance(value, list) else [value]
         expanded = []
         for candidate in candidates:
@@ -430,7 +448,7 @@ class GenericWebAdapter(SiteAdapter):
         opts = element.locator("option")
         normalized = [str(x).strip().casefold().removesuffix("市") for x in expanded]
         if not normalized or any(not target for target in normalized):
-            return False
+            return None
         matches = []
         for i in range(opts.count()):
             opt = opts.nth(i)
@@ -440,12 +458,16 @@ class GenericWebAdapter(SiteAdapter):
             if any(target in hay for target in normalized):
                 matches.append(i)
         if len(matches) != 1:
-            return False
+            return None
+        # Freeze the intended option before dispatching change/input. A reactive
+        # page may revert between the primitive and the later render readback;
+        # its observed value must never redefine the expected result.
+        expected = (opts.nth(matches[0]).evaluate("e => e.value"), matches[0])
         getattr(self, "mutation_guard", lambda: None)()
         element.select_option(index=matches[0])
         if not element.evaluate("(e, index) => e.selectedIndex === index", matches[0]):
             raise BrowserOwnershipError("select choice outcome unknown")
-        return True
+        return expected
 
     def _fill_combobox(self, element, selector: str, value) -> bool:
         if not isinstance(value, (str, int, float)):
@@ -478,6 +500,25 @@ class GenericWebAdapter(SiteAdapter):
         if str(actual).strip() != target:
             raise BrowserOwnershipError("combobox selection outcome unknown")
         return True
+
+    def _collection_complete_now(self) -> bool:
+        """Read current bounds without labels, values, secrets or side effects."""
+        try:
+            return self.page.evaluate(r"""() => {
+              const controls = [...document.querySelectorAll(
+                'input:not([type="hidden"]), textarea, select, [role="combobox"]:not(input):not(textarea):not(select)')];
+              if (controls.length > 350) return false;
+              return !controls.some(e => {
+                if (e.tagName.toLowerCase() !== 'select' || e.options.length <= 200)
+                  return false;
+                const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden'
+                  && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+                  && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+              });
+            }""") is True
+        except Exception:
+            raise FormObservationError("form collection bounds unavailable") from None
 
     def apply_resolutions(self, resolutions: Iterable[FieldResolution]) -> list[dict]:
         resolutions = list(resolutions)
@@ -527,6 +568,10 @@ class GenericWebAdapter(SiteAdapter):
                 continue
             if dependency:
                 self.await_form_render()
+            if not self._collection_complete_now():
+                actions.append({"field_id": resolution.field_id, "ok": False,
+                                "reason": "form_collection_limit_exceeded"})
+                break
             element = self._locate(resolution.selector, resolution.label)
             if element.count() != 1:
                 actions.append({"field_id": resolution.field_id, "ok": False,
@@ -535,10 +580,20 @@ class GenericWebAdapter(SiteAdapter):
             if not self._visible(element):
                 actions.append({"field_id": resolution.field_id, "ok": False, "reason": "not visible"})
                 continue
+            action_id = None
             try:
                 input_type = (element.get_attribute("type") or element.evaluate("e=>e.tagName.toLowerCase()")).lower()
                 tag = element.evaluate("e=>e.tagName.toLowerCase()")
                 value = resolution.value
+                # Identity is captured without applicant values. A reactive
+                # replacement may retain the control contract, but an ordinal
+                # shift, relabel or type change cannot inherit its write proof.
+                signature_script = """e => [e.tagName.toLowerCase(), e.getAttribute('type'),
+                    e.id, e.getAttribute('name'), e.getAttribute('role'),
+                    e.getAttribute('aria-label'),
+                    [...(e.labels || [])].map(label => label.textContent.trim())]"""
+                control_signature = element.evaluate(signature_script)
+                expected_readback = None
                 if input_type == "file":
                     # A browser file input only proves that a local file was
                     # selected. Generic sites provide no trustworthy upload
@@ -547,33 +602,77 @@ class GenericWebAdapter(SiteAdapter):
                     actions.append({"field_id": resolution.field_id, "ok": False,
                                     "reason": "upload_receipt_unsupported"})
                     continue
-                elif input_type == "combobox" or element.get_attribute("role") == "combobox":
+                elif not self._date_precision_supported(value, input_type):
+                    actions.append({"field_id": resolution.field_id, "ok": False,
+                                    "reason": "date_precision_unsupported"})
+                    continue
+                else:
+                    begin = getattr(self, "field_action_begin", None)
+                    finish = getattr(self, "field_action_finish", None)
+                    if callable(begin) != callable(finish):
+                        raise BrowserOwnershipError("field journal unavailable")
+                    if callable(begin):
+                        action_id = begin(resolution.field_id, resolution.selector,
+                                          document_epoch=page_document_epoch(self.page))
+                if input_type == "combobox" or element.get_attribute("role") == "combobox":
                     if not self._fill_combobox(element, resolution.selector, value):
+                        if action_id is not None:
+                            raise BrowserOwnershipError("combobox outcome unknown")
                         actions.append({"field_id": resolution.field_id, "ok": False,
                                         "reason": "combobox_exact_choice_unavailable"})
                         continue
+                    expected_readback = ("combobox", str(value).strip())
                 elif tag == "select":
                     getattr(self, "mutation_guard", lambda: None)()
-                    if not self._fill_select(element, value):
+                    selected_target = self._fill_select(element, value)
+                    if selected_target is None:
+                        if action_id is not None:
+                            raise BrowserOwnershipError("select outcome unknown")
                         actions.append({"field_id": resolution.field_id, "ok": False, "reason": "no_matching_select_option"})
                         continue
+                    expected_readback = ("select", selected_target)
                 elif input_type in {"checkbox", "radio"}:
                     desired = bool(value)
+                    expected_readback = ("checked", desired)
                     if element.is_checked() != desired:
                         getattr(self, "mutation_guard", lambda: None)()
                         element.click()
                 else:
-                    if not self._date_precision_supported(value, input_type):
-                        actions.append({"field_id": resolution.field_id, "ok": False,
-                                        "reason": "date_precision_unsupported"})
-                        continue
                     desired = self._control_text(value, input_type, resolution.label)
                     current = str(element.input_value() or "")
+                    expected_readback = ("value", desired)
                     if current != desired:
                         getattr(self, "mutation_guard", lambda: None)()
                         element.fill(desired)
-                actions.append({"field_id": resolution.field_id, "ok": True, "source": resolution.source})
+                # A primitive returning does not prove that the page kept its
+                # value. Observe the newly rendered control before another field
+                # writes; this remains DOM evidence, never a server-save receipt.
+                self.await_form_render()
+                getattr(self, "mutation_guard", lambda: None)()
+                current_element = self._locate(resolution.selector)
+                if (current_element.count() != 1 or not self._visible(current_element)
+                        or current_element.evaluate(signature_script) != control_signature):
+                    raise BrowserOwnershipError("field readback identity unknown")
+                kind, expected = expected_readback
+                if kind == "checked":
+                    actual = current_element.is_checked()
+                elif kind == "combobox":
+                    actual = str(current_element.evaluate(
+                        "e => e.value ?? e.getAttribute('aria-valuetext') ?? (e.innerText || '').trim()")).strip()
+                elif kind == "select":
+                    actual = (current_element.input_value(),
+                              current_element.evaluate("e => e.selectedIndex"))
+                else:
+                    actual = str(current_element.input_value() or "")
+                if actual != expected:
+                    raise BrowserOwnershipError("field readback outcome unknown")
+                if action_id is not None:
+                    self.field_action_finish(action_id, "DOM_READBACK_UNVERIFIED")
+                actions.append({"field_id": resolution.field_id, "ok": True,
+                                "source": resolution.source, "observed": "DOM_READBACK"})
             except Exception:
+                if action_id is not None:
+                    self.field_action_finish(action_id, "UNKNOWN_OUTCOME")
                 # The primitive may have reached the page before Playwright
                 # reported failure. Do not turn that uncertainty into a retry.
                 raise BrowserOwnershipError("field write outcome unknown") from None

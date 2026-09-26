@@ -34,7 +34,23 @@ jobs:
         if: github.event_name == 'pull_request' && github.event.pull_request.draft
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
-        run: python -m pytest -q tests/test_jcr07_review_certificate.py tests/test_application_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py
+        run: python -m pytest -q tests/test_jcr07_review_certificate.py tests/test_application_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py tests/test_jcr06_forms.py tests/test_generic_browser_v1.py tests/test_field_action_journal_v1.py
+      - name: Validate update-state privacy readback
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: |
+          python -m pytest -q tests/test_local_operations_v1.py
+          python -m pytest -q tests/test_dashboard_diagnostics_browser.py -k 'diagnostics_need_explicit_copy or expired_session'
+      - name: Prepare digest-pinned standalone Python
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft
+        run: |
+          python scripts/prepare_standalone_runtime.py "$RUNNER_TEMP/jae-standalone"
+          echo "JAE_STANDALONE_RUNTIME=$RUNNER_TEMP/jae-standalone/python" >> "$GITHUB_ENV"
+      - name: Targeted packaged release and task journal
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q tests/test_release_candidate_v1.py tests/test_task_state_compatibility_v1.py tests/test_consumer_entry_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py
       - name: Compile Python sources
         run: python -m compileall -q executor tests
       - name: Check local dashboard JavaScript syntax
@@ -55,8 +71,49 @@ jobs:
         if: github.event_name == 'pull_request'
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
 
+  macos_consumer_release:
+    runs-on: macos-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install Python dependencies and hosted headless UI oracle
+        run: |
+          python -m pip install -r requirements.txt
+          python -m playwright install chromium
+      - name: Prepare digest-pinned standalone Python
+        run: |
+          python scripts/prepare_standalone_runtime.py "$RUNNER_TEMP/jae-standalone"
+          echo "JAE_STANDALONE_RUNTIME=$RUNNER_TEMP/jae-standalone/python" >> "$GITHUB_ENV"
+      - name: Hosted Mac candidate, activation and rollback tests
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q tests/test_release_candidate_v1.py tests/test_consumer_entry_v1.py tests/test_task_state_compatibility_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py
+
+      - name: Hosted Mac retired updater public and CLI entrypoints
+        run: python -m pytest -q tests/test_local_operations_v1.py -k 'retired_public_updater_entries or retired_module_cli or retired_cli_never'
+
+      - name: Build unsigned standalone Mac app at round boundary
+        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python scripts/build_macos_app.py --standalone-runtime "$JAE_STANDALONE_RUNTIME" --output "$RUNNER_TEMP/jae-unsigned-distribution"
+      - name: Retain unsigned engineering artifact
+        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        uses: actions/upload-artifact@v4
+        with:
+          name: jae-unsigned-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/jae-unsigned-distribution/AIApplicationManager-unsigned.tar.gz
+            ${{ runner.temp }}/jae-unsigned-distribution/distribution-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
   test:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -72,6 +129,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m playwright install --with-deps chromium
+      - name: Prepare digest-pinned standalone Python
+        run: |
+          python scripts/prepare_standalone_runtime.py "$RUNNER_TEMP/jae-standalone"
+          echo "JAE_STANDALONE_RUNTIME=$RUNNER_TEMP/jae-standalone/python" >> "$GITHUB_ENV"
       - name: Full round-closure test suite
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated

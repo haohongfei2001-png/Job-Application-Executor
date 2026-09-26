@@ -16,6 +16,10 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .headerbtn{border:1px solid #d7dce2;background:#fff;color:#111;padding:7px 11px;border-radius:9px;font-weight:600;font-size:13px}
 .headerbtn:hover{background:#f8fafc}.headerbtn:disabled{opacity:.45;cursor:default}
 .readiness{font-size:12px;color:#92400e;max-width:360px;line-height:1.35}
+.readiness-checks{display:grid;gap:8px;list-style:none;padding:0;margin:12px 0}
+.readiness-checks li{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #e2e8f0;padding:6px 0;font-size:13px}
+.readiness-checks .pass{color:#166534}.readiness-checks .pending{color:#92400e}
+.readiness-summary{font-size:13px;line-height:1.5;color:#475569}
 .metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:16px 0}
 .metric{background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px}
 .metric b{display:block;font-size:20px}.task{border:1px solid #e5e7eb;border-radius:12px;padding:11px;margin:8px 0;background:#fff}
@@ -33,11 +37,17 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .composer{background:#fff;border-top:1px solid #e5e7eb;padding:14px 20px;display:flex;gap:10px}
 textarea{flex:1;min-height:52px;max-height:160px;resize:vertical;border:1px solid #cbd5e1;border-radius:12px;padding:12px;font:inherit}
 button{border:0;border-radius:10px;background:#111;color:#fff;padding:0 18px;font-weight:600;cursor:pointer}
-button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b91c1c}.toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
-@media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:none}}
+button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b91c1c}.diagnostics-dialog{width:min(680px,calc(100vw - 32px));max-height:80vh;border:1px solid #cbd5e1;border-radius:14px;padding:22px;box-shadow:0 18px 60px #0003}
+.diagnostics-dialog::backdrop{background:#0f172a99}.diagnostics-dialog h2{font-size:18px;margin:0 0 8px}.diagnostics-dialog p{font-size:13px;line-height:1.5;color:#475569}
+.diagnostics-dialog pre{max-height:48vh;overflow:auto;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.diagnostics-actions{display:flex;justify-content:flex-end;gap:8px}.diagnostics-actions button{min-height:36px}
+#session-expired{margin:0;padding:16px 22px;background:#fff7ed;color:#9a3412;border-bottom:1px solid #fed7aa;line-height:1.5}
+.toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
+@media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:block;max-height:45vh;border-right:0;border-bottom:1px solid #e5e7eb}main{min-height:55vh}}
 </style>
 </head>
 <body>
+<p id="session-expired" role="alert" tabindex="-1" hidden>面板会话已失效。请重新打开 AI 投递经理；未发送的输入仍保留在此页，可先复制。已有任务不会因重新打开而自动重试，最终提交仍由你本人完成。</p>
 <div class="shell">
 <aside>
   <h1>任务</h1>
@@ -66,7 +76,8 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <div class="statusbar">
     <div><span class="dot"></span><span id="health">本地服务</span></div>
     <span id="readiness" class="readiness" role="status">正在检查运行条件…</span>
-    <button id="diagnostics" class="headerbtn" type="button">复制诊断</button>
+    <button id="readiness-details" class="headerbtn" type="button">运行条件</button>
+    <button id="diagnostics" class="headerbtn" type="button">查看诊断</button>
     <button id="update" class="headerbtn" type="button">检查并更新</button>
   </div>
 </header>
@@ -79,11 +90,65 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 </div>
 </main>
 </div>
-<div id="toast" class="toast"></div>
+<dialog id="readiness-dialog" class="diagnostics-dialog" aria-labelledby="readiness-title">
+  <h2 id="readiness-title">运行条件</h2>
+  <p>这里仅显示本机运行条件的检查结果，不读取或展示个人资料内容。最终提交仍由你本人完成。</p>
+  <div id="readiness-summary" class="readiness-summary" role="status">正在检查…</div>
+  <ul id="readiness-checks" class="readiness-checks"></ul>
+  <div class="diagnostics-actions">
+    <button id="readiness-close" class="headerbtn" type="button">关闭</button>
+  </div>
+</dialog>
+<dialog id="diagnostics-dialog" class="diagnostics-dialog" aria-labelledby="diagnostics-title">
+  <h2 id="diagnostics-title">诊断预览</h2>
+  <p>此报告仅显示运行状态和恢复代码。请核对内容，再决定是否复制分享。</p>
+  <pre id="diagnostics-report"></pre>
+  <div class="diagnostics-actions">
+    <button id="diagnostics-close" class="headerbtn" type="button">关闭</button>
+    <button id="diagnostics-copy" type="button">复制报告</button>
+  </div>
+</dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <script>
-const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
+const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),diagnosticsDialog=document.getElementById('diagnostics-dialog'),diagnosticsReport=document.getElementById('diagnostics-report'),diagnosticsCopy=document.getElementById('diagnostics-copy'),diagnosticsClose=document.getElementById('diagnostics-close'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
+const readinessBtn=document.getElementById('readiness-details'),readinessDialog=document.getElementById('readiness-dialog'),readinessSummary=document.getElementById('readiness-summary'),readinessChecks=document.getElementById('readiness-checks'),readinessClose=document.getElementById('readiness-close');
 const newTaskForm=document.getElementById('newtask');
 const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
+let uiSessionExpired=false;
+function expireUISession(){
+  if(uiSessionExpired)return;
+  uiSessionExpired=true;
+  const notice=document.getElementById('session-expired');
+  notice.hidden=false;
+  document.getElementById('health').textContent='面板会话已失效';
+  document.getElementById('readiness').textContent='请重新打开应用，任务不会自动提交';
+  document.querySelector('.dot').style.background='#b45309';
+  // Keep unsent inputs available for selection/copy. A new app open obtains
+  // its own one-use ticket; this page never renews auth or replays an action.
+  document.querySelectorAll('.shell button').forEach(button=>button.disabled=true);
+  document.querySelectorAll('.shell input,.shell textarea').forEach(input=>{input.disabled=false;input.readOnly=true;});
+  document.querySelectorAll('.shell select').forEach(select=>select.disabled=true);
+  for(const panel of tasksEl.querySelectorAll('[data-private-review-panel]')){
+    panel.replaceChildren();panel.hidden=true;
+    delete panel.dataset.privateReviewOpen;delete panel.dataset.revision;
+  }
+  tasksEl.querySelectorAll('[data-review-values]').forEach(button=>button.setAttribute('aria-expanded','false'));
+  diagnosticsReport.textContent='';
+  if(diagnosticsDialog.open)diagnosticsDialog.close();
+  if(readinessDialog.open)readinessDialog.close();
+  clearTimeout(notify.timer);toast.style.display='none';
+  notice.focus();
+}
+async function uiRequest(path,options){
+  if(uiSessionExpired)throw new Error('ui_session_expired');
+  const response=await fetch(path,options);
+  if(response.status===401){expireUISession();throw new Error('ui_session_expired');}
+  // A different in-flight read may have discovered expiry meanwhile. Its
+  // formerly authorized result must not refresh stale private values/actions.
+  if(uiSessionExpired)throw new Error('ui_session_expired');
+  return response;
+}
+
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const stageText={
   DISCOVERED:'已加入',
@@ -143,6 +208,7 @@ function privateReviewHtml(review){
     <p>服务端结构化行只保存身份和摘要；请在招聘页面核对每条内容。</p>`;
 }
 function render(state){
+  if(uiSessionExpired)return;
   const counts={running:0,need:0,ready:0,done:0};
   (state.tasks||[]).forEach(t=>counts[stageGroup(t.stage)]++);
   Object.entries(counts).forEach(([k,v])=>document.getElementById(k).textContent=v);
@@ -157,10 +223,10 @@ function render(state){
       ${t.stage==='READY_TO_SUBMIT'?(t.review_summary?.status==='last_verified'?`
         <div class="review">上次独立核验：${Number(t.review_summary.field_count)||0} 项填写、${Number(t.review_summary.row_count)||0} 条经历、${Number(t.review_summary.attachment_count)||0} 个附件，${Number(t.review_summary.check_count)||0} 项检查通过。请在申请页面再次核对完整内容；最终提交只能由你本人点击。</div>`:
         '<div class="review warning">核验摘要不可用，请勿提交。任务需要重新核验。</div>'):''}
-      ${t.stage==='NEEDS_USER_INPUT'?(t.unresolved_keys||[]).map(key=>`
-        <label class="factinput"><span>${esc(key)}</span>${(t.boolean_keys||[]).includes(key)?`<select aria-label="${esc(key)}"><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select>`:`<input autocomplete="off" aria-label="${esc(key)}">`}
-          <button type="button" data-answer="true" data-key="${esc(key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button>
-          ${(t.reusable_keys||[]).includes(key)?'<input type="checkbox" class="remember-fact" aria-label="保存为可复用事实"><span>经我确认后记住，供以后申请使用</span>':''}</label>`).join(''):''}
+      ${t.stage==='NEEDS_USER_INPUT'?(t.question_context?.status==='current'?(`<div class="otpnote">以下为当前招聘网站问题原文，仅供辨认；请依据本人真实情况回答。</div>`+(t.question_context.items||[]).map(q=>`
+        <label class="factinput"><span>${esc(q.label)}${q.required?' · 必填':''}</span>${(t.boolean_keys||[]).includes(q.key)?`<select aria-label="${esc(q.label)}"><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select>`:`<input autocomplete="off" aria-label="${esc(q.label)}">`}
+          <button type="button" data-answer="true" data-key="${esc(q.key)}" data-task="${esc(t.task_id)}" data-revision="${t.revision}">本地填写</button>
+          ${(t.reusable_keys||[]).includes(q.key)?'<input type="checkbox" class="remember-fact" aria-label="保存为可复用事实"><span>经我确认后记住，供以后申请使用</span>':''}</label>`).join('')):'<div class="otpnote">当前招聘网站问题原文无法核对；为避免答错字段，已暂停本地填写。请重新核对任务。</div>'):''}
       ${t.blocker==='otp_waiting'&&t.auth_attempt_id?`
         <div class="otpnote">${t.otp_source==='configured_unverified'?'已配置自动接收，正在等待；若接收失败可在此输入。':'自动接收来源未验证；可在此本地输入。'}验证码不会发送给 AI 或保存在任务中。</div>
         <label class="otpinput"><input type="password" inputmode="numeric" autocomplete="off" maxlength="8" aria-label="当前任务验证码" data-otp-task="${esc(t.task_id)}"><button type="button" data-otp-send="true" data-task="${esc(t.task_id)}" data-attempt="${esc(t.auth_attempt_id)}">本地输入验证码</button></label>
@@ -195,9 +261,9 @@ tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-review-values]');if(!button)return;
   button.disabled=true;
   try{
-    const r=await fetch('/ui/api/review-values?task_id='+encodeURIComponent(button.dataset.task),{credentials:'same-origin'});
+    const r=await uiRequest('/ui/api/review-values?task_id='+encodeURIComponent(button.dataset.task),{credentials:'same-origin'});
     if(!r.ok)throw new Error();
-    const data=await r.json();
+    const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     if(data.revision!==Number(button.dataset.revision))throw new Error();
     const panel=button.closest('.task').querySelector('[data-private-review-panel]');
     panel.innerHTML=privateReviewHtml(data.review);
@@ -207,34 +273,34 @@ tasksEl.addEventListener('click',async event=>{
     panel.dataset.privateReviewOpen=button.dataset.task;
     panel.dataset.revision=button.dataset.revision;
   }catch(e){notify('完整复核值已过期或暂不可用；请勿据此提交。');await state()}
-  finally{button.disabled=false}
+  finally{button.disabled=uiSessionExpired}
 });
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-confirm-submission]');if(!button)return;
   if(!window.confirm('请确认你已经在招聘网站亲自点击最终提交。这里仅记录你的确认并保护该岗位，不会代你点击提交。'))return;
   button.disabled=true;
   try{
-    const r=await fetch('/ui/api/human-submission',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+    const r=await uiRequest('/ui/api/human-submission',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
       body:JSON.stringify({task_id:button.dataset.task,expected_revision:Number(button.dataset.revision),user_confirmed:true})});
     if(!r.ok)throw new Error();
-    const receipt=await r.json();
+    const receipt=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     notify(receipt.page_signal?'已记录你的提交确认；页面有成功提示，但服务器结果尚未独立核实。':'已记录你的提交确认；服务器结果尚未独立核实，请保留招聘网站回执。');
     await state();
   }catch(e){notify('确认未记录；请核对当前任务及招聘网站，再重试。');await state()}
-  finally{button.disabled=false}
+  finally{button.disabled=uiSessionExpired}
 });
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-observe-submission]');if(!button)return;
   button.disabled=true;
   try{
-    const r=await fetch('/ui/api/submission-observation?task_id='+encodeURIComponent(button.dataset.task),{credentials:'same-origin'});
+    const r=await uiRequest('/ui/api/submission-observation?task_id='+encodeURIComponent(button.dataset.task),{credentials:'same-origin'});
     if(!r.ok)throw new Error();
-    const observed=await r.json();
+    const observed=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     notify(observed.status==='PAGE_SIGNAL_OBSERVED'
       ?'页面出现提交成功提示；这只是页面信号，尚未核实服务器结果。'
       :'未看到可信的提交结果；任务状态未改变。请在招聘站点自行核对。');
   }catch(e){notify('只读查看暂不可用；任务状态未改变。')}
-  finally{button.disabled=false}
+  finally{button.disabled=uiSessionExpired}
 });
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-action]');if(!button)return;
@@ -242,18 +308,18 @@ tasksEl.addEventListener('click',async event=>{
   const action=button.dataset.action,task_id=button.dataset.task;
   if(action==='OBSERVE'){
     try{
-      const r=await fetch('/ui/api/observe?task_id='+encodeURIComponent(task_id),{credentials:'same-origin'});
+      const r=await uiRequest('/ui/api/observe?task_id='+encodeURIComponent(task_id),{credentials:'same-origin'});
       if(!r.ok)throw new Error();
-      const observed=await r.json();
+      const observed=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
       notify(observed.status==='BOUND_DOCUMENT_OBSERVED'?'已找到原任务页面；草稿和写入结果仍待证明，任务保持暂停。':'原任务页面尚无法核实；任务保持暂停。');
     }catch(e){notify('只读核对暂不可用；任务保持暂停。')}
-    finally{button.disabled=false}
+    finally{button.disabled=uiSessionExpired}
     return;
   }
   const expected_revision=Number(button.dataset.revision);
   const command_id='ui-'+crypto.randomUUID();
   try{
-    const r=await fetch('/ui/api/command',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+    const r=await uiRequest('/ui/api/command',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
       body:JSON.stringify({command_id,task_id,action,expected_revision})});
     if(!r.ok)throw new Error();
     notify({PAUSE:'任务已暂停',RESUME:'任务已继续',CANCEL:'任务已取消'}[action]);
@@ -266,33 +332,33 @@ tasksEl.addEventListener('click',async event=>{
   if(button.dataset.otpSend){
     const input=button.parentElement.querySelector('input[data-otp-task]');
     const message=input.value.trim();input.value='';
-    if(!/^\d{4,8}$/.test(message)){notify('请输入当前短信中的 4 到 8 位验证码。');button.disabled=false;return}
+    if(!/^\d{4,8}$/.test(message)){notify('请输入当前短信中的 4 到 8 位验证码。');button.disabled=uiSessionExpired;return}
     try{
-      const r=await fetch('/ui/api/otp',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      const r=await uiRequest('/ui/api/otp',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
         body:JSON.stringify({task_id:button.dataset.task,attempt_id:button.dataset.attempt,message})});
       if(!r.ok)throw new Error();notify('验证码已通过本地专用通道交给当前任务。');await state();
     }catch(e){notify('验证码未被当前尝试接受；请核对短信和任务状态。');await state()}
   }else{
     try{
-      const r=await fetch('/ui/api/otp-resend',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      const r=await uiRequest('/ui/api/otp-resend',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
         body:JSON.stringify({task_id:button.dataset.task,command_id:'ui-resend-'+crypto.randomUUID(),expected_revision:Number(button.dataset.revision)})});
       if(!r.ok)throw new Error();notify('已授权当前任务重发一次；系统会重新核对控件与冷却状态。');await state();
     }catch(e){notify('无法安全重发；请检查冷却时间和当前任务。');await state()}
   }
-  button.disabled=false;
+  button.disabled=uiSessionExpired;
 });
 newTaskForm.addEventListener('submit',async event=>{
   event.preventDefault();
   const button=newTaskForm.querySelector('button');button.disabled=true;
   const data=Object.fromEntries(new FormData(newTaskForm).entries());
   try{
-    const r=await fetch('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await uiRequest('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
       credentials:'same-origin',body:JSON.stringify(data)});
     if(!r.ok)throw new Error();
-    const result=await r.json();showDiscovery(result,data);
+    const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');showDiscovery(result,data);
     if(result.task_id){newTaskForm.reset();await state()}
   }catch(e){notify('暂时无法安全查找岗位；请核对公司、岗位和官方链接。')}
-  finally{button.disabled=false}
+  finally{button.disabled=uiSessionExpired}
 });
 function showDiscovery(result,request){
   const discovery=result.discovery||{};
@@ -307,11 +373,11 @@ candidatesEl.addEventListener('click',async event=>{
   button.disabled=true;
   try{
     const data={...pendingDiscovery.request,selected_candidate_id:button.dataset.candidate};
-    const r=await fetch('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(data)});
+    const r=await uiRequest('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(data)});
     if(!r.ok)throw new Error();
-    const result=await r.json();showDiscovery(result,pendingDiscovery?.request||data);
+    const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');showDiscovery(result,pendingDiscovery?.request||data);
     if(result.task_id){newTaskForm.reset();await state()}
-  }catch(e){notify('候选已变化或暂时无法核验，请重新查找。');button.disabled=false}
+  }catch(e){notify('候选已变化或暂时无法核验，请重新查找。');button.disabled=uiSessionExpired}
 });
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-answer]');if(!button)return;
@@ -321,29 +387,32 @@ tasksEl.addEventListener('click',async event=>{
   if(!value.trim()){notify('请先填写答案。');return}
   button.disabled=true;
   try{
-    const r=await fetch('/ui/api/user-input',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
+    const r=await uiRequest('/ui/api/user-input',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',
       body:JSON.stringify({task_id:button.dataset.task,field_key:button.dataset.key,
         value,expected_revision:Number(button.dataset.revision),remember})});
     if(!r.ok)throw new Error();
-    const result=await r.json();
+    const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     input.value='';
     notify(remember?(result.task?.fact_reuse_status==='SAVED'?'答案已在本地保存为经确认的可复用事实。':'答案已交给当前任务；可复用保存待重试。'):'答案已在本地交给当前任务。');await state();
   }catch(e){
     try{
-      const r=await fetch('/ui/api/state',{credentials:'same-origin'}),data=await r.json();
+      const r=await uiRequest('/ui/api/state',{credentials:'same-origin'}),data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
       const task=(data.tasks||[]).find(t=>t.task_id===button.dataset.task);
       if(task&&task.stage==='NEEDS_USER_INPUT'&&(task.unresolved_keys||[]).includes(button.dataset.key)){
         button.dataset.revision=String(task.revision);
         notify('任务状态已变化；答案仍在本地，请核对后重试。');
       }else{notify('任务不再等待这个答案；未提交输入。')}
     }catch(_){notify('本地服务暂不可用；答案仍在输入框中。')}
-  }finally{button.disabled=false}
+  }finally{button.disabled=uiSessionExpired}
 });
 function notify(text){
+  if(uiSessionExpired)return;
+  if(toast.style.display==='block'&&toast.textContent===text)return;
   toast.textContent=text;toast.style.display='block';
   clearTimeout(notify.timer);notify.timer=setTimeout(()=>{toast.style.display='none'},4200);
 }
 function updateLabel(update){
+  if(uiSessionExpired){updateBtn.disabled=true;msg.readOnly=true;send.disabled=true;return;}
   const status=(update||{}).status||'idle';
   const busy=['checking','updating','restarting'].includes(status);
   const restartRequired=status==='restart_required';
@@ -358,37 +427,54 @@ function updateLabel(update){
     updateBtn.textContent='检查并更新';
   }
 }
-async function copyDiagnostics(){
+async function previewDiagnostics(){
   diagnosticsBtn.disabled=true;
   try{
-    const r=await fetch('/ui/api/diagnostics',{credentials:'same-origin'});
-    const data=await r.json();
+    const r=await uiRequest('/ui/api/diagnostics',{credentials:'same-origin'});
+    const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     if(!r.ok)throw new Error();
-    const text=JSON.stringify(data,null,2);
+    diagnosticsReport.textContent=JSON.stringify(data,null,2);
+    diagnosticsDialog.showModal();
+    diagnosticsClose.focus();
+  }catch(e){
+    notify('无法读取诊断；现有任务未被修改。');
+  }finally{diagnosticsBtn.disabled=uiSessionExpired}
+}
+async function copyDiagnostics(){
+  diagnosticsCopy.disabled=true;
+  const report=diagnosticsReport.textContent;
+  try{
+    if(!diagnosticsDialog.open||!report)throw new Error();
     try{
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(report);
     }catch(copyError){
       const helper=document.createElement('textarea');
-      helper.value=text;helper.setAttribute('readonly','');helper.style.position='fixed';helper.style.opacity='0';
+      helper.value=report;helper.setAttribute('readonly','');helper.style.position='fixed';helper.style.opacity='0';
       document.body.appendChild(helper);helper.select();
-      if(!document.execCommand('copy'))throw copyError;
-      helper.remove();
+      try{if(!document.execCommand('copy'))throw copyError}
+      finally{helper.remove()}
     }
-    notify('诊断信息已复制。可以直接粘贴给 ChatGPT。');
+    notify('诊断信息已复制。');
   }catch(e){
     notify('复制诊断失败；现有任务未被修改。');
-  }finally{diagnosticsBtn.disabled=false}
+  }finally{diagnosticsCopy.disabled=false}
 }
+diagnosticsDialog.addEventListener('close',()=>{
+  diagnosticsReport.textContent='';
+  if(!uiSessionExpired)diagnosticsBtn.focus();
+});
+diagnosticsClose.onclick=()=>{diagnosticsReport.textContent='';diagnosticsDialog.close()};
+diagnosticsCopy.onclick=copyDiagnostics;
 async function startUpdate(){
   updateBtn.disabled=true;updateBtn.textContent='正在检查…';
   try{
-    const r=await fetch('/ui/api/update',{
+    const r=await uiRequest('/ui/api/update',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       credentials:'same-origin',
       body:'{}'
     });
-    const data=await r.json();
+    const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     if(!r.ok){
       const reason={
         worker_active:'当前正在执行真实任务，请等任务停在安全节点后再更新。',
@@ -398,22 +484,25 @@ async function startUpdate(){
         stale_update_recovered:'检测到上次更新被中断，已解除锁定；可以重新检查更新。',
         not_on_main:'当前代码不在 main 分支，已拒绝自动更新。',
         tracked_changes_present:'本地有未提交代码修改，已拒绝自动更新。',
-        unexpected_origin:'GitHub 来源不符合预期，已拒绝自动更新。'
+        unexpected_origin:'GitHub 来源不符合预期，已拒绝自动更新。',
+        legacy_update_retired:'旧版更新方式已停用。当前版本和任务保持不变；新版安全更新尚未就绪。',
+        packaged_update_not_ready:'当前安装包尚不支持安全更新；现有版本与任务保持不变。'
       }[data.reason]||'当前不能安全更新。';
-      notify(reason);updateBtn.disabled=false;updateBtn.textContent='检查并更新';return;
+      notify(reason);updateBtn.disabled=uiSessionExpired;updateBtn.textContent='检查并更新';return;
     }
     notify('正在检查 GitHub 并安全更新。若有新版本，服务会自动重启并重新打开面板。');
     setTimeout(pollUpdate,900);
   }catch(e){
     notify('更新请求失败；当前版本和任务均保持不变。');
-    updateBtn.disabled=false;updateBtn.textContent='检查并更新';
+    updateBtn.disabled=uiSessionExpired;updateBtn.textContent='检查并更新';
   }
 }
 async function pollUpdate(){
+  if(uiSessionExpired)return;
   try{
-    const r=await fetch('/ui/api/update-status',{credentials:'same-origin'});
+    const r=await uiRequest('/ui/api/update-status',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
-    const data=await r.json();updateLabel(data);
+    const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');updateLabel(data);
     if(['checking','updating','restarting'].includes(data.status)){
       setTimeout(pollUpdate,1000);return;
     }
@@ -444,29 +533,60 @@ async function pollUpdate(){
     // opens a new authenticated UI, so no destructive retry is attempted here.
   }
 }
-diagnosticsBtn.onclick=copyDiagnostics;
+diagnosticsBtn.onclick=previewDiagnostics;
 updateBtn.onclick=startUpdate;
+const readinessLabels={
+  live_browser_mode:'浏览器模式',chrome_installed:'Chrome 已安装',
+  existing_cdp_session:'专用浏览器连接',profile_configured:'资料位置已配置',
+  profile_exists:'资料文件可用',profile_loadable:'资料文件可读取',
+  deepseek_available:'DeepSeek 已连接',supervisor_running:'本地服务运行中'
+};
+function renderReadinessDetails(data){
+  readinessChecks.replaceChildren();
+  const checks=data&&data.checks&&typeof data.checks==='object'?data.checks:{};
+  for(const [key,label] of Object.entries(readinessLabels)){
+    const row=document.createElement('li'),name=document.createElement('span'),result=document.createElement('strong');
+    name.textContent=label;
+    const passed=checks[key]===true;
+    result.textContent=passed?'已通过':'待处理';result.className=passed?'pass':'pending';
+    row.append(name,result);readinessChecks.appendChild(row);
+  }
+  readinessSummary.textContent=data?.ready_for_live_e2e===true?
+    '运行条件已就绪。最终提交仍由你本人完成。':
+    (typeof data?.message==='string'&&data.message?'尚未就绪：'+data.message:'运行条件待检查；任务不会自动提交。');
+}
+readinessBtn.onclick=()=>{readinessDialog.showModal();readinessClose.focus()};
+readinessClose.onclick=()=>readinessDialog.close();
+readinessDialog.addEventListener('close',()=>{if(!uiSessionExpired)readinessBtn.focus()});
 async function readiness(){
+  if(uiSessionExpired)return;
   const label=document.getElementById('readiness');
   try{
-    const r=await fetch('/ui/api/readiness',{credentials:'same-origin'});
+    const r=await uiRequest('/ui/api/readiness',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
-    const data=await r.json();
+    const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     label.textContent=data.ready_for_live_e2e?'已就绪 · 最终提交由你确认':data.message||'运行条件待检查';
-  }catch(e){label.textContent='无法检查运行条件；任务不会自动提交'}
+    renderReadinessDetails(data);
+  }catch(e){
+    if(uiSessionExpired)return;
+    label.textContent='无法检查运行条件；任务不会自动提交';
+    readinessSummary.textContent='无法读取检查结果；任务不会自动提交。';
+    readinessChecks.replaceChildren();
+  }
 }
 async function state(){
+  if(uiSessionExpired)return;
   try{
-    const r=await fetch('/ui/api/state',{credentials:'same-origin'});
+    const r=await uiRequest('/ui/api/state',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
-    const data=await r.json();
+    const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     const openReview=tasksEl.querySelector('[data-private-review-open]');
     if(openReview){
       const current=(data.tasks||[]).find(t=>t.task_id===openReview.dataset.privateReviewOpen);
       if(!current||current.stage!=='READY_TO_SUBMIT'||current.revision!==Number(openReview.dataset.revision)||!current.review_values_available)render(data);
     }else if(![...tasksEl.querySelectorAll('.factinput input:not([type=checkbox]),.factinput select,.otpinput input')].some(input=>input.value))render(data);
     updateLabel(data.update);
-  }catch(e){document.getElementById('health').textContent='连接异常'}
+  }catch(e){if(!uiSessionExpired)document.getElementById('health').textContent='连接异常'}
 }
 function bubble(text,kind,actions){
   const d=document.createElement('div');d.className='bubble '+kind;d.textContent=text;
@@ -474,21 +594,23 @@ function bubble(text,kind,actions){
   chat.appendChild(d);chat.scrollTop=chat.scrollHeight;
 }
 async function submit(){
-  const text=msg.value.trim();if(!text)return;
-  bubble('消息已在本地处理','me');msg.value='';send.disabled=true;
+  if(uiSessionExpired)return;
+  const unsent=msg.value,text=unsent.trim();if(!text)return;
+  send.disabled=true;
   try{
-    const r=await fetch('/ui/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({message:text})});
-    const data=await r.json();
+    const r=await uiRequest('/ui/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({message:text})});
+    const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     if(!r.ok)throw new Error(data.error||'request failed');
+    bubble('消息已在本地处理','me');if(msg.value===unsent)msg.value='';
     bubble(data.reply||'已处理。','ai',data.actions||[]);render(data);
-  }catch(e){bubble('请求失败；现有任务未被修改。','ai')}
+  }catch(e){if(!uiSessionExpired)bubble('请求未确认；输入仍保留，请核对任务状态后再决定是否重试。','ai')}
   finally{
     try{
-      const r=await fetch('/ui/api/update-status',{credentials:'same-origin'});
+      const r=await uiRequest('/ui/api/update-status',{credentials:'same-origin'});
       const update=r.ok?await r.json():{status:'idle'};
       updateLabel(update);
-    }catch(e){send.disabled=false;msg.disabled=false}
-    msg.focus();
+    }catch(e){send.disabled=uiSessionExpired;msg.disabled=false}
+    if(!uiSessionExpired)msg.focus();
   }
 }
 send.onclick=submit;msg.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit()}});

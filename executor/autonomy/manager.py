@@ -449,6 +449,17 @@ class ManagerController:
             self._provider = DeepSeekManagerProvider(self.settings)
         return self._provider
 
+    def loaded_provider_state(self) -> dict[str, Any]:
+        """Observe loaded state without triggering lazy credential initialization."""
+        if self._provider is None:
+            return {"state": "not_loaded", "available": False}
+        try:
+            available = self._provider.available is True
+        except Exception:
+            return {"state": "unavailable", "available": False}
+        return {"state": "available" if available else "unavailable",
+                "available": available}
+
     def state(self) -> dict[str, Any]:
         tasks = [safe_task_view(task) for task in self.queue.tasks()]
         counts: dict[str, int] = {}

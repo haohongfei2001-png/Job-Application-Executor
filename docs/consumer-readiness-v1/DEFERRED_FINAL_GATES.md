@@ -98,8 +98,9 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 - **Type / status:** `REAL_DATA_MIGRATION` / `MITIGATED_FOR_ENGINEERING`
 - **Blocking scope:** Declaring a real private legacy profile or application-answer migration complete without reading, reconciling and backing up that owner's data.
 - **Non-blocked work:** Synthetic old/new profile compatibility, encrypted legacy answer migration, old-version snapshots, rollback guard tests and later independent rounds.
-- **Safe degradation:** A noncanonical existing output or malformed legacy answer file fails closed; imports do not silently overwrite it. Existing canonical profiles receive a one-time `.pre-jcr04` snapshot before atomic versioned replacement. An older binary that cannot read encrypted answers is not a safe write rollback target.
+- **Safe degradation:** A noncanonical existing output or malformed legacy answer file fails closed; imports do not silently overwrite it. Existing canonical profiles receive a one-time `.pre-jcr04` snapshot before atomic versioned replacement. An older binary that cannot read encrypted answers is not a safe write rollback target. JCR-08 refuses manual rollback to an identity-only legacy app bundle; exact head 0ae30ca passed CI 36204390392. The next coherent candidate holds the daemon's state lock and initializes only the candidate queue against a disposable WAL-aware SQLite snapshot, requiring existing task authority and every journal/receipt/binding table to remain intact before either app bundle moves. It never starts a candidate worker with copied applicant state. Rollback compatibility passed exact-head targeted foundation/hosted Mac CI 36209087091 at d9afc7b34b3ac626dba77f2506197b2a5c4673a1. The installation/update candidate applies the same fence and snapshot compatibility before activation, with actual packaged service tests for committed WAL and destructive migration refusal; its targeted foundation/hosted Mac CI 36210075275 passed at 53df0ead516c76389749a46d9ac9fe1a8557ec43. Real private migration, transactional legacy state transfer and older worker-fence compatibility remain unverified.
 - **Existing evidence:** Synthetic malformed/stale/concurrent write tests, CLI answer migration and old task-spec restart regressions in JCR-04.
+- **Current compatibility engineering:** PR #20 additionally verifies an existing journal's SQLite schema floor, including original declarations/constraints, column contracts, indexes, foreign keys and fence triggers. Row-preserving schema weakening must fail before app activation/rollback. Additive migration remains supported. Candidate-process and hosted packaged-update regressions are pending exact-head targeted CI; this is automatic compatibility subevidence, not real private migration or transactional legacy state transfer.
 - **Missing final evidence:** Actual private source inventory, sanitized migration comparison, and owner acceptance of any conflicts; no real private data is accessed unattended.
 - **Final convergence condition:** JCR-09 reviews the real migration snapshot and differences locally with the owner, or keeps the affected path read-only if proof is unavailable.
 - **Related acceptance IDs:** E-04, E-06, E-08, E-09, G-03, G-04.
@@ -138,8 +139,9 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 - **Blocking scope:** Claiming general ATS structured-form compatibility, asking an unknown site question through a context-free key, or continuing an uncertain browser/draft write as if it succeeded. These paths cannot contribute D-class PASS or a consumer READY certificate.
 - **Non-blocked work:** JCR-07 independent review and certificate, JCR-08 app/release engineering, JCR-09 synthetic/fault certification, and supported synthetic JCR-06 drivers.
 - **Safe degradation:** Generic repeated rows, file uploads, iframe/open-shadow/custom controls and virtualized choices remain unsupported unless a certified site driver supplies exact identity and readback. Unknown task answers bind to target/page/question digests, preventing cross-field reuse; a consumer UI must present the local question context before accepting one. Unknown browser/draft effects stay blocked under DFG-002.
-- **Existing evidence:** PR #16 implements scoped row journals, independent draft and attachment receipts, a composed browser/API fixture, exact target and question answer binding, auth-field refusal and 448 passing isolated/headless local tests. `receipts/JCR-06-WIP.md` lists the synthetic scope and negative cases.
-- **Missing final evidence:** A contextual local unknown-question workbench, worker-level read-only browser/draft recovery with per-action outcome, and the declared supported-driver matrix with complete automatic D-case evidence. Unsupported external site components need a capability decision and fixtures before support is claimed.
+- **Existing evidence:** PR #16 implements scoped row journals, independent draft and attachment receipts, a composed browser/API fixture, exact target and question answer binding, auth-field refusal and 448 passing isolated/headless local tests. `receipts/JCR-06-WIP.md` lists the synthetic scope and negative cases. PR #20 adds the local contextual question workbench and `SUPPORTED_DRIVER_MATRIX.md`, backed by a registry diagnostic and route-to-adapter regression; current candidate CI remains required before counting this new evidence.
+- **Current candidate engineering:** PR #20 re-observes each supported native control after reactive rendering before the next write. Value/choice reversion or control-contract changes raise ownership uncertainty and preserve the existing UNKNOWN_OUTCOME/no-replay worker fence. Passing per-field results are explicitly DOM_READBACK only, not server persistence or draft identity. Synthetic browser and real-worker regression coverage passed targeted CI 36212739717 at 0a0adffc50d88b302e2a6f2a7565db92e018d4b8; this does not resolve DFG-002 or certify general ATS compatibility.
+- **Missing final evidence:** Worker-level read-only browser/draft recovery with per-action outcome and complete automatic D-case evidence for any supported production driver. The contextual local unknown-question workbench and declared production-driver matrix now exist; neither certifies unsupported external site components. Those components need a dedicated capability decision and fixtures before support is claimed.
 - **Final convergence condition:** Resolve automatable debt and run affected D/G/H-class safety and fault tests by JCR-09; leave any still unproven external component explicitly unsupported. Real applicant/site evidence is separately DFG-007 and cannot resolve this engineering debt.
 - **Related acceptance IDs:** D-03 through D-11, D-15, D-16, D-17 through D-22; G-01/G-02/G-10/G-11.
 - **Evidence / PR / commit:** PR #16 candidate; automatic subevidence only, no D-class aggregate PASS.
@@ -151,3 +153,319 @@ Final owner/live/permission/paid/external convergence happens in JCR-09 after al
 3. Owner interaction is not requested while automatable independent work remains.
 4. An `ENGINEERING_DEBT` item must be resolved before consumer certification; it may not be reclassified as a live-owner issue merely to avoid engineering work.
 5. JCR-09 is responsible for exhausting all remaining automatable work, resolving engineering debt, and then presenting only the irreducible final owner/live/external set.
+
+
+### JCR-08 startup provenance engineering batch — 2026-09-26
+
+Prior exact-head targeted Ubuntu/hosted-Mac evidence: `a8fdb2da42204ae500b96be2fd10670a1cfc8729`, [CI 36213656240](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36213656240), PASS. Source review found that candidate health already used isolated Python, while the shipped shell and service/recovery subprocesses still inherited Python startup configuration. This batch aligns those actual entrypoints with `-I -B` and explicit owned-source loading. Production startup no longer depends on ambient PYTHONHOME/PYTHONPATH/user site/current-directory imports. Cloud tests exercise the actual packaged shell after removing the development checkout and the actual bootstrap starter/retry/authenticated service handshake under poisoned startup variables; hosted Mac remains mandatory and existing privacy/final-user-only assertions remain.
+
+Upgrade recognition retains the exact previous packaged launcher template; arbitrary edited templates remain refused. A historical non-isolated launcher is not eligible for manual write rollback. Failed update restores/preserves that owned old bundle but reports recovery required rather than claiming healthy isolated startup. New regressions cover upgrade, refused rollback with both versions intact, and failed-candidate restoration without a false healthy claim. New candidate cloud evidence is pending. This closes an interpreter-mode mismatch only: the venv runtime still relies on a host base Python/stdlib/native dependencies. Independent runtime packaging/provenance, real legacy-state transfer and old-worker compatibility remain ENGINEERING_DEBT under DFG-008; DFG-002 independent durable server action reconciliation remains open. No external/private account access, actual job actions or owner permissions used; final submit remains user-only.
+
+
+Startup batch targeted diagnosis: exact head `369b4c4a59b5d5ab770c7a07e8056e1c4d56e7b5`, [36215114340](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36215114340), Ubuntu and hosted Mac each 106 PASS / 1 FAIL. The failure occurred after real retry and authenticated health: a parent-only Popen recorder was incorrectly expected to observe the supervisor launched inside the independent bootstrap process. Classification TEST oracle process boundary. The oracle now verifies actual service.json PID/port plus untruncated OS process arguments (-I -B -c, module, owned source/runtime), alongside the original recovery single-writer, poison-import canary, token/origin and final-user-only assertions. Other tests, realistic fixtures, startup implementation and timeouts remain unchanged; exact new candidate targeted verification pending.
+
+
+### JCR-08 pre-lock legacy service release fence — 2026-09-26
+
+Isolated startup candidate `ec3072819723276d5807d88acbff0053a78dc21b` passed [targeted CI 36215498933](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36215498933): Ubuntu foundation and hosted Mac, 107 packaged/journal tests on each; 25 deterministic, 135 independent browser/review and 7 privacy cases. No unchanged-head rerun or full certification dispatch.
+
+The next app transaction batch closes one bounded old-worker compatibility gap: acquiring the current worker lock alone cannot prove a pre-lock daemon has stopped. A bounded regular no-follow service.json read validates an integer PID and probes existence using signal 0 after acquiring the lock. A live or uninspectable PID blocks both install and rollback before candidate startup, state snapshot or app movement. Malformed, oversized, nonregular and aliased registry data refuses as unavailable. A dead process record stays intact; the updater never kills a service, deletes a registry or rewrites task authority to pass this guard. Synthetic tests exercise the production guard and both consumer operations, including unchanged committed-WAL task/event authority and retained app copies.
+
+New candidate targeted cloud evidence remains pending. This is partial old-worker engineering, not a claim that an arbitrary historical service cooperates with the new lock: concurrent legacy startup after the probe, missing/recycled PID identity, legacy state transfer, self-contained base-Python/stdlib/native packaging and actual hosted app interaction remain open engineering exits. DFG-002 durable server readback and DFG-008 unsupported form capability remain open. No private owner state, live account, actual job action, new permission or signing resource was accessed; final submit remains user-only.
+
+
+### JCR-08 legacy journal continuity fence — 2026-09-26
+
+Pre-existing legacy-service guard candidate `367336d7768c35bdf4539fff07de1e83fd9b0719` passed [targeted CI 36216663941](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36216663941): Ubuntu/hosted Mac 124 packaged/journal cases each, deterministic 25, browser/review 135 and privacy 7. No repeated unchanged-head or full dispatch.
+
+Source review found a distinct release transaction bug: the new app's shared default runtime can be empty even though the candidate checkout or exact historical launcher's repository still owns a populated repo-local journal. Candidate health/compatibility against only the new path would silently strand existing tasks and saved answers. Before staging or service startup, this batch inspects only those finite legacy paths plus the historical packaged release runtime. Any state outside the selected guarded authority (including WAL, keys, service records or unclassified private artifacts) requires transactional migration; it is never read into diagnostics, copied opportunistically or deleted. Aliased/non-directory legacy paths refuse as unavailable. Same-authority explicit selection and empty regular lock-only locations retain their existing behavior.
+
+Regressions use committed SQLite WAL task/event authority, private answer-key canaries and exact historical launchers in distinct repositories. They assert no candidate startup, unchanged original authority/app/key, no new staging/rollback and safe output. New cloud verification pending. This closes silent activation into a different empty journal only; it does not certify or substitute for legacy transfer. Transactional copy/compatibility/activation/old-writer retirement, independent base-Python/stdlib/native packaging, actual app interaction and DFG-002/008 durable server outcomes remain engineering debt. No owner environment, real private state, external application action, new permission or signing resource was accessed. Final-submit remains user-only.
+
+Legacy continuity bounded diagnosis: cf1b23058700fdb38945f965d6a68357c19844a4 / CI 36217727614 hosted Mac completed 131 PASS / 1 FAIL. The existing symlinked-release contract expects untrusted_app_path; the new state detector ran first and returned legacy_state_unavailable. The app integrity check now runs before any historical state-path inspection or staging. The original gate/assertion is retained. The new in-bundle state fixture also checks the true immutable-source trust reason and direct state detection, retaining all WAL/private canaries and zero-start/no-app-change assertions. This is a product validation-order repair, not timeout/runner/harness suppression or a lowered integrity gate. Exact new candidate pending.
+
+### JCR-08 encrypted answer compatibility candidate
+
+Prior exact head `674e5612010b613b34074361f5e8fcae1f443229` / [targeted CI 36218005649](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36218005649) PASS: Ubuntu and hosted Mac packaged/journal132 each, deterministic25, independent review135 and privacy7. Current independent batch makes the install/rollback journal gate also prove that saved task-only encrypted answers remain readable with exactly the same owned private key and latest typed values. Equal encrypted database rows are necessary but do not prove decoder/key compatibility. Only a bounded regular owned no-follow mode0600 key and committed-WAL SQLite backup enter the disposable compatibility directory. Candidate queue/TaskAnswerStore initialization and read-only answer loads run there; no applicant worker, browser, credential/token copy or action runs. Ephemeral keyed expected digests avoid raw private values in args/logs/receipts; the live key and encrypted history remain untouched. Tests cover missing/malformed/public/symlink/FIFO key, unreadable ciphertext, decoder omission/guesses/type coercion, key rotation, distinct tasks and answer versions plus real packaged app activation refusal after empty health succeeds. New cloud evidence pending; not legacy-state transfer, independent base runtime, DFG-002 closure or JCR-08 certification. Final submit remains user-only.
+
+
+### JCR-08 standalone interpreter/stdlib/native staging — 2026-09-26
+
+Exact `dad360070312fbe930441b13a167c08cc21e5f01` passed [CI36219990660](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36219990660): Ubuntu foundation and hosted Mac packaged/journal145 each; the retained native SELECT RAF reversion and new deterministic delayed selection/option-value rejection cases passed. The encrypted latest-answer/key/type migration regressions also passed both platforms. No unchanged-head rerun or full closure dispatch.
+
+The next coherent batch provides an actual installer/CLI path for a complete standalone runtime, prepared once per affected cloud job from fixed upstream asset names and SHA-256 digests (astral-sh/python-build-standalone release20260924 / CPython3.12.14). Complete interpreter, standard library and pinned dependencies are staged and manifested. Only internal file aliases are materialized; host virtualenv configuration, host executable without owned base/stdlib, escaping/directory/loop aliases and nonregular payload refuse. A relocated `-I -B` subprocess requires app-owned sys.prefix/sys.base_prefix/stdlib/search/import origins, closed wheel metadata/RECORD pins and owned loaded native libraries (operating-system libraries are the explicit exception). A standalone marker is covered by the full runtime manifest and revalidated during staging and final-path health; neither a marker nor archive digest is claimed as signing.
+
+Required Linux/hosted Mac positive fixtures exercise the actual installer with pre-existing task authority, remove checkout/prepared build runtime, poison startup variables, verify relocated ownership, packaged Playwright driver startup and authenticated service startup, exercise actual second activation and rollback preserving known-good/failed versions, then reject marker drift with unchanged task authority. Missing cloud runtime preparation fails this gate; no fixture substitution or hosted Mac skip. Existing legacy venv tests remain intact and do not gain standalone certification. New candidate evidence pending. The consumer distribution/default build choice, signed artifact channel, full round closure, transactional legacy transfer/retirement, hosted interaction and DFG-002/008 durable server recovery still require their own canonical exits; private owner/live evidence remains deferred.
+
+
+### JCR-08 unsigned standalone app distribution batch — 2026-09-26
+
+Exact `bdd6083088d767d5cfd5a7950341d736b4636bd9` passed [CI36221095500](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36221095500): foundation/hosted Mac success, Mac153 cases in137.38s. Independent runtime and actual two-version activation/rollback have affected engineering evidence, not full consumer certification.
+
+The next coherent production path builds a standalone unsigned Mac app archive through the real staged installer, using only declared code and a separate empty build journal. A populated repo-local journal, key, profile or credential is neither migration input nor distributed content; existing source authority remains untouched. Archive inventory refuses known task/private-state paths, undeclared outer members and aliases/nonregular files. Streaming normalizes archive headers (no build-host user/path/timestamp); source/runtime/requirements/archive digests bind the manifest. Exclusive output creation and links cannot overwrite an existing artifact; the completion receipt is written last only after source/runtime rechecks. A failed candidate leaves no ready artifact and never erases unidentified concurrent output.
+
+Required Linux/hosted-Mac fixtures actually build/unpack, delete the build checkout/runtime, poison Python configuration and verify relocated independent runtime plus authenticated loopback service health. Existing153 packaged/journal tests and all privacy/no-submit assertions remain; missing standalone preparation fails. Draft pushes run affected checks; cloud unsigned artifact build/upload runs only at the stable round candidate/main boundary with7-day retention. No signing, public release/deployment, owner device install, new permissions or paid resources. The receipt explicitly states unsigned / NOT_CERTIFIED / final-click actor user.
+
+New candidate evidence pending. This provides an automatable distribution build path, not certification of the channel or user device. Signing/private live evidence remains EXTERNAL/FINAL_LIVE; transactional legacy state transfer/old-writer retirement, hosted app interaction and DFG-002/008 engineering remain open. JCR-08 stays IN_PROGRESS, final submit user-only.
+
+
+## JCR-08 transaction writer-fence batch — engineering pending
+
+Prior exact `c2deb358ffee0f9623c4e17c6c6e2290bf8d90e2` / [CI36222577088](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36222577088) PASS: foundation25 deterministic,137 browser/review,7 privacy,161 packaged/journal; hosted Mac161. Actual unsigned app build/unpack/relocated startup succeeded with no source private-state inclusion. Full round and signed/live-owner evidence are not implied.
+
+Bounded updater audit found a separate writer: TaskQueue initializes schema/derived state under migration.lock without acquiring worker.lock. The app's guarded compatibility/activation transaction previously held only worker.lock. It now holds both nonblocking fences until activation/recovery finishes, refusing an active initializer promptly. Queue constructors now retain the migration fence through backup and the complete schema transaction (previously it ended after backup), preserving their existing blocking protocol and waiting until release; neither updater nor fixture starts applicant workflows or changes submission authority.
+
+The app and state fences now inspect lock descriptors as owned ordinary single-link files before chmod/flock use; symlink/FIFO/directory/hardlink ambiguity refuses without reading payload, altering external permissions, staging or activation. Thirteen new regressions retain real WAL authority/schema, prove cross-process real queue construction waits through the guarded transaction, ensure second-lock refusal releases the worker fence, and exercise production install/rollback refusals and lock cleanup. Existing tests/budgets/timeouts remain unchanged. New coherent cloud candidate pending.
+
+This closes an independent transaction concurrency defect only after cloud evidence. It does not prove old pre-lock writer retirement, transfer legacy private state, close DFG-002/008, certify hosted app UI interaction, or authorize real owner state migration/final submit. Those canonical engineering exits remain open.
+
+
+## JCR-08 consumer admission retirement batch
+
+Exact `da3e5b1c3130bf1986cc0b1794972bf4cb7b35e2` / [CI36224112822](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36224112822) PASS: Ubuntu25/137/7/174, hosted Mac174. The whole queue initialization/migration fence and13 added lock/concurrency regressions preserve the previous161 cases.
+
+The consumer source-checkout UI still admitted the historical in-place Git writer. It now retains existing busy/task/OTP/mutation-drain fences and returns safe `legacy_update_retired` before any spawn. Packaged verified/unverified refusal and all auth/no-submit/privacy gates remain. Dashboard explains the unavailable update path without claiming release health. Five task-state cases and an actual authenticated loopback UI request repeated twice assert no writer, task/event mutation or updater artifacts. The historical drain-success assertion is explicitly superseded by the canonical retirement requirement: real mutation drains, zero Git writers admitted. Its concurrency setup/assertions and all historical legacy-engine tests stay.
+
+This closes only consumer admission when its affected cloud gates pass. Direct legacy module/CLI invocation, transactional old-state transfer and process retirement remain ENGINEERING_DEBT; the complete old updater is not claimed retired. Existing missing/ambiguous/WAL legacy authority still refuses app activation. No live migration, new permission/channel/payment, unchanged-head rerun, full certification or final submission performed.
+
+
+### Consumer retirement follow-through — second concurrency oracle
+
+Exact `146433cbc221fc5be9defbe2e4917ac1fc11642a` / [CI36225082930](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36225082930) hosted Mac174 PASS. Foundation passed24 cases and failed the historical safety-check/RESUME race because it required a successful Git updater spawn, now explicitly retired from consumer admission; subsequent foundation groups did not run. No runtime failure or timeout workaround is inferred.
+
+This existing test remains an actual concurrent production-Supervisor test. It now asserts a competing local RESUME stays blocked with unchanged paused task and no receipt while the safety decision owns the command lock; after safe refusal it requires zero spawned writers, exactly one accepted revision, durable matching receipt and idempotent replay. A refused retired update must not freeze normal controls. This explicitly supersedes only the old successful-spawn/FENCED outcome, keeping and strengthening serialization/no-second-writer/revision requirements. Product runtime and all other cases unchanged; new affected cloud evidence pending.
+
+
+## JCR-08 public/module legacy updater retirement — cloud candidate pending
+
+Exact `91b629d6dbf76e0e62cc389ff1ffd780541dd9d2` / [CI36225534283](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36225534283) PASS: foundation25 deterministic,137 browser/review,14 update/privacy/admission and174 packaged/journal; hosted Mac174. The actual concurrent RESUME safety oracle is proved without admitting the retired Git writer. Full round certification remains unrun.
+
+The historical public `spawn_update` and `perform_update` paths now refuse before runtime/lock/Git/service/applicant state access. The module CLI parses its historical flags but exits before claiming an inherited descriptor, creating runtime state or stopping/restarting a service; `--restart-only` cannot bypass retirement. Actual child-process regressions preserve code, caller descriptor identity/mode/payload and missing-state absence. Parameterized public-entrypoint regressions preserve populated task/WAL/key/lock canaries and refuse any route to the historical engine. Hosted Mac additionally runs these entrypoint checks.
+
+All eight existing engine safety, provenance, timeout, Git-mutation-failure and concurrency cases remain through explicitly private retained engine functions. This is a documented replacement of the public mutation contract, not deletion of historical assertions; complete local operations coverage is now part of the affected Ubuntu gate. Production consumer/public/module paths cannot dispatch the private legacy engine. Private compatibility code physically remains, so the old implementation is not claimed removed or a signing-certified updater.
+
+This does not establish retirement of a process launched by an older installed version before this change, perform real private-state migration, prove full app interaction, close DFG-002/008 or certify a channel/device. Existing transfer/authority ambiguity remains fail-closed and ENGINEERING_DEBT; signing/private/live evidence remains deferred owner work. New candidate evidence pending. No live applicant action, permission/payment, unchanged-head rerun or final submit.
+
+
+## JCR-08 relocated production app entry and headless consumer interaction
+
+Exact `6b1cd95205ce18177de3fcfe7617d5e31ed507a1` / [CI36226364678](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36226364678) PASS: foundation25/137/43 complete local operations/1 diagnostics/174 packaged-journal; hosted Mac174 plus7 retired entrypoint cases. Public/module legacy Git admission is now proved retired while private historical safety engines remain retained and inaccessible through those routes. Full round certification remains unrun.
+
+The existing full unsigned archive regression already proves relocation after removing checkout and prepared runtime, dependency/source provenance and absence of applicant state. This next coherent batch continues through the exact production app executable and owned isolated interpreter into the actual supervisor, ticket/session authentication and full consumer HTML/JavaScript, with actual hosted headless Chromium. The oracle substitutes only the normal browser-opening transport using BROWSER; no fake candidate CLI, patched service, injected UI, unverified health fixture or direct product-method calls. Both Ubuntu and hosted Mac must run this complete path. Keyboard open/close diagnostics, read-only state/readiness, actual update-button refusal, missing-cookie and consumed-ticket negatives, zero external browser requests, two real app opens reusing the same writer PID, exact loaded digest and safe checkpoint stop are required. Evidence output stores only booleans. All existing checks and fixture content stay; the archive is built once per existing test rather than repeating packaging.
+
+This closes a missing production-entry interaction proof only if its new cloud gates pass. It does not claim a native single-window Mac shell, tasks/security/final-review/scale/expired-session interaction completeness, real old-state transfer or pre-lock process retirement, DFG002/008 closure, signed build or owner-device acceptance. Those independent engineering exits remain actionable; private/live/signing evidence remains deferred. No live application, new payment/permission, certification rerun or final submit.
+
+## JCR-08 durable task-journal backup prerequisite — coherent candidate
+
+Fresh remote main753688f0a5cb8b69463ff747b47e32c86335c969, sole writerPR20/head70dc3093d6fd2fbb86a56799bcb3903e2bda1d25. CI36228856436 foundation108367999406 and hostedMac108367999293 PASS, including production relocated app/owned runtime/real service/headless UI entry path;174 packaged/journal plus7 retired updater entry cases on Mac. The draft full-round test job was intentionally skipped, so this is affected engineering evidence, not JCR08 certification.
+
+The next coherent candidate adds an internal durable journal/key backup primitive. SQLite online backup captures committed WAL without migrating the original; destination uses a single standalone DELETE-journal database. Owned ordinary single-link source DB/key, private exclusive output, current worker and schema fences, live registry refusal, complete SQLite integrity/schema/table snapshot, real typed answer decryption against the exact copied key and source inode/key readback are required. Payload is flushed before exclusive manifest-last publication. Failure cleanup removes only known same-inode artifacts and preserves unknown concurrent payload or replacements.
+
+Thirteen added synthetic cases preserve every original task/event, every encrypted history row and schema; prove current real candidate queue/answer decoder only on a disposable copy; require private permissions, exact payload hashes, no answer/profile/token plaintext, immutable durable payload on compatibility/repeat, live writer/key/path refusal, publication failure with unknown artifact retained and rotation refusal with the actual rotated source key left untouched. Existing fixtures/assertions/deadlines remain. New-head Ubuntu and hostedMac targeted evidence is pending.
+
+This is a scoped point-in-time backup prerequisite, not complete transactional state transfer: activation remains NOT_AUTHORIZED and pre-lock legacy-writer retirement remains NOT_CERTIFIED in its receipt. It copies only the task journal and encrypted answers key; applicant profiles, authentication tokens, logs and unrelated private files are excluded. No service signal, private owner state access, restore, live migration or final submit occurs. Full legacy transfer/retirement, native single-window shell and DFG002/008 remain actionable independent engineering; signing/real device/private/live evidence stays deferred. No full certification or unchanged-head CI retry.
+
+## JCR-08 bound durable-capsule candidate preflight
+
+Exact df57e01fdbc85fb2aaa1b5bec29e0930d2e33ba7 / CI36258709659 PASS: Ubuntu foundation108450288700 and hostedMac108450288860;187 packaged/journal cases (including13 durable backup faults) plus7 public/module updater retirement cases on Mac. Draft full-round suite intentionally unrun; this is affected engineering evidence.
+
+The next coherent batch closes a transfer/rollback prerequisite: a saved backup manifest cannot validate itself after corruption or replacement. verify_task_state_backup requires the original trusted staging receipt supplied independently by its caller; exact format/scope/NOT_AUTHORIZED activation/NOT_CERTIFIED retirement, typed counts and expected DB/key digests must match. It refuses extra/missing inventory, aliases/hardlinks/FIFOs/nonregular/public/unowned payloads, malformed/oversized receipts and non-standalone WAL headers before running candidate code. All reads are bounded for metadata/key, no-follow, and database snapshot is immutable/read-only without auxiliary files. It checks actual integrity/all authority tables/latest typed answers and rechecks root/file identity, bytes and inventory after the read.
+
+task_state_backup_candidate_compatible proves the actual candidate queue migration and answer decoder only against the existing disposable private SQLite/key copy, then revalidates the unchanged durable capsule against the same frozen external receipt. No service, worker, browser, credential copy, restore or original migration runs. Candidate loss/type coercion is refused; a mid-probe payload change remains visible and is never repaired or deleted.
+
+Twenty-eight added synthetic cases cover actual current candidate/encrypted-history and no-answer/no-key positives;15 drift/alias/hardlink/FIFO/public/manifest/key/database negatives that forbid candidate execution;7 receipt authority/type/count negatives;2 real candidate decoder loss/type-coercion negatives;post-probe key drift;and a matching-receipt WAL-header negative. Original task/event/key authority and durable payload immutability are required; previous tests/fixtures/deadlines stay. New stable-head cloud evidence pending. This is verified handoff preflight, not actual legacy transfer, restore permission, pre-lock writer retirement, native single-window acceptance, DFG002/008 resolution or JCR08 certification. Those remaining engineering exits stay actionable; owner/device/signing/private/live evidence remains deferred on its own dependent paths. Final submit remains user-only.
+
+
+## JCR-08 durable capsule in real install/rollback transaction — candidate pending
+
+Exact13c0400031279ad0500347b91b591fba3be2f0eb [CI36260197290](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36260197290) PASS: foundation108454426965 and hostedMac108454427133,215 packaged/journal cases each including all28 externally bound backup/decoder handoff cases; Mac also7 retired updater cases. No draft full-round certification.
+
+The next coherent batch connects that verified capsule to actual install and rollback entrypoints. Existing app-directory/worker/schema locks stay held from admission through final-path health/recovery; an internal locked backup primitive avoids reacquiring or temporarily releasing either task fence. Public stage_task_state_backup retains path validation and exclusive-lock behavior. Empty/new journals keep the existing compatibility path. A populated selected journal is backed up privately as standalone DELETE SQLite plus exact answer key, published receipt-last, then checked with the original returned receipt and candidate's real schema/typed decoder on a disposable copy before any bundle rename. Complete backup evidence is returned on success and later refusal/recovery, and completed capsules are retained rather than erased to hide a failed update. No profile/token/log copy and no backup restore.
+
+Eight added actual entrypoint/fault cases plus strengthened four retained real update cases cover original WAL/tasks/events/complete encrypted history/key, candidate destructive row/schema/decoder refusal, receipt publication with unknown artifact preserved, capsule key drift before candidate execution, rejected candidate, successful real packaged rollback, and final-path health failure restoring the original app while retaining the failed candidate and verified capsule. Existing live-worker/schema/legacy-service/continuity/alias/concurrency and all capsule negatives remain. New exact-head Ubuntu/hostedMac targeted evidence pending; no unchanged-head/full rerun.
+
+This closes an integration prerequisite only after cloud proof. It does not transfer to a new state root, retire a historical pre-lock process, restore an older journal over newer confirmed task values, implement the native single-window shell, close DFG002/008 or certify JCR08/device/channel. Backup activation remains NOT_AUTHORIZED and legacy writer retirement NOT_CERTIFIED; source state remains unchanged authority. Signing/private/live evidence remains deferred only on its dependent paths; final submit user-only.
+
+
+## JCR-08 truthful expired-session consumer interaction — coherent candidate
+
+Exact dffcf19b35ac1eadd4730cfd22cbe8d1413f2bd1 / CI36261320896 PASS: Ubuntu foundation108457568287 and hostedMac108457568497,223 packaged/journal cases each including the8 actual capsule/install/rollback failures and successful rollback; Mac also7 retired updater entrypoints. Full-round suite skipped while draft; JCR08 remains IN_PROGRESS and consumer NOT_CERTIFIED.
+
+Independent consumer engineering now handles the supervisor's existing authenticated UI API401 boundary explicitly. The first401 latches a permanent notice on the old page, marks connection/session truthfully, retains unsent non-OTP field/form/message values locally as read-only selectable text, disables old actions, clears cached private review and diagnostics, and refuses further reads/mutations from polling or old action callbacks. A late formerly authorized response cannot repaint private values or reopen diagnostics. There is no automatic authentication refresh, ticket reuse, action replay or task mutation. Message input is cleared only after confirmed successful chat response; refused/unconfirmed messages remain local, with truthful status. Existing OTP nonretention and user-only final submit remain.
+
+Six additional targeted cloud browser cases cover401 from state/readiness/diagnostics/task command/chat and an outstanding diagnostics200 arriving after another request reports expiry. They require durable notice/focus, exact unsent values, cleared private review, all action controls disabled, zero subsequent request even through existing callback entrypoints, no clipboard or external request, and no POST beyond the refused original command/chat. The existing actual relocated unsigned app/owned runtime/service/browser oracle is strengthened on both existing app opens: delete only its synthetic HttpOnly cookie, invoke the actual diagnostics button, require real supervisor401, retained form/message and disabled actions, expired HTML admission and consumed ticket refusal. No extra app build or removed fixture/test.
+
+The existing foundation diagnostics browser step expands its selection only by expired_session; all prior checks and both hosted platforms' real packaged-entry oracle remain. Server expiration policy/one-use ticket/HttpOnly/SameSite/Host/Origin/token gates are unchanged. New stable head affected proof pending; no unchanged-head rerun/full certification. This closes the local consumer session-loss interaction only after cloud proof; native single-window shell, full task/onboarding/final-review/scale, new-root legacy state transfer/pre-lock process retirement and DFG002/008 remain engineering exits. Signing/owner-device/private/live gates remain deferred only on their dependent paths.
+
+## JCR-08 session-loss oracle root-cause repair — candidate pending
+
+Exact79ca8bfeabcc03ecb6bbe46b7400494f16bd52df / CI36262518597 failed. Ubuntu foundation108460921069 passed25 privacy/no-submit,137 independent review/browser and43 operations; session selection6/7 passed. The command parameter sent zeroPOST before expiry. Static production-path review identifies crypto.randomUUID before the command request: the routed http://expired-ui.test origin is not trustworthy, unlike production http://127.0.0.1, and cannot satisfy its secure-context API contract. The fixture now uses intercepted HTTPS, asserts secure context/randomUUID and no pageerror, and retains the exact original commandPOST requirement. Background polling stays active; first injected401 is deterministically the parameter's endpoint, all later API requests are401. All five trigger cases, late200/private clearing, exact unsent input, focus and zero-replay assertions remain.
+
+HostedMac108460921054 passed222/223 packaged/journal cases; the actual app/browser session-loss journey exhausted its unchanged30s app subprocess deadline, not a service/FQDN failure. Current oracle cleared a real HttpOnly cookie before registering a diagnostic response and clicking a control: an intervening real state/readiness401 can correctly disable that button, leaving the test waiting for an action it must refuse. Repair registers the first actual UI API401 response before cookie loss, then invokes the existing read-only readiness entrypoint while all actual polling remains active. Actual app/standalone runtime/supervisor/browser and real cookie loss remain; no route is stubbed, no authentication refreshed, no disabled action forced. Real diagnostics401/body is separately required using the same cookie-less browser context, in addition to the retained authorized keyboard-diagnostics journey, input/copy/private/action checks, two actual app opens and one-use-ticket/UI admission refusals.
+
+This is bounded test/environment classification based on production-path review; cloud execution must confirm the new oracle. No product/runtime/workflow/deadline changes, skipped/deleted tests, changed success expectations, smaller fixtures or unchanged-head rerun. All prior app/task/privacy/update/capsule evidence remains required. JCR08 IN_PROGRESS, consumer NOT_CERTIFIED; full round and remaining independent engineering gates stay open. Final submit user-only.
+
+
+## JCR-08 actual archive launch — bounded diagnostic after repeated failure
+
+Exact3e0744ad72025a1df7ea93949dda4eb5e7895e81 / CI36263218544: Ubuntu foundation108462859522 proves all7 session/diagnostics selected browser cases PASS, alongside25 privacy/no-submit,137 review/browser and43 operations. Secure-origin command and deterministic first401 classification is confirmed. Both actual archive gates still fail at the outer app subprocess30s deadline: Ubuntu and hostedMac108462859288 each222/223 packaged/journal PASS, sole real_archive_relocates failure. Full draft round remains unrun.
+
+The earlier cookie/poll race hypothesis does not explain the remaining launch timeout and is not accepted as its root cause. Existing logs expose only the outer subprocess, hiding the last browser assertion because the actual URL-opening helper writes elsewhere. After repeated failure, stop behavioral trial-and-error. The next diagnostic candidate adds fixed browser phase/timing and exception class only, plus includes that bounded report in the existing deadline failure. It separates actual launch/owned browser/ticket/authenticated state/readiness/keyboard diagnostic/update refusal/unsent input/cookie-loss/API401/notice/diagnostic refusal/browser-close checkpoints. No URLs/tickets/cookies/tokens/inputs/diagnostic values/raw exception messages are emitted; only this synthetic oracle writes the report. Actual app/runtime/supervisor/HTTP code, all assertions and deadlines remain unchanged. No workflow/timeout/FQDN workaround, extra build, removed or skipped test, unchanged-head rerun or certification claim. Candidate cloud execution is required to identify the actual failing stage before any further behavioral repair.
+
+JCR08 remains IN_PROGRESS, consumer NOT_CERTIFIED; per-action server-draft reconciliation/DFG002, unsupported-driver DFG008, native shell/full task/new-root legacy transfer/retirement remain independent engineering. Final submit user-only.
+
+
+## JCR-08 bounded archive readback and per-field intent batch — 2026-09-26
+
+Writer remains sole draft PR20. Exact diagnostic parent a95372ce01ec4aa8f57e4c0508a28538f2bd8b90 / CI36263998792 failed only the actual archive app case after222 packaged passes on each platform. All7 session cases and25/137/43 foundation tests passed. Fixed phase evidence: Ubuntu first_real_api401 at0.647s; hosted Mac first_real_api401 at2.035s; both then hit the unchanged30s outer deadline while the probe called the page response's JSON body. This is a test readback lifecycle failure after actual UI API401 headers, not evidence of service startup, FQDN, HTTP readiness or runner provisioning failure. The UI deliberately refuses an unauthorized fetch at headers. Same-route real APIRequestContext GET with the actual cookie jar now verifies full status401/error body; the page's first401 status, GET method, visible/focused expiry notice, preserved exact unsent inputs, disabled actions, diagnostics/UI/ticket401, no external requests/errors, two executable opens/service writer identity and unchanged deadline remain asserted. No route/auth/UI stub or runtime workaround is added. This targeted repair requires fresh PASS before root-cause closure; no unchanged rerun.
+
+Independent DFG-002 engineering adds value-free field_actions to the existing task journal. OperationalAudit is bound to the same coarse run attempt before ApplicationExecutor.run; its hooks reach the production default driver. Intent commits before each bounded field operation, and owned readback records DOM_READBACK_UNVERIFIED only after exact control identity/value and a live lease. Uncertain primitive/readback/partial driver refusal records UNKNOWN_OUTCOME and stops subsequent writes. Interrupted intent remains durable across queue reconstruction; field uncertainty prevents coarse return/checkpoint publication, and existing coarse UNKNOWN_OUTCOME/no-blind-replay remains authoritative. A completed document/field digest cannot repeat within the same run. No values, labels, URLs, arbitrary sources or exception messages are persisted; identity is only document-epoch/field-id/selector SHA256. DOM observations never become server-save proof, a certificate, resume permission or final-submit authority. Unsupported generic upload and unproved site/row/component drivers remain refused.
+
+Ten direct tests cover restart/lease loss, unfinished run return/replay refusal, typed outcomes/idempotence/conflict, arbitrary payload rejection, real browser intent-before-input and readback failure stopping the second field/no submit, privacy canaries and production ApplicationExecutor→OperationalAudit wiring and real same-selector/new-document isolation. Existing dynamic all-table snapshot/compatibility checks include the new authority table; existing223 release/rollback/journal cases retained. Draft foundation adds only this affected test file; full round cadence unchanged. New batch verification is NOT_RUN until exact-head cloud results. DFG-002 remains ENGINEERING_DEBT for server draft reconciliation and other action kinds; DFG-008 and native shell/remaining onboarding/task journeys remain open. JCR08 IN_PROGRESS, consumer NOT_CERTIFIED; JCR09 NOT_STARTED; final submit user-only.
+
+
+## JCR-08 coherent packaged provenance diagnostics — 2026-09-26
+
+Previous exact head e8fe3a0b4033e6224e7ef4ea9c7383be2390a383: [CI36264906196](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36264906196) SUCCESS. Ubuntu108467608217 and hostedMac108467608099 both223 packaged/transaction/state/distribution cases PASS; Ubuntu147 review/browser includes10 new per-field durable intents,43 operations,7 session cases; Mac7 retired updater public/module cases PASS. Full round-boundary test job was intentionally not selected for this still-draft engineering head; no full certification/merge/JCR08 COMPLETE claim.
+
+Bounded previous app failure is closed at its observed test lifecycle: real401 headers were reached in0.647/2.035s, but the UI abandons unauthorized page response bodies. A same-route read-only request with the actual cookie jar supplies the complete error-body oracle. Both platforms prove actual app opening, cookie expiry, exact unsent inputs, disabled actions, recovery and repeat-open ownership. No timeout increase, weakened hostedMac requirement, runtime workaround or unchanged-head rerun.
+
+Next coherent candidate addresses independent packaged runtime/dependency provenance diagnostics. Installed source is recognized even if its manifest is removed, refuses aliases and never falls back to Git. Diagnostics preserve the startup loaded_source identity while separately revalidating current source, owned runtime payload and requirements digest, interpreter ownership and explicit payload-integrity-only/unsigned scope. Changed source/runtime reports fixed safe recovery causes rather than unknown Git version or a false loaded-version match. The operation never executes a candidate interpreter, mutates applicant state or obtains live credentials.
+
+9 real manifest/byte cases cover no Git/subprocess dependence, unchanged state, missing source/runtime receipts, source or dependency tampering, unexpected Git payload, runtime alias, loaded source vs new valid disk source, and manifest replacement during verification. The unchanged full real relocated-app browser oracle additionally requires current source/runtime/requirements integrity and genuinely app-owned interpreter in its actual keyboard-opened diagnostics. No synthetic integrity fixture is claimed as native/process startup evidence.
+
+Candidate targeted checks are NOT_RUN until fresh exact-head Actions results. Signing/live/device remain external; native singlewindow/onboarding/full task journeys, compatible legacy-root authority transfer/retirement, DFG002 actual server draft/other side effects and DFG008 certified driver work remain IN_PROGRESS. final_click_actor=user; submit_capability=false.
+
+
+## JCR-08 packaged diagnostic credential boundary — bounded root repair
+
+Parent3ae689b9d383b3142cb504bb9914bb5a120d190e / CI36266407649: Ubuntu foundation108471819767 PASS25 no-submit/privacy and147 review/browser; operations51PASS/1FAIL, new current-drift test. Failure stack: collect_diagnostics -> DeepSeekMapper.__init__ -> _keychain_key -> subprocess.run(["security","find-generic-password",...,"-w"]). Its retained no-Git/no-subprocess assertion exposed a production diagnostic dependency, even with disabled provider settings. This is not a runner allocation, service hostname, HTTP or timeout failure. HostedMac108471819845 was still executing the real223 packaged cases at this checkpoint, not assumed PASS.
+
+The diagnostic path now observes the already-loaded manager provider's availability. It never instantiates another client, reads a new Keychain credential, invokes a model or updates provider configuration. Report explicitly says loaded_configuration; it is not a live remote connectivity claim. Missing/failed provider state is false with fixed provider_unavailable recovery, without raw exception text. The original privacy test retains its available/no-warning expectations by configuring the existing provider object, rather than intercepting a forbidden newly-created client.
+
+All9 real-manifest/no-process/integrity/drift/alias/concurrency cases and all strengthened relocated-app assertions remain. Three new available/unavailable/exception cases additionally prohibit Keychain reads and model calls and require exact provider status, payload identity, unchanged task/events, no private values and no-submit. No assertion is removed or relaxed; no workflow/timeout/test selection/fixture size is changed.
+
+New coherent repair candidate targeted evidence remains NOT_RUN until fresh exact-head CI. No unchanged-head rerun/full round certification/merge claim. JCR08 native/full task/onboarding/compatible legacy-root transfer/retirement, DFG002 server reconciliation/other actions and DFG008 remain open; final_submit is user-only.
+
+Parent hostedMac108471819845 subsequently completed SUCCESS: all223 packaged cases (including the strengthened actual standalone app diagnostic payload/owned interpreter assertions) passed in278.64s; all7 retired updater public/module checks passed. This confirms the installed real app path on parent3ae, while Ubuntu's credential-read prohibition still requires the repaired candidate. No parent full certification or aggregate PASS is claimed.
+
+
+## JCR-08 bounded loaded-provider and partial-form observation repair
+
+Parent3f00d8621951624a0070455fd6146684a5e298de / CI36266931184: Ubuntu foundation108473292972 PASS25 privacy/no-submit and147 review/browser, then51PASS/4FAIL operations. All four failures are setup AttributeError because ManagerController.provider is a read-only property. Bounded source diagnosis also confirms its lazy getter constructs DeepSeekManagerProvider when _provider is None; reading that getter was NOT a complete credential-boundary repair. No unchanged-head rerun, speculative timeout/workflow change, removed assertion or claimed whole-CI PASS. HostedMac108473293116 passed223 packaged cases at19:49:05UTC and7 retired entry cases at19:49:07UTC. Parent cloud evidence is retained as affected scope only.
+
+ManagerController.loaded_provider_state now reads the already stored _provider without touching the lazy getter. It reports available/unavailable/not_loaded, only a boolean and fixed state; exception details never escape. Diagnostics use this API and preserve loaded_configuration basis, source/runtime verification and user-only final submit. Fixtures configure providers through the real controller constructor, keeping the original positive privacy assertions. Four parameterized available/unavailable/fault/not_loaded cases prohibit a new provider constructor, Keychain, model invocation and every diagnostic subprocess; require safe status, unchanged tasks/events and no private canary leakage. Existing9 manifest/drift/alias/concurrency cases and all223 packaged oracles remain intact.
+
+Independent DFG-008 engineering diagnosis: discover_fields sliced the matched-control list at350 and native options at200 before returning an apparently complete observation. A hidden350-control prefix could conceal a visible required field; a201-option select could omit a canonical choice. Bounds remain unchanged to preserve performance. The same in-page snapshot now detects whether collection is complete before filtering, exposes only a completeness boolean, and includes it in the observation digest. Partial observation cannot bind a fill plan, infer an empty entry page, start/fill/save/navigate an application, or pass post-fill validation. Direct discovery refuses it. Each field action rechecks current counts before its primitive, so a redraw exceeding bounds stops later writes; post-fill re-observation cannot authorize new actions from a partial snapshot.
+
+Six new cases:351 controls,350-hidden prefix plus visible required control,201 select options, exact350-controls/200-options positive native choice, growth from2 to351 controls stopping later writes, and partial/complete digest separation with private canaries. Negative application fixtures prohibit all field/start/save/navigation effects; actual browser counters and retained full-size DOM confirm no submit. Exact-boundary positive remains DOM_READBACK only. Every old browser test is retained unchanged; no test or fixture is shrunk, assertions not weakened. No new certified external ATS/server draft/page advance/attachment/row capability or completed DFG008 is claimed.
+
+New coherent candidate targeted checks are NOT_RUN pending its one fresh automatic cloud run. Workflow selection/timeout is unchanged, heavy full suite not triggered while draft. JCR08 remains IN_PROGRESS/consumer NOT_CERTIFIED; native single-window/full task/onboarding, genuine compatible legacy-root ownership transfer/retirement, DFG002 server reconciliation/other action types, dedicated DFG008 drivers remain independent open engineering. Signing/real owner-device/live gates remain deferred only on dependent paths. Final submit permanently user-only.
+
+## JCR-08 exact-head affected batch proof — c5e261c
+
+Head c5e261cca7997f5a3c85353d7de0289a12370de0 / CI36267715675 SUCCESS:
+Ubuntu foundation108475462753:25 privacy/no-submit,153 independent review/browser
+including all6 new full-size form completeness cases,56 operations including all4
+loaded-provider/no-credential cases,7 selected session/diagnostics and223
+packaged/activation/rollback/state/distribution cases PASS. HostedMac108475462606:
+223 packaged cases and7 retired updater entries PASS. Compile/JS/diff guards PASS.
+The no-lazy-initialization diagnostic path and explicit partial-form refusal are
+now supported by exact-head cloud evidence, not only static review. No unchanged
+rerun; full round-closure suite intentionally unrun while draft. This does not
+close JCR08, certify a native app window/server-save/dedicated external driver,
+or authorize final submit.
+
+## JCR-08 shared in-memory consumer presentation batch
+
+The existing healthy service UI and independent bootstrap were each hardwired
+to webbrowser.open. A native single-window host could not use those production
+readiness/identity/recovery paths without also opening an external browser. This
+batch adds a production ConsumerSurface contract and trusted in-process presenter
+to open_ui, launch_consumer and open_bootstrap. The ordinary browser entry remains
+compatible; an app presenter receives the same actual one-use UI admission or
+owned independent recovery page without another browser window.
+
+Port/type/origin/path/query checks run before issuing a ticket or starting a
+service for invalid input. Factory descriptors are fixed loopback/known-route
+only, URL-encode opaque credentials, suppress repr/raw exception output and expose
+a credential-free summary. App presentation must return exact True; failure,
+truthy mappings and exceptions are safely refused without fallback or repeat.
+Recovery handoff is limited to the initial recovery origin and the caller's
+known service origin; generic external/file/JavaScript/unknown local routes are
+not approved. The existing source/runtime validation, loaded-release mismatch
+restart fences, bootstrap ownership/health handshake, auth/one-use/HttpOnly
+cookies, no-submit and service-safe-point semantics remain.
+
+22 added targeted cases retain every existing consumer/package test: actual
+supervisor one-use ticket→HttpOnly session→real dashboard with external browser
+forbidden and ticket reuse401; repeat admission/private summary/unchanged
+task/events; three refused/malformed/exception presenter outcomes; four invalid
+ports before any action; eleven wrong origin/credential/path/query boundaries;
+opaque credential encoding/known recovery navigation; missing model still
+presented through the production launch route; and two production launch calls
+under injected service-start failure→real independent bootstrap process→actual
+authenticated recovery pages inside the app presenter, same owned recovery
+process/private record and no service/task writer. The latter is transport/
+readiness integration using a synthetic app host, not a real NSWindow/WKWebView.
+
+The new stable candidate remains NOT_RUN until its one automatic targeted cloud
+CI. No workflow, timeout, fixture shrink, skipped test, full suite, owner device
+or live account change. This is the shared app-host presentation foundation,
+not a shipped or certified native window: compiled native host, window reuse,
+persisted app context, keyboard/clipboard/zoom/accessibility and native hosted
+journey remain open with full task/onboarding/legacy transfer/DFG002/008 exits.
+JCR08 IN_PROGRESS, consumer NOT_CERTIFIED, JCR09 NOT_STARTED, final submit user-only.
+
+## Exact app presenter checkpoint — PASS
+
+Exact head3ee2fdd92a9b97c6a25818cbbc4e48aa5bedd4d9
+[CI36268765237](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36268765237)
+SUCCESS. Ubuntu foundation108478557972:25 privacy/no-submit,153 review/browser,
+56 operations,7 session/diagnostic and245 packaged/transaction/state/distribution
+PASS. HostedMac108478557840:245 packaged cases in368.51s and7 retired updater
+public/module cases PASS. All22 new app presentation cases execute on both
+platforms alongside every existing actual relocated archive/executable/service/
+headless UI/rollback oracle. Compile/JS/diff PASS; draft full-round job remains
+intentionally unrun. This proves the shared presentation transport/readiness
+foundation; synthetic app callbacks/direct HTTP do not prove NSWindow/WKWebView
+or a completed native consumer window. No unchanged-head rerun.
+
+## JCR-08 recovery admission — bounded production root and coherent repair
+
+Source review of the actual bootstrap POST /retry proves a distinct admission
+path: it called lifecycle start/health and issued a UI ticket on generic ok
+without the normal consumer launch's installed source/runtime verification or
+loaded_source_sha256 takeover fence. The initial release_unverified/mismatch
+page reason was only explanatory text; it did not prevent a later retry from
+admitting a damaged package or a healthy daemon loaded from another release.
+This is a production path gap, not a timeout, DNS, runner or browser oracle issue.
+
+Normal launch and authenticated recovery now share current disk identity plus
+service admission. A removed/damaged source or existing damaged/aliased runtime
+refuses before lifecycle actions. A healthy daemon with stale/missing loaded
+source identity must stop at the existing safe checkpoint, restart and match the
+current expected source digest; refusal or mismatch cannot mint a UI ticket.
+Disk identity is revalidated after startup/takeover before capability issuance,
+so source drift during startup is refused. Final verified health is authoritative
+even after an earlier start timeout. The retry redirect uses the shared validated
+ConsumerSurface dashboard factory. Existing authenticated Host/Origin/token,
+private bootstrap ownership/reuse, browser/app presenter and no-submit fences
+remain; no new owner data/permissions/system/browser authority is added.
+
+Ten direct production recovery HTTP cases use actual deterministic source/runtime
+manifests and the real independent recovery handler/server/credential publication:
+removed manifest, source bytes changed, runtime bytes changed, runtime alias,
+safe-point restart refusal, stale-after-restart, missing loaded digest, verified
+takeover, final healthy-after-timeout and source drift during startup. Service/
+ticket responses are injected fault boundaries; these are not whole native app/
+service process proofs. Actual unauthenticated GET403 is the server readiness
+handshake; authenticated same-origin POST must return503 without UI admission or
+303 only after matching health. Task/event authority and private canary survive;
+all previous actual child/archive/service/HttpOnly/browser/package cases remain.
+
+New stable repair candidate is NOT_RUN until its single automatic targeted cloud
+CI. No full certification, shortened fixture, removed assertion, skipped test,
+workflow/timeout/rerun/live operation or native-window claim. JCR08 IN_PROGRESS,
+consumer NOT_CERTIFIED; native/full task/onboarding/legacy transfer/retirement/
+DFG002/008 independent engineering stays open; final-submit user-only.

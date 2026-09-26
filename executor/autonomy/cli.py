@@ -16,8 +16,10 @@ from pathlib import Path
 from ..otp.bridge import OtpBridge
 from ..browser import browser_mode, ensure_chrome
 from .queue import RUNTIME, TaskQueue, private_dir
+from .process_entry import isolated_cli_command
 from .supervisor import Supervisor, create_server, local_token
 from .worker import ProcessLock, Worker
+from .consumer_presentation import ConsumerSurface, loopback_origin, present_surface
 
 
 def request(root, port, path, data=None):
@@ -62,7 +64,7 @@ def lifecycle(action, root, port):
             info = json.loads(state.read_text())
             pid = int(info["pid"])
             # Refuse stale PID reuse: exact module and runtime must be present.
-            command = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+            command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
             if "executor.autonomy.cli" in command and "serve" in command and str(Path(root).resolve()) in command:
                 os.kill(pid, signal.SIGTERM)
                 for _ in range(100):
@@ -85,7 +87,7 @@ def lifecycle(action, root, port):
         log = Path(root) / "service.log"
         with log.open("ab") as stream:
             log.chmod(0o600)
-            child = subprocess.Popen([sys.executable, "-m", "executor.autonomy.cli", "--runtime", str(Path(root).resolve()), "--port", str(port), "serve"],
+            child = subprocess.Popen(isolated_cli_command("--runtime", str(Path(root).resolve()), "--port", str(port), "serve"),
                 cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL, stdout=stream, stderr=stream, start_new_session=True)
         for _ in range(50):
             if child.poll() is not None:
@@ -97,35 +99,72 @@ def lifecycle(action, root, port):
         return {"ok": False, "reason": "health_timeout"}
 
 
-def open_ui(root, port):
+def open_ui(root, port, *, presenter=None):
+    loopback_origin(port)  # Validate before issuing any local session capability.
     ticket = request(root, port, "/v1/ui-ticket", {})["ticket"]
-    opened = webbrowser.open(
-        f"http://127.0.0.1:{port}/ui-login?ticket={ticket}",
-        new=2,
-    )
-    return {"ok": bool(opened), "opened": bool(opened)}
+    surface = ConsumerSurface.dashboard(port, ticket)
+    opened = present_surface(surface, presenter=presenter)
+    return {"ok": opened, "opened": opened}
 
 
-def launch_consumer(root, port):
+def _consumer_release_identity():
+    """Current disk identity for both ordinary launch and recovery retry."""
+    from .release import is_packaged_source, read_release_identity, verify_runtime_candidate
+    source = Path(__file__).resolve().parents[2]
+    identity = read_release_identity(source)
+    expected = identity.get("source_sha256") if identity.get("status") == "verified" else ""
+    packaged = is_packaged_source(source)
+    app_runtime = source.parent / "runtime"
+    if packaged and (app_runtime.exists() or app_runtime.is_symlink()) and not verify_runtime_candidate(app_runtime, source):
+        expected = ""
+    return {"packaged": packaged, "expected": expected}
+
+
+def _start_consumer_service(root, port):
+    """Revalidate recovery admission; an old reason is never launch authority."""
+    loopback_origin(port)
+    identity = _consumer_release_identity()
+    expected = identity["expected"]
+    if identity["packaged"] and not expected:
+        return {"ok": False, "reason": "release_unverified"}, {"ok": False}
+    started = lifecycle("start", root, port)
+    health = lifecycle("health", root, port)
+    if expected and health.get("ok") and health.get("loaded_source_sha256") != expected:
+        restarted = lifecycle("restart", root, port)
+        health = lifecycle("health", root, port)
+        if not restarted.get("ok") or health.get("loaded_source_sha256") != expected:
+            return {"ok": False, "reason": "release_mismatch"}, {"ok": False}
+    # Recheck after service startup/safe-point takeover, before minting a UI
+    # capability. A changed/broken installed source cannot enter via recovery.
+    if _consumer_release_identity() != identity:
+        return {"ok": False, "reason": "release_unverified"}, {"ok": False}
+    return started, health
+
+
+def launch_consumer(root, port, *, presenter=None):
+    loopback_origin(port)
     from .consumer import humanize_preflight
     from .preflight import collect_live_preflight
 
+    # Check disk integrity before starting an owned browser, then revalidate
+    # again through the shared service/recovery admission path.
+    identity = _consumer_release_identity()
     live_mode = browser_mode() not in {"test", "isolated", "headless"}
-    if live_mode:
+    if live_mode and (not identity["packaged"] or identity["expected"]):
         try:
-            # Browser startup is a repair attempt, not a gate to the local UI.
             ensure_chrome()
         except Exception:
             pass
-    started = lifecycle("start", root, port)
-    health = lifecycle("health", root, port)
+    started, health = _start_consumer_service(root, port)
     result = collect_live_preflight(
         supervisor_running=bool(health.get("ok")),
     )
     if not health.get("ok"):
         from .bootstrap import open_bootstrap
 
-        bootstrap = open_bootstrap(root, port, str(started.get("reason") or "service_unavailable"))
+        reason = str(started.get("reason") or "service_unavailable")
+        bootstrap = (open_bootstrap(root, port, reason) if presenter is None else
+                     open_bootstrap(root, port, reason, presenter=presenter))
         return {
             **result,
             "message": humanize_preflight(result),
@@ -135,7 +174,8 @@ def launch_consumer(root, port):
         }
 
     try:
-        ui = open_ui(root, port)
+        ui = (open_ui(root, port) if presenter is None else
+              open_ui(root, port, presenter=presenter))
     except Exception:
         ui = {"ok": False, "opened": False}
     return {
@@ -154,8 +194,10 @@ def main(argv=None):
     parser.add_argument("--runtime", type=Path, default=RUNTIME)
     parser.add_argument("--port", type=int, default=9344)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch", "install-app"):
+    for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch"):
         commands.add_parser(name)
+    installer = commands.add_parser("install-app")
+    installer.add_argument("--standalone-runtime", type=Path)
     bootstrap = commands.add_parser("bootstrap-serve")
     bootstrap.add_argument("--reason", default="service_unavailable")
     preflight = commands.add_parser("preflight")
@@ -200,7 +242,9 @@ def main(argv=None):
         elif args.command == "install-app":
             from .consumer import install_macos_app
 
-            result = install_macos_app(Path(__file__).resolve().parents[2])
+            options = ({"standalone_runtime": args.standalone_runtime}
+                       if args.standalone_runtime is not None else {})
+            result = install_macos_app(Path(__file__).resolve().parents[2], **options)
         elif args.command == "enqueue":
             result = request(args.runtime, args.port, "/v1/tasks", json.loads(args.file.read_text()))
         elif args.command in {"tasks", "events"}:

@@ -125,6 +125,22 @@ class OperationalAudit:
         path.chmod(0o600)
         return path
 
+    def bind_run_attempt(self, queue, attempt_id):
+        self.action_queue, self.action_attempt_id = queue, attempt_id
+
+    def begin_field_action(self, field_id, selector, *, document_epoch):
+        self.guard()
+        # Hash only control identity. Never persist its value, label, source,
+        # URL, exception message, or any authentication input.
+        identity = json.dumps([document_epoch, field_id, selector], ensure_ascii=True, separators=(",", ":"))
+        return self.action_queue.begin_field_action(
+            self.action_attempt_id, hashlib.sha256(identity.encode("utf-8")).hexdigest())
+
+    def finish_field_action(self, action_id, outcome):
+        if outcome == "DOM_READBACK_UNVERIFIED":
+            self.guard()
+        self.action_queue.finish_field_action(action_id, outcome)
+
     def record_action(self, action):
         self.guard()
         # Queue events already record transitions. Do not retain arbitrary action text.
@@ -150,6 +166,7 @@ class Worker:
         self.stop_event = threading.Event()
         self.answers = {}
         self.answers_lock = threading.RLock()
+        self.question_contexts = {}
         self.review_lock = threading.RLock()
         self.review_cache = {}
         self.answer_store = TaskAnswerStore(queue)
@@ -157,6 +174,47 @@ class Worker:
         self._otp_watch_lock = threading.RLock()
         self._otp_watchers = set()
         self._otp_watch_retry_after = {}
+
+    def _remember_question_context(self, tid, plan, revision):
+        """Keep raw site labels in daemon memory for the authenticated local UI only."""
+        items = []
+        seen = set()
+        for field in plan.unresolved_fields:
+            key = field.canonical_key or field.field_id
+            label = field.label.strip() if isinstance(field.label, str) else ""
+            scope = field.scope_sha256
+            if (not isinstance(key, str) or not IDENTIFIER.fullmatch(key)
+                    or key in seen or not label or len(label) > 300
+                    or scope is not None and (not isinstance(scope, str)
+                        or len(scope) != 64
+                        or any(ch not in "0123456789abcdef" for ch in scope))):
+                items = []
+                break
+            seen.add(key)
+            items.append({"key": key, "label": label, "required": field.required,
+                          "scope_sha256": scope})
+        with self.answers_lock:
+            self.question_contexts.pop(tid, None)
+            if items:
+                self.question_contexts[tid] = {
+                    "revision": revision,
+                    "target_sha256": hashlib.sha256(plan.target_url.encode("utf-8")).hexdigest(),
+                    "items": items,
+                }
+
+    def question_context(self, tid, revision):
+        """Never return a label for a stale task, changed target, or partial set."""
+        task = self.queue.get(tid)
+        with self.answers_lock:
+            context = copy.deepcopy(self.question_contexts.get(tid))
+        if (not context or task["stage"] != "NEEDS_USER_INPUT" or task["owner"]
+                or task["revision"] != revision or context["revision"] != revision
+                or context["target_sha256"] != hashlib.sha256(
+                    task["spec"]["target_url"].encode("utf-8")).hexdigest()
+                or set(task["details"].get("unresolved_keys", [])) !=
+                    {item["key"] for item in context["items"]}):
+            return None
+        return {"status": "current", "items": context["items"]}
 
     def _remember_private_review(self, tid, runner, plan, revision):
         snapshot = getattr(runner, "private_review_snapshot", None)
@@ -421,6 +479,7 @@ class Worker:
         resumed = self.answer_store.save_and_resume(
             tid, normalized, expected_revision=expected_revision, remember=remember)
         with self.answers_lock:
+            self.question_contexts.pop(tid, None)
             self.answers.setdefault(tid, {}).update(normalized)
         if remember:
             resumed["fact_reuse_status"] = (
@@ -551,9 +610,17 @@ class Worker:
                     assets[key] = _task_attachment_asset(key, path, assets.get(key))
                     runner.plan.attachments[key] = path
             attempt_id = self.queue.begin_run_attempt(tid, owner)
+            audit.bind_run_attempt(self.queue, attempt_id)
+            with self.answers_lock:
+                self.question_contexts.pop(tid, None)
             plan = runner.run()
             stage, blocker = outcome(plan)
+            # Refuse an unresolved field before publishing a runnable/ready
+            # checkpoint or releasing its lease.
+            self.queue.require_field_action_readbacks(attempt_id)
             checkpoint(stage, blocker=blocker, details={"unresolved_keys": [x.canonical_key or x.field_id for x in plan.unresolved_fields], "review_certificate": plan.metadata.get("review_certificate")}, release=True)
+            if stage == "NEEDS_USER_INPUT":
+                self._remember_question_context(tid, plan, self.queue.get(tid)["revision"])
             self.queue.finish_run_attempt(attempt_id, "RETURNED_UNVERIFIED")
             if stage == "READY_TO_SUBMIT":
                 try:

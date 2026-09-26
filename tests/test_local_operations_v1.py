@@ -4,13 +4,21 @@ import http.cookiejar
 import json
 import os
 import subprocess
+import sys
+from pathlib import Path
 import threading
 import time
+from datetime import datetime, timezone
 import urllib.request
 
 import pytest
 
 from executor.autonomy import diagnostics, updater
+
+# The canonical consumer contract retires public Git mutation entrypoints.
+# Historical engine cases below still exercise every existing safety failure,
+# timeout, restart, provenance and concurrency assertion through private retained
+# engine functions; no production consumer/CLI may dispatch those functions.
 from executor.autonomy.manager import ManagerController, ManagerTurn
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.supervisor import Supervisor, create_server
@@ -97,7 +105,9 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
         def __init__(self, *_):
             self.available = True
 
-    monkeypatch.setattr(diagnostics, "DeepSeekMapper", FakeMapper)
+    supervisor.manager = ManagerController(
+        q, worker, provider=FakeMapper(), settings=supervisor.manager.settings)
+    supervisor.release_identity = {"status": "verified", "source_sha256": "a" * 64}
     report = diagnostics.collect_diagnostics(
         supervisor,
         repo_root=tmp_path,
@@ -105,6 +115,11 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
     serialized = json.dumps(report, ensure_ascii=False)
 
     assert report["format"] == "application-executor-diagnostics-v1"
+    assert report["loaded_source"] == {
+        "verified_at_start": True, "sha256": "a" * 64
+    }
+    assert datetime.fromisoformat(report["captured_at_utc"]).tzinfo == timezone.utc
+    assert report["recovery"] == {"reason": "none", "action": "none"}
     assert report["system"]["cdp_alive"] is True
     assert report["system"]["deepseek_available"] is True
     assert report["system"]["otp_waiting_tasks"] == 1
@@ -119,6 +134,25 @@ def test_diagnostics_are_copy_safe_and_never_emit_buffered_otp(
         assert private not in serialized
     assert report["tasks"][0]["task"] == task["task_id"][:8]
     assert "target_host" not in report["tasks"][0]
+    monkeypatch.setattr(diagnostics.browser, "browser_mode", lambda: "CANARY_PRIVATE_MODE_VALUE")
+    bounded = diagnostics.collect_diagnostics(supervisor, repo_root=tmp_path)
+    assert bounded["system"]["browser_mode"] == "unknown"
+    assert "CANARY_PRIVATE_MODE_VALUE" not in json.dumps(bounded)
+
+
+def test_diagnostic_repository_state_redacts_local_branch_names(tmp_path, monkeypatch):
+    def fake_git(_repo, *args, **_kwargs):
+        if args == ("rev-parse", "HEAD"):
+            return "a" * 40
+        if args == ("branch", "--show-current"):
+            return "CANARY_PRIVATE_APPLICANT"
+        if args == ("status", "--porcelain", "--untracked-files=no"):
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(diagnostics, "_git", fake_git)
+    state = diagnostics.repository_state(tmp_path)
+    assert state == {"version": "a" * 12, "branch": "other", "worktree_clean": True}
 
 
 def _init_git_repo(path):
@@ -142,6 +176,65 @@ def _init_git_repo(path):
         check=True,
     )
     return tracked
+
+
+def test_packaged_app_never_invokes_legacy_git_updater(tmp_path, monkeypatch):
+    _queue, _worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {"status": "verified", "source_sha256": "a" * 64}
+
+    def forbidden_writer(**_kwargs):
+        raise AssertionError("packaged app must not launch the Git writer")
+
+    monkeypatch.setattr("executor.autonomy.supervisor.spawn_update", forbidden_writer)
+    result = supervisor.begin_update(9344)
+    assert result == {
+        "ok": False,
+        "status": "denied",
+        "reason": "packaged_update_not_ready",
+    }
+
+
+def test_unverified_packaged_app_never_invokes_legacy_git_updater(tmp_path, monkeypatch):
+    _queue, _worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {"status": "unverified", "source_sha256": ""}
+    monkeypatch.setattr("executor.autonomy.supervisor.is_packaged_source", lambda _: True)
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.spawn_update",
+        lambda **_: pytest.fail("unverified packaged app must not launch Git updater"),
+    )
+    assert supervisor.begin_update(9344) == {
+        "ok": False, "status": "denied", "reason": "packaged_update_not_ready",
+    }
+
+
+def test_direct_legacy_updater_refuses_packaged_source_before_git_or_runtime_write(
+    tmp_path, monkeypatch
+):
+    release = tmp_path / "AI Manager.app" / "Contents" / "Resources" / "release"
+    release.mkdir(parents=True)
+    runtime = tmp_path / "runtime"
+
+    def forbidden_git(*_args, **_kwargs):
+        pytest.fail("packaged release must never reach Git")
+
+    monkeypatch.setattr(updater, "_git", forbidden_git)
+    monkeypatch.setattr(updater, "_run", forbidden_git)
+    monkeypatch.setattr(updater.subprocess, "Popen", forbidden_git)
+    assert updater.repository_update_preconditions(release) == {
+        "ok": False, "reason": "packaged_update_not_ready"
+    }
+    assert updater.spawn_update(repo_root=release, runtime=runtime, port=9344) == {
+        "ok": False, "status": "denied", "reason": "packaged_update_not_ready"
+    }
+    assert updater.perform_update(release, runtime, 9344) == 1
+    assert not runtime.exists()
+
+    # The bundle-layout fence survives a missing source manifest. A fake Git
+    # checkout cannot turn an installed app back into an in-place update target.
+    (release / ".git").mkdir()
+    assert updater.repository_update_preconditions(release)["reason"] == "packaged_update_not_ready"
+    assert updater.perform_update(release, runtime, 9344, restart_only=True) == 1
+    assert not runtime.exists()
 
 
 def test_updater_requires_clean_main_and_expected_origin(tmp_path):
@@ -225,7 +318,7 @@ def test_update_lock_serializes_concurrent_launches(tmp_path):
     try:
         second = updater.acquire_update_lock(runtime)
         assert second is None
-        denied = updater.spawn_update(
+        denied = updater._legacy_spawn_update(
             repo_root=tmp_path / "repo",
             runtime=runtime,
             port=9344,
@@ -379,8 +472,10 @@ def test_begin_update_waits_for_inflight_mutation_to_drain(tmp_path, monkeypatch
     update_thread.join(2)
 
     assert finished.is_set()
-    assert update_result["status"] == "started"
-    assert len(spawned) == 1
+    assert update_result == {
+        "ok": False, "status": "denied", "reason": "legacy_update_retired",
+    }
+    assert spawned == [], "drained mutation cannot admit the retired Git writer"
 
 
 def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
@@ -419,7 +514,7 @@ def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
         else (_ for _ in ()).throw(AssertionError(args)),
     )
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -457,7 +552,7 @@ def test_spawn_update_preserves_restart_retry_intent(tmp_path, monkeypatch):
 
     monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
 
-    result = updater.spawn_update(
+    result = updater._legacy_spawn_update(
         repo_root=repo,
         runtime=runtime,
         port=9344,
@@ -523,7 +618,7 @@ def test_restart_required_can_be_retried_when_code_is_already_current(
     monkeypatch.setattr(updater.subprocess, "run", fake_service)
     monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         runtime,
         9344,
@@ -568,7 +663,7 @@ def test_restart_only_bypasses_git_and_timeout_keeps_restart_fence(
     monkeypatch.setattr(updater, "_run", forbidden_git)
     monkeypatch.setattr(updater.subprocess, "run", fake_service)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -623,7 +718,7 @@ def test_failure_after_git_mutation_stays_restart_required(
     monkeypatch.setattr(updater, "_git", fake_git)
     monkeypatch.setattr(updater, "_run", fake_run)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -684,7 +779,7 @@ def test_update_check_uses_http11_and_leaves_code_unchanged_when_current(
     monkeypatch.setattr(updater, "_run", fake_run)
     monkeypatch.setattr(updater, "_git", fake_git)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -745,7 +840,7 @@ def test_fast_forward_update_restarts_service_and_records_success(
     monkeypatch.setattr(updater.subprocess, "run", fake_subprocess_run)
     monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -863,6 +958,46 @@ def test_ui_diagnostics_and_update_routes_require_valid_ui_session(
         thread.join()
 
 
+
+def test_update_state_readback_never_exposes_corrupt_private_text(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    private = "CANARY_PRIVATE_APPLICANT_VALUE"
+    (runtime / "update-state.json").write_text(json.dumps({
+        "status": "failed",
+        "old_version": private,
+        "new_version": private,
+        "reason": private,
+    }), encoding="utf-8")
+
+    state = updater.read_update_state(runtime)
+    assert state == {
+        "status": "failed",
+        "old_version": "",
+        "new_version": "",
+        "reason": "state_invalid",
+    }
+    assert private not in json.dumps(state)
+
+
+
+def test_update_state_readback_refuses_symlink_to_private_file(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    private = tmp_path / "private-applicant.txt"
+    private.write_text("CANARY_PRIVATE_APPLICANT_VALUE", encoding="utf-8")
+    (runtime / "update-state.json").symlink_to(private)
+
+    state = updater.read_update_state(runtime)
+    assert state == {
+        "status": "failed",
+        "old_version": "",
+        "new_version": "",
+        "reason": "state_invalid",
+    }
+    assert "CANARY_PRIVATE_APPLICANT_VALUE" not in json.dumps(state)
+
+
 def test_diagnostics_do_not_claim_clean_checkout_when_git_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(diagnostics, "_git", lambda *args, **kwargs: None)
     state = diagnostics.repository_state(tmp_path)
@@ -948,3 +1083,418 @@ def test_supervisor_fences_mutations_while_update_is_running(
     assert supervisor.dispatch("GET", "/v1/diagnostics", {})["format"] == (
         "application-executor-diagnostics-v1"
     )
+
+
+@pytest.mark.parametrize("task_gate", ["empty", "worker", "runnable", "otp", "security"])
+def test_consumer_retired_update_admission_never_spawns_checkout_writer(
+    tmp_path, monkeypatch, task_gate
+):
+    q, worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {"status": "unverified", "source_sha256": ""}
+    monkeypatch.setattr("executor.autonomy.supervisor.is_packaged_source", lambda _: False)
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.spawn_update",
+        lambda **_: pytest.fail("consumer must never admit the retired Git writer"),
+    )
+    monkeypatch.setattr(updater, "_run", lambda *a, **k: pytest.fail("no Git process"))
+    if task_gate == "worker":
+        worker.active = "synthetic-active"
+    elif task_gate != "empty":
+        task = q.enqueue(_spec(tmp_path))
+        if task_gate in {"otp", "security"}:
+            claimed = q.claim("synthetic-owner")
+            q.checkpoint(task["task_id"], claimed["owner"], "NEEDS_USER_ACTION",
+                         blocker="otp_waiting" if task_gate == "otp" else "security_challenge",
+                         release=True)
+    tasks, events = q.tasks(), q.recent_events(1000)
+    expected = {"worker": "worker_active", "runnable": "runnable_task_pending",
+                "otp": "otp_in_flight"}.get(task_gate, "legacy_update_retired")
+    assert supervisor.begin_update(9344) == {
+        "ok": False, "status": "denied", "reason": expected,
+    }
+    assert q.tasks() == tasks
+    assert q.recent_events(1000) == events
+    assert not (q.root / "updater.log").exists()
+    assert not (q.root / "update-state.json").exists()
+
+
+def test_authenticated_consumer_update_route_is_readonly_after_legacy_retirement(
+    tmp_path, monkeypatch
+):
+    q, _, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {"status": "unverified", "source_sha256": ""}
+    monkeypatch.setattr("executor.autonomy.supervisor.is_packaged_source", lambda _: False)
+    monkeypatch.setattr(
+        "executor.autonomy.supervisor.spawn_update",
+        lambda **_: pytest.fail("actual authenticated UI cannot launch Git writer"),
+    )
+    tasks, events = q.tasks(), q.recent_events(1000)
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+    )
+    try:
+        ticket_request = urllib.request.Request(
+            base + "/v1/ui-ticket", data=b"{}",
+            headers={"Authorization": "Bearer " + "x" * 40,
+                     "Content-Type": "application/json"}, method="POST")
+        with opener.open(ticket_request, timeout=5) as response:
+            ticket = json.load(response)["ticket"]
+        with opener.open(base + "/ui-login?ticket=" + ticket, timeout=5):
+            pass
+        for _ in range(2):
+            request = urllib.request.Request(
+                base + "/ui/api/update", data=b"{}",
+                headers={"Content-Type": "application/json", "Origin": base},
+                method="POST")
+            with pytest.raises(urllib.error.HTTPError) as refused:
+                opener.open(request, timeout=5)
+            assert refused.value.code == 409
+            assert json.load(refused.value) == {
+                "ok": False, "status": "denied", "reason": "legacy_update_retired",
+            }
+        with opener.open(base + "/ui/api/update-status", timeout=5) as response:
+            assert json.load(response)["status"] == "idle"
+        assert q.tasks() == tasks
+        assert q.recent_events(1000) == events
+        assert not (q.root / "updater.log").exists()
+        assert not (q.root / "update-state.json").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("packaged", [False, True])
+@pytest.mark.parametrize("existing_runtime", [False, True])
+def test_retired_public_updater_entries_are_readonly(
+    tmp_path, monkeypatch, packaged, existing_runtime
+):
+    repo, runtime = tmp_path / "code", tmp_path / "state"
+    repo.mkdir()
+    code = repo / "source-canary.py"
+    code.write_bytes(b"CODE_AUTHORITY_UNCHANGED\n")
+    if existing_runtime:
+        runtime.mkdir(mode=0o700)
+        for name in ["worker.lock", "migration.lock", "update.lock", "update-state.json",
+                     "tasks.sqlite3", "tasks.sqlite3-wal", "task-state.key"]:
+            (runtime / name).write_bytes(b"PRIVATE_STATE_CANARY_DO_NOT_READ_OR_WRITE")
+            (runtime / name).chmod(0o600)
+    def inventory(root):
+        return sorted((str(p.relative_to(root)), p.read_bytes(), p.stat().st_mode)
+                      for p in root.rglob("*") if p.is_file()) if root.exists() else None
+    before_code, before_state = inventory(repo), inventory(runtime)
+    monkeypatch.setattr(updater, "is_packaged_source", lambda _: packaged)
+    def forbidden(*args, **kwargs):
+        pytest.fail("retired entrypoint must not call the legacy writer or read state")
+    for name in ["_legacy_spawn_update", "_legacy_perform_update",
+                 "acquire_update_lock", "repository_update_preconditions",
+                 "runtime_safe_to_update", "read_update_state", "write_update_state",
+                 "_git", "_run", "_stop_service", "_start_service"]:
+        if hasattr(updater, name):
+            monkeypatch.setattr(updater, name, forbidden)
+    monkeypatch.setattr(updater.subprocess, "Popen", forbidden)
+    for _ in range(2):
+        assert updater.spawn_update(repo_root=repo, runtime=runtime, port=9344) == {
+            "ok": False, "status": "denied",
+            "reason": "packaged_update_not_ready" if packaged else "legacy_update_retired",
+        }
+        for restart_only in [False, True]:
+            assert updater.perform_update(repo, runtime, 9344,
+                                          restart_only=restart_only) == 1
+    assert inventory(repo) == before_code
+    assert inventory(runtime) == before_state
+
+
+@pytest.mark.parametrize("restart_only", [False, True])
+def test_retired_module_cli_refuses_before_runtime_or_inherited_lock_io(
+    tmp_path, restart_only
+):
+    repo, runtime = tmp_path / "legacy-code", tmp_path / "missing-state"
+    repo.mkdir()
+    code = repo / "source-canary.py"
+    code.write_bytes(b"OLD_CODE_CANNOT_BE_REPLACED\n")
+    inherited = tmp_path / "caller-owned-update.lock"
+    inherited.write_bytes(b"CALLER_LOCK_AUTHORITY")
+    inherited.chmod(0o600)
+    fd = os.open(inherited, os.O_RDWR)
+    original = (inherited.read_bytes(), inherited.stat().st_mode, inherited.stat().st_ino)
+    try:
+        command = [
+            sys.executable, "-m", "executor.autonomy.updater",
+            "--repo", str(repo), "--runtime", str(runtime), "--port", "9344",
+            "--lock-fd", str(fd),
+        ]
+        if restart_only:
+            command.append("--restart-only")
+        result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
+                                capture_output=True, text=True, timeout=5,
+                                pass_fds=(fd,))
+        assert result.returncode == 1
+        assert result.stdout == "" and result.stderr == ""
+        assert not runtime.exists()
+        assert code.read_bytes() == b"OLD_CODE_CANNOT_BE_REPLACED\n"
+        assert (inherited.read_bytes(), inherited.stat().st_mode,
+                inherited.stat().st_ino) == original
+        assert os.fstat(fd).st_ino == original[2]
+        assert sorted(p.name for p in repo.iterdir()) == ["source-canary.py"]
+    finally:
+        os.close(fd)
+
+
+def test_retired_cli_never_touches_supplied_lock_or_restart_flags(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("CLI retirement happens before lock or restart I/O")
+    for name in ["acquire_update_lock", "_legacy_perform_update", "perform_update",
+                 "runtime_safe_to_update", "_git", "_run", "write_update_state"]:
+        monkeypatch.setattr(updater, name, forbidden)
+    monkeypatch.setattr(updater.time, "sleep", forbidden)
+    assert updater.main([
+        "--repo", str(tmp_path / "nonexistent-code"),
+        "--runtime", str(tmp_path / "nonexistent-state"),
+        "--port", "9344", "--lock-fd", "987654", "--restart-only",
+    ]) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+# The production diagnostics must work without a checkout or subprocess.
+# These are real manifest/byte fixtures, not mocked integrity decisions.
+def _diagnostic_packaged_fixture(tmp_path):
+    from executor.autonomy import release
+
+    source = tmp_path / "source"
+    package = source / "executor"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "main.py").write_text("VALUE = 'synthetic-release'\n")
+    (source / "requirements.txt").write_text("synthetic-package==1.0\n")
+    root = tmp_path / "Synthetic Manager.app" / "Contents" / "Resources"
+    candidate = root / "release"
+    source_identity = release.copy_source_candidate(source, candidate)
+    runtime = root / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    # If diagnostics executed this fake interpreter, the test would fail.
+    (runtime / "bin" / "python").write_text("#!/bin/sh\nexit 99\n")
+    (runtime / "bin" / "python").chmod(0o700)
+    (runtime / "owned-dependency.py").write_text("VALUE = 'synthetic-owned-dependency'\n")
+    runtime_identity = release.runtime_manifest(runtime, candidate)
+    (runtime / release.RUNTIME_MANIFEST_NAME).write_text(json.dumps(runtime_identity))
+    return candidate, runtime, source_identity, runtime_identity
+
+
+def _diagnostics_forbid_git_and_processes(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("packaged diagnostics must never invoke Git or a subprocess")
+
+    monkeypatch.setattr(diagnostics, "_git", forbidden)
+    monkeypatch.setattr(diagnostics.subprocess, "run", forbidden)
+
+
+def test_packaged_diagnostics_use_real_manifest_identity_without_git_or_execution(
+    tmp_path, monkeypatch
+):
+    candidate, runtime, source, payload = _diagnostic_packaged_fixture(tmp_path)
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    before = {str(path.relative_to(candidate.parent)): path.read_bytes()
+              for path in candidate.parent.rglob("*") if path.is_file()}
+    assert diagnostics.repository_state(candidate) == {
+        "version": source["source_sha256"][:12],
+        "branch": "packaged", "worktree_clean": None,
+    }
+    report = diagnostics.packaged_provenance(candidate)
+    assert report == {
+        "source_verified_now": True,
+        "source_sha256": source["source_sha256"],
+        "runtime_verified_now": True,
+        "runtime_sha256": payload["runtime_sha256"],
+        "requirements_sha256": payload["requirements_sha256"],
+        # The unit runner is not the synthetic app interpreter. Manifest
+        # integrity cannot turn this host process into an owned runtime.
+        "interpreter_owned": False,
+        "verification_scope": "payload_integrity_only",
+        "signed_distribution_certified": False,
+    }
+    assert before == {str(path.relative_to(candidate.parent)): path.read_bytes()
+                      for path in candidate.parent.rglob("*") if path.is_file()}
+    assert str(tmp_path) not in json.dumps(report)
+
+
+@pytest.mark.parametrize("damage", [
+    "missing_source_manifest", "changed_source", "unexpected_git",
+    "runtime_dependency_change", "missing_runtime_manifest", "runtime_alias",
+])
+def test_damaged_packaged_diagnostics_never_fall_back_to_git_or_claim_integrity(
+    tmp_path, monkeypatch, damage
+):
+    from executor.autonomy import release
+
+    candidate, runtime, _source, _payload = _diagnostic_packaged_fixture(tmp_path)
+    if damage == "missing_source_manifest":
+        (candidate / release.MANIFEST_NAME).unlink()
+    elif damage == "changed_source":
+        (candidate / "executor" / "main.py").write_text("PRIVATE_SOURCE_CANARY")
+    elif damage == "unexpected_git":
+        (candidate / ".git").mkdir()
+        (candidate / ".git" / "config").write_text("PRIVATE_GIT_CANARY")
+    elif damage == "runtime_dependency_change":
+        (runtime / "owned-dependency.py").write_text("PRIVATE_DEPENDENCY_CANARY")
+    elif damage == "missing_runtime_manifest":
+        (runtime / release.RUNTIME_MANIFEST_NAME).unlink()
+    else:
+        actual = runtime.with_name("private-runtime-canary")
+        runtime.rename(actual)
+        runtime.symlink_to(actual, target_is_directory=True)
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    state = diagnostics.repository_state(candidate)
+    report = diagnostics.packaged_provenance(candidate)
+    assert state["branch"] == "packaged"
+    assert state["worktree_clean"] is None
+    if damage in {"missing_source_manifest", "changed_source", "unexpected_git"}:
+        assert state["version"] == "unknown"
+        assert report["source_verified_now"] is False
+        assert report["source_sha256"] == ""
+    else:
+        assert report["source_verified_now"] is True
+    assert report["runtime_verified_now"] is False
+    assert report["runtime_sha256"] == ""
+    assert report["requirements_sha256"] == ""
+    assert report["interpreter_owned"] is False
+    serialized = json.dumps(report)
+    assert "PRIVATE_" not in serialized
+    assert "private-runtime-canary" not in serialized
+    assert str(tmp_path) not in serialized
+
+
+def test_packaged_diagnostics_report_current_drift_without_rewriting_loaded_identity(
+    tmp_path, monkeypatch
+):
+    from executor.autonomy import release
+
+    candidate, runtime, source, payload = _diagnostic_packaged_fixture(tmp_path)
+    queue, _worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {
+        "status": "verified", "source_sha256": source["source_sha256"],
+    }
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    monkeypatch.setattr(diagnostics.browser, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(diagnostics.browser, "_alive", lambda: False)
+    before_tasks, before_events = queue.tasks(), queue.recent_events(1000)
+
+    initial = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
+    assert initial["packaged_release"]["loaded_source_matches_disk"] is True
+    assert initial["packaged_release"]["runtime_verified_now"] is True
+    assert initial["loaded_source"]["sha256"] == source["source_sha256"]
+
+    (candidate / "executor" / "main.py").write_text("PRIVATE_RUNTIME_DRIFT_CANARY")
+    drift = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
+    assert drift["packaged_release"]["source_verified_now"] is False
+    assert drift["packaged_release"]["loaded_source_matches_disk"] is False
+    assert drift["loaded_source"] == initial["loaded_source"]
+    assert drift["recovery"] == {
+        "reason": "release_unverified", "action": "reinstall_verified_app",
+    }
+
+    # A new valid disk snapshot is still not what this process loaded.
+    next_source = release.source_manifest(candidate)
+    (candidate / release.MANIFEST_NAME).write_text(json.dumps(next_source))
+    changed = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
+    assert changed["packaged_release"]["source_verified_now"] is True
+    assert changed["packaged_release"]["loaded_source_matches_disk"] is False
+    assert changed["loaded_source"] == initial["loaded_source"]
+    assert changed["recovery"] == {
+        "reason": "release_changed", "action": "restart_verified_app",
+    }
+    assert queue.tasks() == before_tasks
+    assert queue.recent_events(1000) == before_events
+    for report in (initial, drift, changed):
+        serialized = json.dumps(report)
+        assert "PRIVATE_RUNTIME_DRIFT_CANARY" not in serialized
+        assert "very-private-profile" not in serialized
+        assert str(tmp_path) not in serialized
+        assert report["safety"]["final_click_actor"] == "user"
+        assert report["safety"]["submit_capability"] is False
+
+
+def test_packaged_provenance_refuses_manifest_switched_during_runtime_verification(
+    tmp_path, monkeypatch
+):
+    from executor.autonomy import release
+
+    candidate, runtime, _source, _payload = _diagnostic_packaged_fixture(tmp_path)
+    verify = diagnostics.verify_runtime_candidate
+    def switched(root, source):
+        passed = verify(root, source)
+        assert passed is True
+        path = runtime / release.RUNTIME_MANIFEST_NAME
+        forged = json.loads(path.read_text())
+        forged["runtime_sha256"] = "f" * 64
+        path.write_text(json.dumps(forged))
+        return passed
+    monkeypatch.setattr(diagnostics, "verify_runtime_candidate", switched)
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    report = diagnostics.packaged_provenance(candidate)
+    assert report["runtime_verified_now"] is False
+    assert report["runtime_sha256"] == ""
+    assert report["requirements_sha256"] == ""
+
+
+@pytest.mark.parametrize("available", [True, False, "fault", None])
+def test_diagnostic_provider_state_never_loads_credentials_or_starts_processes(
+    tmp_path, monkeypatch, available
+):
+    candidate, _runtime, source, _payload = _diagnostic_packaged_fixture(tmp_path)
+    queue, _worker, supervisor = _supervisor(tmp_path)
+    supervisor.release_identity = {
+        "status": "verified", "source_sha256": source["source_sha256"],
+    }
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    monkeypatch.setattr(diagnostics.browser, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(diagnostics.browser, "_alive", lambda: False)
+    from executor import resolver
+    monkeypatch.setattr(
+        resolver, "_keychain_key",
+        lambda *_args, **_kwargs: pytest.fail("diagnostics must not read Keychain"),
+    )
+    class ExistingProvider:
+        @property
+        def available(self):
+            if available == "fault":
+                raise RuntimeError("PRIVATE_PROVIDER_FAILURE_CANARY")
+            return available
+
+        def decide(self, *_args, **_kwargs):
+            pytest.fail("diagnostics must never invoke the model")
+
+    monkeypatch.setattr(
+        "executor.autonomy.manager.DeepSeekManagerProvider",
+        lambda *_args, **_kwargs: pytest.fail("diagnostics must not initialize provider"),
+    )
+    supervisor.manager = ManagerController(
+        queue, _worker, provider=ExistingProvider() if available is not None else None,
+        settings=supervisor.manager.settings,
+    )
+    before = (queue.tasks(), queue.recent_events(1000))
+    report = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
+    assert report["system"]["deepseek_available"] is (available is True)
+    assert report["system"]["provider_state_basis"] == "loaded_configuration"
+    assert report["system"]["provider_state"] == (
+        "available" if available is True else
+        "not_loaded" if available is None else "unavailable")
+    assert report["recovery"] == (
+        {"reason": "none", "action": "none"} if available is True else
+        {"reason": "provider_unavailable", "action": "check_provider_settings"}
+    )
+    assert report["loaded_source"]["sha256"] == source["source_sha256"]
+    assert report["packaged_release"]["loaded_source_matches_disk"] is True
+    assert report["packaged_release"]["runtime_verified_now"] is True
+    assert before == (queue.tasks(), queue.recent_events(1000))
+    serialized = json.dumps(report)
+    assert "PRIVATE_PROVIDER_FAILURE_CANARY" not in serialized
+    assert "very-private-profile" not in serialized
+    assert str(tmp_path) not in serialized
+    assert report["safety"]["submit_capability"] is False

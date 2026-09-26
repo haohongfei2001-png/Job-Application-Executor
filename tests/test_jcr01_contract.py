@@ -229,14 +229,18 @@ def test_missing_field_check_only_covers_current_page(monkeypatch):
 
 
 def test_command_cannot_resume_between_update_safety_check_and_start(tmp_path, monkeypatch):
+    # Canonical JCR-08 retirement supersedes successful Git-spawn admission:
+    # local commands stay serialized during the check, then resume normally
+    # after the retired update is denied. No second writer or stale busy fence.
     queue = TaskQueue(tmp_path / "runtime")
     tid = task(queue, tmp_path)["task_id"]
     queue.pause(tid)
     worker = Worker(queue, settings={"deepseek": {"enabled": False}})
     supervisor = Supervisor(queue, worker=worker)
     checking, proceed = threading.Event(), threading.Event()
-    fenced = [False]
-    monkeypatch.setattr(supervisor, "mutation_fenced", lambda: fenced[0])
+    attempted, finished = threading.Event(), threading.Event()
+    spawned = []
+    monkeypatch.setattr(supervisor, "mutation_fenced", lambda: False)
 
     def check(_):
         checking.set()
@@ -244,8 +248,8 @@ def test_command_cannot_resume_between_update_safety_check_and_start(tmp_path, m
         return True, None
 
     def start(**_):
-        fenced[0] = True
-        return {"ok": True, "status": "started"}
+        spawned.append("writer")
+        pytest.fail("retired update cannot spawn a checkout writer")
 
     monkeypatch.setattr("executor.autonomy.supervisor.safe_to_update", check)
     monkeypatch.setattr("executor.autonomy.supervisor.spawn_update", start)
@@ -260,19 +264,36 @@ def test_command_cannot_resume_between_update_safety_check_and_start(tmp_path, m
     outcome = []
 
     def resume():
+        attempted.set()
         try:
             outcome.append(supervisor.run_local_command(command))
-        except RuntimeError:
-            outcome.append("FENCED")
+        finally:
+            finished.set()
 
     command_thread = threading.Thread(target=resume)
     command_thread.start()
-    proceed.set()
-    update_thread.join(3)
-    command_thread.join(3)
-    assert results["ok"]
-    assert outcome == ["FENCED"]
-    assert queue.get(tid)["run_state"] == "PAUSED"
+    try:
+        assert attempted.wait(2)
+        assert not finished.wait(0.05), "command must wait for the update admission decision"
+        assert queue.get(tid) == paused
+        with pytest.raises(KeyError, match="command not found"):
+            queue.command_receipt(command.command_id)
+        assert spawned == []
+    finally:
+        proceed.set()
+        update_thread.join(3)
+        command_thread.join(3)
+    assert not update_thread.is_alive()
+    assert not command_thread.is_alive()
+    assert results == {"ok": False, "status": "denied", "reason": "legacy_update_retired"}
+    assert spawned == []
+    assert len(outcome) == 1
+    assert outcome[0]["status"] == "accepted"
+    assert queue.command_receipt(command.command_id) == outcome[0]
+    assert queue.get(tid)["run_state"] == "RUNNABLE"
+    assert queue.get(tid)["revision"] == paused["revision"] + 1
+    assert supervisor.run_local_command(command) == outcome[0]
+    assert queue.get(tid)["revision"] == paused["revision"] + 1
 
 
 def test_ui_private_fact_input_is_local_scoped_and_revision_checked(tmp_path):
@@ -283,6 +304,14 @@ def test_ui_private_fact_input_is_local_scoped_and_revision_checked(tmp_path):
                      blocker="unknown_facts", details={"unresolved_keys": ["family.primary.role"]},
                      release=True)
     worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    observed = queue.get(tid)
+    worker._remember_question_context(
+        tid, ApplicationPlan(execution_id=tid, target_url=observed["spec"]["target_url"],
+                             site_id="synthetic", unresolved_fields=[
+            FieldResolution(field_id="family-role", selector="#family-role",
+                            label="家庭成员当前职业", canonical_key="family.primary.role",
+                            status=ResolutionStatus.UNRESOLVED, required=True)]),
+        observed["revision"])
     supervisor = Supervisor(queue, worker=worker)
     server = create_server(supervisor, port=0)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -325,6 +354,14 @@ def test_dashboard_fact_control_submits_only_to_local_service(tmp_path):
                      blocker="unknown_facts", details={"unresolved_keys": ["family.primary.role"]},
                      release=True)
     worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    observed = queue.get(tid)
+    worker._remember_question_context(
+        tid, ApplicationPlan(execution_id=tid, target_url=observed["spec"]["target_url"],
+                             site_id="synthetic", unresolved_fields=[
+            FieldResolution(field_id="family-role", selector="#family-role",
+                            label="家庭成员当前职业", canonical_key="family.primary.role",
+                            status=ResolutionStatus.UNRESOLVED, required=True)]),
+        observed["revision"])
 
     class ForbiddenProvider:
         available = True
@@ -344,7 +381,7 @@ def test_dashboard_fact_control_submits_only_to_local_service(tmp_path):
                 page = browser.new_page()
                 page.goto(f"http://127.0.0.1:{server.server_port}/ui-login?ticket="
                           + supervisor.issue_ui_ticket())
-                page.get_by_label("family.primary.role").fill(secret)
+                page.get_by_label("家庭成员当前职业").fill(secret)
                 page.get_by_role("button", name="本地填写").click()
                 page.locator("button[data-answer]").wait_for(state="detached")
             finally:

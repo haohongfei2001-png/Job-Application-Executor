@@ -7,7 +7,7 @@ import secrets
 import threading
 import time
 from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -15,8 +15,10 @@ from .. import browser
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
+from .loopback_http import LoopbackHTTPServer
 from .manager import ManagerController, safe_task_view
 from .queue import TaskQueue, TaskSpec, private_dir
+from .release import is_packaged_source, read_release_identity
 from .updater import reconciled_update_state, safe_to_update, spawn_update
 from .worker import Worker
 
@@ -53,6 +55,7 @@ class Supervisor:
         if len(self.token) < 32:
             raise ValueError("local auth token too short")
         self.manager = manager or ManagerController(queue, self.worker)
+        self.release_identity = read_release_identity(Path(__file__).resolve().parents[2])
         self._ui_lock = threading.RLock()
         self._mutation_lock = threading.RLock()
         self._command_lock = threading.RLock()
@@ -97,6 +100,11 @@ class Supervisor:
     def ui_state(self):
         state = self.manager.state()
         for task in state.get("tasks", []):
+            if task.get("stage") == "NEEDS_USER_INPUT":
+                task["question_context"] = (
+                    self.worker.question_context(task["task_id"], task["revision"])
+                    or {"status": "unavailable", "items": []})
+                continue
             if task.get("stage") == "READY_TO_SUBMIT":
                 queue_task = self.queue.get(task["task_id"])
                 spec = queue_task.get("spec") or {}
@@ -289,6 +297,16 @@ class Supervisor:
                         "status": "denied",
                         "reason": "update_in_progress",
                     }
+                # A packaged release has no trusted Git checkout. Until the
+                # staged release updater is ready, never route it to the old
+                # in-place Git writer.
+                if (self.release_identity.get("status") == "verified"
+                        or is_packaged_source(Path(__file__).resolve().parents[2])):
+                    return {
+                        "ok": False,
+                        "status": "denied",
+                        "reason": "packaged_update_not_ready",
+                    }
                 safe, reason = safe_to_update(self)
                 if not safe:
                     return {
@@ -296,11 +314,14 @@ class Supervisor:
                         "status": "denied",
                         "reason": reason,
                     }
-                return spawn_update(
-                    repo_root=Path(__file__).resolve().parents[2],
-                    runtime=self.queue.root,
-                    port=port,
-                )
+                # Consumer admission is read-only for the retired checkout
+                # writer. Keep busy/task/OTP fences, but never launch a Git
+                # mutation or a second task-state writer from the application.
+                return {
+                    "ok": False,
+                    "status": "denied",
+                    "reason": "legacy_update_retired",
+                }
 
     def run_local_command(self, command: CommandEnvelope):
         # Serialize admission with the updater's final safety check and spawn.
@@ -319,6 +340,11 @@ class Supervisor:
         with self._command_lock:
             if self.mutation_fenced():
                 raise RuntimeError("update in progress")
+            if self.queue.get(task_id)["revision"] != revision:
+                raise RuntimeError("stale task revision")
+            context = self.worker.question_context(task_id, revision)
+            if not context or field_key not in {item["key"] for item in context["items"]}:
+                raise ValueError("current site question context required")
             updated = self.worker.user_input(task_id, {field_key: value},
                                              expected_revision=revision,
                                              remember=remember)
@@ -339,7 +365,9 @@ class Supervisor:
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
         if method == "GET" and parts == ["health"]:
-            return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user"}
+            return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user",
+                    "loaded_source_sha256": self.release_identity.get("source_sha256", "")
+                    if self.release_identity.get("status") == "verified" else ""}
         if method == "GET" and parts == ["v1", "tasks"]:
             return {"tasks": self.queue.tasks()}
         if method == "GET" and len(parts) == 3 and parts[:2] == ["v1", "commands"]:
@@ -494,7 +522,7 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
             if is_ui:
                 if not supervisor.valid_ui_session(self._cookie_session()):
                     if parsed.path == "/ui":
-                        self._send_html(401, "<h1>AI 投递经理</h1><p>请从本地 CLI 重新打开面板。</p>")
+                        self._send_html(401, "<h1>AI 投递经理</h1><p>面板会话已失效，请重新打开 AI 投递经理。已有任务不会自动重试，最终提交仍由你本人完成。</p>")
                     else:
                         self._send_json(401, {"error": "ui_session_required"})
                     return
@@ -652,6 +680,6 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
         do_GET = handle_request
         do_POST = handle_request
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = LoopbackHTTPServer((host, port), Handler)
     server.daemon_threads = True
     return server

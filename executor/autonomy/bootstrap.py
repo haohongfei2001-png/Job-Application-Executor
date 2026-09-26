@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+from datetime import datetime, timezone
 import os
 import re
 import secrets
@@ -15,10 +16,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+from .loopback_http import LoopbackHTTPServer
 from .queue import private_dir
+from .process_entry import isolated_cli_command
+from .release import read_release_identity
+from .consumer_presentation import ConsumerSurface, loopback_origin, present_surface
 
 
 def _state_path(root: str | Path) -> Path:
@@ -30,13 +35,24 @@ def _reason(code: str) -> str:
         "service_start_failed": "本地服务启动失败。现有任务没有被修改。",
         "health_timeout": "本地服务未能通过健康检查。现有任务没有被修改。",
         "worker_stopping_at_safe_checkpoint": "服务仍在等待安全停止点。请稍后重试。",
+        "release_mismatch": "新应用尚未接管旧版服务。现有任务没有被修改；请在安全停止后重试。",
+        "release_unverified": "应用文件未通过完整性校验。现有任务没有被修改；请重新安装可信版本。",
     }.get(code, "本地服务暂时不可用。现有任务没有被修改。")
 
 
-def _version() -> str:
+def _version(root: str | Path | None = None) -> str:
+    source = Path(root).resolve() if root is not None else Path(__file__).resolve().parents[2]
+    identity = read_release_identity(source)
+    if identity.get("status") == "verified":
+        return identity["source_sha256"][:12]
+    # An installed app with a missing or damaged manifest is unverified. Never
+    # infer its identity from Git metadata on the host or invoke Git for it.
+    from .release import is_packaged_source
+    if is_packaged_source(source):
+        return "unknown"
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2],
+            ["git", "rev-parse", "HEAD"], cwd=source,
             capture_output=True, text=True, timeout=3,
         )
         sha = result.stdout.strip()
@@ -45,10 +61,39 @@ def _version() -> str:
         return "unknown"
 
 
+def _safe_diagnostics(reason: str, version: str) -> dict:
+    """A copy-safe bootstrap report that needs no running supervisor."""
+    known = {
+        "service_start_failed": "retry_service",
+        "health_timeout": "retry_service",
+        "worker_stopping_at_safe_checkpoint": "retry_after_safe_checkpoint",
+        "release_mismatch": "retry_after_old_service_stops",
+        "release_unverified": "reinstall_verified_app",
+    }
+    code = reason if reason in known else "service_unavailable"
+    source = Path(__file__).resolve().parents[2]
+    identity = read_release_identity(source)
+    verified = identity.get("status") == "verified"
+    digest = identity.get("source_sha256", "") if verified else ""
+    return {
+        "format": "application-executor-bootstrap-diagnostics-v1",
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "loaded_version": version,
+        "loaded_source_verified": verified,
+        "loaded_source_sha256": digest,
+        "reason": code,
+        "recovery_action": known.get(code, "retry_service"),
+        "applicant_values_in_report": False,
+        "final_click_actor": "user",
+        "submit_capability": False,
+    }
+
+
 def _page(reason: str, token: str) -> str:
     safe_reason = html.escape(_reason(reason))
     safe_token = html.escape(token, quote=True)
     version = _version()
+    report = html.escape(json.dumps(_safe_diagnostics(reason, version), ensure_ascii=False, indent=2))
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI 投递经理 · 恢复</title><style>
@@ -59,11 +104,12 @@ h1{{font-size:21px}}p{{line-height:1.6}}button{{background:#111;color:white;bord
 <p>可以重试本地服务。重试不会重放结果不明的浏览器写入，也不会提交申请。</p>
 <form action="/retry?token={safe_token}" method="post"><button type="submit">重试并打开面板</button></form>
 <p><small>本地版本：{version}</small></p>
-</main></body></html>"""
+<details><summary>查看安全诊断</summary><p>报告不含申请人资料、验证码或凭证；分享前请先核对。</p><pre id="safe-diagnostics">{report}</pre><button id="copy-diagnostics" type="button">复制诊断</button></details>
+</main><script>document.getElementById('copy-diagnostics').addEventListener('click',async function(){{await navigator.clipboard.writeText(document.getElementById('safe-diagnostics').textContent);this.textContent='已复制';}});</script></body></html>"""
 
 
 def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "service_unavailable") -> None:
-    from .cli import lifecycle, request
+    from .cli import _start_consumer_service, request
 
     root = Path(root).expanduser().resolve()
     token = secrets.token_urlsafe(32)
@@ -106,23 +152,22 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
             if self.headers.get("Content-Length") not in {None, "0"}:
                 self.respond(400, "<h1>请求无效</h1>")
                 return
-            started = lifecycle("start", root, service_port)
-            health = lifecycle("health", root, service_port)
-            if started.get("ok") and health.get("ok"):
+            started, health = _start_consumer_service(root, service_port)
+            if health.get("ok"):
                 try:
                     ticket = request(root, service_port, "/v1/ui-ticket", {})["ticket"]
-                    target = f"http://127.0.0.1:{service_port}/ui-login?ticket={urllib.parse.quote(ticket)}"
+                    target = ConsumerSurface.dashboard(service_port, ticket).url
                     self.respond(303, "", location=target)
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
-                except (KeyError, OSError, urllib.error.URLError):
+                except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError):
                     pass
             self.respond(503, _page(str(started.get("reason") or "service_unavailable"), token))
 
         do_GET = handle_request
         do_POST = handle_request
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
     state = _state_path(root)
     tmp = state.with_suffix(".tmp")
     tmp.write_text(json.dumps({"pid": os.getpid(), "port": server.server_address[1], "token": token}))
@@ -139,7 +184,9 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
             pass
 
 
-def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_unavailable") -> dict:
+def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_unavailable", *,
+                   presenter=None) -> dict:
+    loopback_origin(service_port)
     root = Path(root).expanduser().resolve()
     state = _state_path(root)
 
@@ -172,8 +219,8 @@ def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_u
         with log.open("ab") as stream:
             log.chmod(0o600)
             child = subprocess.Popen(
-                [sys.executable, "-m", "executor.autonomy.cli", "--runtime", str(root),
-                 "--port", str(service_port), "bootstrap-serve", "--reason", reason],
+                isolated_cli_command("--runtime", str(root), "--port", str(service_port),
+                                     "bootstrap-serve", "--reason", reason),
                 cwd=Path(__file__).resolve().parents[2],
                 stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
                 start_new_session=True,
@@ -187,5 +234,10 @@ def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_u
             time.sleep(0.1)
     if not active:
         return {"ok": False, "opened": False, "reason": "bootstrap_start_failed"}
-    opened = webbrowser.open(active["url"], new=2)
-    return {"ok": bool(opened), "opened": bool(opened)}
+    try:
+        surface = ConsumerSurface.from_url("bootstrap", active["url"],
+                                           service_port=service_port)
+    except ValueError:
+        return {"ok": False, "opened": False, "reason": "bootstrap_presentation_invalid"}
+    opened = present_surface(surface, presenter=presenter)
+    return {"ok": opened, "opened": opened}
