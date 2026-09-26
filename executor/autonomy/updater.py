@@ -281,6 +281,26 @@ def reconciled_update_state(runtime: str | Path) -> dict:
 
 
 def spawn_update(
+    *, repo_root: str | Path, runtime: str | Path, port: int,
+    python_executable: str | None = None,
+) -> dict:
+    """Read-only compatibility response; never start the checkout writer."""
+    reason = ("packaged_update_not_ready" if is_packaged_source(repo_root)
+              else "legacy_update_retired")
+    return {"ok": False, "status": "denied", "reason": reason}
+
+
+def perform_update(
+    repo_root: str | Path, runtime: str | Path, port: int, *,
+    python_executable: str | None = None, restart_only: bool = False,
+) -> int:
+    """The historical public engine entry is retired before any state I/O."""
+    return 1
+
+
+# Retained only for historical engine regression coverage. Production consumer
+# admission and public/module entrypoints cannot route to these functions.
+def _legacy_spawn_update(
     *,
     repo_root: str | Path,
     runtime: str | Path,
@@ -486,7 +506,7 @@ def _restart_service(
     return 0
 
 
-def perform_update(
+def _legacy_perform_update(
     repo_root: str | Path,
     runtime: str | Path,
     port: int,
@@ -681,28 +701,10 @@ def main(argv=None) -> int:
     parser.add_argument("--restart-only", action="store_true")
     args = parser.parse_args(argv)
 
-    owned_lock = None
-    if args.lock_fd is None:
-        owned_lock = acquire_update_lock(args.runtime)
-        if owned_lock is None:
-            return 1
-    else:
-        try:
-            os.fstat(args.lock_fd)
-        except OSError:
-            return 1
-
-    try:
-        time.sleep(0.8)
-        return perform_update(
-            args.repo,
-            args.runtime,
-            args.port,
-            restart_only=args.restart_only,
-        )
-    finally:
-        if owned_lock is not None:
-            os.close(owned_lock)
+    # Even an inherited lock or --restart-only invocation cannot re-enable the
+    # retired CLI. Argument parsing is compatibility-only: no runtime creation,
+    # lock claim, checkout operation, service stop/start or applicant read.
+    return 1
 
 
 if __name__ == "__main__":

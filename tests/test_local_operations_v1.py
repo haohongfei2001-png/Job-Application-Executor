@@ -4,6 +4,8 @@ import http.cookiejar
 import json
 import os
 import subprocess
+import sys
+from pathlib import Path
 import threading
 import time
 from datetime import datetime, timezone
@@ -12,6 +14,11 @@ import urllib.request
 import pytest
 
 from executor.autonomy import diagnostics, updater
+
+# The canonical consumer contract retires public Git mutation entrypoints.
+# Historical engine cases below still exercise every existing safety failure,
+# timeout, restart, provenance and concurrency assertion through private retained
+# engine functions; no production consumer/CLI may dispatch those functions.
 from executor.autonomy.manager import ManagerController, ManagerTurn
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.supervisor import Supervisor, create_server
@@ -310,7 +317,7 @@ def test_update_lock_serializes_concurrent_launches(tmp_path):
     try:
         second = updater.acquire_update_lock(runtime)
         assert second is None
-        denied = updater.spawn_update(
+        denied = updater._legacy_spawn_update(
             repo_root=tmp_path / "repo",
             runtime=runtime,
             port=9344,
@@ -506,7 +513,7 @@ def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
         else (_ for _ in ()).throw(AssertionError(args)),
     )
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -544,7 +551,7 @@ def test_spawn_update_preserves_restart_retry_intent(tmp_path, monkeypatch):
 
     monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
 
-    result = updater.spawn_update(
+    result = updater._legacy_spawn_update(
         repo_root=repo,
         runtime=runtime,
         port=9344,
@@ -610,7 +617,7 @@ def test_restart_required_can_be_retried_when_code_is_already_current(
     monkeypatch.setattr(updater.subprocess, "run", fake_service)
     monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         runtime,
         9344,
@@ -655,7 +662,7 @@ def test_restart_only_bypasses_git_and_timeout_keeps_restart_fence(
     monkeypatch.setattr(updater, "_run", forbidden_git)
     monkeypatch.setattr(updater.subprocess, "run", fake_service)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -710,7 +717,7 @@ def test_failure_after_git_mutation_stays_restart_required(
     monkeypatch.setattr(updater, "_git", fake_git)
     monkeypatch.setattr(updater, "_run", fake_run)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -771,7 +778,7 @@ def test_update_check_uses_http11_and_leaves_code_unchanged_when_current(
     monkeypatch.setattr(updater, "_run", fake_run)
     monkeypatch.setattr(updater, "_git", fake_git)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -832,7 +839,7 @@ def test_fast_forward_update_restarts_service_and_records_success(
     monkeypatch.setattr(updater.subprocess, "run", fake_subprocess_run)
     monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
 
-    rc = updater.perform_update(
+    rc = updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -1160,3 +1167,95 @@ def test_authenticated_consumer_update_route_is_readonly_after_legacy_retirement
         server.server_close()
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("packaged", [False, True])
+@pytest.mark.parametrize("existing_runtime", [False, True])
+def test_retired_public_updater_entries_are_readonly(
+    tmp_path, monkeypatch, packaged, existing_runtime
+):
+    repo, runtime = tmp_path / "code", tmp_path / "state"
+    repo.mkdir()
+    code = repo / "source-canary.py"
+    code.write_bytes(b"CODE_AUTHORITY_UNCHANGED\n")
+    if existing_runtime:
+        runtime.mkdir(mode=0o700)
+        for name in ["worker.lock", "migration.lock", "update.lock", "update-state.json",
+                     "tasks.sqlite3", "tasks.sqlite3-wal", "task-state.key"]:
+            (runtime / name).write_bytes(b"PRIVATE_STATE_CANARY_DO_NOT_READ_OR_WRITE")
+            (runtime / name).chmod(0o600)
+    def inventory(root):
+        return sorted((str(p.relative_to(root)), p.read_bytes(), p.stat().st_mode)
+                      for p in root.rglob("*") if p.is_file()) if root.exists() else None
+    before_code, before_state = inventory(repo), inventory(runtime)
+    monkeypatch.setattr(updater, "is_packaged_source", lambda _: packaged)
+    def forbidden(*args, **kwargs):
+        pytest.fail("retired entrypoint must not call the legacy writer or read state")
+    for name in ["_legacy_spawn_update", "_legacy_perform_update",
+                 "acquire_update_lock", "repository_update_preconditions",
+                 "runtime_safe_to_update", "read_update_state", "write_update_state",
+                 "_git", "_run", "_stop_service", "_start_service"]:
+        if hasattr(updater, name):
+            monkeypatch.setattr(updater, name, forbidden)
+    monkeypatch.setattr(updater.subprocess, "Popen", forbidden)
+    for _ in range(2):
+        assert updater.spawn_update(repo_root=repo, runtime=runtime, port=9344) == {
+            "ok": False, "status": "denied",
+            "reason": "packaged_update_not_ready" if packaged else "legacy_update_retired",
+        }
+        for restart_only in [False, True]:
+            assert updater.perform_update(repo, runtime, 9344,
+                                          restart_only=restart_only) == 1
+    assert inventory(repo) == before_code
+    assert inventory(runtime) == before_state
+
+
+@pytest.mark.parametrize("restart_only", [False, True])
+def test_retired_module_cli_refuses_before_runtime_or_inherited_lock_io(
+    tmp_path, restart_only
+):
+    repo, runtime = tmp_path / "legacy-code", tmp_path / "missing-state"
+    repo.mkdir()
+    code = repo / "source-canary.py"
+    code.write_bytes(b"OLD_CODE_CANNOT_BE_REPLACED\n")
+    inherited = tmp_path / "caller-owned-update.lock"
+    inherited.write_bytes(b"CALLER_LOCK_AUTHORITY")
+    inherited.chmod(0o600)
+    fd = os.open(inherited, os.O_RDWR)
+    original = (inherited.read_bytes(), inherited.stat().st_mode, inherited.stat().st_ino)
+    try:
+        command = [
+            sys.executable, "-m", "executor.autonomy.updater",
+            "--repo", str(repo), "--runtime", str(runtime), "--port", "9344",
+            "--lock-fd", str(fd),
+        ]
+        if restart_only:
+            command.append("--restart-only")
+        result = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
+                                capture_output=True, text=True, timeout=5,
+                                pass_fds=(fd,))
+        assert result.returncode == 1
+        assert result.stdout == "" and result.stderr == ""
+        assert not runtime.exists()
+        assert code.read_bytes() == b"OLD_CODE_CANNOT_BE_REPLACED\n"
+        assert (inherited.read_bytes(), inherited.stat().st_mode,
+                inherited.stat().st_ino) == original
+        assert os.fstat(fd).st_ino == original[2]
+        assert sorted(p.name for p in repo.iterdir()) == ["source-canary.py"]
+    finally:
+        os.close(fd)
+
+
+def test_retired_cli_never_touches_supplied_lock_or_restart_flags(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("CLI retirement happens before lock or restart I/O")
+    for name in ["acquire_update_lock", "_legacy_perform_update", "perform_update",
+                 "runtime_safe_to_update", "_git", "_run", "write_update_state"]:
+        monkeypatch.setattr(updater, name, forbidden)
+    monkeypatch.setattr(updater.time, "sleep", forbidden)
+    assert updater.main([
+        "--repo", str(tmp_path / "nonexistent-code"),
+        "--runtime", str(tmp_path / "nonexistent-state"),
+        "--port", "9344", "--lock-fd", "987654", "--restart-only",
+    ]) == 1
+    assert list(tmp_path.iterdir()) == []
