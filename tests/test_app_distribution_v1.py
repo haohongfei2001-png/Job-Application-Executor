@@ -394,3 +394,139 @@ with Path(os.environ['JAE_TEST_BROWSER_REPORT']).open('a',encoding='utf-8') as f
     assert not (state_root / "service.json").exists()
     assert not list(release.rglob("__pycache__"))
     assert json.loads((output / RECEIPT_NAME).read_text()) == receipt
+
+
+def test_operator_build_native_mode_is_explicit_and_never_publishes_or_starts_tasks(
+    tmp_path, monkeypatch, capsys
+):
+    import importlib.util
+    from executor.autonomy import app_distribution
+
+    script = Path(__file__).resolve().parents[1] / "scripts/build_macos_app.py"
+    spec = importlib.util.spec_from_file_location("jae_operator_build", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+    monkeypatch.setattr(app_distribution, "build_macos_distribution",
+        lambda source, **options: calls.append((source, options)) or
+        {"signing": "unsigned", "certification": "NOT_CERTIFIED", "final_click_actor": "user"})
+    monkeypatch.chdir(tmp_path)
+    runtime, output = tmp_path / "runtime", tmp_path / "artifact"
+    args = ["--standalone-runtime", str(runtime), "--output", str(output)]
+    assert module.main(args) == 0
+    assert calls[-1] == (script.parent.parent, {"standalone_runtime": runtime, "output_dir": output})
+    assert module.main(args + ["--native-presentation"]) == 0
+    assert calls[-1] == (script.parent.parent,
+        {"standalone_runtime": runtime, "output_dir": output, "native_presentation": True})
+    assert len(calls) == 2 and not output.exists()
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 2
+    assert all(json.loads(line) == {"signing": "unsigned", "certification": "NOT_CERTIFIED",
+                                  "final_click_actor": "user"} for line in lines)
+
+
+@pytest.mark.parametrize("mode", [None, 0, 1, "native"])
+def test_distribution_rejects_non_boolean_native_mode_before_creating_output(tmp_path, mode):
+    output = tmp_path / "invalid-artifact"
+    with pytest.raises(ValueError, match="distribution_presentation_invalid"):
+        build_macos_distribution(tmp_path / "source", standalone_runtime=tmp_path / "runtime",
+                                 output_dir=output, platform="darwin", native_presentation=mode)
+    assert not output.exists()
+
+
+def test_hosted_mac_native_archive_relocates_and_launches_exact_verified_window_without_build_state(
+    tmp_path
+):
+    if sys.platform != "darwin":
+        pytest.skip("Actual native archive acceptance uses hosted macOS Cocoa/WebKit")
+    from executor.autonomy.consumer import _trusted_bundle, _native_bundle_matches
+
+    repo = tmp_path / "source"
+    copy_source_candidate(Path(__file__).resolve().parents[1], repo)
+    prepared = tmp_path / "prepared-runtime"
+    copy_standalone_runtime_candidate(Path(os.environ["JAE_STANDALONE_RUNTIME"]), prepared, repo)
+    private = repo / "runtime/autonomy"
+    queue = TaskQueue(private)
+    task = queue.enqueue(TaskSpec(company="Synthetic native archive", role="Engineer",
+        target_url="https://example.invalid/jobs/archive", profile_ref="synthetic-profile.json"))
+    original = queue.get(task["task_id"])
+    (private / "task-answers.key").write_text("CANARY_NATIVE_PRIVATE_KEY")
+    (repo / ".env").write_text("CANARY_NATIVE_BUILD_CREDENTIAL")
+    (repo / "profile.json").write_text('{"name":"CANARY_NATIVE_BUILD_PROFILE"}')
+    output = tmp_path / "native-artifact"
+    receipt = build_macos_distribution(repo, standalone_runtime=prepared,
+        output_dir=output, native_presentation=True)
+    assert receipt["presentation"] == "native"
+    assert receipt["signing"] == "unsigned" and receipt["certification"] == "NOT_CERTIFIED"
+    assert receipt["task_state"] == "excluded" and receipt["final_click_actor"] == "user"
+    assert queue.get(task["task_id"]) == original
+    assert (private / "task-answers.key").read_text() == "CANARY_NATIVE_PRIVATE_KEY"
+    assert json.loads((output / RECEIPT_NAME).read_text()) == receipt
+    assert sorted(path.name for path in output.iterdir()) == [ARCHIVE_NAME, RECEIPT_NAME]
+    with (output / ARCHIVE_NAME).open("rb") as archive_file:
+        assert hashlib.file_digest(archive_file, "sha256").hexdigest() == receipt["archive_sha256"]
+    relocated = tmp_path / "Relocated Applications"
+    relocated.mkdir()
+    with tarfile.open(output / ARCHIVE_NAME, "r:gz") as archive:
+        members = archive.getmembers()
+        assert members
+        for member in members:
+            assert member.name == APP_NAME + ".app" or member.name.startswith(APP_NAME + ".app/")
+            assert member.isfile() or member.isdir()
+            assert member.uid == member.gid == member.mtime == 0
+            assert member.uname == member.gname == ""
+            assert not any(part in {".env", "profile.json", "tasks.sqlite3",
+                "tasks.sqlite3-wal", "tasks.sqlite3-shm", "task-answers.key",
+                "auth.token", "service.json"} for part in Path(member.name).parts)
+        native_members = [m for m in members if "/native-host/" in m.name]
+        assert sorted(Path(m.name).name for m in native_members) == [
+            "AIApplicationWindow", "native-host-manifest.json"]
+        archive.extractall(relocated, filter="data")
+    shutil.rmtree(repo)
+    shutil.rmtree(prepared)
+    app = relocated / (APP_NAME + ".app")
+    release = app / "Contents/Resources/release"
+    runtime = app / "Contents/Resources/runtime"
+    assert _trusted_bundle(app)
+    assert _native_bundle_matches(release, app / "Contents/Resources/native-host")
+    assert source_manifest(release)["source_sha256"] == receipt["source_sha256"]
+    identity = json.loads((runtime / "release-runtime-manifest.json").read_text())
+    assert identity["runtime_sha256"] == receipt["runtime_sha256"]
+    assert identity["requirements_sha256"] == receipt["requirements_sha256"]
+    assert verify_standalone_runtime(runtime, release)
+    home = tmp_path / "consumer-home"
+    home.mkdir()
+    state = home / "Library/Application Support/AI投递经理/autonomy"
+    user_queue = TaskQueue(state)
+    user_task = user_queue.enqueue(TaskSpec(company="Synthetic consumer", role="Engineer",
+        target_url="https://example.invalid/jobs/consumer", profile_ref="synthetic-profile.json"))
+    before = user_queue.pause(user_task["task_id"])
+    assert before["run_state"] == "PAUSED" and before["attempts"] == 0
+    poison = tmp_path / "ambient"
+    poison.mkdir()
+    (poison / "sitecustomize.py").write_text("raise RuntimeError('unowned startup')")
+    env = {**os.environ, "HOME": str(home), "PYTHONHOME": str(poison),
+           "PYTHONPATH": str(poison), "BROWSER": "/usr/bin/false",
+           "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"}
+    command = [str(runtime / "bin/python"), "-I", "-B", "-c", CLI_ENTRY_SCRIPT,
+               str(release), "--runtime", str(state), "--port", "9344"]
+    try:
+        launch = subprocess.run(["/bin/zsh", str(app / "Contents/MacOS/AIApplicationManager"),
+                                 "--native-smoke"], cwd=poison, env=env,
+                                capture_output=True, text=True, timeout=30)
+        actual = (home / "Library/Logs/AI投递经理/launcher.log").read_text()
+        assert launch.returncode == 0, actual
+        assert json.loads(actual) == {"ok": True, "opened": True, "native_window": True,
+                                    "native_page": True, "final_click_actor": "user"}
+        assert '/ui-login?' not in actual and 'ticket=' not in actual and 'Bearer ' not in actual
+        health = subprocess.run(command + ["health"], cwd=poison, env=env,
+            capture_output=True, text=True, timeout=10)
+        assert health.returncode == 0 and json.loads(health.stdout)["ok"] is True
+        assert user_queue.get(user_task["task_id"]) == before
+        assert not list(release.rglob("__pycache__"))
+        assert json.loads((output / RECEIPT_NAME).read_text()) == receipt
+    finally:
+        stopped = subprocess.run(command + ["stop"], cwd=poison, env=env,
+            capture_output=True, text=True, timeout=15)
+        assert stopped.returncode == 0
+    assert not (state / "service.json").exists()
