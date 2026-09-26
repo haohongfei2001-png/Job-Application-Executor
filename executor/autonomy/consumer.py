@@ -229,6 +229,57 @@ def _trusted_bundle(app: Path) -> bool:
         return False
 
 
+
+def _legacy_state_migration_needed(repo: Path, app: Path, target: Path) -> bool:
+    """Do not activate a new default journal while an old authority is stranded.
+
+    Only inspect the finite legacy locations defined by recognized launchers.
+    Never copy private files, reinterpret journals or infer an empty database
+    from its main file: committed authority may still be in SQLite WAL.
+    """
+    roots = [(repo, repo / "runtime" / "autonomy")]
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    if executable.is_file() and _legacy_bundle_matches(executable):
+        launcher = executable.read_text(encoding="utf-8")
+        assignments = [line for line in launcher.splitlines() if line.startswith("REPO_ROOT=")]
+        if len(assignments) != 1:
+            raise ValueError("legacy_launcher_changed")
+        parsed = shlex.split(assignments[0].removeprefix("REPO_ROOT="))
+        if len(parsed) != 1:
+            raise ValueError("legacy_launcher_changed")
+        old_repo = Path(parsed[0])
+        if (not old_repo.is_absolute() or old_repo.name != "Job-Application-Executor"
+                or launcher != _legacy_launcher(old_repo)):
+            raise ValueError("legacy_launcher_changed")
+        roots.append((old_repo, old_repo / "runtime" / "autonomy"))
+    roots.append((app, app / "Contents" / "Resources" / "release" / "runtime" / "autonomy"))
+    for base, root in roots:
+        # Compare only after refusing aliases in every legacy path component.
+        # A missing parent is ordinary absence; an existing alias is ambiguous.
+        components = [root]
+        parent = root
+        while parent != base:
+            parent = parent.parent
+            components.append(parent)
+        if any(parent.is_symlink() for parent in components):
+            raise ValueError("legacy_state_path_invalid")
+        if root.resolve() == target.resolve():
+            continue
+        if not root.exists():
+            continue
+        if not root.is_dir():
+            raise ValueError("legacy_state_path_invalid")
+        for child in root.iterdir():
+            if child.name in {"worker.lock", "migration.lock"}:
+                if child.is_symlink() or not child.is_file():
+                    raise ValueError("legacy_state_path_invalid")
+                continue
+            # Any remaining state (including unknown files, keys and service
+            # records) requires explicit transactional transfer. No read/log.
+            return True
+    return False
+
+
 def _candidate_starts(python: Path, release: Path) -> bool:
     """Require the staged service to answer authenticated loopback health."""
     from .release import source_manifest
@@ -383,6 +434,22 @@ def _install_macos_app_unlocked(
     )
     apps_dir.mkdir(parents=True, exist_ok=True)
     app = apps_dir / f"{APP_NAME}.app"
+    # Source-path health alone cannot prove continuity with a historical
+    # repo-local journal. Refuse before staging or candidate startup so the
+    # original app and its complete private/WAL state remain the authority.
+    try:
+        if task_state_root is None or _legacy_state_migration_needed(repo, app, task_state_root):
+            return {
+                "ok": False,
+                "reason": "legacy_state_migration_required",
+                "message": "发现旧版任务状态，尚未完成安全迁移；现有应用、任务和已保存答案保持不变。",
+            }
+    except (OSError, UnicodeError, ValueError):
+        return {
+            "ok": False,
+            "reason": "legacy_state_unavailable",
+            "message": "无法安全核对旧版任务状态；现有应用和任务保持不变。",
+        }
     staging = apps_dir / f".{APP_NAME}.app.installing"
     try:
         staging.mkdir()

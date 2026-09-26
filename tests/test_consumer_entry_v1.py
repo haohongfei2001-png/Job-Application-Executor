@@ -1481,3 +1481,111 @@ def test_app_install_and_rollback_refuse_unlocked_legacy_daemon_before_any_activ
     assert (previous / "retained").read_text() == "previous"
     assert not (apps / ".AI 投递经理.app.installing").exists()
     assert not (apps / ".AI 投递经理.app.failed").exists()
+
+
+def _legacy_app(app, repo):
+    """Actual exact historical launcher, with its independent repository path."""
+    macos = app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    executable = macos / "AIApplicationManager"
+    executable.write_text(consumer._legacy_launcher(repo), encoding="utf-8")
+    executable.chmod(0o755)
+    with (app / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump({
+            "CFBundleIdentifier": consumer.BUNDLE_ID,
+            "CFBundleExecutable": "AIApplicationManager",
+        }, handle)
+    return executable
+
+
+@pytest.mark.parametrize("location", ["candidate-repo", "old-launcher-repo", "old-packaged-release"])
+def test_new_default_state_cannot_strand_legacy_wal_authority(tmp_path, monkeypatch, location):
+    from contextlib import closing
+    from test_task_state_compatibility_v1 import legacy_state, authority
+
+    repo = tmp_path / "candidate" / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    app = apps / (consumer.APP_NAME + ".app")
+    old_repo = tmp_path / "historical" / "Job-Application-Executor"
+    executable = _legacy_app(app, old_repo)
+    original_launcher = executable.read_bytes()
+    roots = {
+        "candidate-repo": repo / "runtime" / "autonomy",
+        "old-launcher-repo": old_repo / "runtime" / "autonomy",
+        "old-packaged-release": app / "Contents" / "Resources" / "release" / "runtime" / "autonomy",
+    }
+    state = roots[location]
+    state.parent.mkdir(parents=True, exist_ok=True)
+    with closing(legacy_state(state)) as db:
+        before = authority(db)
+        assert (state / "tasks.sqlite3-wal").stat().st_size > 0
+        secret = state / "task-answers.key"
+        secret.write_bytes(b"synthetic-private-answer-key-never-export")
+        secret.chmod(0o600)
+        def forbidden_start(*args, **kwargs):
+            pytest.fail("state split must refuse before any candidate service starts")
+        monkeypatch.setattr(consumer, "_candidate_starts", forbidden_start)
+        result = install_macos_app(repo, destination=apps, platform="darwin")
+        assert result["reason"] == "legacy_state_migration_required"
+        assert authority(db) == before
+        assert secret.read_bytes() == b"synthetic-private-answer-key-never-export"
+        assert "synthetic-private" not in json.dumps(result)
+    assert executable.read_bytes() == original_launcher
+    assert not (apps / ("." + consumer.APP_NAME + ".app.previous")).exists()
+    assert not (apps / ("." + consumer.APP_NAME + ".app.installing")).exists()
+
+
+@pytest.mark.parametrize("artifact", ["task-answers.key", "auth.token", "unknown-private-state"])
+def test_first_packaged_install_retains_untransferred_private_state(tmp_path, monkeypatch, artifact):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    state = repo / "runtime" / "autonomy"
+    state.mkdir(parents=True)
+    item = state / artifact
+    item.write_bytes(b"synthetic-private-canary")
+    item.chmod(0o600)
+    monkeypatch.setattr(consumer, "_candidate_starts", lambda *_: pytest.fail("must not start"))
+    apps = tmp_path / "Applications"
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert result["reason"] == "legacy_state_migration_required"
+    assert item.read_bytes() == b"synthetic-private-canary"
+    assert str(state) not in json.dumps(result)
+    assert "synthetic-private-canary" not in json.dumps(result)
+    assert not (apps / (consumer.APP_NAME + ".app")).exists()
+
+
+def test_legacy_path_alias_refuses_without_following_or_copying_private_state(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (outside / "task-answers.key").write_bytes(b"synthetic-unrelated-key")
+    (repo / "runtime").symlink_to(outside, target_is_directory=True)
+    apps = tmp_path / "Applications"
+    monkeypatch.setattr(consumer, "_candidate_starts", lambda *_: pytest.fail("must not start"))
+    result = install_macos_app(repo, destination=apps, platform="darwin")
+    assert result["reason"] == "legacy_state_unavailable"
+    assert (outside / "task-answers.key").read_bytes() == b"synthetic-unrelated-key"
+    assert not (apps / (consumer.APP_NAME + ".app")).exists()
+
+
+def test_legacy_state_detection_accepts_explicit_same_authority_and_empty_locks(tmp_path):
+    repo = tmp_path / "Job-Application-Executor"
+    state = repo / "runtime" / "autonomy"
+    state.mkdir(parents=True)
+    (state / "tasks.sqlite3-wal").write_bytes(b"synthetic-wal")
+    app = tmp_path / "Applications" / (consumer.APP_NAME + ".app")
+    assert not consumer._legacy_state_migration_needed(repo, app, state)
+    assert consumer._legacy_state_migration_needed(repo, app, tmp_path / "new")
+    (state / "tasks.sqlite3-wal").unlink()
+    (state / "worker.lock").touch()
+    (state / "migration.lock").touch()
+    assert not consumer._legacy_state_migration_needed(repo, app, tmp_path / "new")
