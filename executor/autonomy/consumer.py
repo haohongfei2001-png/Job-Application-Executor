@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sqlite3
+import uuid
 import tempfile
 import time
 import urllib.error
@@ -361,6 +363,35 @@ def _acquire_app_transaction_lock(apps_dir: Path) -> int:
     return _private_lock_fd(apps_dir / f".{APP_NAME}.app.transaction.lock")
 
 
+
+def _prepare_task_state_release(python: Path, release: Path, state: Path,
+                                apps: Path, evidence: dict) -> bool:
+    """Verify the candidate against a durable capsule inside the held fences.
+
+    Empty/new state retains the existing compatibility path. Existing task
+    authority gets a private standalone backup before either app bundle moves.
+    No journal is restored, no old writer is signalled and no private profile,
+    credential, service token or log enters this scoped capsule.
+    """
+    from .state_compatibility import (
+        _stage_task_state_backup_locked, task_state_candidate_compatible,
+        task_state_backup_candidate_compatible,
+    )
+    database = state / "tasks.sqlite3"
+    if not database.exists() and not database.is_symlink():
+        return task_state_candidate_compatible(python, release, state)
+    capsule = apps / (".jae-task-state-backup-" + uuid.uuid4().hex)
+    try:
+        receipt = _stage_task_state_backup_locked(state, capsule)
+        # Retain the original returned receipt outside the capsule's own
+        # manifest, including on later refusal/recovery. Never erase a backup
+        # to make a failed release look successful.
+        evidence.update({"path": str(capsule), "receipt": receipt})
+        return task_state_backup_candidate_compatible(python, release, capsule, receipt)
+    except (ImportError, OSError, ValueError, TimeoutError, sqlite3.Error):
+        return False
+
+
 def install_macos_app(
     repo_root: str | Path,
     *,
@@ -389,9 +420,12 @@ def install_macos_app(
                       else default_runtime(apps_dir / f"{APP_NAME}.app" / "Contents" / "Resources" / "release"))
         try:
             with task_state_guard(state_root):
-                return _install_macos_app_unlocked(
+                backup_evidence = {}
+                result = _install_macos_app_unlocked(
                     repo_root, destination=apps_dir, platform=platform,
-                    task_state_root=state_root, standalone_runtime=standalone_runtime)
+                    task_state_root=state_root, standalone_runtime=standalone_runtime,
+                    _state_backup_evidence=backup_evidence)
+                return {**result, "task_state_backup": backup_evidence} if backup_evidence else result
         except BlockingIOError:
             return {"ok": False, "reason": "task_state_in_use",
                     "message": "任务服务仍在使用当前状态；请先在应用中停止服务，当前应用保持不变。"}
@@ -409,6 +443,7 @@ def _install_macos_app_unlocked(
     platform: str | None = None,
     task_state_root: Path | None = None,
     standalone_runtime: str | Path | None = None,
+    _state_backup_evidence: dict | None = None,
 ) -> dict:
     """Stage a source-and-runtime snapshot, then atomically activate the Mac app."""
     current_platform = platform or sys.platform
@@ -557,10 +592,9 @@ def _install_macos_app_unlocked(
     # Health uses an empty temporary journal. Separately prove the staged
     # queue can initialize a WAL-aware copy of the actual shared journal.
     # The daemon lock remains held until activation/recovery has finished.
-    from .state_compatibility import task_state_candidate_compatible
-
-    if (task_state_root is None or not task_state_candidate_compatible(
-            runtime / "bin" / "python", release, task_state_root)):
+    backup_evidence = _state_backup_evidence if _state_backup_evidence is not None else {}
+    if (task_state_root is None or not _prepare_task_state_release(
+            runtime / "bin" / "python", release, task_state_root, apps_dir, backup_evidence)):
         shutil.rmtree(staging)
         return {
             "ok": False,
@@ -665,7 +699,11 @@ def rollback_macos_app(destination: str | Path, *, task_state_root: str | Path |
                       else default_runtime(apps_dir / f"{APP_NAME}.app" / "Contents" / "Resources" / "release"))
         try:
             with task_state_guard(state_root):
-                return _rollback_macos_app_unlocked(apps_dir, task_state_root=state_root)
+                backup_evidence = {}
+                result = _rollback_macos_app_unlocked(
+                    apps_dir, task_state_root=state_root,
+                    _state_backup_evidence=backup_evidence)
+                return {**result, "task_state_backup": backup_evidence} if backup_evidence else result
         except BlockingIOError:
             return {"ok": False, "reason": "task_state_in_use",
                     "message": "任务服务仍在使用当前状态；请先在应用中停止服务，当前应用保持不变。"}
@@ -676,7 +714,8 @@ def rollback_macos_app(destination: str | Path, *, task_state_root: str | Path |
         os.close(lock_fd)
 
 
-def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Path) -> dict:
+def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Path,
+                                 _state_backup_evidence: dict | None = None) -> dict:
     """Restore the retained app without deleting the failed candidate."""
     apps_dir = Path(destination).expanduser().resolve()
     app = apps_dir / f"{APP_NAME}.app"
@@ -714,10 +753,10 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
             "reason": "rollback_unhealthy",
             "message": "回退副本无法启动；当前应用保持不变。",
         }
-    from .state_compatibility import task_state_candidate_compatible
-
-    if not task_state_candidate_compatible(
-        previous_runtime / "bin" / "python", previous_release, task_state_root
+    backup_evidence = _state_backup_evidence if _state_backup_evidence is not None else {}
+    if not _prepare_task_state_release(
+        previous_runtime / "bin" / "python", previous_release, task_state_root,
+        apps_dir, backup_evidence
     ):
         return {
             "ok": False,

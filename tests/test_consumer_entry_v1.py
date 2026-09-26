@@ -1306,7 +1306,7 @@ def test_macos_install_refuses_aliased_task_state_without_touching_it(tmp_path, 
     assert not (apps / ".AI 投递经理.app.installing").exists()
 
 
-@pytest.mark.parametrize("destructive", [False, True, "schema", "answers"])
+@pytest.mark.parametrize("destructive", [False, True, "schema", "answers", "post_health"])
 def test_macos_update_proves_journal_compatibility_before_activation(
     tmp_path, monkeypatch, destructive
 ):
@@ -1386,7 +1386,7 @@ def test_macos_update_proves_journal_compatibility_before_activation(
             candidate_answers = repo / "executor" / "facts" / "answers.py"
             with candidate_answers.open("a", encoding="utf-8") as handle:
                 handle.write("\nTaskAnswerStore.load = lambda self, task_id: {}\n")
-        elif destructive:
+        elif destructive in {True, "schema"}:
             candidate_queue = repo / "executor" / "autonomy" / "queue.py"
             with candidate_queue.open("a", encoding="utf-8") as handle:
                 handle.write(
@@ -1411,6 +1411,8 @@ def test_macos_update_proves_journal_compatibility_before_activation(
                 with pytest.raises(BlockingIOError):
                     fcntl.flock(initializer, fcntl.LOCK_EX | fcntl.LOCK_NB)
             starts.append(source)
+            if destructive == "post_health" and len(starts) == 2:
+                return False
             return real_start(runtime_python, source)
 
         monkeypatch.setattr(consumer, "_candidate_starts", checked_start)
@@ -1426,7 +1428,28 @@ def test_macos_update_proves_journal_compatibility_before_activation(
         assert not (state / "auth.token").exists()
         assert not (state / "service.json").exists()
         assert not (state / "tasks.sqlite3.pre-jcr01.sqlite3").exists()
-        if destructive:
+        from executor.autonomy.state_compatibility import verify_task_state_backup
+        backup = result["task_state_backup"]
+        capsule = Path(backup["path"])
+        assert capsule.parent == apps
+        assert capsule.stat().st_mode & 0o077 == 0
+        assert verify_task_state_backup(capsule, backup["receipt"])
+        assert backup["receipt"]["activation"] == "NOT_AUTHORIZED"
+        assert backup["receipt"]["legacy_writer_retirement"] == "NOT_CERTIFIED"
+        assert (capsule / "task-answers.key").read_bytes() == key
+        with closing(sqlite3.connect(capsule / "tasks.sqlite3")) as snapshot:
+            assert (snapshot.execute("SELECT * FROM tasks").fetchall(),
+                    snapshot.execute("SELECT * FROM events").fetchall()) == before
+            assert snapshot.execute("SELECT * FROM task_answer_events").fetchall() == answer_before
+        assert "PRIVATE_ACTIVATION_ANSWER_CANARY" not in json.dumps(result)
+        if destructive == "post_health":
+            assert result["reason"] == "post_activation_unhealthy"
+            assert len(starts) == 3
+            assert marker.read_text() == "preserve"
+            assert (release / "release-source-manifest.json").read_bytes() == before_manifest
+            assert not previous.exists()
+            assert (apps / ".AI 投递经理.app.failed").is_dir()
+        elif destructive:
             assert result["reason"] == "candidate_state_incompatible"
             assert len(starts) == 1
             assert marker.read_text() == "preserve"
@@ -1681,3 +1704,158 @@ def test_app_transactions_refuse_queue_initializer_before_candidate_start(tmp_pa
         from executor.autonomy.state_compatibility import task_state_guard
         with task_state_guard(state):
             pass
+
+
+@pytest.mark.parametrize("action", ["install", "rollback"])
+@pytest.mark.parametrize("defect", ["publication", "capsule_drift", "candidate_rejection"])
+def test_app_transaction_keeps_versions_and_authority_when_durable_preflight_refuses(
+    tmp_path, monkeypatch, action, defect
+):
+    from contextlib import closing
+    from cryptography.fernet import Fernet
+    from executor.autonomy import state_compatibility
+    from executor.autonomy.worker import ProcessLock
+    from test_task_state_compatibility_v1 import legacy_state, authority, encrypted_answers
+
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    empty = tmp_path / "empty-build-state"
+    assert install_macos_app(repo, destination=apps, platform="darwin", task_state_root=empty)["ok"]
+    if action == "rollback":
+        (repo / "executor" / "consumer_entry.py").write_text("VERSION='second'\n")
+        assert install_macos_app(repo, destination=apps, platform="darwin", task_state_root=empty)["ok"]
+    app = apps / (consumer.APP_NAME + ".app")
+    previous = apps / ("." + consumer.APP_NAME + ".app.previous")
+    manifest = app / "Contents" / "Resources" / "release" / "release-source-manifest.json"
+    current_manifest = manifest.read_bytes()
+    previous_manifest = (previous / "Contents" / "Resources" / "release" /
+                         "release-source-manifest.json").read_bytes() if previous.exists() else None
+    state = tmp_path / "synthetic-private-state"
+    with closing(legacy_state(state)) as db:
+        key = encrypted_answers(state, db)
+        before = authority(db)
+        answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        real_stage = state_compatibility._stage_task_state_backup_locked
+        seen = []
+        def stage(root, destination):
+            with pytest.raises(RuntimeError, match="another local worker"):
+                with ProcessLock(state / "worker.lock"):
+                    pytest.fail("backup must share the install/rollback writer fence")
+            with (state / "migration.lock").open("a+") as initializer:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(initializer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            seen.append(destination)
+            receipt = real_stage(root, destination)
+            if defect == "capsule_drift":
+                (destination / "task-answers.key").write_bytes(Fernet.generate_key())
+            return receipt
+        monkeypatch.setattr(state_compatibility, "_stage_task_state_backup_locked", stage)
+        if defect == "publication":
+            native_link = state_compatibility.os.link
+            def failed_publish(source, target, *args, **kwargs):
+                if Path(source).name == ".backup-manifest.tmp":
+                    (Path(target).parent / "unexpected").write_text("UNKNOWN_BACKUP_CANARY")
+                    raise OSError("synthetic receipt publication failure")
+                return native_link(source, target, *args, **kwargs)
+            monkeypatch.setattr(state_compatibility.os, "link", failed_publish)
+        def incompatible(*args):
+            if defect != "candidate_rejection":
+                pytest.fail("invalid/unpublished capsule cannot reach candidate schema/decoder")
+            return False
+        monkeypatch.setattr(state_compatibility, "task_state_candidate_compatible", incompatible)
+        if action == "install":
+            result = install_macos_app(repo, destination=apps, platform="darwin", task_state_root=state)
+            assert result["reason"] == "candidate_state_incompatible"
+        else:
+            result = rollback_macos_app(apps, task_state_root=state)
+            assert result["reason"] == "rollback_state_incompatible"
+        assert result["ok"] is False
+        assert len(seen) == 1
+        assert manifest.read_bytes() == current_manifest
+        if previous_manifest is not None:
+            assert (previous / "Contents" / "Resources" / "release" /
+                    "release-source-manifest.json").read_bytes() == previous_manifest
+        else:
+            assert not previous.exists()
+        assert not (apps / ("." + consumer.APP_NAME + ".app.installing")).exists()
+        assert not (apps / ("." + consumer.APP_NAME + ".app.failed")).exists()
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == answers
+        assert (state / "task-answers.key").read_bytes() == key
+        assert "PRIVATE_LATEST_ANSWER_CANARY" not in json.dumps(result)
+        if defect == "publication":
+            assert "task_state_backup" not in result
+            assert sorted(p.name for p in seen[0].iterdir()) == ["unexpected"]
+            assert (seen[0] / "unexpected").read_text() == "UNKNOWN_BACKUP_CANARY"
+        else:
+            backup = result["task_state_backup"]
+            assert Path(backup["path"]) == seen[0]
+            assert state_compatibility.verify_task_state_backup(
+                seen[0], backup["receipt"]) is (defect == "candidate_rejection")
+    with ProcessLock(state / "worker.lock"):
+        pass
+
+
+def test_real_packaged_rollback_retains_a_bound_backup_without_restoring_old_task_values(
+    tmp_path, monkeypatch
+):
+    import shutil
+    import sqlite3
+    from contextlib import closing
+    from executor.autonomy import state_compatibility
+    from executor.autonomy.worker import ProcessLock
+    from test_task_state_compatibility_v1 import legacy_state, authority, encrypted_answers
+
+    actual = Path(__file__).resolve().parents[1]
+    repo = tmp_path / "Job-Application-Executor"
+    repo.mkdir()
+    shutil.copytree(actual / "executor", repo / "executor",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copy2(actual / "requirements.txt", repo / "requirements.txt")
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    apps = tmp_path / "Applications"
+    empty = tmp_path / "empty-build-state"
+    assert install_macos_app(repo, destination=apps, platform="darwin", task_state_root=empty)["ok"]
+    first = (apps / (consumer.APP_NAME + ".app") / "Contents" / "Resources" /
+             "release" / "release-source-manifest.json").read_bytes()
+    with (repo / "executor" / "__init__.py").open("a") as file:
+        file.write("\n# Synthetic second release identity.\n")
+    assert install_macos_app(repo, destination=apps, platform="darwin", task_state_root=empty)["ok"]
+    state = tmp_path / "synthetic-private-state"
+    with closing(legacy_state(state)) as db:
+        key = encrypted_answers(state, db)
+        before = authority(db)
+        answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        (state / "profile.json").write_text("PRIVATE_ROLLBACK_PROFILE_CANARY")
+        (state / "auth.token").write_text("PRIVATE_ROLLBACK_TOKEN_CANARY")
+        result = rollback_macos_app(apps, task_state_root=state)
+        assert result["ok"] is True
+        assert result["restored"] is True
+        backup = result["task_state_backup"]
+        capsule = Path(backup["path"])
+        assert state_compatibility.verify_task_state_backup(capsule, backup["receipt"])
+        assert sorted(p.name for p in capsule.iterdir()) == [
+            "backup-manifest.json", "task-answers.key", "tasks.sqlite3"]
+        assert (capsule / "task-answers.key").read_bytes() == key
+        with closing(sqlite3.connect(capsule / "tasks.sqlite3")) as snapshot:
+            assert authority(snapshot) == before
+            assert snapshot.execute("SELECT * FROM task_answer_events").fetchall() == answers
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == answers
+        assert (state / "task-answers.key").read_bytes() == key
+        assert (state / "profile.json").read_text() == "PRIVATE_ROLLBACK_PROFILE_CANARY"
+        assert (state / "auth.token").read_text() == "PRIVATE_ROLLBACK_TOKEN_CANARY"
+        assert "PRIVATE_" not in json.dumps(result)
+        assert (Path(result["app_path"]) / "Contents" / "Resources" / "release" /
+                "release-source-manifest.json").read_bytes() == first
+        assert Path(result["failed_candidate_path"]).is_dir()
+        assert not (apps / ("." + consumer.APP_NAME + ".app.previous")).exists()
+        assert not (state / "tasks.sqlite3.pre-jcr01.sqlite3").exists()
+    with ProcessLock(state / "worker.lock"):
+        pass
