@@ -19,6 +19,7 @@ from .queue import RUNTIME, TaskQueue, private_dir
 from .process_entry import isolated_cli_command
 from .supervisor import Supervisor, create_server, local_token
 from .worker import ProcessLock, Worker
+from .consumer_presentation import ConsumerSurface, loopback_origin, present_surface
 
 
 def request(root, port, path, data=None):
@@ -98,16 +99,16 @@ def lifecycle(action, root, port):
         return {"ok": False, "reason": "health_timeout"}
 
 
-def open_ui(root, port):
+def open_ui(root, port, *, presenter=None):
+    loopback_origin(port)  # Validate before issuing any local session capability.
     ticket = request(root, port, "/v1/ui-ticket", {})["ticket"]
-    opened = webbrowser.open(
-        f"http://127.0.0.1:{port}/ui-login?ticket={ticket}",
-        new=2,
-    )
-    return {"ok": bool(opened), "opened": bool(opened)}
+    surface = ConsumerSurface.dashboard(port, ticket)
+    opened = present_surface(surface, presenter=presenter)
+    return {"ok": opened, "opened": opened}
 
 
-def launch_consumer(root, port):
+def launch_consumer(root, port, *, presenter=None):
+    loopback_origin(port)
     from .consumer import humanize_preflight
     from .preflight import collect_live_preflight
 
@@ -148,7 +149,9 @@ def launch_consumer(root, port):
     if not health.get("ok"):
         from .bootstrap import open_bootstrap
 
-        bootstrap = open_bootstrap(root, port, str(started.get("reason") or "service_unavailable"))
+        reason = str(started.get("reason") or "service_unavailable")
+        bootstrap = (open_bootstrap(root, port, reason) if presenter is None else
+                     open_bootstrap(root, port, reason, presenter=presenter))
         return {
             **result,
             "message": humanize_preflight(result),
@@ -158,7 +161,8 @@ def launch_consumer(root, port):
         }
 
     try:
-        ui = open_ui(root, port)
+        ui = (open_ui(root, port) if presenter is None else
+              open_ui(root, port, presenter=presenter))
     except Exception:
         ui = {"ok": False, "opened": False}
     return {

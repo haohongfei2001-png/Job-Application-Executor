@@ -361,3 +361,58 @@ Independent DFG-008 engineering diagnosis: discover_fields sliced the matched-co
 Six new cases:351 controls,350-hidden prefix plus visible required control,201 select options, exact350-controls/200-options positive native choice, growth from2 to351 controls stopping later writes, and partial/complete digest separation with private canaries. Negative application fixtures prohibit all field/start/save/navigation effects; actual browser counters and retained full-size DOM confirm no submit. Exact-boundary positive remains DOM_READBACK only. Every old browser test is retained unchanged; no test or fixture is shrunk, assertions not weakened. No new certified external ATS/server draft/page advance/attachment/row capability or completed DFG008 is claimed.
 
 New coherent candidate targeted checks are NOT_RUN pending its one fresh automatic cloud run. Workflow selection/timeout is unchanged, heavy full suite not triggered while draft. JCR08 remains IN_PROGRESS/consumer NOT_CERTIFIED; native single-window/full task/onboarding, genuine compatible legacy-root ownership transfer/retirement, DFG002 server reconciliation/other action types, dedicated DFG008 drivers remain independent open engineering. Signing/real owner-device/live gates remain deferred only on dependent paths. Final submit permanently user-only.
+
+## JCR-08 exact-head affected batch proof — c5e261c
+
+Head c5e261cca7997f5a3c85353d7de0289a12370de0 / CI36267715675 SUCCESS:
+Ubuntu foundation108475462753:25 privacy/no-submit,153 independent review/browser
+including all6 new full-size form completeness cases,56 operations including all4
+loaded-provider/no-credential cases,7 selected session/diagnostics and223
+packaged/activation/rollback/state/distribution cases PASS. HostedMac108475462606:
+223 packaged cases and7 retired updater entries PASS. Compile/JS/diff guards PASS.
+The no-lazy-initialization diagnostic path and explicit partial-form refusal are
+now supported by exact-head cloud evidence, not only static review. No unchanged
+rerun; full round-closure suite intentionally unrun while draft. This does not
+close JCR08, certify a native app window/server-save/dedicated external driver,
+or authorize final submit.
+
+## JCR-08 shared in-memory consumer presentation batch
+
+The existing healthy service UI and independent bootstrap were each hardwired
+to webbrowser.open. A native single-window host could not use those production
+readiness/identity/recovery paths without also opening an external browser. This
+batch adds a production ConsumerSurface contract and trusted in-process presenter
+to open_ui, launch_consumer and open_bootstrap. The ordinary browser entry remains
+compatible; an app presenter receives the same actual one-use UI admission or
+owned independent recovery page without another browser window.
+
+Port/type/origin/path/query checks run before issuing a ticket or starting a
+service for invalid input. Factory descriptors are fixed loopback/known-route
+only, URL-encode opaque credentials, suppress repr/raw exception output and expose
+a credential-free summary. App presentation must return exact True; failure,
+truthy mappings and exceptions are safely refused without fallback or repeat.
+Recovery handoff is limited to the initial recovery origin and the caller's
+known service origin; generic external/file/JavaScript/unknown local routes are
+not approved. The existing source/runtime validation, loaded-release mismatch
+restart fences, bootstrap ownership/health handshake, auth/one-use/HttpOnly
+cookies, no-submit and service-safe-point semantics remain.
+
+22 added targeted cases retain every existing consumer/package test: actual
+supervisor one-use ticket→HttpOnly session→real dashboard with external browser
+forbidden and ticket reuse401; repeat admission/private summary/unchanged
+task/events; three refused/malformed/exception presenter outcomes; four invalid
+ports before any action; eleven wrong origin/credential/path/query boundaries;
+opaque credential encoding/known recovery navigation; missing model still
+presented through the production launch route; and two production launch calls
+under injected service-start failure→real independent bootstrap process→actual
+authenticated recovery pages inside the app presenter, same owned recovery
+process/private record and no service/task writer. The latter is transport/
+readiness integration using a synthetic app host, not a real NSWindow/WKWebView.
+
+The new stable candidate remains NOT_RUN until its one automatic targeted cloud
+CI. No workflow, timeout, fixture shrink, skipped test, full suite, owner device
+or live account change. This is the shared app-host presentation foundation,
+not a shipped or certified native window: compiled native host, window reuse,
+persisted app context, keyboard/clipboard/zoom/accessibility and native hosted
+journey remain open with full task/onboarding/legacy transfer/DFG002/008 exits.
+JCR08 IN_PROGRESS, consumer NOT_CERTIFIED, JCR09 NOT_STARTED, final submit user-only.

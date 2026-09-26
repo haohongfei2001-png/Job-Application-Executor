@@ -23,6 +23,7 @@ from .loopback_http import LoopbackHTTPServer
 from .queue import private_dir
 from .process_entry import isolated_cli_command
 from .release import read_release_identity
+from .consumer_presentation import ConsumerSurface, loopback_origin, present_surface
 
 
 def _state_path(root: str | Path) -> Path:
@@ -184,7 +185,9 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
             pass
 
 
-def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_unavailable") -> dict:
+def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_unavailable", *,
+                   presenter=None) -> dict:
+    loopback_origin(service_port)
     root = Path(root).expanduser().resolve()
     state = _state_path(root)
 
@@ -232,5 +235,10 @@ def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_u
             time.sleep(0.1)
     if not active:
         return {"ok": False, "opened": False, "reason": "bootstrap_start_failed"}
-    opened = webbrowser.open(active["url"], new=2)
-    return {"ok": bool(opened), "opened": bool(opened)}
+    try:
+        surface = ConsumerSurface.from_url("bootstrap", active["url"],
+                                           service_port=service_port)
+    except ValueError:
+        return {"ok": False, "opened": False, "reason": "bootstrap_presentation_invalid"}
+    opened = present_surface(surface, presenter=presenter)
+    return {"ok": opened, "opened": opened}

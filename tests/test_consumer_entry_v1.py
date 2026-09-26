@@ -1859,3 +1859,230 @@ def test_real_packaged_rollback_retains_a_bound_backup_without_restoring_old_tas
         assert not (state / "tasks.sqlite3.pre-jcr01.sqlite3").exists()
     with ProcessLock(state / "worker.lock"):
         pass
+
+
+def test_app_presenter_consumes_actual_one_use_ui_admission_without_browser(
+        tmp_path, monkeypatch):
+    import http.cookiejar
+    import threading
+    from executor.autonomy.manager import ManagerController
+    from executor.autonomy.queue import TaskQueue
+    from executor.autonomy.supervisor import Supervisor, create_server, local_token
+    from executor.autonomy.worker import Worker
+    from executor.autonomy.consumer_presentation import ConsumerSurface
+
+    monkeypatch.setenv("APPLICATION_EXECUTOR_BROWSER_MODE", "isolated")
+    runtime = tmp_path / "runtime"
+    queue = TaskQueue(runtime)
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    class NoProvider:
+        available = False
+        def decide(self, *_args):
+            pytest.fail("UI presentation must not invoke a provider")
+    manager = ManagerController(queue, worker, provider=NoProvider(),
+                                settings={"deepseek": {"enabled": False}})
+    supervisor = Supervisor(queue, worker=worker, manager=manager,
+                            token=local_token(runtime))
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(cli.webbrowser, "open",
+        lambda *_args, **_kwargs: pytest.fail("app host must not open an external browser"))
+    before = (queue.tasks(), queue.recent_events(1000))
+    seen = []
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    def app_host(surface):
+        assert isinstance(surface, ConsumerSurface)
+        assert surface.surface == "dashboard"
+        assert surface.allows_navigation(surface.url)
+        with opener.open(surface.url, timeout=10) as response:
+            assert response.status == 200
+            assert response.url == f"http://127.0.0.1:{server.server_port}/ui"
+            assert "AI 投递经理" in response.read().decode()
+        seen.append(surface)
+        return True
+    try:
+        first = cli.open_ui(runtime, server.server_port, presenter=app_host)
+        assert first == {"ok": True, "opened": True}
+        assert any("HttpOnly" in cookie._rest for cookie in jar)
+        with pytest.raises(urllib.error.HTTPError) as reused:
+            opener.open(seen[0].url, timeout=10)
+        assert reused.value.code == 401
+        second = cli.open_ui(runtime, server.server_port, presenter=app_host)
+        assert second == first
+        assert len(seen) == 2
+        assert seen[0].url != seen[1].url
+        assert not seen[0].allows_navigation("https://private.example.test/")
+        assert not seen[0].allows_navigation(f"http://127.0.0.1:{server.server_port}/v1/tasks")
+        assert before == (queue.tasks(), queue.recent_events(1000))
+        report = json.dumps([first, second, *(s.safe_summary() for s in seen)])
+        for surface in seen:
+            from urllib.parse import parse_qs, urlsplit
+            ticket = parse_qs(urlsplit(surface.url).query)["ticket"][0]
+            assert ticket not in report
+            assert ticket not in repr(surface)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("outcome", ["refused", "truthy_mapping", "private_exception"])
+def test_app_presentation_failure_never_falls_back_or_reports_credentials(monkeypatch, outcome):
+    from executor.autonomy.consumer_presentation import ConsumerSurface, present_surface
+    surface = ConsumerSurface.dashboard(9344, "PRIVATE_UI_TICKET_CANARY")
+    calls = []
+    monkeypatch.setattr(cli.webbrowser, "open",
+        lambda *_args, **_kwargs: pytest.fail("failed app host must not fall back to browser"))
+    def app_host(candidate):
+        calls.append(candidate)
+        if outcome == "private_exception":
+            raise RuntimeError(candidate.url)
+        return {"opened": False} if outcome == "truthy_mapping" else False
+    assert present_surface(surface, presenter=app_host) is False
+    assert calls == [surface]
+    assert "PRIVATE_UI_TICKET_CANARY" not in repr(surface)
+    assert "PRIVATE_UI_TICKET_CANARY" not in json.dumps(surface.safe_summary())
+
+
+@pytest.mark.parametrize("port", [True, 0, 65536, "9344"])
+def test_invalid_app_presentation_port_refuses_before_ticket_or_service_actions(
+        tmp_path, monkeypatch, port):
+    monkeypatch.setattr(cli, "request", lambda *_args: pytest.fail("invalid port must not mint ticket"))
+    monkeypatch.setattr(cli, "lifecycle", lambda *_args: pytest.fail("invalid port must not start service"))
+    monkeypatch.setattr(cli, "ensure_chrome", lambda: pytest.fail("invalid port must not start Chrome"))
+    with pytest.raises(ValueError, match="invalid consumer presentation"):
+        cli.open_ui(tmp_path, port, presenter=lambda _surface: True)
+    with pytest.raises(ValueError, match="invalid consumer presentation"):
+        cli.launch_consumer(tmp_path, port, presenter=lambda _surface: True)
+    with pytest.raises(ValueError, match="invalid consumer presentation"):
+        bootstrap.open_bootstrap(tmp_path, port, presenter=lambda _surface: True)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("url", [
+    "https://127.0.0.1:9344/ui-login?ticket=canary",
+    "http://localhost:9344/ui-login?ticket=canary",
+    "http://127.0.0.1.example.test:9344/ui-login?ticket=canary",
+    "http://user:password@127.0.0.1:9344/ui-login?ticket=canary",
+    "http://127.0.0.1:9344/ui-login?ticket=canary#private",
+    "http://127.0.0.1:9344/ui-login?ticket=first&ticket=second",
+    "http://127.0.0.1:9344/ui-login?ticket=canary&next=https://example.test",
+    "http://127.0.0.1:9344/ui-login?ticket=",
+    "http://127.0.0.1:9344/ui-login?ticket=%0Aprivate",
+    "http://127.0.0.1:9344/v1/tasks?ticket=canary",
+    "file:///tmp/private",
+])
+def test_app_surface_rejects_unowned_or_ambiguous_routes_without_echoing(url):
+    from executor.autonomy.consumer_presentation import ConsumerSurface
+    with pytest.raises(ValueError) as blocked:
+        ConsumerSurface.from_url("dashboard", url)
+    assert str(blocked.value) == "invalid consumer presentation"
+    assert url not in str(blocked.value)
+
+
+def test_app_surface_escapes_opaque_ticket_and_limits_recovery_handoff():
+    from executor.autonomy.consumer_presentation import ConsumerSurface
+    from urllib.parse import parse_qs, urlsplit
+    ticket = "PRIVATE_OPAQUE&redirect=https://example.test/?x=1"
+    dashboard = ConsumerSurface.dashboard(9344, ticket)
+    assert parse_qs(urlsplit(dashboard.url).query) == {"ticket": [ticket]}
+    recovery = ConsumerSurface.from_url(
+        "bootstrap", "http://127.0.0.1:19444/?token=PRIVATE_BOOTSTRAP_CANARY",
+        service_port=9344)
+    assert recovery.allows_navigation(recovery.url)
+    assert recovery.allows_navigation("http://127.0.0.1:19444/retry?token=PRIVATE_BOOTSTRAP_CANARY")
+    assert recovery.allows_navigation(dashboard.url)
+    assert recovery.allows_navigation("http://127.0.0.1:9344/ui")
+    assert not recovery.allows_navigation("http://127.0.0.1:19445/ui")
+    assert not recovery.allows_navigation("http://127.0.0.1:9344/retry")
+    assert not recovery.allows_navigation("http://127.0.0.1:19444/ui")
+    assert not recovery.allows_navigation("javascript:alert(1)")
+    assert not recovery.allows_navigation("http://127.0.0.1:9344/ui#private")
+    assert "PRIVATE" not in repr(recovery)
+    assert "PRIVATE" not in json.dumps(recovery.safe_summary())
+
+
+def test_consumer_launch_routes_through_app_presenter_even_when_model_is_missing(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(cli, "lifecycle", lambda *_args: {"ok": True})
+    monkeypatch.setattr(preflight, "collect_live_preflight", lambda **_kwargs: {
+        "ready_for_live_e2e": False, "remediation": ["configure_deepseek_key"],
+        "final_click_actor": "user", "submit_capability": False})
+    monkeypatch.setattr(cli, "request", lambda *_args: {"ticket": "PRIVATE_MISSING_MODEL_TICKET"})
+    monkeypatch.setattr(cli.webbrowser, "open",
+        lambda *_args, **_kwargs: pytest.fail("missing model must not force external browser"))
+    seen = []
+    result = cli.launch_consumer(tmp_path, 9344,
+                                presenter=lambda surface: seen.append(surface) or True)
+    assert result["ok"] is True
+    assert result["opened"] is True
+    assert result["ready_for_live_e2e"] is False
+    assert result["submit_capability"] is False
+    assert "DeepSeek" in result["message"]
+    assert len(seen) == 1
+    assert seen[0].surface == "dashboard"
+    assert "PRIVATE_MISSING_MODEL_TICKET" not in json.dumps(result)
+
+
+def test_actual_independent_bootstrap_can_be_presented_inside_app_and_reused(
+        tmp_path, monkeypatch):
+    runtime = tmp_path / "app-bootstrap"
+    runtime.mkdir()
+    monkeypatch.setenv("APPLICATION_EXECUTOR_BROWSER_MODE", "isolated")
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        service_port = reservation.getsockname()[1]
+    monkeypatch.setattr(cli.webbrowser, "open",
+        lambda *_args, **_kwargs: pytest.fail("app recovery must not open external browser"))
+    children = []
+    real_popen = subprocess.Popen
+    def record_child(command, **kwargs):
+        child = real_popen(command, **kwargs)
+        if "-I" in command and any("executor.autonomy.cli" in str(part) for part in command):
+            children.append(child)
+        return child
+    monkeypatch.setattr(subprocess, "Popen", record_child)
+    seen = []
+    lifecycle_calls = []
+    actual_lifecycle = cli.lifecycle
+    def failed_service(action, _root, _port):
+        lifecycle_calls.append(action)
+        return {"ok": False, "reason": "service_start_failed"}
+    monkeypatch.setattr(cli, "lifecycle", failed_service)
+    monkeypatch.setattr(cli, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(preflight, "collect_live_preflight", lambda **_kwargs: {
+        "ready_for_live_e2e": False, "remediation": ["start_supervisor"],
+        "final_click_actor": "user", "submit_capability": False})
+    def app_host(surface):
+        assert surface.surface == "bootstrap"
+        with urllib.request.urlopen(surface.url, timeout=10) as response:
+            assert response.status == 200
+            assert "现有任务没有被修改" in response.read().decode()
+        seen.append(surface)
+        return True
+    try:
+        first = cli.launch_consumer(runtime, service_port, presenter=app_host)
+        second = cli.launch_consumer(runtime, service_port, presenter=app_host)
+        assert first == second
+        assert first["ok"] is True and first["opened"] is True
+        assert first["bootstrap_reason"] == "service_start_failed"
+        assert first["ready_for_live_e2e"] is False
+        assert first["submit_capability"] is False
+        assert lifecycle_calls == ["start", "health", "start", "health"]
+        assert len(children) == 1
+        assert len(seen) == 2
+        assert seen[0].url == seen[1].url
+        assert not actual_lifecycle("health", runtime, service_port)["ok"]
+        assert not (runtime / "service.json").exists()
+        assert not (runtime / "tasks.sqlite3").exists()
+        record = json.loads((runtime / "bootstrap.json").read_text())
+        assert runtime.joinpath("bootstrap.json").stat().st_mode & 0o077 == 0
+        assert record["token"] not in json.dumps([first, second, seen[0].safe_summary()])
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=5)
