@@ -1605,3 +1605,108 @@ def test_profile_setup_request_bound_does_not_change_existing_endpoint_limit(tmp
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.mark.parametrize("available", [True, False, "fault", None, 1])
+def test_readiness_authenticated_readback_never_loads_credentials_provider_or_task(
+    tmp_path, monkeypatch, available
+):
+    from executor import resolver
+    from executor.autonomy import preflight
+
+    queue, worker, supervisor = _supervisor(tmp_path)
+    task = queue.enqueue(_spec(tmp_path))
+    profile = Path(task["spec"]["profile_ref"])
+    profile.write_text(json.dumps({
+        "fields": {"identity.phone": {"value": "13800138000"}},
+        "original_research": "PRIVATE_READINESS_CANARY 完整长研究\n" * 1000,
+    }), encoding="utf-8")
+    current_settings = {"profile_path": str(profile),
+                        "future_preference": {"private": "PRIVATE_SETTINGS_CANARY"}}
+    class ExistingProvider:
+        @property
+        def available(self):
+            if available == "fault":
+                raise RuntimeError("PRIVATE_PROVIDER_READINESS_CANARY")
+            return available
+
+        def decide(self, *_args, **_kwargs):
+            pytest.fail("readiness must not invoke the model")
+
+    provider = ExistingProvider() if available is not None else None
+    supervisor.manager = ManagerController(
+        queue, worker, provider=provider, settings=current_settings,
+    )
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("readiness must not initialize credentials, processes or tasks")
+
+    monkeypatch.setattr(preflight, "DeepSeekManagerProvider", forbidden)
+    monkeypatch.setattr("executor.autonomy.manager.DeepSeekManagerProvider", forbidden)
+    monkeypatch.setattr(resolver, "_keychain_key", forbidden)
+    monkeypatch.setattr(preflight, "load_settings", forbidden)
+    monkeypatch.setattr(worker, "run_once", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    chrome = tmp_path / "synthetic-chrome"
+    chrome.write_bytes(b"synthetic presence only; never execute")
+    monkeypatch.setattr(preflight.browser, "CHROME", str(chrome))
+    monkeypatch.setattr(preflight.browser, "browser_mode", lambda: "live")
+    monkeypatch.setattr(preflight.browser, "owned_cdp_session", lambda: True)
+    before = (queue.tasks(), queue.recent_events(1000), profile.read_bytes(),
+              json.dumps(supervisor.manager.settings, sort_keys=True))
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    cookie = "application_executor_session=" + supervisor.consume_ui_ticket(supervisor.issue_ui_ticket())
+    try:
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(base + "/ui/api/readiness")
+        assert denied.value.code == 401
+        for _ in range(3):
+            request = urllib.request.Request(base + "/ui/api/readiness", headers={"Cookie": cookie})
+            with urllib.request.urlopen(request) as response:
+                assert response.status == 200
+                report = json.load(response)
+            assert report["provider_state_basis"] == "loaded_configuration"
+            assert report["provider_state"] == (
+                "available" if available is True else
+                "not_loaded" if available is None else "unavailable")
+            assert report["checks"]["deepseek_available"] is (available is True)
+            assert report["checks"]["profile_loadable"] is True
+            assert report["ready_for_live_e2e"] is (available is True)
+            assert report["ok"] is (available is True)
+            assert report["remediation"] == (
+                [] if available is True else
+                ["load_provider_on_user_request"] if available is None else ["configure_deepseek_key"])
+            if available is None:
+                assert "首次处理你的请求时加载" in report["message"]
+            serialized = json.dumps(report)
+            assert "PRIVATE_" not in serialized and str(tmp_path) not in serialized
+            assert "13800138000" not in serialized
+            assert report["submit_capability"] is False
+            assert report["final_click_actor"] == "user"
+            assert supervisor.manager._provider is provider
+        assert before == (queue.tasks(), queue.recent_events(1000), profile.read_bytes(),
+                          json.dumps(supervisor.manager.settings, sort_keys=True))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_preflight_explicit_empty_loaded_settings_never_reads_unrelated_disk_configuration(monkeypatch):
+    from executor.autonomy import preflight
+    monkeypatch.setattr(
+        preflight, "load_settings",
+        lambda: pytest.fail("explicit settings cannot fall back to another disk configuration"),
+    )
+    result = preflight.collect_live_preflight(
+        {}, supervisor_running=True, browser_mode_value="live",
+        chrome_exists=True, cdp_alive=True, deepseek_available=True,
+    )
+    assert result["checks"]["profile_configured"] is False
+    assert result["checks"]["profile_exists"] is False
+    assert result["checks"]["profile_loadable"] is False
+    assert result["remediation"] == ["configure_profile_path"]
+    assert result["ready_for_live_e2e"] is False
+    assert result["submit_capability"] is False

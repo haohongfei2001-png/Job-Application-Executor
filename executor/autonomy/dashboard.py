@@ -760,7 +760,7 @@ const readinessLabels={
   live_browser_mode:'浏览器模式',chrome_installed:'Chrome 已安装',
   existing_cdp_session:'专用浏览器连接',profile_configured:'资料位置已配置',
   profile_exists:'资料文件可用',profile_loadable:'资料文件可读取',
-  deepseek_available:'DeepSeek 已连接',supervisor_running:'本地服务运行中'
+  deepseek_available:'DeepSeek 配置已加载',supervisor_running:'本地服务运行中'
 };
 function renderReadinessDetails(data){
   readinessChecks.replaceChildren();

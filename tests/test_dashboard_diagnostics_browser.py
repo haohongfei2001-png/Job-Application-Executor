@@ -103,7 +103,7 @@ def test_bootstrap_diagnostics_are_explicit_and_copy_safe(monkeypatch):
             browser.close()
 
 
-def test_readiness_details_are_read_only_and_restore_focus():
+def test_task_workspace_readiness_details_are_read_only_and_restore_focus():
     """Onboarding shows only named checks and does not start an applicant action."""
     readiness_payload = {
         "ready_for_live_e2e": False,
@@ -149,6 +149,8 @@ def test_readiness_details_are_read_only_and_restore_focus():
             assert "资料文件尚未就绪" in page.locator("#readiness-summary").inner_text()
             assert page.locator("#readiness-checks li").count() == 8
             assert "待处理" in page.locator("#readiness-checks").inner_text()
+            assert "DeepSeek 配置已加载" in page.locator("#readiness-checks").inner_text()
+            assert "DeepSeek 已连接" not in dialog.inner_text()
             assert "must-not-appear" not in dialog.inner_text()
             assert all(method == "GET" for method, _ in requests)
             page.get_by_role("button", name="关闭").click()
@@ -165,6 +167,8 @@ def test_readiness_details_are_read_only_and_restore_focus():
             assert "运行条件已就绪" in page.locator("#readiness-summary").inner_text()
             assert "最终提交仍由你本人完成" in dialog.inner_text()
             assert "待处理" not in page.locator("#readiness-checks").inner_text()
+            assert "DeepSeek 配置已加载" in page.locator("#readiness-checks").inner_text()
+            assert "DeepSeek 已连接" not in dialog.inner_text()
             assert all(method == "GET" for method, _ in requests)
         finally:
             browser.close()

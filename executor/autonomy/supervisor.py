@@ -180,8 +180,28 @@ class Supervisor:
         from .consumer import humanize_preflight
         from .preflight import collect_live_preflight
 
-        result = collect_live_preflight(supervisor_running=True)
-        return {**result, "message": humanize_preflight(result)}
+        # Read the same loaded provider/settings used by tasks. A periodic GUI
+        # check must not construct another provider or prompt for Keychain access.
+        try:
+            provider = self.manager.loaded_provider_state()
+            state = provider["state"]
+            if state not in {"available", "unavailable", "not_loaded"}:
+                raise ValueError("provider_state_invalid")
+            available = state == "available" and provider["available"] is True
+        except Exception:
+            state, available = "unavailable", False
+        result = collect_live_preflight(
+            settings=self.manager.settings, supervisor_running=True,
+            deepseek_available=available,
+        )
+        if state == "not_loaded":
+            result["remediation"] = [
+                "load_provider_on_user_request" if code == "configure_deepseek_key" else code
+                for code in result["remediation"]
+            ]
+        return {**result, "provider_state": state,
+                "provider_state_basis": "loaded_configuration",
+                "message": humanize_preflight(result)}
 
     def observe_task(self, tid: str):
         task = self.queue.get(tid)

@@ -83,7 +83,8 @@ REMEDIATION_MESSAGES = {
     "configure_profile_path": "个人资料尚未配置。",
     "restore_profile_file": "个人资料文件不存在。",
     "repair_profile_file": "个人资料文件无法安全读取。",
-    "configure_deepseek_key": "DeepSeek 服务尚未连接。",
+    "configure_deepseek_key": "DeepSeek 已加载配置尚不可用。",
+    "load_provider_on_user_request": "DeepSeek 配置尚未加载；首次处理你的请求时加载。",
     "start_supervisor": "本地投递服务没有启动。",
 }
 
