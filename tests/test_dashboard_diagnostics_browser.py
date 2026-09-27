@@ -899,11 +899,12 @@ def test_task_workspace_explicit_provider_load_actual_authenticated_service_pres
             page.on("request", lambda request: writes.append((request.url, request.post_data))
                     if request.method == "POST" else None)
             page.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            page.locator("#message").fill("UNSENT_PRIVATE_INPUT")
+            assert page.locator("#message").input_value() == "UNSENT_PRIVATE_INPUT"
             page.get_by_role("button", name="运行条件", exact=True).click()
             expect(page.locator("#provider-load")).to_be_enabled()
             page.evaluate("readiness()")
             assert loads == [] and writes == [], "opening/polling must not acquire credentials"
-            page.locator("#message").fill("UNSENT_PRIVATE_INPUT")
             page.locator("#provider-load").click()
             expect(page.locator("#provider-load-status")).to_contain_text(
                 "已加载本机配置" if availability is True else "已配置凭证暂不可用")
@@ -954,9 +955,10 @@ def test_task_workspace_provider_load_late_reply_never_revives_closed_or_expired
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.route("https://provider-lifetime.test/**", route_request)
             page.goto("https://provider-lifetime.test/")
+            page.locator("#message").fill("UNSENT_PROVIDER_INPUT")
+            assert page.locator("#message").input_value() == "UNSENT_PROVIDER_INPUT"
             page.get_by_role("button", name="运行条件", exact=True).click()
             expect(page.locator("#provider-load")).to_be_enabled()
-            page.locator("#message").fill("UNSENT_PROVIDER_INPUT")
             with page.expect_request("https://provider-lifetime.test/ui/api/provider-load"):
                 page.locator("#provider-load").click()
             assert len(pending) == 1
