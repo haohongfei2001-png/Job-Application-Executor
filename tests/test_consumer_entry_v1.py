@@ -2573,7 +2573,15 @@ def test_runtime_path_and_token_contract_remain_shared_and_fail_closed(
     monkeypatch.delenv("APPLICATION_EXECUTOR_LOCAL_TOKEN", raising=False)
     assert queue.private_dir is bootstrap.private_dir is runtime_paths.private_dir
     assert queue.default_runtime(tmp_path / "dev-source") == runtime_paths.default_runtime(tmp_path / "dev-source")
-    assert runtime_paths.default_runtime(tmp_path / "release", home=tmp_path / "synthetic-home") == (
+    # A basename alone is not an installed app. Keep the production admission
+    # predicate and use the complete actual bundle layout for this oracle.
+    ordinary_release = tmp_path / "release"
+    assert release.is_packaged_source(ordinary_release) is False
+    assert runtime_paths.default_runtime(ordinary_release) == ordinary_release / "runtime" / "autonomy"
+    packaged_release = tmp_path / "AIApplicationManager.app" / "Contents" / "Resources" / "release"
+    packaged_release.mkdir(parents=True)
+    assert release.is_packaged_source(packaged_release) is True
+    assert runtime_paths.default_runtime(packaged_release, home=tmp_path / "synthetic-home") == (
         tmp_path / "synthetic-home" / "Library" / "Application Support" / "AI投递经理" / "autonomy")
     assert cli.local_token is supervisor.local_token is runtime_paths.local_token
     root = runtime_paths.private_dir(tmp_path / "owned")
