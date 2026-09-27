@@ -899,14 +899,33 @@ def _install_macos_app_unlocked(
             app.rename(rollback)
         staging.rename(app)
     except OSError:
-        restored = not replaced
-        if replaced and rollback.exists() and not app.exists():
+        # A filesystem error does not preserve the authority observed BEFORE
+        # rename. Re-admit retained input and the entire recovery destination;
+        # never overwrite an empty foreign directory/dangling link or delete
+        # a changed staging candidate while handling an activation failure.
+        absent = not app.exists() and not app.is_symlink()
+        retained_absent = not rollback.exists() and not rollback.is_symlink()
+        unchanged_staging = _bundle_transaction_identity(staging) == candidate_identity
+        unmoved = (replaced and retained_absent
+                   and _bundle_transaction_identity(app) == current_identity)
+        moved = (replaced and absent
+                 and _bundle_transaction_identity(rollback) == current_identity)
+        safe = (unchanged_staging and not failed.exists() and not failed.is_symlink()
+                and ((unmoved or moved) if replaced else (absent and retained_absent)))
+        if not safe:
+            return {
+                "ok": False, "reason": "rollback_required",
+                "message": "启用失败时版本身份或恢复位置发生变化；所有版本保留当前位置，需要核对恢复。",
+            }
+        restored = not replaced or unmoved
+        if moved:
             try:
                 rollback.rename(app)
-                restored = True
+                restored = _bundle_transaction_identity(app) == current_identity
             except OSError:
                 restored = False
-        if staging.exists():
+        # Recovery failure preserves the candidate for diagnosis as well.
+        if restored and _bundle_transaction_identity(staging) == candidate_identity:
             shutil.rmtree(staging)
         return {
             "ok": False,
@@ -914,7 +933,7 @@ def _install_macos_app_unlocked(
             "rollback_path": str(rollback) if rollback.exists() else None,
             "message": (
                 "新版本未启用，原应用保持可用。"
-                if restored else "新版本未启用；旧版保存在回退位置，需要人工恢复。"
+                if restored else "新版本未启用；所有版本已保留，需要核对恢复。"
             ),
         }
     # Recheck at the final bundle path: moving a virtualenv can invalidate
@@ -941,7 +960,8 @@ def _install_macos_app_unlocked(
             if replaced:
                 rollback.rename(app)
         except OSError:
-            if failed.exists() and not app.exists():
+            if (not app.exists() and not app.is_symlink()
+                    and _bundle_location_matches(failed, candidate_identity)):
                 try:
                     failed.rename(app)
                 except OSError:
@@ -1091,8 +1111,17 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
     try:
         previous.rename(app)
     except OSError:
+        if (app.exists() or app.is_symlink()
+                or _bundle_transaction_identity(failed) != current_identity
+                or _bundle_transaction_identity(previous) != previous_identity):
+            return {
+                "ok": False, "reason": "manual_recovery_required",
+                "message": "回退启用失败时版本身份或恢复位置发生变化；所有版本保留当前位置，需要核对恢复。",
+            }
         try:
             failed.rename(app)
+            if _bundle_transaction_identity(app) != current_identity:
+                raise OSError("recovery_identity_changed")
             reason = "rollback_activation_failed"
             message = "旧版没有启用，当前版本已恢复。"
         except OSError:

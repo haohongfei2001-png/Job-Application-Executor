@@ -4429,3 +4429,200 @@ def test_final_health_recovery_preserves_changed_authority_and_occupied_slots(
         assert not (state / "service.json").exists()
     with ProcessLock(state / "worker.lock"):
         pass
+
+
+@pytest.mark.parametrize("action", ["install", "rollback"])
+@pytest.mark.parametrize("scenario", [
+    "unchanged", "destination_occupied", "destination_alias",
+    "retained_resealed", "retained_replaced", "candidate_resealed",
+])
+def test_activation_rename_error_rechecks_recovery_authority_before_restore_or_cleanup(
+    tmp_path, monkeypatch, action, scenario
+):
+    import shutil
+    from contextlib import closing
+    from test_task_state_compatibility_v1 import authority
+    from executor.autonomy.state_compatibility import verify_task_state_backup
+    from executor.autonomy.worker import ProcessLock
+
+    repo, apps, state, db, key = _identity_transaction_fixture(
+        tmp_path, rollback=action == "rollback")
+    app = apps / (consumer.APP_NAME + ".app")
+    previous = apps / ("." + consumer.APP_NAME + ".app.previous")
+    failed = apps / ("." + consumer.APP_NAME + ".app.failed")
+    staging = apps / ("." + consumer.APP_NAME + ".app.installing")
+    candidate = previous if action == "rollback" else staging
+    retained = failed if action == "rollback" else previous
+    displaced = apps / ".independent-displaced-activation"
+    actual_rename = Path.rename
+    actual_start = consumer._candidate_starts
+    app_before = _identity_file_inventory(app)
+    app_inode = app.stat().st_ino
+    calls = []
+    starts = []
+    after_fault = {}
+
+    def snapshot():
+        return {
+            path.relative_to(apps).as_posix():
+            (path.stat(follow_symlinks=False).st_dev,
+             path.stat(follow_symlinks=False).st_ino,
+             stat.S_IMODE(path.stat(follow_symlinks=False).st_mode))
+            for path in [apps, *apps.rglob("*")]
+        }
+
+    def start(python, source):
+        actual = actual_start(python, source)
+        assert actual
+        starts.append(source)
+        return actual
+
+    def rename(source, target):
+        if source == candidate and Path(target) == app and not calls:
+            calls.append((source, Path(target)))
+            assert retained.is_dir() and not app.exists()
+            if scenario == "destination_occupied":
+                app.mkdir()
+                assert not list(app.iterdir())
+            elif scenario == "destination_alias":
+                app.symlink_to(tmp_path / "absent-foreign-app", target_is_directory=True)
+                assert app.is_symlink() and not app.exists()
+            elif scenario == "retained_resealed":
+                _reseal_changed_source(retained)
+            elif scenario == "retained_replaced":
+                actual_rename(retained, displaced)
+                shutil.copytree(displaced, retained, symlinks=True)
+                assert consumer._trusted_bundle(retained)
+            elif scenario == "candidate_resealed":
+                _reseal_changed_source(candidate)
+            after_fault["files"] = _identity_file_inventory(apps)
+            after_fault["locations"] = snapshot()
+            raise OSError("PRIVATE_SYNTHETIC_RENAME_ERROR")
+        if calls:
+            calls.append((source, Path(target)))
+        return actual_rename(source, target)
+
+    with closing(db):
+        expected_authority = authority(db)
+        expected_answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        private_before = _identity_file_inventory(state)
+        monkeypatch.setattr(consumer, "_candidate_starts", start)
+        monkeypatch.setattr(Path, "rename", rename)
+        result = (rollback_macos_app(apps, task_state_root=state) if action == "rollback"
+                  else install_macos_app(repo, destination=apps, platform="darwin",
+                                         task_state_root=state))
+        assert len(starts) == 1, "actual candidate health still runs before rename fault"
+        assert result["ok"] is False
+        if scenario == "unchanged":
+            assert result["reason"] == ("rollback_activation_failed" if action == "rollback"
+                                        else "activation_failed")
+            assert app.stat().st_ino == app_inode
+            assert _identity_file_inventory(app) == app_before
+            assert not retained.exists() and not retained.is_symlink()
+            assert len(calls) == 2
+            assert calls[-1] == (retained, app)
+            assert candidate.is_dir() if action == "rollback" else not candidate.exists()
+        else:
+            assert result["reason"] == ("manual_recovery_required" if action == "rollback"
+                                        else "rollback_required")
+            assert len(calls) == 1, "no speculative restore move after authority changed"
+            assert _identity_file_inventory(apps) == after_fault["files"]
+            assert snapshot() == after_fault["locations"]
+        assert _identity_file_inventory(state) == private_before
+        assert authority(db) == expected_authority
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == expected_answers
+        assert (state / "task-answers.key").read_bytes() == key
+        backup = result["task_state_backup"]
+        assert verify_task_state_backup(Path(backup["path"]), backup["receipt"])
+        assert backup["receipt"]["activation"] == "NOT_AUTHORIZED"
+        assert "PRIVATE_" not in json.dumps(result)
+        assert not (state / "auth.token").exists()
+        assert not (state / "service.json").exists()
+    with ProcessLock(state / "worker.lock"):
+        pass
+
+
+@pytest.mark.parametrize("scenario", [
+    "quarantine_replaced", "destination_occupied", "destination_alias",
+])
+def test_post_health_restore_rename_error_never_moves_foreign_quarantine_or_overwrites_slot(
+    tmp_path, monkeypatch, scenario
+):
+    import shutil
+    from contextlib import closing
+    from test_task_state_compatibility_v1 import authority
+    from executor.autonomy.state_compatibility import verify_task_state_backup
+    from executor.autonomy.worker import ProcessLock
+
+    repo, apps, state, db, key = _identity_transaction_fixture(tmp_path, rollback=False)
+    app = apps / (consumer.APP_NAME + ".app")
+    previous = apps / ("." + consumer.APP_NAME + ".app.previous")
+    failed = apps / ("." + consumer.APP_NAME + ".app.failed")
+    displaced = apps / ".independent-displaced-quarantine"
+    actual_rename = Path.rename
+    actual_start = consumer._candidate_starts
+    starts = []
+    after_fault = {}
+    moves_after_fault = []
+
+    def snapshot():
+        return {
+            path.relative_to(apps).as_posix():
+            (path.stat(follow_symlinks=False).st_dev,
+             path.stat(follow_symlinks=False).st_ino,
+             stat.S_IMODE(path.stat(follow_symlinks=False).st_mode))
+            for path in [apps, *apps.rglob("*")]
+        }
+
+    def start(python, source):
+        actual = actual_start(python, source)
+        assert actual
+        starts.append(source)
+        return False if len(starts) == 2 else actual
+
+    def rename(source, target):
+        if source == previous and Path(target) == app and len(starts) == 2:
+            assert failed.is_dir() and not app.exists()
+            if scenario == "quarantine_replaced":
+                actual_rename(failed, displaced)
+                shutil.copytree(displaced, failed, symlinks=True)
+                assert consumer._trusted_bundle(failed)
+            elif scenario == "destination_occupied":
+                app.mkdir()
+                assert not list(app.iterdir())
+            else:
+                app.symlink_to(tmp_path / "absent-foreign-app", target_is_directory=True)
+                assert app.is_symlink() and not app.exists()
+            after_fault["files"] = _identity_file_inventory(apps)
+            after_fault["locations"] = snapshot()
+            raise OSError("PRIVATE_SYNTHETIC_RESTORE_ERROR")
+        if after_fault:
+            moves_after_fault.append((source, Path(target)))
+        return actual_rename(source, target)
+
+    with closing(db):
+        expected_authority = authority(db)
+        expected_answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        private_before = _identity_file_inventory(state)
+        monkeypatch.setattr(consumer, "_candidate_starts", start)
+        monkeypatch.setattr(Path, "rename", rename)
+        result = install_macos_app(repo, destination=apps, platform="darwin",
+                                   task_state_root=state)
+        assert len(starts) == 2
+        assert result["ok"] is False
+        assert result["reason"] == "post_activation_recovery_required"
+        assert moves_after_fault == []
+        assert _identity_file_inventory(apps) == after_fault["files"]
+        assert snapshot() == after_fault["locations"]
+        assert _identity_file_inventory(state) == private_before
+        assert authority(db) == expected_authority
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == expected_answers
+        assert (state / "task-answers.key").read_bytes() == key
+        backup = result["task_state_backup"]
+        assert verify_task_state_backup(Path(backup["path"]), backup["receipt"])
+        assert backup["receipt"]["activation"] == "NOT_AUTHORIZED"
+        assert "PRIVATE_" not in json.dumps(result)
+        assert not (state / "auth.token").exists()
+        assert not (state / "service.json").exists()
+    with ProcessLock(state / "worker.lock"):
+        pass
