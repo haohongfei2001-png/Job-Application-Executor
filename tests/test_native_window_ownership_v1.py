@@ -187,3 +187,206 @@ def test_failed_native_launch_releases_ownership_and_invalid_root_is_safe(tmp_pa
     refused = cli.launch_native_consumer(alias, 9344)
     assert refused == {"ok": False, "opened": False, "reason": "native_window_state_invalid"}
     assert calls == [True] and "PRIVATE_ALIAS_CANARY" not in json.dumps(refused)
+
+
+# Focus-only reopen uses a private socket, never a second window writer.
+@pytest.fixture
+def short_reopen_root():
+    import tempfile
+    # Real Unix socket path limits are retained. Keep this isolated cloud fixture
+    # short on BOTH platforms; long-path refusal is tested separately below.
+    with tempfile.TemporaryDirectory(prefix="jwr-",
+            dir="/private/tmp" if sys.platform == "darwin" else "/tmp") as temporary:
+        yield Path(temporary) / "state"
+
+
+def test_focus_only_endpoint_uses_real_child_process_without_private_state_access(short_reopen_root):
+    from executor.autonomy.native_reopen import NativeReopenServer
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    root = short_reopen_root
+    queue = TaskQueue(root)
+    task = queue.enqueue(TaskSpec(company="Synthetic reopen", role="Engineer",
+        target_url="https://example.invalid/jobs/reopen", profile_ref="synthetic.json"))
+    queue.pause(task["task_id"])
+    queue.remember_task_view(task["task_id"], expected_revision=0)
+    before = (queue.tasks(), queue.recent_events(1000), queue.task_view_context())
+    private = root / "PRIVATE_REOPEN_CANARY"
+    private.write_bytes(b"PRIVATE_REOPEN_CANARY")
+    calls = []
+    child_source = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from executor.autonomy.native_reopen import request_owned_focus
+print("FOCUSED" if request_owned_focus(sys.argv[2]) else "REFUSED")
+"""
+    with native_window_guard(root) as fd:
+        server = NativeReopenServer(root, fd, lambda: calls.append(True) or True)
+        assert server.start() is True
+        try:
+            assert stat.S_IMODE((root / "native-focus.sock").stat().st_mode) == 0o600
+            payload = {p.name: p.read_bytes() for p in root.iterdir() if p.name != "native-focus.sock"}
+            for _ in range(2):
+                child = subprocess.run([sys.executable, "-I", "-B", "-c", child_source,
+                    str(Path(__file__).resolve().parents[1]), str(root)],
+                    capture_output=True, text=True, timeout=8, check=False)
+                assert child.returncode == 0 and child.stdout == "FOCUSED\n" and child.stderr == ""
+            assert calls == [True, True]
+            # Check all journal/private bytes BEFORE fixture SELECTs change SHM.
+            assert {p.name: p.read_bytes() for p in root.iterdir() if p.name != "native-focus.sock"} == payload
+            assert (queue.tasks(), queue.recent_events(1000), queue.task_view_context()) == before
+            with pytest.raises(BlockingIOError):
+                with task_state_guard(root):
+                    pytest.fail("focus released the window/update fence")
+            assert "PRIVATE_" not in repr(server)
+        finally:
+            server.close()
+        assert not (root / "native-focus.sock").exists()
+        assert (root / "native-window.lock").read_bytes() == b""
+
+
+@pytest.mark.parametrize("packet", [
+    b'{"command":"focus","url":"PRIVATE_FORGED_URL"}\n',
+    b'{"command":"focus","ticket":"PRIVATE_FORGED_TICKET"}\n',
+    b'{"command":true}\n', b'{"command":"launch"}\n',
+    b'{"command":"focus"}\n{"command":"focus"}\n',
+    b'PRIVATE_APPLICANT_CANARY\n', b"x" * 65,
+])
+def test_reopen_rejects_every_non_focus_packet_without_echo_or_callback(short_reopen_root, packet):
+    import socket
+    from executor.autonomy.native_reopen import NativeReopenServer
+    calls = []
+    with native_window_guard(short_reopen_root) as fd:
+        server = NativeReopenServer(short_reopen_root, fd, lambda: calls.append(True) or True)
+        assert server.start()
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(2)
+                connection.connect(str(short_reopen_root / "native-focus.sock"))
+                connection.sendall(packet)
+                connection.shutdown(socket.SHUT_WR)
+                reply = connection.recv(128)
+            assert reply == b'{"ok":false,"focus_only":false}\n'
+            assert calls == [] and b"PRIVATE_" not in reply
+        finally:
+            server.close()
+
+
+@pytest.mark.parametrize("changed", ["root_alias", "socket_alias", "socket_file", "foreign_identity", "lease_inode"])
+def test_reopen_refuses_changed_authority_without_touching_replacement(short_reopen_root, monkeypatch, changed):
+    from executor.autonomy import native_reopen
+    root, calls = short_reopen_root, []
+    with native_window_guard(root) as fd:
+        server = native_reopen.NativeReopenServer(root, fd, lambda: calls.append(True) or True)
+        assert server.start()
+        supplied, replacement = root, None
+        try:
+            if changed == "root_alias":
+                supplied = root.parent / "alias"
+                supplied.symlink_to(root, target_is_directory=True)
+            elif changed in {"socket_alias", "socket_file"}:
+                path = root / "native-focus.sock"
+                path.unlink()
+                replacement = root / "PRIVATE_REPLACEMENT_CANARY"
+                replacement.write_bytes(b"PRIVATE_REPLACEMENT_CANARY")
+                if changed == "socket_alias":
+                    path.symlink_to(replacement)
+                else:
+                    path.write_bytes(b"PRIVATE_REPLACEMENT_CANARY")
+                    replacement = path
+            elif changed == "lease_inode":
+                path = root / "native-window.lock"
+                path.unlink()
+                path.write_bytes(b"")
+                path.chmod(0o600)
+            if changed == "foreign_identity":
+                current_uid = os.geteuid()
+                with monkeypatch.context() as context:
+                    context.setattr(native_reopen.os, "geteuid", lambda: current_uid + 1)
+                    assert native_reopen.request_owned_focus(supplied) is False
+            else:
+                assert native_reopen.request_owned_focus(supplied) is False
+            assert calls == []
+        finally:
+            server.close()
+        if replacement is not None:
+            assert replacement.read_bytes() == b"PRIVATE_REPLACEMENT_CANARY"
+
+
+def test_reopen_cannot_adopt_stale_socket_without_active_window_lease(short_reopen_root):
+    import socket
+    from executor.autonomy.native_reopen import NativeReopenServer, request_owned_focus
+    root = short_reopen_root
+    with native_window_guard(root):
+        pass
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    path = root / "native-focus.sock"
+    listener.bind(str(path));path.chmod(0o600);listener.listen(1)
+    calls = []
+    try:
+        server = NativeReopenServer(root, -1, lambda: calls.append(True) or True)
+        assert server.start() is False
+        assert request_owned_focus(root) is False
+        assert path.exists() and calls == []
+        # A fresh exact lease can replace only that owned stale SOCKET.
+        listener.close()
+        with native_window_guard(root) as fd:
+            recovered = NativeReopenServer(root, fd, lambda: calls.append(True) or True)
+            assert recovered.start()
+            try:
+                assert request_owned_focus(root) is True
+                assert calls == [True]
+            finally:
+                recovered.close()
+    finally:
+        listener.close()
+    assert not path.exists()
+
+
+def test_duplicate_cli_focuses_existing_presenter_without_ticket_service_or_journal_write(short_reopen_root, monkeypatch):
+    from executor.autonomy import macos_host
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    cli = _recognized_app(short_reopen_root.parent, monkeypatch)
+    root = short_reopen_root
+    queue = TaskQueue(root)
+    task = queue.enqueue(TaskSpec(company="Synthetic CLI reopen", role="Engineer",
+        target_url="https://example.invalid/jobs/reopen", profile_ref="synthetic.json"))
+    queue.pause(task["task_id"]);queue.remember_task_view(task["task_id"], expected_revision=0)
+    before = (queue.tasks(), queue.recent_events(1000), queue.task_view_context())
+    calls, nested = [], []
+    class Presenter:
+        def __init__(self, directory, *, consumer_smoke, ownership_fd):
+            assert os.fstat(ownership_fd).st_nlink == 1
+            calls.append("presenter")
+        def focus(self):
+            calls.append("focus")
+            return True
+        def wait_for_close(self):
+            nested.append(cli.launch_native_consumer(root, 9344))
+            calls.append("closed")
+            return True
+        def close(self):
+            calls.append("cleanup")
+    monkeypatch.setattr(macos_host, "NativePresenter", Presenter)
+    monkeypatch.setattr(cli, "launch_consumer",
+        lambda *a, **k: calls.append("service_and_ticket") or {"ok": True, "opened": True})
+    result = cli.launch_native_consumer(root, 9344)
+    assert result == {"ok": True, "opened": True, "native_window": True,
+        "native_page": None, "final_click_actor": "user"}
+    assert nested == [{"ok": True, "opened": True, "native_window": True,
+        "focus_only": True, "final_click_actor": "user"}]
+    assert calls == ["presenter", "service_and_ticket", "focus", "closed", "cleanup"]
+    assert (queue.tasks(), queue.recent_events(1000), queue.task_view_context()) == before
+    assert not (root / "native-focus.sock").exists()
+
+
+def test_long_socket_path_refuses_reopen_without_deleting_private_state(short_reopen_root):
+    from executor.autonomy.native_reopen import NativeReopenServer, request_owned_focus
+    root = short_reopen_root / ("long-owned-segment-" * 7)
+    calls = []
+    with native_window_guard(root) as fd:
+        marker = root / "PRIVATE_LONG_PATH_CANARY";marker.write_bytes(b"PRIVATE_LONG_PATH_CANARY")
+        server = NativeReopenServer(root, fd, lambda: calls.append(True) or True)
+        assert server.start() is False
+        assert request_owned_focus(root) is False
+        assert marker.read_bytes() == b"PRIVATE_LONG_PATH_CANARY" and calls == []
+        assert (root / "native-window.lock").read_bytes() == b""

@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 from .consumer_presentation import ConsumerSurface
@@ -418,11 +419,24 @@ class NativePresenter:
         self.process = None
         self.sequence = 0
         self.current_surface = None
+        self._command_lock = threading.RLock()
 
     def __repr__(self) -> str:
         return "<NativePresenter credential_in_report=False>"
 
     def __call__(self, surface: ConsumerSurface) -> bool:
+        with self._command_lock:
+            return self._present_surface(surface)
+
+    def focus(self) -> bool:
+        """Focus only the current owned surface; never create or reload one."""
+        with self._command_lock:
+            if (self.current_surface is None or self.process is None
+                    or self.process.poll() is not None):
+                return False
+            return self._present_surface(self.current_surface, focus_required=True)
+
+    def _present_surface(self, surface: ConsumerSurface, *, focus_required=False) -> bool:
         try:
             self.sequence += 1
             command = native_command(surface, self.sequence)
@@ -430,6 +444,10 @@ class NativePresenter:
                 return False
             reuse = self.process is not None and self.process.poll() is None
             focus_only = reuse and self.current_surface == surface
+            # A child can exit during image verification. A focus request must
+            # NEVER turn that race into cold-start replay of a consumed ticket.
+            if focus_required and not focus_only:
+                return False
             if focus_only:
                 # The exact same in-memory capability has already been
                 # presented. Reopening must not consume it again or reload edits.
@@ -487,6 +505,10 @@ class NativePresenter:
             self.close()
 
     def close(self) -> None:
+        with self._command_lock:
+            self._close()
+
+    def _close(self) -> None:
         process, self.process = self.process, None
         self.current_surface = None
         if process is not None:

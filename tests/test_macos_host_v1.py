@@ -498,6 +498,7 @@ def test_repeated_exact_surface_focus_command_cannot_reload_or_reissue_ticket(tm
         {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1},
         {"ok": True, "request": 2, "surface": "dashboard", "window_count": 1, "focus_only": True},
         {"ok": True, "request": 3, "surface": "dashboard", "window_count": 1},
+        {"ok": True, "request": 4, "surface": "dashboard", "window_count": 1, "focus_only": True},
     ]
     class Child:
         def __init__(self):
@@ -522,11 +523,14 @@ def test_repeated_exact_surface_focus_command_cannot_reload_or_reissue_ticket(tm
         assert presenter(first)
         other = ConsumerSurface.dashboard(43210, "PRIVATE_NEW_EXPLICIT_TICKET")
         assert presenter(other)
+        assert presenter.focus()
         commands = [json.loads(line) for line in child.stdin.getvalue().splitlines()]
         assert commands[0] == native_command(first, 1)
         assert commands[1] == {"command": "focus", "request": 2}
         assert commands[2] == native_command(other, 3)
+        assert commands[3] == {"command": "focus", "request": 4}
         assert "PRIVATE_" not in json.dumps(commands[1])
+        assert "PRIVATE_" not in json.dumps(commands[3])
         assert len(starts) == 1
         assert presenter.current_surface == other
         assert "PRIVATE_" not in repr(presenter)
@@ -578,6 +582,10 @@ def test_focus_requires_exact_ack_and_never_falls_back_to_reloading(tmp_path, mo
 
 def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(compiled_host):
     import queue
+    import tempfile
+    from pathlib import Path
+    from executor.autonomy.native_reopen import NativeReopenServer
+    from executor.autonomy.state_compatibility import native_window_guard
 
     state = {"admissions": 0, "pages": 0, "writes": 0}
     class Handler(BaseHTTPRequestHandler):
@@ -623,10 +631,15 @@ def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(comp
     reader = None
     messages = queue.Queue()
     stdout = []
+    temporary = tempfile.TemporaryDirectory(prefix="jwr-", dir="/private/tmp")
+    root = Path(temporary.name) / "state"
+    owner = native_window_guard(root)
+    ownership_fd = owner.__enter__()
+    reopen = None
     try:
         child = subprocess.Popen([str(compiled_host / "AIApplicationWindow"), "--focus-smoke"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, bufsize=1)
+            text=True, bufsize=1, pass_fds=(ownership_fd,))
         def read_messages():
             for line in child.stdout:
                 stdout.append(line)
@@ -652,10 +665,35 @@ def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(comp
         send(native_command(surface, 1))
         assert reply() == {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1}
         assert reply() == {"ok": True, "focus_fixture_ready": True, "window_count": 1}
-        for request in (2, 3, 4):
+        current_request = [1]
+        original_pid = child.pid
+        def owned_focus():
+            current_request[0] += 1
+            request = current_request[0]
             send({"command": "focus", "request": request})
-            assert reply() == {"ok": True, "request": request, "surface": "dashboard",
-                               "window_count": 1, "focus_only": True}
+            observed = reply()
+            assert observed == {"ok": True, "request": request, "surface": "dashboard",
+                                "window_count": 1, "focus_only": True}
+            assert child.pid == original_pid
+            return True
+        reopen = NativeReopenServer(root, ownership_fd, owned_focus)
+        assert reopen.start()
+        child_source = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from executor.autonomy.native_reopen import request_owned_focus
+print("FOCUSED" if request_owned_focus(sys.argv[2]) else "REFUSED")
+"""
+        for request in (2, 3, 4):
+            secondary = subprocess.run([sys.executable, "-I", "-B", "-c", child_source,
+                str(Path(__file__).resolve().parents[1]), str(root)],
+                capture_output=True, text=True, timeout=8, check=False)
+            assert secondary.returncode == 0 and secondary.stdout == "FOCUSED\n"
+            assert secondary.stderr == "" and current_request[0] == request
+            with pytest.raises(BlockingIOError):
+                with native_window_guard(root):
+                    pytest.fail("reopen admitted another native writer")
+        reopen.close()
         assert reply() == {"ok": True, "focus_only": True, "window_count": 1,
                            "draft_and_selection_retained": True, "reopen_count": 3}
         assert child.wait(timeout=5) == 0
@@ -664,6 +702,8 @@ def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(comp
         assert "PRIVATE_" not in "".join(stdout)
         assert "127.0.0.1" not in "".join(stdout)
     finally:
+        if reopen is not None:
+            reopen.close()
         if child is not None:
             if child.poll() is None:
                 child.terminate()
@@ -676,6 +716,49 @@ def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(comp
                 reader.join(timeout=3)
             child.stdin.close()
             child.stdout.close()
+        owner.__exit__(None, None, None)
+        assert not (root / "native-focus.sock").exists()
+        temporary.cleanup()
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+def test_cold_focus_never_constructs_surface_or_starts_native_child(tmp_path, monkeypatch):
+    from executor.autonomy import macos_host as module
+    root = _candidate(tmp_path)
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    monkeypatch.setattr(module.subprocess, "Popen",
+        lambda *a, **k: pytest.fail("cold focus started a child"))
+    presenter = NativePresenter(root)
+    assert presenter.focus() is False
+    assert presenter.process is None and presenter.current_surface is None
+    assert presenter.sequence == 0
+    presenter.close()
+
+def test_child_exit_during_focus_verification_never_replays_surface_or_starts_child(tmp_path, monkeypatch):
+    import io
+    from executor.autonomy import macos_host as module
+    root = _candidate(tmp_path)
+    class Child:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(json.dumps(
+                {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1}) + "\n")
+            self.polls = 0
+        def poll(self):
+            self.polls += 1
+            return None if self.polls == 1 else 0
+        def wait(self, **kwargs):
+            return 0
+    child, starts = Child(), []
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    monkeypatch.setattr(module.subprocess, "Popen",
+        lambda *a, **k: starts.append(True) or child)
+    monkeypatch.setattr(module.select, "select", lambda readers, *a: (readers, [], []))
+    presenter = NativePresenter(root)
+    surface = ConsumerSurface.dashboard(43210, "PRIVATE_EXIT_RACE_TICKET")
+    assert presenter(surface)
+    assert presenter.focus() is False
+    assert starts == [True]
+    assert [json.loads(line) for line in child.stdin.getvalue().splitlines()] == [native_command(surface, 1)]
+    presenter.close()

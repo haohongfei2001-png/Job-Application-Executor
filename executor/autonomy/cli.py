@@ -203,6 +203,7 @@ def launch_native_consumer(root, port, *, smoke=False):
             or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
         return {"ok": False, "opened": False, "reason": "native_bundle_unverified"}
     from .state_compatibility import native_window_guard
+    from .native_reopen import NativeReopenServer, request_owned_focus
 
     try:
         # Acquire before service startup or issuing a UI ticket. A duplicate
@@ -210,6 +211,8 @@ def launch_native_consumer(root, port, *, smoke=False):
         with native_window_guard(root) as window_fd:
             presenter = NativePresenter(source.parent / "native-host",
                 consumer_smoke=smoke, ownership_fd=window_fd)
+            reopen = NativeReopenServer(root, window_fd, lambda: presenter.focus())
+            reopen.start()  # Optional IPC refusal never closes the primary window.
             try:
                 result = launch_consumer(root, port, presenter=presenter)
                 opened = result.get("opened") is True and result.get("ok") is True
@@ -218,8 +221,12 @@ def launch_native_consumer(root, port, *, smoke=False):
                         "native_window": opened, "native_page": closed if smoke else None,
                         "final_click_actor": "user"}
             finally:
+                reopen.close()
                 presenter.close()
     except BlockingIOError:
+        if request_owned_focus(root):
+            return {"ok": True, "opened": True, "native_window": True,
+                    "focus_only": True, "final_click_actor": "user"}
         return {"ok": False, "opened": False, "reason": "native_window_already_open"}
     except (OSError, ValueError):
         return {"ok": False, "opened": False, "reason": "native_window_state_invalid"}
