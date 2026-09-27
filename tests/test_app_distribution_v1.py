@@ -396,7 +396,7 @@ with Path(os.environ['JAE_TEST_BROWSER_REPORT']).open('a',encoding='utf-8') as f
     assert json.loads((output / RECEIPT_NAME).read_text()) == receipt
 
 
-def test_operator_build_native_mode_is_explicit_and_never_publishes_or_starts_tasks(
+def test_operator_build_defaults_to_native_with_explicit_fallback_without_publication(
     tmp_path, monkeypatch, capsys
 ):
     import importlib.util
@@ -414,13 +414,17 @@ def test_operator_build_native_mode_is_explicit_and_never_publishes_or_starts_ta
     runtime, output = tmp_path / "runtime", tmp_path / "artifact"
     args = ["--standalone-runtime", str(runtime), "--output", str(output)]
     assert module.main(args) == 0
-    assert calls[-1] == (script.parent.parent, {"standalone_runtime": runtime, "output_dir": output})
+    assert calls[-1] == (script.parent.parent,
+        {"standalone_runtime": runtime, "output_dir": output, "native_presentation": True})
     assert module.main(args + ["--native-presentation"]) == 0
     assert calls[-1] == (script.parent.parent,
         {"standalone_runtime": runtime, "output_dir": output, "native_presentation": True})
-    assert len(calls) == 2 and not output.exists()
+    assert module.main(args + ["--web-fallback"]) == 0
+    assert calls[-1] == (script.parent.parent,
+        {"standalone_runtime": runtime, "output_dir": output, "native_presentation": False})
+    assert len(calls) == 3 and not output.exists()
     lines = capsys.readouterr().out.strip().splitlines()
-    assert len(lines) == 2
+    assert len(lines) == 3
     assert all(json.loads(line) == {"signing": "unsigned", "certification": "NOT_CERTIFIED",
                                   "final_click_actor": "user"} for line in lines)
 
@@ -435,7 +439,7 @@ def test_distribution_rejects_non_boolean_native_mode_before_creating_output(tmp
 
 
 def test_hosted_mac_native_archive_relocates_and_launches_exact_verified_window_without_build_state(
-    tmp_path
+    tmp_path, capsys
 ):
     if sys.platform != "darwin":
         pytest.skip("Actual native archive acceptance uses hosted macOS Cocoa/WebKit")
@@ -454,8 +458,18 @@ def test_hosted_mac_native_archive_relocates_and_launches_exact_verified_window_
     (repo / ".env").write_text("CANARY_NATIVE_BUILD_CREDENTIAL")
     (repo / "profile.json").write_text('{"name":"CANARY_NATIVE_BUILD_PROFILE"}')
     output = tmp_path / "native-artifact"
-    receipt = build_macos_distribution(repo, standalone_runtime=prepared,
-        output_dir=output, native_presentation=True)
+    # Exercise the exact delivered operator with its normal (no-mode-flag) args.
+    # The complete archive, relocation and Cocoa oracles below stay unchanged.
+    import importlib.util
+
+    script = repo / "scripts/build_macos_app.py"
+    script.parent.mkdir()
+    shutil.copyfile(Path(__file__).resolve().parents[1] / "scripts/build_macos_app.py", script)
+    spec = importlib.util.spec_from_file_location("jae_native_delivery_operator", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.main(["--standalone-runtime", str(prepared), "--output", str(output)]) == 0
+    receipt = json.loads(capsys.readouterr().out)
     assert receipt["presentation"] == "native"
     assert receipt["signing"] == "unsigned" and receipt["certification"] == "NOT_CERTIFIED"
     assert receipt["task_state"] == "excluded" and receipt["final_click_actor"] == "user"
@@ -530,3 +544,27 @@ def test_hosted_mac_native_archive_relocates_and_launches_exact_verified_window_
             capture_output=True, text=True, timeout=15)
         assert stopped.returncode == 0
     assert not (state / "service.json").exists()
+
+
+@pytest.mark.parametrize("flags", [
+    ["--native-presentation", "--web-fallback"],
+    ["--web-fallback", "--native-presentation"],
+])
+def test_operator_build_refuses_conflicting_presentation_before_artifact_work(
+    tmp_path, monkeypatch, flags
+):
+    import importlib.util
+    from executor.autonomy import app_distribution
+
+    script = Path(__file__).resolve().parents[1] / "scripts/build_macos_app.py"
+    spec = importlib.util.spec_from_file_location("jae_operator_conflict", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(app_distribution, "build_macos_distribution",
+        lambda *_args, **_kwargs: pytest.fail("ambiguous mode created an artifact"))
+    output = tmp_path / "not-created"
+    with pytest.raises(SystemExit) as stopped:
+        module.main(["--standalone-runtime", str(tmp_path / "runtime"),
+                     "--output", str(output), *flags])
+    assert stopped.value.code == 2
+    assert not output.exists()

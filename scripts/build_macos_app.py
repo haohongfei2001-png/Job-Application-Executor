@@ -13,11 +13,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--standalone-runtime", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--native-presentation", action="store_true")
+    presentation = parser.add_mutually_exclusive_group()
+    presentation.add_argument("--native-presentation", dest="native_presentation",
+                              action="store_true")
+    presentation.add_argument("--web-fallback", dest="native_presentation",
+                              action="store_false")
+    parser.set_defaults(native_presentation=True)
     args = parser.parse_args(argv)
-    options = {"standalone_runtime": args.standalone_runtime, "output_dir": args.output}
-    if args.native_presentation:
-        options["native_presentation"] = True
+    # Normal delivered artifacts use the verified native shell. An explicit
+    # compatibility fallback remains available; neither mode is certification.
+    options = {"standalone_runtime": args.standalone_runtime, "output_dir": args.output,
+               "native_presentation": args.native_presentation}
     receipt = build_macos_distribution(Path(__file__).resolve().parents[1], **options)
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
