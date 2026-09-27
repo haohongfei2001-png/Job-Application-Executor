@@ -1218,3 +1218,167 @@ def test_worker_and_app_guard_share_one_inode_across_real_processes_without_auth
         assert db.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall() == schema
         assert (root / "task-answers.key").read_bytes() == key
         assert not list(tmp_path.glob("backup*"))
+
+
+@pytest.mark.parametrize("encrypted", [False, True])
+@pytest.mark.parametrize("entry", ["journal", "capsule"])
+@pytest.mark.parametrize("mutation", ["", "delete_authority"])
+def test_owned_compatibility_scratch_alias_uses_real_candidate_and_preserves_authority(
+        tmp_path, monkeypatch, encrypted, entry, mutation):
+    """An OS temporary-parent alias is not the caller's journal authority."""
+    import hashlib
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    parent = (tmp_path / "temporary-parent").resolve()
+    parent.mkdir()
+    alias = tmp_path / "temporary-parent-alias"
+    alias.symlink_to(parent, target_is_directory=True)
+    alias_identity = alias.lstat()
+    outside = parent / "unrelated"
+    outside.write_bytes(b"PRIVATE_UNRELATED_SCRATCH_CANARY" * 400)
+    outside.chmod(0o640)
+    outside_before = (outside.read_bytes(), outside.stat().st_mode,
+                      outside.stat().st_dev, outside.stat().st_ino)
+    release = answer_candidate(tmp_path)
+    if mutation:
+        # Change only the disposable journal AFTER the real schema migration.
+        with (release / "executor" / "autonomy" / "queue.py").open("a") as handle:
+            handle.write(
+                "\n_original_init = TaskQueue.__init__\n"
+                "def _changed_init(self, *args, **kwargs):\n"
+                "    _original_init(self, *args, **kwargs)\n"
+                "    with self.tx() as db:\n"
+                "        db.execute('DELETE FROM tasks')\n"
+                "TaskQueue.__init__ = _changed_init\n")
+    def source_inventory():
+        return {str(p.relative_to(release)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in release.rglob("*") if p.is_file()}
+    source_before = source_inventory()
+    real_temporary = state_compatibility.tempfile.TemporaryDirectory
+    real_run = state_compatibility.subprocess.run
+    scratch = []
+    admitted = []
+
+    @contextmanager
+    def aliased_owned_temporary(*args, **kwargs):
+        assert kwargs["prefix"] == "jae-state-compatibility-"
+        assert "dir" not in kwargs
+        with real_temporary(*args, dir=parent, **kwargs) as created:
+            canonical = Path(created).resolve(strict=True)
+            lexical = alias / canonical.name
+            assert lexical.is_dir()
+            assert any(p.is_symlink() for p in lexical.parents)
+            scratch.append(canonical)
+            yield str(lexical)
+        assert not canonical.exists()
+
+    def actual_candidate(command, **kwargs):
+        selected = Path(command[-1])
+        assert selected == scratch[-1]
+        assert not any(p.is_symlink() for p in (selected, *selected.parents))
+        assert Path(command[-2]) == release
+        assert command[1:4] == ["-I", "-B", "-c"]
+        assert kwargs["timeout"] == 10
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert kwargs["stdout"] == subprocess.DEVNULL
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        # This is the actual isolated candidate queue/decoder, not a result mock.
+        completed = real_run(command, **kwargs)
+        assert completed.returncode == 0
+        admitted.append(selected)
+        assert (selected / "tasks.sqlite3").is_file()
+        assert (selected / "tasks.sqlite3").stat().st_mode & 0o077 == 0
+        if encrypted:
+            assert (selected / "task-answers.key").stat().st_mode & 0o077 == 0
+            assert (selected / ".answer-compatibility.json").stat().st_mode & 0o077 == 0
+        else:
+            assert not (selected / "task-answers.key").exists()
+        with closing(sqlite3.connect(selected / "tasks.sqlite3")) as migrated:
+            assert "revision" in {r[1] for r in migrated.execute("PRAGMA table_info(tasks)")}
+            assert migrated.execute("SELECT count(*) FROM tasks").fetchone()[0] == (
+                0 if mutation else 1)
+        return completed
+
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db) if encrypted else None
+        before = authority(db)
+        schema = db.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+        history = db.execute("SELECT * FROM task_answer_events").fetchall() if encrypted else None
+        assert (root / "tasks.sqlite3-wal").stat().st_size > 0
+        capsule = tmp_path / "capsule"
+        receipt = stage_task_state_backup(root, capsule) if entry == "capsule" else None
+        capsule_before = ({p.name: (p.read_bytes(), p.stat().st_mode, p.stat().st_ino)
+                           for p in capsule.iterdir()} if receipt else None)
+        with task_state_guard(root):
+            journal_before = {name: (root / name).read_bytes()
+                              for name in ["tasks.sqlite3", "tasks.sqlite3-wal"]}
+            with monkeypatch.context() as patch:
+                patch.setattr(state_compatibility.tempfile, "TemporaryDirectory",
+                              aliased_owned_temporary)
+                patch.setattr(state_compatibility.subprocess, "run", actual_candidate)
+                if entry == "journal":
+                    result = task_state_candidate_compatible(Path(sys.executable), release, root)
+                else:
+                    result = task_state_backup_candidate_compatible(
+                        Path(sys.executable), release, capsule, receipt)
+            assert result is (not bool(mutation))
+            assert admitted == scratch and len(admitted) == 1
+            assert all(not p.exists() for p in scratch)
+            assert {name: (root / name).read_bytes() for name in journal_before} == journal_before
+        assert authority(db) == before
+        assert db.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall() == schema
+        assert "revision" not in {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
+        if encrypted:
+            assert db.execute("SELECT * FROM task_answer_events").fetchall() == history
+            assert (root / "task-answers.key").read_bytes() == key
+        else:
+            assert not (root / "task-answers.key").exists()
+        assert not (root / "auth.token").exists()
+        assert not (root / "service.json").exists()
+        assert not (root / ".answer-compatibility.json").exists()
+        if receipt:
+            assert verify_task_state_backup(capsule, receipt)
+            assert {p.name: (p.read_bytes(), p.stat().st_mode, p.stat().st_ino)
+                    for p in capsule.iterdir()} == capsule_before
+    assert source_inventory() == source_before
+    assert alias.is_symlink()
+    assert (alias.lstat().st_dev, alias.lstat().st_ino) == (
+        alias_identity.st_dev, alias_identity.st_ino)
+    assert (outside.read_bytes(), outside.stat().st_mode,
+            outside.stat().st_dev, outside.stat().st_ino) == outside_before
+    assert sorted(p.name for p in parent.iterdir()) == ["unrelated"]
+
+
+@pytest.mark.parametrize("shape", ["root", "ancestor"])
+def test_owned_scratch_canonicalization_never_admits_a_caller_journal_alias(
+        tmp_path, monkeypatch, shape):
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        before = authority(db)
+        history = db.execute("SELECT * FROM task_answer_events").fetchall()
+        schema = db.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+        alias = tmp_path / "caller-alias"
+        alias.symlink_to(root if shape == "root" else tmp_path, target_is_directory=True)
+        selected = alias if shape == "root" else alias / root.name
+        alias_identity = alias.lstat()
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("caller aliases must refuse before scratch creation or child migration")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(state_compatibility.tempfile, "TemporaryDirectory", forbidden)
+            patch.setattr(state_compatibility.subprocess, "run", forbidden)
+            assert task_state_candidate_compatible(Path(sys.executable), tmp_path, selected) is False
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == history
+        assert db.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall() == schema
+        assert (root / "task-answers.key").read_bytes() == key
+        assert not (root / "auth.token").exists()
+        assert not (root / "service.json").exists()
+        assert alias.is_symlink()
+        assert (alias.lstat().st_dev, alias.lstat().st_ino) == (
+            alias_identity.st_dev, alias_identity.st_ino)

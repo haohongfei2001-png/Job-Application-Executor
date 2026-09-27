@@ -304,6 +304,11 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
         if not database.is_file():
             return False
         with tempfile.TemporaryDirectory(prefix="jae-state-compatibility-") as directory:
+            # This newly created scratch directory is exclusively ours. macOS
+            # may spell its temporary ancestor through /var -> /private/var.
+            # Admit the real scratch authority before copying or child migration;
+            # never resolve the caller journal root, which was checked above.
+            directory = str(Path(directory).resolve(strict=True))
             copy = Path(directory) / "tasks.sqlite3"
             # SQLite backup includes committed WAL rows; file copying does not.
             with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as source:
