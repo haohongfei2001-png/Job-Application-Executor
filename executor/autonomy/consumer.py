@@ -336,7 +336,7 @@ def _legacy_state_migration_needed(repo: Path, app: Path, target: Path) -> bool:
         if not root.is_dir():
             raise ValueError("legacy_state_path_invalid")
         for child in root.iterdir():
-            if child.name in {"worker.lock", "migration.lock"}:
+            if child.name in {"worker.lock", "migration.lock", "native-window.lock"}:
                 if child.is_symlink() or not child.is_file():
                     raise ValueError("legacy_state_path_invalid")
                 continue

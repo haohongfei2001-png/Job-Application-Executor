@@ -456,3 +456,34 @@ def test_hosted_mac_native_failure_is_visible_without_retry_or_private_url(
             thread.join(timeout=3)
         if reserved is not None:
             reserved.close()
+
+
+def test_hosted_mac_actual_window_inherits_lease_and_blocks_second_launch(compiled_host, tmp_path):
+    from executor.autonomy.state_compatibility import native_window_guard
+
+    root = tmp_path / "owned-state"
+    presenter = None
+    try:
+        with native_window_guard(root) as fd:
+            presenter = NativePresenter(compiled_host, ownership_fd=fd)
+            surface = ConsumerSurface.dashboard(43210, "PRIVATE_SINGLETON_CANARY")
+            assert present_surface(surface, presenter=presenter)
+            process = presenter.process
+            assert process.poll() is None
+            with pytest.raises(BlockingIOError):
+                with native_window_guard(root):
+                    pytest.fail("second launch admitted while actual NSWindow alive")
+        # The Python owner descriptor is now closed; actual Cocoa process owns
+        # the inherited descriptor. Do not force-unlock an orphaned live window.
+        assert process.poll() is None
+        with pytest.raises(BlockingIOError):
+            with native_window_guard(root):
+                pytest.fail("parent loss admitted a second native window")
+        presenter.close()
+        assert process.poll() is not None
+        with native_window_guard(root):
+            pass
+        assert (root / "native-window.lock").read_bytes() == b""
+    finally:
+        if presenter is not None:
+            presenter.close()

@@ -75,6 +75,30 @@ def _private_lock_fd(path: Path, *, blocking: bool = False) -> int:
 
 
 @contextmanager
+def native_window_guard(root: str | Path):
+    """One presenter per owned task root, shared with app activation.
+
+    Keep the ordinary inode after close. Never unlock by PID, unlink a live
+    lease or write capabilities to it. The Cocoa child inherits this descriptor
+    so a parent crash cannot admit a second window while the first survives.
+    """
+    root = Path(root).expanduser().absolute()
+    if any(path.is_symlink() for path in (root, *root.parents)):
+        raise ValueError("native_window_state_invalid")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    metadata = root.stat(follow_symlinks=False)
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+            or any(path.is_symlink() for path in (root, *root.parents))):
+        raise ValueError("native_window_state_invalid")
+    root.chmod(0o700)
+    fd = _private_lock_fd(root / "native-window.lock")
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
 def task_state_guard(root: str | Path):
     """Share the daemon's lock through the entire app install or rollback transaction."""
     root = Path(root).expanduser()
@@ -87,16 +111,19 @@ def task_state_guard(root: str | Path):
     # A queue constructor writes schema/derived state under migration.lock even
     # without starting a worker. Fence both writers through compatibility,
     # activation and recovery; contention refuses promptly rather than waits.
-    fd = _private_lock_fd(root / "worker.lock")
-    migration_fd = None
+    window_fd = _private_lock_fd(root / "native-window.lock")
+    fd = migration_fd = None
     try:
+        fd = _private_lock_fd(root / "worker.lock")
         migration_fd = _private_lock_fd(root / "migration.lock")
         _refuse_live_service(root)
         yield
     finally:
         if migration_fd is not None:
             os.close(migration_fd)
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
+        os.close(window_fd)
 
 
 def _quote(name: str) -> str:

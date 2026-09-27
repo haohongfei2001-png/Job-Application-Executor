@@ -202,16 +202,27 @@ def launch_native_consumer(root, port, *, smoke=False):
             or not _trusted_bundle(app)
             or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
         return {"ok": False, "opened": False, "reason": "native_bundle_unverified"}
-    presenter = NativePresenter(source.parent / "native-host", consumer_smoke=smoke)
+    from .state_compatibility import native_window_guard
+
     try:
-        result = launch_consumer(root, port, presenter=presenter)
-        opened = result.get("opened") is True and result.get("ok") is True
-        closed = presenter.wait_for_close() if opened else False
-        return {"ok": opened and closed, "opened": opened,
-                "native_window": opened, "native_page": closed if smoke else None,
-                "final_click_actor": "user"}
-    finally:
-        presenter.close()
+        # Acquire before service startup or issuing a UI ticket. A duplicate
+        # invocation has no authority to reload the existing unsent workbench.
+        with native_window_guard(root) as window_fd:
+            presenter = NativePresenter(source.parent / "native-host",
+                consumer_smoke=smoke, ownership_fd=window_fd)
+            try:
+                result = launch_consumer(root, port, presenter=presenter)
+                opened = result.get("opened") is True and result.get("ok") is True
+                closed = presenter.wait_for_close() if opened else False
+                return {"ok": opened and closed, "opened": opened,
+                        "native_window": opened, "native_page": closed if smoke else None,
+                        "final_click_actor": "user"}
+            finally:
+                presenter.close()
+    except BlockingIOError:
+        return {"ok": False, "opened": False, "reason": "native_window_already_open"}
+    except (OSError, ValueError):
+        return {"ok": False, "opened": False, "reason": "native_window_state_invalid"}
 
 
 def main(argv=None):

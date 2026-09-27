@@ -329,9 +329,13 @@ def native_command(surface: ConsumerSurface, request: int) -> dict:
 
 class NativePresenter:
     """One trusted native window, no fallback and no credential report."""
-    def __init__(self, directory: str | Path, *, consumer_smoke: bool = False):
+    def __init__(self, directory: str | Path, *, consumer_smoke: bool = False,
+                 ownership_fd: int | None = None):
         if type(consumer_smoke) is not bool:
             raise ValueError("native_host_mode_invalid")
+        if ownership_fd is not None and (type(ownership_fd) is not int or ownership_fd < 0):
+            raise ValueError("native_host_ownership_invalid")
+        self.ownership_fd = ownership_fd
         self.consumer_smoke = consumer_smoke
         self.directory = Path(directory).absolute()
         self.process = None
@@ -351,7 +355,8 @@ class NativePresenter:
                     [str(self.directory / "AIApplicationWindow"),
                      *(["--consumer-smoke"] if self.consumer_smoke else [])],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                    stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                    pass_fds=(() if self.ownership_fd is None else (self.ownership_fd,)))
             self.process.stdin.write(json.dumps(command, ensure_ascii=False) + "\n")
             self.process.stdin.flush()
             ready, _, _ = select.select([self.process.stdout], [], [], 5)
