@@ -1251,3 +1251,180 @@ def test_task_workspace_provider_refresh_duplicate_click_and_late_reply_do_not_r
             assert errors == []
         finally:
             browser.close()
+
+@pytest.mark.parametrize("status,fenced", [
+    ("idle", False), ("checking", True), ("updating", True),
+    ("restarting", True), ("restart_required", True), ("success", False),
+    ("up_to_date", False), ("failed", False),
+])
+def test_task_workspace_retired_update_is_readonly_and_preserves_legacy_fences(status, fenced):
+    """Actual browser entry reads once and never re-enables the checkout writer."""
+    requests, errors = [], []
+    current = "idle"
+    observation = {"status": status, "old_version": "PRIVATE_OLD_VERSION",
+                   "new_version": "PRIVATE_NEW_VERSION", "reason": "PRIVATE_REASON"}
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("retired-update.test", 1)[-1]
+                requests.append((route.request.method, path))
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/update-status":
+                    route.fulfill(status=200, content_type="application/json",
+                                  body=json.dumps(observation))
+                else:
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                        "tasks": [], "update": {"status": current}, "ready_for_live_e2e": False}))
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://retired-update.test/**", route_request)
+            page.goto("https://retired-update.test/")
+            page.locator("#message").fill("UNSENT_UPDATE_INPUT")
+            current = status
+            page.get_by_role("button", name="更新状态", exact=True).click()
+            expect(page.locator("#update-dialog")).to_be_visible()
+            expect(page.locator("#update-close")).to_be_focused()
+            page.wait_for_function("updateReadBusy === false")
+            assert requests.count(("GET", "/ui/api/update-status")) == 1
+            text = page.locator("#update-dialog").inner_text()
+            assert "旧版 Git 更新入口已停用" in text
+            assert "旧版状态记录不能证明当前安装包" in text
+            assert "PRIVATE_" not in text
+            assert "UNSENT_UPDATE_INPUT" not in text
+            assert page.locator("#message").input_value() == "UNSENT_UPDATE_INPUT"
+            assert page.locator("#message").is_disabled() is fenced
+            assert page.locator("#send").is_disabled() is fenced
+            if fenced:
+                assert "任务写入保持暂停" in page.locator("#update-observation").inner_text()
+            elif status == "success":
+                assert "不能据此确认当前安装包版本" in page.locator("#update-observation").inner_text()
+            elif status == "up_to_date":
+                assert "不能据此确认当前安装包已是最新版本" in page.locator("#update-observation").inner_text()
+            # No timer-based update polling exists. Existing entry names are
+            # read-only compatibility, including synthetic duplicate dispatch.
+            page.evaluate("document.getElementById('update').dispatchEvent(new MouseEvent('click'))")
+            assert requests.count(("GET", "/ui/api/update-status")) == 1
+            page.locator("#update-refresh").click()
+            page.wait_for_function("updateReadBusy === false")
+            assert requests.count(("GET", "/ui/api/update-status")) == 2
+            page.locator("#update-close").click()
+            expect(page.locator("#update-dialog")).not_to_be_visible()
+            expect(page.locator("#update")).to_be_focused()
+            assert page.locator("#update-observation").inner_text() == ""
+            page.evaluate("pollUpdate()")
+            assert requests.count(("GET", "/ui/api/update-status")) == 2
+            assert all(method == "GET" for method, _ in requests)
+            assert all(path != "/ui/api/update" for _, path in requests)
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert errors == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("failure", ["transport", "http", "malformed", "private_status"])
+def test_task_workspace_retired_update_uncertain_read_never_retries_or_clears_fence(failure):
+    requests, errors = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("retired-update-unknown.test", 1)[-1]
+                requests.append((route.request.method, path))
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/update-status":
+                    if failure == "transport":
+                        route.abort("failed")
+                    else:
+                        route.fulfill(status=503 if failure == "http" else 200,
+                            content_type="application/json", body=json.dumps(
+                                [] if failure == "malformed" else {"status": "PRIVATE_STATE"}))
+                else:
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                        "tasks": [], "update": {"status": "restart_required"},
+                        "ready_for_live_e2e": False}))
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://retired-update-unknown.test/**", route_request)
+            page.goto("https://retired-update-unknown.test/")
+            expect(page.locator("#send")).to_be_disabled()
+            page.get_by_role("button", name="更新状态", exact=True).click()
+            page.wait_for_function("updateReadBusy === false")
+            expect(page.locator("#update-observation")).to_contain_text("更新状态未确认")
+            assert "PRIVATE_STATE" not in page.locator("#update-dialog").inner_text()
+            expect(page.locator("#message")).to_be_disabled()
+            expect(page.locator("#send")).to_be_disabled()
+            assert requests.count(("GET", "/ui/api/update-status")) == 1
+            page.locator("#update-close").click()
+            page.evaluate("pollUpdate()")
+            assert requests.count(("GET", "/ui/api/update-status")) == 1
+            assert all(method == "GET" for method, _ in requests)
+            assert errors == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
+def test_task_workspace_retired_update_late_reply_never_revives_dialog_or_replays(interruption):
+    pending, requests, errors = [], [], []
+    expired = False
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("retired-update-lifetime.test", 1)[-1]
+                requests.append((route.request.method, path))
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/update-status":
+                    pending.append(route)
+                elif expired:
+                    route.fulfill(status=401, content_type="application/json",
+                                  body='{"error":"ui_session_required"}')
+                else:
+                    route.fulfill(status=200, content_type="application/json",
+                                  body='{"tasks":[],"update":{"status":"idle"},"ready_for_live_e2e":false}')
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://retired-update-lifetime.test/**", route_request)
+            page.goto("https://retired-update-lifetime.test/")
+            page.locator("#message").fill("UNSENT_UPDATE_LIFETIME")
+            with page.expect_request("https://retired-update-lifetime.test/ui/api/update-status"):
+                page.get_by_role("button", name="更新状态", exact=True).click()
+            expect(page.locator("#update-refresh")).to_be_disabled()
+            page.evaluate("document.getElementById('update-refresh').dispatchEvent(new MouseEvent('click'))")
+            assert len(pending) == 1
+            if interruption == "expired_session":
+                expired = True
+                page.evaluate("state()")
+                expect(page.locator("#session-expired")).to_be_visible()
+            elif interruption == "close":
+                page.locator("#update-close").click()
+            else:
+                page.locator("#update-dialog").press("Escape")
+            expect(page.locator("#update-dialog")).not_to_be_visible()
+            with page.expect_response("https://retired-update-lifetime.test/ui/api/update-status"):
+                pending[0].fulfill(status=200, content_type="application/json",
+                                  body='{"status":"success","reason":"PRIVATE_LATE_REPLY"}')
+            page.evaluate("async () => { await Promise.resolve(); await pollUpdate(); }")
+            assert page.locator("#update-observation").inner_text() == ""
+            expect(page.locator("#update-dialog")).not_to_be_visible()
+            assert page.evaluate("legacyUpdateObservation.status") == "idle"
+            assert page.locator("#message").input_value() == "UNSENT_UPDATE_LIFETIME"
+            assert requests.count(("GET", "/ui/api/update-status")) == 1
+            assert all(method == "GET" for method, _ in requests)
+            if interruption == "expired_session":
+                expect(page.locator("#session-expired")).to_be_focused()
+                expect(page.locator("#update")).to_be_disabled()
+                assert page.locator("#message").get_attribute("readonly") is not None
+                checkpoint = list(requests)
+                page.evaluate("async () => { await startUpdate(); await pollUpdate(); }")
+                assert requests == checkpoint
+            else:
+                expect(page.locator("#update")).to_be_focused()
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert errors == []
+        finally:
+            browser.close()

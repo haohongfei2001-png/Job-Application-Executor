@@ -87,7 +87,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
     <button id="profile-setup" class="headerbtn" type="button">资料设置</button>
     <button id="readiness-details" class="headerbtn" type="button">运行条件</button>
     <button id="diagnostics" class="headerbtn" type="button">查看诊断</button>
-    <button id="update" class="headerbtn" type="button">检查并更新</button>
+    <button id="update" class="headerbtn" type="button">更新状态</button>
   </div>
 </header>
 <div id="chat" class="chat">
@@ -130,6 +130,16 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <div class="diagnostics-actions">
     <button id="diagnostics-close" class="headerbtn" type="button">关闭</button>
     <button id="diagnostics-copy" type="button">复制报告</button>
+  </div>
+</dialog>
+<dialog id="update-dialog" class="diagnostics-dialog" aria-labelledby="update-title">
+  <h2 id="update-title">更新状态</h2>
+  <p>旧版 Git 更新入口已停用。此页只读取兼容状态，不会安装版本、重启服务或恢复任务。</p>
+  <p id="update-observation" role="status">尚未读取更新状态。</p>
+  <p>安装包更新仍需完成应用内的安全交接；旧版状态记录不能证明当前安装包已更新或已是最新版本。</p>
+  <div class="diagnostics-actions">
+    <button id="update-close" class="headerbtn" type="button">关闭</button>
+    <button id="update-refresh" type="button">刷新状态</button>
   </div>
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -219,6 +229,10 @@ const providerLoad=document.getElementById('provider-load'),providerLoadStatus=d
 let providerLoadBusy=false,providerLoadUnknown=false,providerLoadState='unknown',providerLoadEpoch=0;
 const providerRefresh=document.getElementById('provider-refresh');
 let providerRefreshBusy=false,providerRefreshUnknown=false,providerRefreshObservation=null;
+const updateDialog=document.getElementById('update-dialog'),
+  updateObservation=document.getElementById('update-observation'),
+  updateClose=document.getElementById('update-close'),updateRefresh=document.getElementById('update-refresh');
+let updateEpoch=0,updateReadBusy=false,legacyUpdateObservation={status:'idle'};
 let uiSessionExpired=false;
 let currentTaskId=null;
 const taskContext=document.getElementById('task-context');
@@ -318,6 +332,8 @@ tasksEl.addEventListener('keydown',event=>{
 function expireUISession(){
   if(uiSessionExpired)return;
   uiSessionExpired=true;
+  updateEpoch++;updateReadBusy=false;updateRefresh.disabled=true;
+  updateObservation.textContent='';if(updateDialog.open)updateDialog.close();
   providerLoadEpoch++;providerLoad.disabled=true;providerRefresh.disabled=true;
   providerRefreshObservation=null;providerLoadStatus.textContent='';
   currentTaskId=null;savedView=null;updateTaskContext();
@@ -644,19 +660,25 @@ function notify(text){
 }
 function updateLabel(update){
   if(uiSessionExpired){updateBtn.disabled=true;msg.readOnly=true;send.disabled=true;return;}
-  const status=(update||{}).status||'idle';
-  const busy=['checking','updating','restarting'].includes(status);
-  const restartRequired=status==='restart_required';
-  updateBtn.disabled=busy;
-  msg.disabled=busy||restartRequired;
-  send.disabled=busy||restartRequired;
-  if(busy){
-    updateBtn.textContent=status==='checking'?'正在检查…':status==='updating'?'正在更新…':'正在重启…';
-  }else if(restartRequired){
-    updateBtn.textContent='重试重启';
-  }else{
-    updateBtn.textContent='检查并更新';
-  }
+  // Retain every legacy mutation fence. Historical records cannot authorize
+  // an install, clear a restart fence or prove the current packaged version.
+  const status=update&&typeof update.status==='string'?update.status:'idle';
+  legacyUpdateObservation={status};
+  const fenced=['checking','updating','restarting','restart_required'].includes(status);
+  updateBtn.disabled=false;updateBtn.textContent='更新状态';
+  msg.disabled=fenced;send.disabled=fenced;
+  const messages={
+    idle:'没有正在进行的旧版更新记录；这不代表已检查新版本。',
+    checking:'旧版记录显示正在检查；任务写入保持暂停，此页不会启动或重试更新。',
+    updating:'旧版记录显示可能正在更新；任务写入保持暂停，此页不会安装或重试。',
+    restarting:'旧版记录显示重启尚未确认；任务写入保持暂停，此页不会重启服务。',
+    restart_required:'旧版记录尚需恢复核验；任务写入保持暂停，请重新打开应用并查看诊断，此页不会重试重启。',
+    success:'记录包含旧版更新成功状态；不能据此确认当前安装包版本。',
+    up_to_date:'记录包含旧版版本检查结果；不能据此确认当前安装包已是最新版本。',
+    failed:'记录包含旧版更新失败状态；此页不会重试，也不能据此确认当前安装包版本。'
+  };
+  if(updateDialog.open)updateObservation.textContent=messages[status]||
+    '更新状态未确认；此页不会自动重试或改变任务。';
 }
 async function previewDiagnostics(){
   diagnosticsBtn.disabled=true;
@@ -697,73 +719,38 @@ diagnosticsDialog.addEventListener('close',()=>{
 diagnosticsClose.onclick=()=>{diagnosticsReport.textContent='';diagnosticsDialog.close()};
 diagnosticsCopy.onclick=copyDiagnostics;
 async function startUpdate(){
-  updateBtn.disabled=true;updateBtn.textContent='正在检查…';
-  try{
-    const r=await uiRequest('/ui/api/update',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      credentials:'same-origin',
-      body:'{}'
-    });
-    const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
-    if(!r.ok){
-      const reason={
-        worker_active:'当前正在执行真实任务，请等任务停在安全节点后再更新。',
-        runnable_task_pending:'还有可立即执行的任务，请先暂停或等它停在安全节点。',
-        otp_in_flight:'正在等待或处理短信验证码，此时不能更新。',
-        update_in_progress:'已经有一次更新正在进行，不会重复启动。',
-        stale_update_recovered:'检测到上次更新被中断，已解除锁定；可以重新检查更新。',
-        not_on_main:'当前代码不在 main 分支，已拒绝自动更新。',
-        tracked_changes_present:'本地有未提交代码修改，已拒绝自动更新。',
-        unexpected_origin:'GitHub 来源不符合预期，已拒绝自动更新。',
-        legacy_update_retired:'旧版更新方式已停用。当前版本和任务保持不变；新版安全更新尚未就绪。',
-        packaged_update_not_ready:'当前安装包尚不支持安全更新；现有版本与任务保持不变。'
-      }[data.reason]||'当前不能安全更新。';
-      notify(reason);updateBtn.disabled=uiSessionExpired;updateBtn.textContent='检查并更新';return;
-    }
-    notify('正在检查 GitHub 并安全更新。若有新版本，服务会自动重启并重新打开面板。');
-    setTimeout(pollUpdate,900);
-  }catch(e){
-    notify('更新请求失败；当前版本和任务均保持不变。');
-    updateBtn.disabled=uiSessionExpired;updateBtn.textContent='检查并更新';
-  }
+  if(uiSessionExpired||updateDialog.open)return;
+  updateEpoch++;updateDialog.showModal();updateClose.focus();
+  updateLabel(legacyUpdateObservation);
+  await pollUpdate();
 }
 async function pollUpdate(){
-  if(uiSessionExpired)return;
+  // Compatibility name retained for old callers. One explicit read only:
+  // no Git/update POST, retry, service restart or timer is admitted here.
+  if(uiSessionExpired||!updateDialog.open||updateReadBusy)return;
+  const epoch=updateEpoch;updateReadBusy=true;updateRefresh.disabled=true;
   try{
-    const r=await uiRequest('/ui/api/update-status',{credentials:'same-origin'});
-    if(!r.ok)throw new Error();
-    const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');updateLabel(data);
-    if(['checking','updating','restarting'].includes(data.status)){
-      setTimeout(pollUpdate,1000);return;
-    }
-    if(data.status==='up_to_date')notify('已经是最新版本。');
-    if(data.status==='success')notify('更新完成，正在打开新版本。');
-    if(data.status==='restart_required'){
-      notify('代码已更新，但本地服务还需要重新启动。点击“重试重启”即可继续。');
-    }
-    if(data.status==='failed'){
-      const reason={
-        worker_active:'更新取消：当前仍有任务在执行。',
-        runnable_task_pending:'更新取消：还有可立即执行的任务。',
-        otp_in_flight:'更新取消：短信验证码流程正在进行。',
-        not_on_main:'更新取消：当前不在 main 分支。',
-        tracked_changes_present:'更新取消：本地有未提交的代码修改。',
-        unexpected_origin:'更新取消：GitHub 来源不符合预期。',
-        repository_changed_during_update:'更新取消：检查期间本地代码状态发生了变化。',
-        remote_changed_during_update:'更新取消：检查期间远端 main 又发生了变化。',
-        stale_update_recovered:'检测到上次更新被中断，已解除更新锁定。',
-        fast_forward_required:'更新取消：远端无法安全快进到本地。',
-        service_stop_failed:'代码已检查，但服务没有安全停止。',
-        service_start_failed:'代码已更新，但服务未能自动重启；重新打开 AI 投递经理即可重试启动。'
-      }[data.reason]||'更新没有完成；当前任务和已有版本保持安全。';
-      notify(reason);
-    }
-  }catch(e){
-    // During a successful restart this old session disappears. The updater
-    // opens a new authenticated UI, so no destructive retry is attempted here.
+    const response=await uiRequest('/ui/api/update-status',{credentials:'same-origin'});
+    if(!response.ok)throw new Error();
+    const data=await response.json();
+    if(uiSessionExpired||epoch!==updateEpoch||!updateDialog.open)return;
+    if(!data||typeof data!=='object'||Array.isArray(data)
+      ||!['idle','checking','updating','restarting','restart_required','success','up_to_date','failed'].includes(data.status))throw new Error();
+    updateLabel(data);
+  }catch(_){
+    if(!uiSessionExpired&&epoch===updateEpoch&&updateDialog.open)
+      updateObservation.textContent='更新状态未确认；原有任务安全限制保持不变，不会自动重试。';
+  }finally{
+    if(epoch===updateEpoch){updateReadBusy=false;updateRefresh.disabled=uiSessionExpired;}
   }
 }
+updateDialog.addEventListener('close',()=>{
+  updateEpoch++;updateReadBusy=false;updateObservation.textContent='';
+  updateRefresh.disabled=uiSessionExpired;
+  if(!uiSessionExpired)updateBtn.focus();
+});
+updateClose.onclick=()=>updateDialog.close();
+updateRefresh.onclick=pollUpdate;
 diagnosticsBtn.onclick=previewDiagnostics;
 updateBtn.onclick=startUpdate;
 const readinessLabels={
@@ -947,7 +934,7 @@ async function submit(){
       const r=await uiRequest('/ui/api/update-status',{credentials:'same-origin'});
       const update=r.ok?await r.json():{status:'idle'};
       updateLabel(update);
-    }catch(e){send.disabled=uiSessionExpired;msg.disabled=false}
+    }catch(e){updateLabel(legacyUpdateObservation)}
     if(!uiSessionExpired)msg.focus();
   }
 }
