@@ -433,6 +433,16 @@ class GenericWebAdapter(SiteAdapter):
             return False
         return 1 <= int(text[5:7]) <= 12
 
+    @staticmethod
+    def _choice_enabled(element) -> bool:
+        """Check current native and inherited ARIA admission, never infer from a label."""
+        try:
+            return element.is_enabled() and element.evaluate(
+                """e => !e.matches(':disabled') &&
+                    !e.closest('[aria-disabled="true"]')""") is True
+        except Exception:
+            return False
+
     def _fill_select(self, element, value) -> tuple[str, int] | None:
         if element.get_attribute("multiple") is not None:
             return None
@@ -462,8 +472,14 @@ class GenericWebAdapter(SiteAdapter):
         # Freeze the intended option before dispatching change/input. A reactive
         # page may revert between the primitive and the later render readback;
         # its observed value must never redefine the expected result.
-        expected = (opts.nth(matches[0]).evaluate("e => e.value"), matches[0])
+        choice = opts.nth(matches[0])
+        expected = (choice.evaluate("e => e.value"), matches[0])
+        expected_label = (choice.inner_text() or "").strip()
         getattr(self, "mutation_guard", lambda: None)()
+        if (not self._choice_enabled(element) or not self._choice_enabled(choice)
+                or choice.evaluate("e => e.value") != expected[0]
+                or (choice.inner_text() or "").strip() != expected_label):
+            return None
         element.select_option(index=matches[0])
         if not element.evaluate("(e, index) => e.selectedIndex === index", matches[0]):
             raise BrowserOwnershipError("select choice outcome unknown")
@@ -482,6 +498,8 @@ class GenericWebAdapter(SiteAdapter):
         if listbox.count() != 1:
             return False
         getattr(self, "mutation_guard", lambda: None)()
+        if not self._choice_enabled(element):
+            return False
         element.click()
         choices = listbox.locator('[role="option"]')
         exact = [choices.nth(index) for index in range(choices.count())
@@ -491,6 +509,10 @@ class GenericWebAdapter(SiteAdapter):
         if len(exact) != 1:
             return False
         getattr(self, "mutation_guard", lambda: None)()
+        if (not exact[0].is_visible() or not self._choice_enabled(exact[0])
+                or (exact[0].get_attribute("aria-label") or
+                    exact[0].inner_text()).strip() != target):
+            return False
         exact[0].click()
         self.await_form_render()
         selected = self._locate(selector)

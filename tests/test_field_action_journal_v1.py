@@ -381,3 +381,59 @@ def test_real_field_recovery_consumer_ui_is_read_only_revision_bound_and_clears_
                     queue.resume(tid)
             finally:
                 browser.close()
+
+
+@pytest.mark.parametrize("component", ["native", "aria"])
+def test_unavailable_choice_retains_unknown_journal_and_stops_later_write(tmp_path, component):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    if component == "native":
+        body = """<select id='city'><option value=''>Choose</option>
+          <option value='city' disabled>PRIVATE_VALUE_CANARY</option></select>"""
+    else:
+        body = """<div id='city' role='combobox' aria-controls='cities'
+          tabindex='0' onclick="window.opens++;document.querySelector('#cities').hidden=false">Choose</div>
+          <div id='cities' role='listbox' hidden>
+            <div role='option' aria-disabled='true' onclick="window.choices++;
+              document.querySelector('#city').innerText=this.innerText">PRIVATE_VALUE_CANARY</div>
+          </div>"""
+    html = tmp_path / "disabled-owned-choice.html"
+    html.write_text("<!doctype html><body>" + body + """<input id='later'>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.opens=0;window.choices=0;window.submits=0;
+        document.querySelector('#city').addEventListener('change',()=>window.choices++);
+      </script>""", encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        resolutions = [FieldResolution(
+            field_id="PRIVATE_CONTROL_CANARY_" + key, selector="#" + key,
+            label="PRIVATE_LABEL_CANARY", value="PRIVATE_VALUE_CANARY",
+            status=ResolutionStatus.RESOLVED) for key in ("city", "later")]
+        with pytest.raises(BrowserOwnershipError, match="outcome unknown"):
+            adapter.apply_resolutions(resolutions)
+        assert adapter.page.locator("#later").input_value() == ""
+        assert adapter.page.evaluate("[window.choices,window.submits]") == [0, 0]
+        assert adapter.page.evaluate("window.opens") == (1 if component == "aria" else 0)
+        if component == "native":
+            assert adapter.page.locator("#city").input_value() == ""
+        else:
+            assert adapter.page.locator("#city").inner_text() == "Choose"
+        # A refused option is not a server-save receipt or authority to replay
+        # an already journaled action (opening the ARIA component may be an effect).
+        with pytest.raises(BrowserOwnershipError):
+            adapter.apply_resolutions(resolutions)
+        assert adapter.page.evaluate("[window.choices,window.submits]") == [0, 0]
+        assert adapter.page.evaluate("window.opens") == (1 if component == "aria" else 0)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    actions = rebuilt.field_actions(tid)
+    assert len(actions) == 1
+    assert actions[0]["outcome"] == "UNKNOWN_OUTCOME"
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    for path in queue.root.rglob("*"):
+        if path.is_file():
+            payload = path.read_bytes()
+            for canary in (b"PRIVATE_CONTROL_CANARY", b"PRIVATE_LABEL_CANARY", b"PRIVATE_VALUE_CANARY"):
+                assert canary not in payload

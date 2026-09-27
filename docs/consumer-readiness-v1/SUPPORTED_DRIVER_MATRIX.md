@@ -25,7 +25,21 @@ stops remaining actions. Hidden prefixes cannot turn an incomplete page into an
 empty application-entry page. No fixture or limit is reduced to manufacture PASS.
 
 Exact-limit native selection and synthetic351-control/201-option/hidden-prefix/
-dynamic-redraw cases cover this boundary. Their current candidate result is
-NOT_RUN until exact-head cloud CI. This remains a generic capability refusal and
+dynamic-redraw cases cover this boundary. Their bounded collection cases passed the affected exacte949107 review/browser
+suite in CI36283653134; this does not certify a site driver. This remains a generic capability refusal and
 DOM readback boundary, not a new certified external driver, server draft receipt,
 page-advance capability, or completed DFG-008.
+
+## Current disabled-choice admission boundary
+
+Native options, disabled optgroups and inherited ARIA-disabled choices must be
+currently admissible immediately before a generic selection primitive. An exact
+label is insufficient; a disabled duplicate does not disambiguate another option.
+Recheck after the ownership boundary and, for ARIA choices, after opening the
+component. A journaled uncertain/refused action still retains UNKNOWN_OUTCOME and
+blocks blind replay; an opened component is not presumed effect-free.
+
+Ten actual isolated-browser cases and two private field-journal cases accompany
+this batch. Their new exact-head cloud result is NOT_RUN. Existing enabled choice,
+dependency redraw, DOM readback, independent server receipt and final-submit
+user-only boundaries remain. This is DFG008 mitigation, not certification or closure.

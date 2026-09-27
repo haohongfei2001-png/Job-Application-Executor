@@ -882,3 +882,121 @@ def test_partial_observation_cannot_inherit_complete_observation_digest():
     summary = json.dumps(partial.safe_summary())
     assert "PRIVATE_LABEL_CANARY" not in summary
     assert "PRIVATE_VALUE_CANARY" not in summary
+
+
+@pytest.mark.parametrize("restriction", ["option", "optgroup", "aria"])
+def test_disabled_native_choice_never_dispatches_selection(tmp_path, restriction):
+    option = "<option id='blocked' value='city'>Synthetic City</option>"
+    if restriction == "option":
+        option = option.replace("id='blocked'", "id='blocked' disabled")
+    elif restriction == "optgroup":
+        option = "<optgroup label='Unavailable' disabled>" + option + "</optgroup>"
+    else:
+        option = option.replace("id='blocked'", "id='blocked' aria-disabled='true'")
+    html = tmp_path / "unavailable-native.html"
+    html.write_text("<!doctype html><body><label>City<select id='city'>"
+        "<option value=''>Choose</option>" + option + "</select></label>"
+        "<script>window.choices=0;document.querySelector('#city').onchange="
+        "()=>window.choices++;</script>", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert actions == [{"field_id": "city", "ok": False,
+                            "reason": "no_matching_select_option"}]
+        assert adapter.page.locator("#city").input_value() == ""
+        assert adapter.page.evaluate("window.choices") == 0
+
+
+def test_native_choice_disabled_at_ownership_boundary_is_rechecked(tmp_path):
+    html = tmp_path / "native-choice-redraw.html"
+    html.write_text("""<!doctype html><body><select id='city'>
+      <option value=''>Choose</option><option id='target' value='city'>Synthetic City</option>
+      </select><script>window.choices=0;document.querySelector('#city').onchange=
+      ()=>window.choices++;</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        choice = adapter.page.locator("#city")
+        assert adapter.page.locator("#target").is_enabled()
+        adapter.mutation_guard = lambda: adapter.page.locator("#target").evaluate(
+            "e=>e.disabled=true")
+        assert adapter._fill_select(choice, "Synthetic City") is None
+        assert choice.input_value() == ""
+        assert adapter.page.evaluate("window.choices") == 0
+
+
+@pytest.mark.parametrize("restriction", ["option", "listbox", "fieldset"])
+def test_disabled_aria_choice_never_dispatches_option_click(tmp_path, restriction):
+    option_attr = "aria-disabled='true'" if restriction == "option" else ""
+    listbox_attr = "aria-disabled='true'" if restriction == "listbox" else ""
+    option = ("<button type='button' role='option' id='target' " + option_attr
+        + " onclick=\"window.choices++;document.querySelector('#city').innerText="
+          "this.innerText\">Synthetic City</button>")
+    if restriction == "fieldset":
+        option = "<fieldset disabled>" + option + "</fieldset>"
+    html = tmp_path / "unavailable-aria.html"
+    html.write_text("<!doctype html><body><div id='city' role='combobox' "
+        "aria-controls='cities' tabindex='0' onclick=\"document.querySelector('#cities').hidden=false\">Choose</div>"
+        "<div id='cities' role='listbox' hidden " + listbox_attr + ">" + option
+        + "</div><script>window.choices=0;</script>", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert actions == [{"field_id": "city", "ok": False,
+                            "reason": "combobox_exact_choice_unavailable"}]
+        assert adapter.page.locator("#city").inner_text() == "Choose"
+        assert adapter.page.evaluate("window.choices") == 0
+
+
+def test_aria_choice_disabled_after_open_never_dispatches_selection(tmp_path):
+    html = tmp_path / "aria-choice-redraw.html"
+    html.write_text("""<!doctype html><body>
+      <div id='city' role='combobox' aria-controls='cities' tabindex='0'
+           onclick="document.querySelector('#cities').hidden=false">Choose</div>
+      <div id='cities' role='listbox' hidden>
+        <div id='target' role='option' onclick="window.choices++;
+          document.querySelector('#city').innerText=this.innerText">Synthetic City</div>
+      </div><script>window.choices=0;</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        def redraw():
+            if adapter.page.locator("#cities").is_visible():
+                adapter.page.locator("#target").evaluate(
+                    "e=>e.setAttribute('aria-disabled','true')")
+        adapter.mutation_guard = redraw
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert actions == [{"field_id": "city", "ok": False,
+                            "reason": "combobox_exact_choice_unavailable"}]
+        assert adapter.page.locator("#city").inner_text() == "Choose"
+        assert adapter.page.evaluate("window.choices") == 0
+
+
+@pytest.mark.parametrize("component", ["native", "aria"])
+def test_disabled_duplicate_label_does_not_disambiguate_a_choice(tmp_path, component):
+    if component == "native":
+        body = """<select id='city'><option value=''>Choose</option>
+          <option value='first' disabled>Synthetic City</option>
+          <option value='second'>Synthetic City</option></select>"""
+        reason = "no_matching_select_option"
+    else:
+        body = """<div id='city' role='combobox' aria-controls='cities'
+          tabindex='0'>Choose</div><div id='cities' role='listbox'>
+          <div role='option' aria-disabled='true'>Synthetic City</div>
+          <div role='option' onclick="window.choices++;
+            document.querySelector('#city').innerText=this.innerText">Synthetic City</div></div>"""
+        reason = "combobox_exact_choice_unavailable"
+    html = tmp_path / "ambiguous-disabled.html"
+    html.write_text("<!doctype html><body>" + body
+        + "<script>window.choices=0;document.addEventListener('change',()=>window.choices++);</script>",
+        encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert actions == [{"field_id": "city", "ok": False, "reason": reason}]
+        if component == "native":
+            assert adapter.page.locator("#city").input_value() == ""
+        else:
+            assert adapter.page.locator("#city").inner_text() == "Choose"
+        assert adapter.page.evaluate("window.choices") == 0
