@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import html
+import fcntl
 import json
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -29,6 +32,86 @@ from .consumer_presentation import ConsumerSurface, loopback_origin, present_sur
 
 def _state_path(root: str | Path) -> Path:
     return private_dir(root) / "bootstrap.json"
+
+
+def _bootstrap_identity_valid(record) -> bool:
+    return (type(record) is dict and set(record) == {"pid", "port", "token", "service_port"}
+            and type(record["pid"]) is int and 0 < record["pid"] <= 2147483647
+            and all(type(record[key]) is int and 0 < record[key] < 65536
+                    for key in ("port", "service_port"))
+            and type(record["token"]) is str and 32 <= len(record["token"]) <= 128
+            and record["token"].isascii()
+            and all(char.isalnum() or char in "_-" for char in record["token"]))
+
+
+def _bootstrap_record(path: Path) -> dict | None:
+    # Cold admission needs only stdlib, never a task queue/business import.
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError("bootstrap_state_invalid")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, encoding="utf-8") as handle:
+        metadata = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077):
+            raise ValueError("bootstrap_state_invalid")
+        raw = handle.read(65537)
+    current = path.stat(follow_symlinks=False)
+    if (len(raw) > 65536 or (current.st_dev, current.st_ino)
+            != (metadata.st_dev, metadata.st_ino)):
+        raise ValueError("bootstrap_state_invalid")
+    record = json.loads(raw)
+    if not _bootstrap_identity_valid(record):
+        raise ValueError("bootstrap_state_invalid")
+    return record
+
+
+@contextmanager
+def _bootstrap_guard(root: Path):
+    if any(part.is_symlink() for part in (root, *root.parents)):
+        raise ValueError("bootstrap_state_invalid")
+    root = private_dir(root)
+    path = root / "bootstrap-service.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        metadata = os.fstat(fd)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()):
+            raise ValueError("bootstrap_state_invalid")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        current = path.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise ValueError("bootstrap_state_invalid")
+        os.fchmod(fd, 0o600)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _bootstrap_current(state: Path, service_port: int) -> dict | None:
+    record = _bootstrap_record(state)
+    if record is None or record["service_port"] != service_port:
+        return None
+    base = f"http://127.0.0.1:{record['port']}"
+    query = "?token=" + urllib.parse.quote(record["token"], safe="")
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None
+    try:
+        # An actual private loopback identity, not PID/argv/page-200 heuristics.
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(base + "/identity" + query, timeout=2) as response:
+            if response.status != 200:
+                return None
+            raw = response.read(65537)
+        observed = json.loads(raw)
+        if (len(raw) > 65536 or not _bootstrap_identity_valid(observed)
+                or observed != record or _bootstrap_record(state) != record):
+            return None
+        return {"pid": record["pid"], "url": base + "/" + query}
+    except (OSError, ValueError, TypeError, UnicodeError, urllib.error.URLError):
+        return None
 
 
 def _reason(code: str) -> str:
@@ -221,16 +304,28 @@ copyButton.addEventListener('click',async function(){{
 
 
 def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "service_unavailable") -> None:
+    loopback_origin(service_port)
+    root = Path(root).expanduser().absolute()
+    with _bootstrap_guard(root):
+        _serve_bootstrap_locked(root, service_port, initial_reason)
+
+
+def _serve_bootstrap_locked(root: Path, service_port: int, initial_reason: str) -> None:
     from .cli import _start_consumer_service, request
 
     root = Path(root).expanduser().resolve()
     token = secrets.token_urlsafe(32)
+    state = _state_path(root)
+    previous = _bootstrap_record(state)
+    if previous is not None and previous["service_port"] != service_port:
+        raise ValueError("bootstrap_service_mismatch")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
 
-        def respond(self, status: int, body: str, *, location: str | None = None):
+        def respond(self, status: int, body: str, *, location: str | None = None,
+                    content_type: str = "text/html; charset=utf-8"):
             payload = body.encode("utf-8")
             self.send_response(status)
             self.send_header("Cache-Control", "no-store")
@@ -239,7 +334,7 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
             if location:
                 self.send_header("Location", location)
             else:
-                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             if not location:
@@ -251,6 +346,13 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
             supplied = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
             if self.headers.get("Host") != expected_host or not secrets.compare_digest(supplied, token):
                 self.respond(403, "<h1>无法访问恢复页</h1>")
+                return
+            if self.command == "GET" and parsed.path == "/identity":
+                if (self.headers.get("Origin") not in {None, "http://" + expected_host}
+                        or urllib.parse.parse_qs(parsed.query) != {"token": [token]}):
+                    self.respond(403, "<h1>无法访问恢复页</h1>")
+                    return
+                self.respond(200, json.dumps(record), content_type="application/json; charset=utf-8")
                 return
             if self.command == "GET" and parsed.path == "/":
                 self.respond(200, _page(initial_reason, token))
@@ -280,70 +382,74 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
         do_POST = handle_request
 
     server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
-    state = _state_path(root)
-    tmp = state.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"pid": os.getpid(), "port": server.server_address[1], "token": token}))
-    tmp.chmod(0o600)
-    tmp.replace(state)
+    record = {"pid": os.getpid(), "port": server.server_address[1],
+              "token": token, "service_port": service_port}
+    tmp = state.with_name(".bootstrap-" + secrets.token_hex(16) + ".tmp")
     try:
+        if _bootstrap_record(state) != previous:
+            raise ValueError("bootstrap_state_changed")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(record, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(state)
         server.serve_forever(poll_interval=0.5)
     finally:
+        tmp.unlink(missing_ok=True)
         server.server_close()
         try:
-            if json.loads(state.read_text()).get("pid") == os.getpid():
+            if _bootstrap_record(state) == record:
                 state.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError, TypeError, UnicodeError):
+            pass  # A replaced/ambiguous registry is preserved.
 
 
 def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_unavailable", *,
                    presenter=None) -> dict:
     loopback_origin(service_port)
-    root = Path(root).expanduser().resolve()
-    state = _state_path(root)
-
-    def current() -> dict | None:
-        try:
-            if state.is_symlink() or state.stat().st_mode & 0o077:
-                return None
-            record = json.loads(state.read_text())
-            pid, port, token = int(record["pid"]), int(record["port"]), str(record["token"])
-            if not (0 < port < 65536 and len(token) >= 32):
-                return None
-            command = subprocess.run(
-                ["ps", "-ww", "-p", str(pid), "-o", "command="],
-                capture_output=True, text=True, timeout=3,
-            ).stdout
-            if "executor.autonomy.cli" not in command or "bootstrap-serve" not in command or str(root) not in command:
-                return None
-            url = f"http://127.0.0.1:{port}/?token={urllib.parse.quote(token)}"
-            with urllib.request.urlopen(url, timeout=2) as response:
-                if response.status != 200:
-                    return None
-            return {"pid": pid, "url": url}
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError, urllib.error.URLError):
-            return None
-
-    active = current()
-    if active is None:
-        state.unlink(missing_ok=True)
-        log = root / "bootstrap.log"
-        with log.open("ab") as stream:
-            log.chmod(0o600)
-            child = subprocess.Popen(
-                isolated_cli_command("--runtime", str(root), "--port", str(service_port),
-                                     "bootstrap-serve", "--reason", reason),
-                cwd=Path(__file__).resolve().parents[2],
-                stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                start_new_session=True,
-            )
-        for _ in range(50):
-            if child.poll() is not None:
-                break
-            active = current()
-            if active and active["pid"] == child.pid:
-                break
-            time.sleep(0.1)
+    root = Path(root).expanduser().absolute()
+    try:
+        if any(part.is_symlink() for part in (root, *root.parents)):
+            raise ValueError("bootstrap_state_invalid")
+        state = _state_path(root)
+        record = _bootstrap_record(state)
+        if record is not None and record["service_port"] != service_port:
+            return {"ok": False, "opened": False, "reason": "bootstrap_service_mismatch"}
+        active = _bootstrap_current(state, service_port)
+        if active is None:
+            # A dead exact-format owner can recover only after its lease is
+            # released. A hung/live owner never authorizes a second writer.
+            with _bootstrap_guard(root):
+                if _bootstrap_record(state) != record:
+                    raise ValueError("bootstrap_state_changed")
+            log = root / "bootstrap.log"
+            fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                         | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            with os.fdopen(fd, "ab") as stream:
+                metadata = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                        or metadata.st_uid != os.geteuid()):
+                    raise ValueError("bootstrap_state_invalid")
+                os.fchmod(stream.fileno(), 0o600)
+                child = subprocess.Popen(
+                    isolated_cli_command("--runtime", str(root), "--port", str(service_port),
+                                         "bootstrap-serve", "--reason", reason),
+                    cwd=Path(__file__).resolve().parents[2],
+                    stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                    start_new_session=True,
+                )
+            for _ in range(50):
+                if child.poll() is not None:
+                    break
+                active = _bootstrap_current(state, service_port)
+                if active and active["pid"] == child.pid:
+                    break
+                time.sleep(0.1)
+    except BlockingIOError:
+        return {"ok": False, "opened": False, "reason": "bootstrap_owner_busy"}
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {"ok": False, "opened": False, "reason": "bootstrap_state_invalid"}
     if not active:
         return {"ok": False, "opened": False, "reason": "bootstrap_start_failed"}
     try:

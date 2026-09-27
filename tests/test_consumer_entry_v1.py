@@ -4099,3 +4099,244 @@ def test_service_start_refuses_live_legacy_writer_before_journal_initialization(
     _assert_retirement_authority(root, db, before)
     with ProcessLock(root / "worker.lock"):
         pass  # Failed takeover releases only its own ordinary fence.
+
+# Recovery ownership is independent of business imports/task-state writers.
+@pytest.mark.parametrize("defect", [
+    "legacy", "bool_pid", "float_pid", "string_port", "bool_port",
+    "bool_service_port", "wrong_service_port", "extra_key", "short_token",
+    "unicode_token", "invalid_token", "malformed", "list", "oversized",
+    "public", "symlink", "hardlink", "fifo", "directory",
+])
+def test_bootstrap_refuses_ambiguous_registry_without_process_or_business_actions(
+    retirement_private_state, tmp_path, monkeypatch, defect
+):
+    root, queue, db, key = retirement_private_state
+    record = {"pid": os.getpid(), "port": 19344, "service_port": 9344, "token": "A" * 43}
+    registry = root / "bootstrap.json"
+    if defect == "legacy":
+        record.pop("service_port")
+    elif defect == "bool_pid":
+        record["pid"] = True
+    elif defect == "float_pid":
+        record["pid"] = float(record["pid"])
+    elif defect == "string_port":
+        record["port"] = "19344"
+    elif defect == "bool_port":
+        record["port"] = True
+    elif defect == "bool_service_port":
+        record["service_port"] = True
+    elif defect == "wrong_service_port":
+        record["service_port"] = 9345
+    elif defect == "extra_key":
+        record["private"] = "PRIVATE_KEY"
+    elif defect == "short_token":
+        record["token"] = "short"
+    elif defect == "unicode_token":
+        record["token"] = "私" * 43
+    elif defect == "invalid_token":
+        record["token"] = "/" * 43
+    registry.write_text(json.dumps(record), encoding="utf-8")
+    registry.chmod(0o600)
+    if defect == "malformed":
+        registry.write_text("PRIVATE_MALFORMED")
+    elif defect == "list":
+        registry.write_text("[]")
+    elif defect == "oversized":
+        registry.write_text(" " * 65537)
+    elif defect == "public":
+        registry.chmod(0o644)
+    elif defect in {"symlink", "hardlink", "fifo", "directory"}:
+        registry.unlink()
+        outside = tmp_path / "PRIVATE_OUTSIDE_REGISTRY"
+        outside.write_text(json.dumps(record), encoding="utf-8")
+        outside.chmod(0o600)
+        if defect == "symlink":
+            registry.symlink_to(outside)
+        elif defect == "hardlink":
+            os.link(outside, registry)
+        elif defect == "fifo":
+            os.mkfifo(registry, 0o600)
+        else:
+            registry.mkdir(mode=0o700)
+    authority = _retirement_authority(root, db)
+    before = _retirement_inventory(tmp_path)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("ambiguous recovery cannot inspect PID, contact a service or launch business")
+    monkeypatch.setattr(bootstrap.subprocess, "run", forbidden)
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(bootstrap.os, "kill", forbidden)
+    monkeypatch.setattr(bootstrap.urllib.request, "build_opener", forbidden)
+    result = bootstrap.open_bootstrap(root, 9344, presenter=forbidden)
+    expected = "bootstrap_service_mismatch" if defect == "wrong_service_port" else "bootstrap_state_invalid"
+    assert result == {"ok": False, "opened": False, "reason": expected}
+    _assert_retirement_inventory(tmp_path, before)
+    _assert_retirement_authority(root, db, authority)
+    assert "PRIVATE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("defect", ["symlink", "hardlink", "fifo", "directory", "held"])
+def test_bootstrap_owner_lease_refuses_second_writer_without_deleting_state(
+    retirement_private_state, tmp_path, monkeypatch, defect
+):
+    root, queue, db, key = retirement_private_state
+    lock = root / "bootstrap-service.lock"
+    outside = tmp_path / "PRIVATE_RECOVERY_LOCK"
+    outside.write_bytes(b"PRIVATE_LOCK_CANARY")
+    outside.chmod(0o600)
+    held = None
+    if defect == "symlink":
+        lock.symlink_to(outside)
+    elif defect == "hardlink":
+        os.link(outside, lock)
+    elif defect == "fifo":
+        os.mkfifo(lock, 0o600)
+    elif defect == "directory":
+        lock.mkdir(mode=0o700)
+    else:
+        held = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    authority = _retirement_authority(root, db)
+    before = _retirement_inventory(tmp_path)
+    monkeypatch.setattr(bootstrap.subprocess, "Popen",
+                        lambda *_args, **_kwargs: pytest.fail("no second recovery writer"))
+    try:
+        result = bootstrap.open_bootstrap(root, 9344,
+            presenter=lambda *_: pytest.fail("unverified owner cannot open a page"))
+        assert result == {"ok": False, "opened": False, "reason":
+                          "bootstrap_owner_busy" if defect == "held" else "bootstrap_state_invalid"}
+        _assert_retirement_inventory(tmp_path, before)
+        _assert_retirement_authority(root, db, authority)
+    finally:
+        if held is not None:
+            os.close(held)
+
+
+@pytest.mark.parametrize("readback", ["exact", "legacy", "bool_pid", "wrong_token",
+                                      "wrong_service", "private", "oversized", "replacement"])
+def test_bootstrap_reuse_requires_exact_bounded_authenticated_identity(
+    tmp_path, monkeypatch, readback
+):
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    state = root / "bootstrap.json"
+    record = {"pid": os.getpid(), "port": 19344, "service_port": 9344, "token": "A" * 43}
+    state.write_text(json.dumps(record))
+    state.chmod(0o600)
+    observed = dict(record)
+    if readback == "legacy":
+        observed.pop("service_port")
+    elif readback == "bool_pid":
+        observed["pid"] = True
+    elif readback == "wrong_token":
+        observed["token"] = "B" * 43
+    elif readback == "wrong_service":
+        observed["service_port"] = 9345
+    elif readback == "private":
+        observed = {"error": "PRIVATE_SERVER_DETAIL"}
+    replacement = {**record, "token": "B" * 43}
+    calls = []
+    class Reply:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def read(self, bound):
+            assert bound == 65537
+            if readback == "replacement":
+                state.write_text(json.dumps(replacement))
+                state.chmod(0o600)
+            return (b" " * 65537 if readback == "oversized"
+                    else json.dumps(observed).encode())
+    class Opener:
+        def open(self, url, timeout):
+            calls.append((url, timeout))
+            return Reply()
+    def opener(proxy, handler):
+        assert proxy.proxies == {}
+        assert handler.redirect_request(None, None, None, None, None) is None
+        return Opener()
+    monkeypatch.setattr(bootstrap.urllib.request, "build_opener", opener)
+    monkeypatch.setattr(bootstrap.subprocess, "run",
+                        lambda *_args, **_kwargs: pytest.fail("PID argv is not identity"))
+    actual = bootstrap._bootstrap_current(state, 9344)
+    assert actual == ({"pid": record["pid"],
+                       "url": "http://127.0.0.1:19344/?token=" + record["token"]}
+                      if readback == "exact" else None)
+    assert calls == [("http://127.0.0.1:19344/identity?token=" + record["token"], 2)]
+    assert json.loads(state.read_text()) == (replacement if readback == "replacement" else record)
+
+
+def test_actual_bootstrap_identity_is_readonly_and_preserves_replaced_registry(
+    retirement_private_state, monkeypatch
+):
+    import threading
+    root, queue, db, key = retirement_private_state
+    authority = _retirement_authority(root, db)
+    monkeypatch.setattr(bootstrap, "_page",
+                        lambda *_: pytest.fail("identity must not import/inspect business configuration"))
+    monkeypatch.setattr(cli, "_start_consumer_service",
+                        lambda *_: pytest.fail("identity must not start task service"))
+    ready = threading.Event()
+    servers = []
+    actual_server = bootstrap.LoopbackHTTPServer
+    def observe_server(*args, **kwargs):
+        server = actual_server(*args, **kwargs)
+        servers.append(server)
+        return server
+    monkeypatch.setattr(bootstrap, "LoopbackHTTPServer", observe_server)
+    # The unauthenticated response below is the real readiness handshake.
+    thread = threading.Thread(target=bootstrap.serve_bootstrap,
+                              args=(root, 9344), daemon=True)
+    original_dump = bootstrap.json.dump
+    def published(value, handle, *args, **kwargs):
+        result = original_dump(value, handle, *args, **kwargs)
+        ready.set()
+        return result
+    monkeypatch.setattr(bootstrap.json, "dump", published)
+    thread.start()
+    try:
+        assert ready.wait(timeout=5)
+        server = servers[0]
+        base = f"http://127.0.0.1:{server.server_port}"
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(base + "/identity", timeout=5)
+        assert refused.value.code == 403
+        state = root / "bootstrap.json"
+        record = json.loads(state.read_text())
+        assert bootstrap._bootstrap_identity_valid(record)
+        assert record["service_port"] == 9344
+        before = _retirement_inventory(root)
+        url = base + "/identity?token=" + record["token"]
+        with urllib.request.urlopen(url, timeout=5) as response:
+            assert response.headers["Content-Type"].startswith("application/json")
+            assert response.headers["Cache-Control"] == "no-store"
+            assert json.load(response) == record
+        assert bootstrap._bootstrap_current(state, 9344) == {
+            "pid": record["pid"], "url": base + "/?token=" + record["token"]}
+        assert bootstrap._bootstrap_current(state, 9345) is None
+        for headers, query in [({"Origin": "https://external.invalid"}, ""),
+                               ({"Host": "localhost:" + str(server.server_port)}, ""),
+                               ({}, "&token=" + record["token"])]:
+            request = urllib.request.Request(url + query, headers=headers)
+            with pytest.raises(urllib.error.HTTPError) as denied:
+                urllib.request.urlopen(request, timeout=5)
+            assert denied.value.code == 403
+        _assert_retirement_inventory(root, before)
+        _assert_retirement_authority(root, db, authority)
+        with pytest.raises(BlockingIOError):
+            with bootstrap._bootstrap_guard(root):
+                pytest.fail("real recovery service must retain its owning lease")
+        replacement = {**record, "token": "B" * 43}
+        state.write_text(json.dumps(replacement))
+        state.chmod(0o600)
+        server.shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert json.loads(state.read_text()) == replacement
+        _assert_retirement_authority(root, db, authority)
+    finally:
+        if servers:
+            servers[0].shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
