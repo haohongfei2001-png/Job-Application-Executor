@@ -424,6 +424,9 @@ def main(argv=None):
     delivered = commands.add_parser("install-bundle")
     delivered.add_argument("--candidate", type=Path, required=True)
     delivered.add_argument("--destination", type=Path)
+    distribution = commands.add_parser("install-distribution")
+    distribution.add_argument("--distribution", type=Path, required=True)
+    distribution.add_argument("--destination", type=Path)
     installer = commands.add_parser("install-app")
     installer.add_argument("--standalone-runtime", type=Path)
     installer.add_argument("--native-presentation", action="store_true")
@@ -480,6 +483,14 @@ def main(argv=None):
             explicit_runtime = any(value == "--runtime" or value.startswith("--runtime=")
                                    for value in supplied)
             result = install_macos_bundle(args.candidate, destination=args.destination,
+                task_state_root=args.runtime if explicit_runtime else None)
+        elif args.command == "install-distribution":
+            from .app_distribution import install_macos_distribution
+
+            supplied = sys.argv[1:] if argv is None else argv
+            explicit_runtime = any(value == "--runtime" or value.startswith("--runtime=")
+                                   for value in supplied)
+            result = install_macos_distribution(args.distribution, destination=args.destination,
                 task_state_root=args.runtime if explicit_runtime else None)
         elif args.command == "install-app":
             from .consumer import install_macos_app

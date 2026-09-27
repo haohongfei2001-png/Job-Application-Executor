@@ -977,8 +977,40 @@ def test_hosted_mac_prebuilt_delivery_updates_rolls_back_and_reopens_without_com
     actual_bytes = private_bytes()
     monkeypatch.setattr(consumer, "_stage_native_host",
         lambda *_args: pytest.fail("delivered consumer update required Xcode"))
-    installed = consumer.install_macos_bundle(candidate, destination=apps, task_state_root=state)
+    # Deliver the SAME complete compiled app/runtime through the real archive
+    # and receipt entry. No fixture shrink or second build/compile is needed.
+    from executor.autonomy.app_distribution import (
+        ARCHIVE_NAME, RECEIPT_NAME, _archive_app, install_macos_distribution,
+    )
+    delivery = tmp_path / "Complete Delivered Distribution"
+    delivery.mkdir()
+    archive_path = delivery / ARCHIVE_NAME
+    _archive_app(candidate, archive_path)
+    with archive_path.open("rb") as file:
+        archive_sha = hashlib.file_digest(file, "sha256").hexdigest()
+    runtime_identity = json.loads(
+        (candidate / "Contents/Resources/runtime/release-runtime-manifest.json").read_text())
+    receipt = {
+        "format": "jae-macos-distribution-v1", "archive": ARCHIVE_NAME,
+        "archive_sha256": archive_sha, "app_name": consumer.APP_NAME + ".app",
+        "source_sha256": source_manifest(candidate_source)["source_sha256"],
+        "runtime_sha256": runtime_identity["runtime_sha256"],
+        "requirements_sha256": runtime_identity["requirements_sha256"],
+        "signing": "unsigned", "certification": "NOT_CERTIFIED",
+        "final_click_actor": "user", "task_state": "excluded",
+        "build_host_metadata": "excluded", "presentation": "native",
+    }
+    (delivery / RECEIPT_NAME).write_text(json.dumps(receipt), encoding="utf-8")
+    archive_before = archive_path.stat()
+    installed = install_macos_distribution(delivery, destination=apps, task_state_root=state)
     assert installed["ok"] is True and installed["presentation"] == "native"
+    assert json.loads((delivery / RECEIPT_NAME).read_text()) == receipt
+    with archive_path.open("rb") as file:
+        assert hashlib.file_digest(file, "sha256").hexdigest() == archive_sha
+    archive_after = archive_path.stat()
+    assert (archive_after.st_ino, archive_after.st_size, archive_after.st_mtime_ns) == (
+        archive_before.st_ino, archive_before.st_size, archive_before.st_mtime_ns)
+    assert sorted(path.name for path in delivery.iterdir()) == [ARCHIVE_NAME, RECEIPT_NAME]
     current = apps / (consumer.APP_NAME + ".app")
     current_source = current / "Contents/Resources/release"
     current_host = current / "Contents/Resources/native-host"

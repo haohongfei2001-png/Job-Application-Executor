@@ -15,7 +15,7 @@ import pytest
 from executor.autonomy.app_distribution import (
     ARCHIVE_NAME, RECEIPT_NAME, _archive_app, build_macos_distribution,
 )
-from executor.autonomy.consumer import APP_NAME, _candidate_starts
+from executor.autonomy.consumer import APP_NAME, _candidate_starts, _trusted_bundle
 from executor.autonomy.process_entry import CLI_ENTRY_SCRIPT
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.release import (
@@ -164,6 +164,8 @@ def test_real_archive_relocates_without_checkout_runtime_or_private_build_state(
     before_archive = (output / ARCHIVE_NAME).stat()
     with stage_macos_distribution(output) as admitted:
         staged = admitted
+        assert admitted == admitted.resolve(strict=True)
+        assert not any(part.is_symlink() for part in (admitted, *admitted.parents))
         assert _trusted_bundle(admitted)
         staged_release = admitted / "Contents/Resources/release"
         staged_runtime = admitted / "Contents/Resources/runtime"
@@ -461,7 +463,7 @@ def test_distribution_rejects_non_boolean_native_mode_before_creating_output(tmp
 
 
 def test_hosted_mac_native_archive_relocates_and_launches_exact_verified_window_without_build_state(
-    tmp_path, capsys
+    tmp_path, capsys, monkeypatch
 ):
     if sys.platform != "darwin":
         pytest.skip("Actual native archive acceptance uses hosted macOS Cocoa/WebKit")
@@ -518,15 +520,30 @@ def test_hosted_mac_native_archive_relocates_and_launches_exact_verified_window_
         assert sorted(Path(m.name).name for m in native_members) == [
             "AIApplicationWindow", "native-host-manifest.json"]
         archive.extractall(relocated, filter="data")
+    from executor.autonomy import app_distribution as distribution_module
     from executor.autonomy.app_distribution import stage_macos_distribution
-    with stage_macos_distribution(output) as admitted:
-        staged = admitted
-        assert _trusted_bundle(admitted)
-        assert _native_bundle_matches(admitted / "Contents/Resources/release",
-            admitted / "Contents/Resources/native-host")
-        assert source_manifest(admitted / "Contents/Resources/release")["source_sha256"] == receipt["source_sha256"]
-        assert queue.get(task["task_id"]) == original
+    # Reproduce a system temp ancestor alias deterministically with the SAME
+    # full native delivery. Only the newly created private staging root may
+    # canonicalize; native image admission must still refuse an alias spelling.
+    staging_root = tmp_path / "canonical-staging-parent"
+    staging_root.mkdir()
+    staging_alias = tmp_path / "system-staging-alias"
+    staging_alias.symlink_to(staging_root, target_is_directory=True)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(distribution_module.tempfile, "tempdir", str(staging_alias))
+        with stage_macos_distribution(output) as admitted:
+            staged = admitted
+            assert admitted == admitted.resolve(strict=True)
+            assert not any(part.is_symlink() for part in (admitted, *admitted.parents))
+            assert admitted.is_relative_to(staging_root)
+            assert _trusted_bundle(admitted)
+            assert not _trusted_bundle(staging_alias / admitted.relative_to(staging_root))
+            assert _native_bundle_matches(admitted / "Contents/Resources/release",
+                admitted / "Contents/Resources/native-host")
+            assert source_manifest(admitted / "Contents/Resources/release")["source_sha256"] == receipt["source_sha256"]
+            assert queue.get(task["task_id"]) == original
     assert not staged.exists()
+    assert list(staging_root.iterdir()) == [] and staging_alias.is_symlink()
     assert json.loads((output / RECEIPT_NAME).read_text()) == receipt
     shutil.rmtree(repo)
     shutil.rmtree(prepared)
@@ -808,3 +825,146 @@ def test_distribution_pax_admission_refuses_noncanonical_paths_and_metadata(head
     member.type = tarfile.DIRTYPE
     member.pax_headers = headers
     assert _distribution_pax_matches(member) is False
+
+
+@pytest.mark.parametrize("result", [
+    {"ok": True, "replaced": False, "presentation": "native"},
+    {"ok": True, "replaced": True, "presentation": "native"},
+    {"ok": False, "reason": "task_state_in_use"},
+    {"ok": False, "reason": "update_in_progress"},
+    {"ok": False, "reason": "candidate_start_failed"},
+    {"ok": False, "reason": "post_activation_verification_failed", "restored": True},
+])
+def test_distribution_transaction_handoff_keeps_candidate_alive_and_exact_authority(
+    tmp_path, monkeypatch, result
+):
+    # Boundary routing only. The complete hosted-Mac journey exercises actual
+    # archive admission, install/state backup/rollback/health without stubs.
+    from contextlib import contextmanager
+    from executor.autonomy import app_distribution as module, consumer
+
+    delivered, apps, state = tmp_path / "delivery", tmp_path / "Applications", tmp_path / "state"
+    canary = tmp_path / "private-state"
+    canary.write_bytes(b"UNCHANGED_TASK_AUTHORITY")
+    candidate = tmp_path / "private-stage.app"
+    calls, cleaned = [], []
+    @contextmanager
+    def admit(supplied):
+        assert supplied == delivered
+        candidate.mkdir()
+        try:
+            yield candidate
+        finally:
+            candidate.rmdir()
+            cleaned.append(True)
+    def transact(app, **options):
+        assert app == candidate and app.is_dir()
+        calls.append(options)
+        return result
+    monkeypatch.setattr(module, "stage_macos_distribution", admit)
+    monkeypatch.setattr(consumer, "install_macos_bundle", transact)
+    observed = module.install_macos_distribution(delivered, destination=apps,
+        task_state_root=state, platform="darwin")
+    assert observed is result
+    assert calls == [{"destination": apps, "task_state_root": state, "platform": "darwin"}]
+    assert cleaned == [True] and not candidate.exists()
+    assert canary.read_bytes() == b"UNCHANGED_TASK_AUTHORITY"
+
+
+def test_distribution_transaction_cleans_stage_on_installer_exception_without_replay(
+    tmp_path, monkeypatch
+):
+    from contextlib import contextmanager
+    from executor.autonomy import app_distribution as module, consumer
+
+    stage, calls = tmp_path / "private-stage.app", []
+    @contextmanager
+    def admit(_supplied):
+        stage.mkdir()
+        try:
+            yield stage
+        finally:
+            stage.rmdir()
+    def transact(app, **options):
+        assert app == stage and stage.is_dir()
+        calls.append(options)
+        raise RuntimeError("transaction_failure")
+    monkeypatch.setattr(module, "stage_macos_distribution", admit)
+    monkeypatch.setattr(consumer, "install_macos_bundle", transact)
+    with pytest.raises(RuntimeError, match="^transaction_failure$"):
+        module.install_macos_distribution(tmp_path / "delivery", platform="darwin")
+    assert calls == [{"destination": None, "task_state_root": None, "platform": "darwin"}]
+    assert not stage.exists()
+
+
+def test_distribution_transaction_refuses_actual_bad_archive_before_install_or_state(
+    tmp_path, monkeypatch
+):
+    from executor.autonomy import app_distribution as module, consumer
+
+    directory, receipt = _intake_artifact(tmp_path, [
+        (APP_NAME + ".app", "directory", ""),
+        (APP_NAME + ".app/../escape", "file", "CANARY"),
+    ])
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    current = apps / (APP_NAME + ".app")
+    current.mkdir()
+    (current / "identity").write_bytes(b"PRESERVE_CURRENT_APP")
+    state = tmp_path / "private-state"
+    state.mkdir()
+    (state / "task-answers.key").write_bytes(b"PRESERVE_PRIVATE_KEY")
+    monkeypatch.setattr(consumer, "install_macos_bundle",
+        lambda *_args, **_kwargs: pytest.fail("bad delivery entered transaction"))
+    result = module.install_macos_distribution(directory, destination=apps,
+        task_state_root=state, platform="darwin")
+    assert result == {"ok": False, "reason": "distribution_candidate_invalid",
+                     "message": "交付包无法核对；现有应用和任务保持不变。"}
+    assert (current / "identity").read_bytes() == b"PRESERVE_CURRENT_APP"
+    assert (state / "task-answers.key").read_bytes() == b"PRESERVE_PRIVATE_KEY"
+    assert not (tmp_path / "escape").exists()
+    assert json.loads((directory / RECEIPT_NAME).read_text()) == receipt
+    assert sorted(path.name for path in apps.iterdir()) == [APP_NAME + ".app"]
+    assert sorted(path.name for path in state.iterdir()) == ["task-answers.key"]
+
+
+def test_distribution_transaction_non_mac_is_inert_before_intake(tmp_path, monkeypatch):
+    from executor.autonomy import app_distribution as module
+
+    monkeypatch.setattr(module, "stage_macos_distribution",
+        lambda *_args: pytest.fail("unsupported platform entered intake"))
+    assert module.install_macos_distribution(tmp_path / "missing",
+        platform="linux") == {"ok": False, "reason": "macos_required"}
+
+
+@pytest.mark.parametrize("runtime_form", [None, "separate", "equals"])
+def test_distribution_cli_keeps_default_or_explicit_task_authority(
+    tmp_path, monkeypatch, capsys, runtime_form
+):
+    from executor.autonomy import cli, app_distribution as module
+
+    delivered, apps, state = tmp_path / "delivery", tmp_path / "Applications", tmp_path / "state"
+    calls = []
+    monkeypatch.setattr(module, "install_macos_distribution",
+        lambda path, **options: calls.append((path, options)) or {"ok": True})
+    prefix = (["--runtime", str(state)] if runtime_form == "separate"
+              else ["--runtime=" + str(state)] if runtime_form == "equals" else [])
+    assert cli.main(prefix + ["install-distribution", "--distribution", str(delivered),
+        "--destination", str(apps)]) == 0
+    assert calls == [(delivered, {"destination": apps,
+        "task_state_root": None if runtime_form is None else state})]
+    assert json.loads(capsys.readouterr().out) == {"ok": True}
+
+
+def test_distribution_cli_reports_fixed_refusal_once_without_private_exception(
+    tmp_path, monkeypatch, capsys
+):
+    from executor.autonomy import cli, app_distribution as module
+
+    calls = []
+    result = {"ok": False, "reason": "distribution_candidate_invalid",
+              "message": "交付包无法核对；现有应用和任务保持不变。"}
+    monkeypatch.setattr(module, "install_macos_distribution",
+        lambda path, **options: calls.append(path) or result)
+    assert cli.main(["install-distribution", "--distribution", str(tmp_path / "CANARY_PRIVATE")]) == 1
+    assert len(calls) == 1 and json.loads(capsys.readouterr().out) == result

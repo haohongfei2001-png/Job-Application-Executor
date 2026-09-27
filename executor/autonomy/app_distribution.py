@@ -6,7 +6,7 @@ certify, sign, install on an owner device, or activate any applicant task.
 from __future__ import annotations
 
 import gzip
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -286,9 +286,16 @@ def stage_macos_distribution(distribution: str | Path):
     except (OSError, ValueError, TypeError, UnicodeError):
         raise ValueError("distribution_intake_refused") from None
     with tempfile.TemporaryDirectory(prefix=".jae-distribution-intake-") as temporary:
-        work = Path(temporary)
+        # Canonicalize only our newly created private temporary root. macOS
+        # may spell its system temp ancestor through /var -> /private/var.
+        # Caller-supplied package/destination aliases still remain forbidden.
+        work = Path(temporary).resolve(strict=True)
+        _no_alias_path(work)
         app = work / (APP_NAME + ".app")
         expanded = work / "payload.tar"
+        # Fixed diagnostic stages carry no package text, filesystem path or
+        # applicant value; owning CI can distinguish a remaining admission root.
+        phase = "archive"
         try:
             # One descriptor binds digest, decompression and final recheck.
             fd = os.open(archive_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -310,6 +317,7 @@ def stage_macos_distribution(distribution: str | Path):
                 if digest() != receipt["archive_sha256"]:
                     raise ValueError("distribution_archive_digest")
                 raw.seek(0)
+                phase = "expansion"
                 expanded_bytes = 0
                 with gzip.GzipFile(fileobj=raw, mode="rb") as zipped, expanded.open("xb") as target:
                     for block in iter(lambda: zipped.read(1024 * 1024), b""):
@@ -317,6 +325,7 @@ def stage_macos_distribution(distribution: str | Path):
                         if expanded_bytes > MAX_DISTRIBUTION_EXPANDED_BYTES:
                             raise ValueError("distribution_archive_expansion")
                         target.write(block)
+                phase = "members"
                 seen = set()
                 with expanded.open("rb") as payload, tarfile.open(fileobj=payload, mode="r:") as archive:
                     for member in archive:
@@ -359,26 +368,31 @@ def stage_macos_distribution(distribution: str | Path):
                     for block in iter(lambda: payload.read(1024 * 1024), b""):
                         if any(block):
                             raise ValueError("distribution_archive_trailing")
+                phase = "archive_recheck"
                 _no_alias_path(archive_path)
                 current = archive_path.stat(follow_symlinks=False)
                 if (current.st_dev != original.st_dev or current.st_ino != original.st_ino
                         or current.st_size != original.st_size
                         or digest() != receipt["archive_sha256"]):
                     raise ValueError("distribution_archive_changed")
+            phase = "receipt_recheck"
             if _read_distribution_receipt(receipt_path) != (receipt, receipt_bytes):
                 raise ValueError("distribution_receipt_changed")
             release = app / "Contents/Resources/release"
             runtime = app / "Contents/Resources/runtime"
+            phase = "payload"
             _bundle_members(app)
             if (not _trusted_bundle(app)
                     or not verify_source_candidate(release)
                     or not verify_runtime_candidate(runtime, release)
                     or source_manifest(release)["source_sha256"] != receipt["source_sha256"]):
                 raise ValueError("distribution_payload_invalid")
+            phase = "identity"
             identity = json.loads((runtime / RUNTIME_MANIFEST_NAME).read_text())
             if any(identity[key] != receipt[key]
                    for key in ("runtime_sha256", "requirements_sha256")):
                 raise ValueError("distribution_payload_identity")
+            phase = "presentation"
             from .consumer import _native_packaged_launcher
             native = (app / "Contents/MacOS/AIApplicationManager").read_text() == _native_packaged_launcher()
             if native != (receipt.get("presentation") == "native"):
@@ -387,5 +401,35 @@ def stage_macos_distribution(distribution: str | Path):
         except (OSError, EOFError, ValueError, TypeError, KeyError, UnicodeError,
                 tarfile.TarError):
             # Do not disclose applicant/build paths or untrusted archive text.
-            raise ValueError("distribution_intake_refused") from None
+            raise ValueError("distribution_intake_refused:" + phase) from None
         yield app
+
+
+def install_macos_distribution(
+    distribution: str | Path, *,
+    destination: str | Path | None = None,
+    task_state_root: str | Path | None = None,
+    platform: str | None = None,
+) -> dict:
+    """Admit a complete local delivery into the existing app transaction.
+
+    Intake is static and receipt-bound; bundle admission performs the real
+    standalone-runtime probe. The existing installer alone owns app/state
+    locks, private backup, candidate health, activation and compensation.
+    This does not discover/download releases, attest an unsigned publisher,
+    stop a live service, or grant a second task-state/update authority.
+    """
+    if (platform or sys.platform) != "darwin":
+        return {"ok": False, "reason": "macos_required"}
+    with ExitStack() as cleanup:
+        try:
+            candidate = cleanup.enter_context(stage_macos_distribution(distribution))
+        except (OSError, ValueError, TypeError, UnicodeError):
+            return {"ok": False, "reason": "distribution_candidate_invalid",
+                    "message": "交付包无法核对；现有应用和任务保持不变。"}
+        from .consumer import install_macos_bundle
+
+        # Keep the admitted candidate alive through the entire transaction,
+        # including refusal/compensation, and clean only our staging on exit.
+        return install_macos_bundle(candidate, destination=destination,
+            task_state_root=task_state_root, platform=platform)
