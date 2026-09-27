@@ -930,9 +930,11 @@ def test_state_alias_admission_refuses_before_locks_or_candidate_reads(tmp_path,
             with task_state_guard(supplied):
                 pytest.fail("aliased authority admitted")
         assert task_state_candidate_compatible(Path(sys.executable), tmp_path, supplied) is False
+        # Compare every private file, including volatile SQLite SHM, before
+        # the fixture performs SELECTs that can update WAL-index read marks.
+        assert {path.name: path.read_bytes() for path in state.iterdir()} == payload
         assert authority(db) == before
         assert db.execute("SELECT * FROM task_answer_events").fetchall() == history
-        assert {path.name: path.read_bytes() for path in state.iterdir()} == payload
         assert state.stat().st_mode == mode
         assert sorted(path.name for path in actual.iterdir()) == ["state"]
         assert not any((state / name).exists() for name in
@@ -948,8 +950,10 @@ def test_state_admission_refuses_foreign_root_before_chmod_or_private_read(tmp_p
         encrypted_answers(root, db)
         root.chmod(0o755)
         mode = root.stat().st_mode
-        payload = {path.name: path.read_bytes() for path in root.iterdir()}
         before = authority(db)
+        history = db.execute("SELECT * FROM task_answer_events").fetchall()
+        # Establish semantic reads before the exact byte baseline.
+        payload = {path.name: path.read_bytes() for path in root.iterdir()}
         current_uid = os.geteuid()
         monkeypatch.setattr(state_compatibility.os, "geteuid", lambda: current_uid + 1)
         def never(*args, **kwargs):
@@ -961,8 +965,11 @@ def test_state_admission_refuses_foreign_root_before_chmod_or_private_read(tmp_p
                 pytest.fail("foreign root admitted")
         assert task_state_candidate_compatible(Path(sys.executable), tmp_path, root) is False
         assert root.stat().st_mode == mode
-        assert authority(db) == before
+        # Reader queries mutate SHM read marks independently of admission.
+        # Keep the full byte oracle around the product operation itself.
         assert {path.name: path.read_bytes() for path in root.iterdir()} == payload
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == history
 
 
 @pytest.mark.parametrize("operation", ["install", "rollback"])
@@ -1002,9 +1009,10 @@ def test_app_transaction_refuses_aliased_authority_before_activation(tmp_path, m
         assert result["reason"] == "task_state_unavailable"
         assert "task_state_backup" not in result
         assert "owned" not in json.dumps(result)
+        # Observe all bytes before fixture SELECTs can alter SHM read marks.
+        assert {path.name: path.read_bytes() for path in state.iterdir()} == payload
         assert authority(db) == before
         assert (state / "task-answers.key").read_bytes() == key
-        assert {path.name: path.read_bytes() for path in state.iterdir()} == payload
         assert state.stat().st_mode == mode
         assert sorted(path.name for path in actual.iterdir()) == ["state"]
         assert (app / "retained").read_text() == "CURRENT_APP_CANARY"
