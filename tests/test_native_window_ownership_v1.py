@@ -124,6 +124,8 @@ def _recognized_app(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.setattr(consumer, "_trusted_bundle", lambda candidate: candidate == app)
     monkeypatch.setattr("webbrowser.open", lambda *a, **k: pytest.fail("browser fallback"))
+    monkeypatch.setattr(cli, "handoff_installed_consumer",
+                        lambda *a, **k: pytest.fail("ordinary close cannot release/update task authority"))
     return cli
 
 
@@ -148,6 +150,8 @@ def test_duplicate_native_launch_never_mints_ticket_starts_service_or_resets_vie
             nested.append(cli.launch_native_consumer(root, 9344))
             calls.append("closed")
             return True
+        def take_release_request(self):
+            return None  # Ordinary close has no native release intent.
         def close(self):
             calls.append("cleanup")
     monkeypatch.setattr(macos_host, "NativePresenter", Presenter)
@@ -169,6 +173,8 @@ def test_failed_native_launch_releases_ownership_and_invalid_root_is_safe(tmp_pa
     class Presenter:
         def __init__(self, *a, **k):
             pass
+        def take_release_request(self):
+            pytest.fail("unopened window cannot inspect a release intent")
         def close(self):
             pass
         def wait_for_close(self):
@@ -364,6 +370,8 @@ def test_duplicate_cli_focuses_existing_presenter_without_ticket_service_or_jour
             nested.append(cli.launch_native_consumer(root, 9344))
             calls.append("closed")
             return True
+        def take_release_request(self):
+            return None  # Ordinary close has no native release intent.
         def close(self):
             calls.append("cleanup")
     monkeypatch.setattr(macos_host, "NativePresenter", Presenter)
@@ -575,6 +583,8 @@ def test_long_duplicate_cli_focuses_existing_window_without_new_service_or_ticke
             nested.append(cli.launch_native_consumer(root, 9344))
             calls.append("closed")
             return True
+        def take_release_request(self):
+            return None  # Ordinary close has no native release intent.
         def close(self):
             calls.append("cleanup")
     monkeypatch.setattr(macos_host, "NativePresenter", Presenter)
@@ -638,3 +648,50 @@ def test_long_reopen_rejects_invalid_metadata_before_any_socket(long_reopen_root
         server = create_owned_reopen_server(root, fd, lambda: pytest.fail("invalid metadata focused"))
         assert server.start() is False and request_owned_focus(root) is False
         assert endpoint.read_bytes() == before
+
+
+@pytest.mark.parametrize("opened,closed,smoke", [
+    (False, False, False), (True, False, False),
+    (True, True, True), (True, True, False),
+])
+def test_native_ordinary_close_contract_never_becomes_release_handoff(
+    tmp_path, monkeypatch, opened, closed, smoke
+):
+    from executor.autonomy import macos_host
+    cli = _recognized_app(tmp_path, monkeypatch)
+    root = tmp_path / "retained-authority"
+    root.mkdir()
+    canary = root / "retained-private"
+    canary.write_bytes(b"PRIVATE_ORDINARY_CLOSE_CANARY" * 1000)
+    original = canary.read_bytes()
+    calls = []
+    class Presenter:
+        def __init__(self, directory, *, consumer_smoke, ownership_fd):
+            assert consumer_smoke is smoke and os.fstat(ownership_fd).st_nlink == 1
+        def wait_for_close(self):
+            assert opened is True
+            with pytest.raises(BlockingIOError):
+                with native_window_guard(root):
+                    pytest.fail("window wait lost native owner")
+            calls.append("wait")
+            return closed
+        def take_release_request(self):
+            assert opened is True and closed is True and smoke is False
+            calls.append("ordinary_intent")
+            return None
+        def close(self):
+            calls.append("cleanup")
+    monkeypatch.setattr(macos_host, "NativePresenter", Presenter)
+    monkeypatch.setattr(cli, "launch_consumer",
+                        lambda *a, **k: {"ok": opened, "opened": opened})
+    result = cli.launch_native_consumer(root, 9344, smoke=smoke)
+    assert result == {"ok": opened and closed, "opened": opened,
+                     "native_window": opened, "native_page": closed if smoke else None,
+                     "final_click_actor": "user"}
+    assert calls == (["wait"] if opened else []) + (
+        ["ordinary_intent"] if opened and closed and not smoke else []) + ["cleanup"]
+    assert canary.read_bytes() == original
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+    assert not (root / "tasks.sqlite3").exists() and not (root / "service.json").exists()
+    with native_window_guard(root):
+        pass
