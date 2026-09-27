@@ -364,6 +364,59 @@ def _trusted_bundle(app: Path) -> bool:
 
 
 
+def _bundle_transaction_identity(app: Path) -> tuple | None:
+    """Bind verified payloads and the owned bundle inode across transaction waits.
+
+    Manifest integrity alone accepts a different, freshly resealed release.
+    Startup and journal compatibility prove only the identity they examined.
+    This private in-memory fence is neither signing nor a health certificate.
+    """
+    def capture():
+        if any(path.is_symlink() for path in (app, *app.parents)):
+            raise ValueError("bundle_alias")
+        metadata = app.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("bundle_invalid")
+        contents = app / "Contents"
+        resources = contents / "Resources"
+        release = resources / "release"
+        runtime = resources / "runtime"
+        directories = [contents, contents / "MacOS"]
+        if resources.exists() or resources.is_symlink():
+            directories.append(resources)
+        paths = [contents / "Info.plist",
+                 contents / "MacOS" / "AIApplicationManager"]
+        if release.exists() or release.is_symlink():
+            directories.append(release)
+            paths.append(release / "release-source-manifest.json")
+        if runtime.exists() or runtime.is_symlink():
+            directories.append(runtime)
+            paths.append(runtime / "release-runtime-manifest.json")
+        native = resources / "native-host"
+        if native.exists() or native.is_symlink():
+            directories.append(native)
+            paths.append(native / "native-host-manifest.json")
+        if any(path.is_symlink() or not path.is_dir() for path in directories):
+            raise ValueError("bundle_directory_invalid")
+        evidence = []
+        for path in paths:
+            entry = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(entry.st_mode):
+                raise ValueError("bundle_file_invalid")
+            evidence.append((path.relative_to(app).as_posix(),
+                             stat.S_IMODE(entry.st_mode),
+                             hashlib.sha256(path.read_bytes()).hexdigest()))
+        return (metadata.st_dev, metadata.st_ino, tuple(evidence))
+
+    try:
+        before = capture()
+        if not _trusted_bundle(app) or capture() != before:
+            return None
+        return before
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None
+
+
 def _legacy_state_migration_needed(repo: Path, app: Path, target: Path) -> bool:
     """Do not activate a new default journal while an old authority is stranded.
 
@@ -665,6 +718,10 @@ def _install_macos_app_unlocked(
             "reason": "untrusted_app_path",
             "message": "现有应用包无法核对；没有替换或删除任何应用。",
         }
+    current_identity = _bundle_transaction_identity(app) if app.exists() else None
+    if app.exists() and current_identity is None:
+        return {"ok": False, "reason": "current_identity_unverified",
+                "message": "当前应用身份无法核对；没有替换或删除任何应用。"}
     # Source-path health alone cannot prove continuity with a historical
     # repo-local journal. Refuse before staging or candidate startup so the
     # original app and its complete private/WAL state remain the authority.
@@ -761,6 +818,11 @@ def _install_macos_app_unlocked(
             "message": "新应用包未通过本机校验；现有应用没有被替换。",
         }
 
+    candidate_identity = _bundle_transaction_identity(staging)
+    if candidate_identity is None:
+        return {"ok": False, "reason": "candidate_identity_unverified",
+                "message": "候选应用身份无法核对；候选保留供诊断，现有应用没有被替换。"}
+
     if (not _candidate_starts(runtime / "bin" / "python", release)
             or not verify_source_candidate(release)
             or not verify_runtime_candidate(runtime, release)):
@@ -800,7 +862,18 @@ def _install_macos_app_unlocked(
             "message": "新版本无法完整保留现有任务状态；现有应用和任务保持不变。",
         }
 
-    replaced = app.exists()
+    # Health/compatibility can execute candidate code. Rebind both identities
+    # and all occupied slots before the first move; never delete changed input.
+    if (_bundle_transaction_identity(staging) != candidate_identity
+            or (current_identity is not None
+                and _bundle_transaction_identity(app) != current_identity)
+            or (current_identity is None and (app.exists() or app.is_symlink()))
+            or rollback.exists() or rollback.is_symlink()
+            or failed.exists() or failed.is_symlink()):
+        return {"ok": False, "reason": "activation_identity_changed",
+                "message": "检查期间应用身份或位置发生变化；没有启用候选，所有版本保留供核对。"}
+
+    replaced = current_identity is not None
     try:
         if replaced:
             app.rename(rollback)
@@ -828,8 +901,9 @@ def _install_macos_app_unlocked(
     # interpreter/framework references even when staging health succeeded.
     active_release = app / "Contents" / "Resources" / "release"
     active_runtime = app / "Contents" / "Resources" / "runtime"
-    if (not _trusted_bundle(app)
-            or not _candidate_starts(active_runtime / "bin" / "python", active_release)):
+    if (_bundle_transaction_identity(app) != candidate_identity
+            or not _candidate_starts(active_runtime / "bin" / "python", active_release)
+            or _bundle_transaction_identity(app) != candidate_identity):
         try:
             app.rename(failed)
             if replaced:
@@ -849,9 +923,11 @@ def _install_macos_app_unlocked(
         if replaced:
             restored_release = app / "Contents" / "Resources" / "release"
             restored_runtime = app / "Contents" / "Resources" / "runtime"
-            if (not _trusted_bundle(app) or not _isolated_bundle_startup(app)
+            if (_bundle_transaction_identity(app) != current_identity
+                    or not _isolated_bundle_startup(app)
                     or (restored_runtime.exists() and not _candidate_starts(
-                        restored_runtime / "bin" / "python", restored_release))):
+                        restored_runtime / "bin" / "python", restored_release))
+                    or _bundle_transaction_identity(app) != current_identity):
                 return {
                     "ok": False,
                     "reason": "post_activation_recovery_required",
@@ -938,6 +1014,11 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
             "reason": "legacy_rollback_unsupported",
             "message": "旧版应用缺少独立运行环境，无法证明任务状态兼容；当前应用保持不变。",
         }
+    current_identity = _bundle_transaction_identity(app)
+    previous_identity = _bundle_transaction_identity(previous)
+    if current_identity is None or previous_identity is None:
+        return {"ok": False, "reason": "rollback_identity_unverified",
+                "message": "应用与回退副本身份无法核对；两个版本保持原位。"}
     if not _isolated_bundle_startup(previous):
         return {
             "ok": False,
@@ -962,6 +1043,11 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
             "reason": "rollback_state_incompatible",
             "message": "旧版不能安全保留当前任务记录；当前应用和回退副本保持不变。",
         }
+    if (_bundle_transaction_identity(app) != current_identity
+            or _bundle_transaction_identity(previous) != previous_identity
+            or failed.exists() or failed.is_symlink()):
+        return {"ok": False, "reason": "rollback_identity_changed",
+                "message": "检查期间应用或回退副本发生变化；没有移动任何版本。"}
     try:
         app.rename(failed)
     except OSError:
@@ -985,9 +1071,9 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
     # app if the old one stops responding after activation.
     active_release = app / "Contents" / "Resources" / "release"
     active_runtime = app / "Contents" / "Resources" / "runtime"
-    if active_runtime.exists() and not _candidate_starts(
-        active_runtime / "bin" / "python", active_release
-    ):
+    if (_bundle_transaction_identity(app) != previous_identity
+            or not _candidate_starts(active_runtime / "bin" / "python", active_release)
+            or _bundle_transaction_identity(app) != previous_identity):
         try:
             app.rename(previous)
             failed.rename(app)
@@ -997,6 +1083,9 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
                 "reason": "rollback_recovery_required",
                 "message": "回退版本启用后无法启动；两个版本已保留，需要人工核对恢复。",
             }
+        if _bundle_transaction_identity(app) != current_identity:
+            return {"ok": False, "reason": "rollback_recovery_required",
+                    "message": "回退失败后原应用身份无法核对；两个版本保留，需要人工核对恢复。"}
         return {
             "ok": False,
             "reason": "rollback_post_activation_unhealthy",

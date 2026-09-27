@@ -3457,3 +3457,193 @@ def test_actual_cold_recovery_payload_survives_missing_sdks_and_rejects_drift(
         "ok": True, "source": source_ok, "runtime": runtime_ok, "submit": False}
     assert "PRIVATE_" not in result.stdout
     assert snapshot() == before
+
+def _identity_transaction_fixture(tmp_path, *, rollback):
+    import shutil
+    from executor.autonomy.state_compatibility import task_state_guard
+
+    actual = Path(__file__).resolve().parents[1]
+    repo = tmp_path / "Job-Application-Executor"
+    repo.mkdir()
+    shutil.copytree(actual / "executor", repo / "executor",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copy2(actual / "requirements.txt", repo / "requirements.txt")
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    apps = tmp_path / "Applications"
+    empty = tmp_path / "empty-build-state"
+    assert install_macos_app(repo, destination=apps, platform="darwin",
+                             task_state_root=empty)["ok"]
+    with (repo / "executor" / "__init__.py").open("a") as handle:
+        handle.write("\n# Distinct complete next transaction candidate.\n")
+    if rollback:
+        assert install_macos_app(repo, destination=apps, platform="darwin",
+                                 task_state_root=empty)["ok"]
+    from test_task_state_compatibility_v1 import legacy_state, encrypted_answers
+    state = tmp_path / "private-task-authority"
+    db = legacy_state(state)
+    key = encrypted_answers(state, db)
+    with task_state_guard(state):
+        pass
+    (state / "profile.json").write_text(json.dumps({
+        "full": "\n".join(f"{i}: PRIVATE_IDENTITY_PROFILE_中文_<literal>"
+                          for i in range(1000))}, ensure_ascii=False))
+    (state / "preferences.json").write_text(json.dumps({
+        "full": ["PRIVATE_IDENTITY_SETTINGS_" + str(i) for i in range(1000)]}))
+    return repo, apps, state, db, key
+
+
+def _identity_file_inventory(root):
+    # Exact bytes and modes, including complete source/runtime payloads and WAL.
+    return {path.relative_to(root).as_posix():
+            (stat.S_IMODE(path.stat().st_mode), path.read_bytes())
+            for path in root.rglob("*") if path.is_file()}
+
+
+def _reseal_changed_source(bundle):
+    source = bundle / "Contents" / "Resources" / "release"
+    with (source / "executor" / "__init__.py").open("a") as handle:
+        handle.write("\n# PRIVATE_RESEALED_DIFFERENT_RELEASE\n")
+    (source / "release-source-manifest.json").write_text(
+        json.dumps(release.source_manifest(source), sort_keys=True) + "\n")
+    # The attack is another internally consistent release, not merely corrupt
+    # bytes. A fresh integrity/health pass must not authorize a different SHA.
+    assert verify_source_candidate(source)
+    assert consumer._trusted_bundle(bundle)
+
+
+@pytest.mark.parametrize("action", ["install", "rollback"])
+@pytest.mark.parametrize("phase", ["health", "journal"])
+@pytest.mark.parametrize("changed_role", ["candidate", "current"])
+def test_release_transaction_refuses_resealed_identity_after_health_or_journal(
+    tmp_path, monkeypatch, action, phase, changed_role
+):
+    from contextlib import closing
+    from test_task_state_compatibility_v1 import legacy_state, authority, encrypted_answers
+    from executor.autonomy.state_compatibility import verify_task_state_backup
+    from executor.autonomy.worker import ProcessLock
+
+    repo, apps, state, db, key = _identity_transaction_fixture(tmp_path, rollback=action == "rollback")
+    app = apps / (consumer.APP_NAME + ".app")
+    candidate = apps / ("." + consumer.APP_NAME + (
+        ".app.previous" if action == "rollback" else ".app.installing"))
+    original_inode = app.stat().st_ino
+    previous_inode = candidate.stat().st_ino if action == "rollback" else None
+    changed = []
+    after_mutation = {}
+    actual_start = consumer._candidate_starts
+    actual_prepare = consumer._prepare_task_state_release
+
+    def mutate():
+        target = candidate if changed_role == "candidate" else app
+        _reseal_changed_source(target)
+        changed.append(target)
+        after_mutation["current"] = _identity_file_inventory(app)
+        after_mutation["candidate"] = _identity_file_inventory(candidate)
+
+    def start(python, source):
+        result = actual_start(python, source)
+        assert result
+        if phase == "health" and not changed:
+            mutate()
+        return result
+
+    def prepare(*args):
+        result = actual_prepare(*args)
+        assert result
+        if phase == "journal":
+            mutate()
+        return result
+
+    with closing(db):
+        expected_authority = authority(db)
+        expected_answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        private_before = _identity_file_inventory(state)
+        monkeypatch.setattr(consumer, "_candidate_starts", start)
+        monkeypatch.setattr(consumer, "_prepare_task_state_release", prepare)
+        result = (rollback_macos_app(apps, task_state_root=state) if action == "rollback"
+                  else install_macos_app(repo, destination=apps, platform="darwin",
+                                         task_state_root=state))
+        assert len(changed) == 1
+        assert result["ok"] is False
+        assert result["reason"] == ("rollback_identity_changed" if action == "rollback"
+                                    else "activation_identity_changed")
+        # Both payloads remain exactly where they were, including the changed
+        # candidate. No cleanup deletes evidence or replays a private task.
+        assert app.stat().st_ino == original_inode
+        if previous_inode is not None:
+            assert candidate.stat().st_ino == previous_inode
+        assert _identity_file_inventory(app) == after_mutation["current"]
+        assert _identity_file_inventory(candidate) == after_mutation["candidate"]
+        assert not (apps / ("." + consumer.APP_NAME + ".app.failed")).exists()
+        assert _identity_file_inventory(state) == private_before
+        assert authority(db) == expected_authority
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == expected_answers
+        assert (state / "task-answers.key").read_bytes() == key
+        backup = result["task_state_backup"]
+        assert verify_task_state_backup(Path(backup["path"]), backup["receipt"])
+        assert backup["receipt"]["activation"] == "NOT_AUTHORIZED"
+        assert "PRIVATE_" not in json.dumps(result)
+        assert not (state / "auth.token").exists()
+        assert not (state / "service.json").exists()
+    with ProcessLock(state / "worker.lock"):
+        pass
+
+
+@pytest.mark.parametrize("action", ["install", "rollback"])
+@pytest.mark.parametrize("changed_payload", ["source", "launcher"])
+def test_release_transaction_never_certifies_payload_changed_during_final_health(
+    tmp_path, monkeypatch, action, changed_payload
+):
+    repo, apps, state, db, key = _identity_transaction_fixture(tmp_path, rollback=action == "rollback")
+    from contextlib import closing
+    with closing(db):
+        app = apps / (consumer.APP_NAME + ".app")
+        current_before = _identity_file_inventory(app)
+        current_inode = app.stat().st_ino
+        candidate = apps / ("." + consumer.APP_NAME + (
+            ".app.previous" if action == "rollback" else ".app.installing"))
+        actual_start = consumer._candidate_starts
+        starts = []
+        changed_identity = {}
+
+        def start(python, source):
+            result = actual_start(python, source)
+            assert result
+            starts.append(source)
+            if len(starts) == 2:
+                active = source.parents[2]
+                assert active == app
+                if changed_payload == "source":
+                    _reseal_changed_source(active)
+                else:
+                    launcher = active / "Contents" / "MacOS" / "AIApplicationManager"
+                    launcher.write_text("PRIVATE_CHANGED_LAUNCHER\n")
+                changed_identity.update(_identity_file_inventory(active))
+            return result
+
+        monkeypatch.setattr(consumer, "_candidate_starts", start)
+        from test_task_state_compatibility_v1 import authority
+        expected_authority = authority(db)
+        expected_answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        private_before = _identity_file_inventory(state)
+        result = (rollback_macos_app(apps, task_state_root=state) if action == "rollback"
+                  else install_macos_app(repo, destination=apps, platform="darwin",
+                                         task_state_root=state))
+        assert result["ok"] is False
+        assert result["reason"] == ("rollback_post_activation_unhealthy" if action == "rollback"
+                                    else "post_activation_unhealthy")
+        assert len(starts) == (2 if action == "rollback" else 3)
+        assert app.stat().st_ino == current_inode
+        assert _identity_file_inventory(app) == current_before
+        retained = (candidate if action == "rollback"
+                    else apps / ("." + consumer.APP_NAME + ".app.failed"))
+        assert _identity_file_inventory(retained) == changed_identity
+        assert _identity_file_inventory(state) == private_before
+        assert authority(db) == expected_authority
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == expected_answers
+        assert (state / "task-answers.key").read_bytes() == key
+        assert "PRIVATE_" not in json.dumps(result)
+        assert not (state / "auth.token").exists()
+        assert not (state / "service.json").exists()
