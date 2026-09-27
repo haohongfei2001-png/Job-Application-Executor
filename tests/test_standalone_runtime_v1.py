@@ -156,3 +156,42 @@ def test_installer_cli_routes_explicit_standalone_runtime_without_other_effects(
     assert len(calls) == 1
     assert calls[0][1] == {"standalone_runtime": runtime}
     assert '"ok": true' in capsys.readouterr().out.lower()
+
+
+@pytest.mark.parametrize("placement", ["direct", "missing-parents", "ancestor-alias"])
+def test_standalone_snapshot_refuses_recursive_destination_before_any_write(
+    tmp_path, placement
+):
+    repo = release(tmp_path)
+    source = tmp_path / "runtime-source"
+    (source / "bin").mkdir(parents=True)
+    shutil.copy2(sys.executable, source / "bin" / "python")
+    (source / "dependency-provenance.json").write_text(
+        '{"fixture":"owned-source-unchanged"}\n', encoding="utf-8")
+    if placement == "direct":
+        target = source / "candidate"
+    elif placement == "missing-parents":
+        target = source / "not-created" / "deep" / "candidate"
+    else:
+        alias = tmp_path / "runtime-source-alias"
+        alias.symlink_to(source, target_is_directory=True)
+        target = alias / "candidate"
+    before = {
+        path.relative_to(source).as_posix(): (
+            "directory" if path.is_dir() else path.read_bytes()
+        ) for path in source.rglob("*")
+    }
+    release_before = source_manifest(repo)
+    with pytest.raises(
+        ValueError, match="standalone_runtime_destination_overlaps_source"
+    ):
+        copy_standalone_runtime_candidate(source, target, repo)
+    assert not target.exists()
+    assert {
+        path.relative_to(source).as_posix(): (
+            "directory" if path.is_dir() else path.read_bytes()
+        ) for path in source.rglob("*")
+    } == before
+    assert source_manifest(repo) == release_before
+    if placement == "ancestor-alias":
+        assert alias.is_symlink() and alias.resolve() == source.resolve()

@@ -112,6 +112,13 @@ def copy_standalone_runtime_candidate(source: str | Path, target: str | Path,
             or target.is_symlink() or (source / "pyvenv.cfg").exists()):
         raise ValueError("standalone_runtime_source_invalid")
     root = source.resolve()
+    # A new destination beneath the source would recursively copy itself.
+    # Resolve existing ancestor aliases before any mkdir/copy/manifest write.
+    try:
+        if target.resolve().is_relative_to(root):
+            raise ValueError("standalone_runtime_destination_overlaps_source")
+    except (OSError, RuntimeError):
+        raise ValueError("standalone_runtime_destination_invalid") from None
     # Directory aliases are refused: no recursion through an unreviewed tree.
     try:
         for path in source.rglob("*"):
