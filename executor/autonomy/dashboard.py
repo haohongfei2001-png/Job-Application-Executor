@@ -166,8 +166,15 @@ async function openProfileSetup(){
   }finally{if(epoch===profileEpoch)profileControls();}
 }
 profileBtn.onclick=()=>void openProfileSetup();
-profileClose.onclick=()=>profileDialog.close();
+function closeProfileSetup(){
+  clearProfileSelection();
+  if(profileDialog.open)profileDialog.close();
+}
+profileClose.onclick=closeProfileSetup;
+profileDialog.addEventListener('cancel',()=>clearProfileSelection());
 profileDialog.addEventListener('close',()=>{
+  // close is a queued event; it must not clear a newer, reopened dialog.
+  if(profileDialog.open)return;
   clearProfileSelection();
   if(!uiSessionExpired)profileBtn.focus();
 });

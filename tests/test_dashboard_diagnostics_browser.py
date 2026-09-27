@@ -807,7 +807,7 @@ def test_task_workspace_profile_setup_actual_file_save_and_complete_authority(pr
             browser.close()
 
 
-@pytest.mark.parametrize("interruption", ["close", "expired_session"])
+@pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
 def test_task_workspace_profile_setup_stale_file_read_never_sends_or_revives_private_selection(
     profile_setup_service, interruption
 ):
@@ -833,8 +833,13 @@ def test_task_workspace_profile_setup_stale_file_read_never_sends_or_revives_pri
             }""")
             page.locator("#profile-save").click()
             page.wait_for_function("typeof window.__finishProfileRead === 'function'")
-            if interruption == "close":
-                page.locator("#profile-close").click()
+            if interruption in {"close", "escape"}:
+                if interruption == "close":
+                    page.locator("#profile-close").click()
+                else:
+                    page.locator("#profile-dialog").press("Escape")
+                assert page.locator("#profile-file").input_value() == ""
+                assert page.locator("#profile-status").inner_text() == ""
                 page.get_by_role("button", name="资料设置", exact=True).click()
                 expect(page.locator("#profile-file")).to_be_enabled()
             else:
