@@ -84,6 +84,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <div class="statusbar">
     <div><span class="dot"></span><span id="health">本地服务</span></div>
     <span id="readiness" class="readiness" role="status">正在检查运行条件…</span>
+    <button id="profile-setup" class="headerbtn" type="button">资料设置</button>
     <button id="readiness-details" class="headerbtn" type="button">运行条件</button>
     <button id="diagnostics" class="headerbtn" type="button">查看诊断</button>
     <button id="update" class="headerbtn" type="button">检查并更新</button>
@@ -98,6 +99,17 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 </div>
 </main>
 </div>
+<dialog id="profile-dialog" class="diagnostics-dialog" aria-labelledby="profile-title">
+  <h2 id="profile-title">资料设置</h2>
+  <p>选择个人资料 JSON 文件，内容仅保存在本机，用于之后添加的任务。已有任务继续使用原资料。密码、验证码和 API 密钥请勿放入资料文件；最终提交由你本人完成。</p>
+  <p id="profile-status" role="status">正在读取设置…</p>
+  <label for="profile-file">选择资料文件（JSON，最多 256 KB）</label>
+  <input id="profile-file" type="file" accept=".json,application/json" disabled>
+  <div class="diagnostics-actions">
+    <button id="profile-close" class="headerbtn" type="button">关闭</button>
+    <button id="profile-save" type="button" disabled>保存资料</button>
+  </div>
+</dialog>
 <dialog id="readiness-dialog" class="diagnostics-dialog" aria-labelledby="readiness-title">
   <h2 id="readiness-title">运行条件</h2>
   <p>这里仅显示本机运行条件的检查结果，不读取或展示个人资料内容。最终提交仍由你本人完成。</p>
@@ -120,6 +132,75 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 <script>
 const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),diagnosticsDialog=document.getElementById('diagnostics-dialog'),diagnosticsReport=document.getElementById('diagnostics-report'),diagnosticsCopy=document.getElementById('diagnostics-copy'),diagnosticsClose=document.getElementById('diagnostics-close'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
 const readinessBtn=document.getElementById('readiness-details'),readinessDialog=document.getElementById('readiness-dialog'),readinessSummary=document.getElementById('readiness-summary'),readinessChecks=document.getElementById('readiness-checks'),readinessClose=document.getElementById('readiness-close');
+const profileBtn=document.getElementById('profile-setup'),profileDialog=document.getElementById('profile-dialog'),
+  profileFile=document.getElementById('profile-file'),profileStatus=document.getElementById('profile-status'),
+  profileSave=document.getElementById('profile-save'),profileClose=document.getElementById('profile-close');
+let profileEpoch=0,profileVersion=null,profileBusy=false;
+function validProfileState(data){
+  return data&&/^[0-9a-f]{64}$/.test(data.settings_version)
+    &&typeof data.profile_selected==='boolean'&&data.submit_capability===false;
+}
+function profileControls(){
+  profileFile.disabled=uiSessionExpired||profileBusy||!profileVersion;
+  profileSave.disabled=profileFile.disabled||profileFile.files.length!==1;
+}
+function clearProfileSelection(){
+  profileEpoch++;profileVersion=null;profileBusy=false;profileFile.value='';
+  profileStatus.textContent='';profileControls();
+}
+async function openProfileSetup(){
+  if(uiSessionExpired)return;
+  clearProfileSelection();
+  const epoch=profileEpoch;
+  profileStatus.textContent='正在读取设置…';profileDialog.showModal();profileClose.focus();
+  try{
+    const response=await uiRequest('/ui/api/profile-setup',{credentials:'same-origin'});
+    const data=await response.json();
+    if(uiSessionExpired||epoch!==profileEpoch||!profileDialog.open)return;
+    if(!response.ok||!validProfileState(data))throw new Error();
+    profileVersion=data.settings_version;
+    profileStatus.textContent=data.profile_selected?'已选择本机资料，可选择新文件供之后的任务使用。':'尚未选择资料，请选择文件并明确保存。';
+  }catch(_){
+    if(!uiSessionExpired&&epoch===profileEpoch&&profileDialog.open)
+      profileStatus.textContent='无法读取设置，请关闭后重新打开；没有修改资料。';
+  }finally{if(epoch===profileEpoch)profileControls();}
+}
+profileBtn.onclick=()=>void openProfileSetup();
+profileClose.onclick=()=>profileDialog.close();
+profileDialog.addEventListener('close',()=>{
+  clearProfileSelection();
+  if(!uiSessionExpired)profileBtn.focus();
+});
+profileFile.onchange=()=>{profileControls();};
+profileSave.onclick=async()=>{
+  if(uiSessionExpired||profileBusy||!profileVersion||profileFile.files.length!==1)return;
+  const epoch=profileEpoch,version=profileVersion,file=profileFile.files[0];
+  if(file.size>256*1024){profileStatus.textContent='资料文件超过 256 KB，请选择完整且符合大小限制的文件。';return;}
+  profileBusy=true;profileControls();
+  try{
+    const text=await file.text();
+    if(uiSessionExpired||epoch!==profileEpoch||!profileDialog.open)return;
+    const response=await uiRequest('/ui/api/profile-setup',{method:'POST',
+      headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      body:JSON.stringify({profile_json:text,expected_settings_version:version})});
+    const data=await response.json();
+    if(uiSessionExpired||epoch!==profileEpoch||!profileDialog.open)return;
+    if(!response.ok||!validProfileState(data)||!data.profile_selected)throw new Error();
+    const readback=await uiRequest('/ui/api/profile-setup',{credentials:'same-origin'});
+    const observed=await readback.json();
+    if(uiSessionExpired||epoch!==profileEpoch||!profileDialog.open)return;
+    if(!readback.ok||!validProfileState(observed)||!observed.profile_selected
+      ||observed.settings_version!==data.settings_version)throw new Error();
+    profileVersion=observed.settings_version;profileFile.value='';
+    profileStatus.textContent='资料已保存在本机，之后添加的任务将使用这份资料。已有任务保持原资料。';
+    void readiness();
+  }catch(_){
+    if(!uiSessionExpired&&epoch===profileEpoch&&profileDialog.open){
+      profileVersion=null;profileFile.value='';
+      profileStatus.textContent='资料保存未确认。请关闭后重新打开并检查文件与设置；不会自动重试。';
+    }
+  }finally{if(epoch===profileEpoch){profileBusy=false;profileControls();}}
+};
 const newTaskForm=document.getElementById('newtask');
 const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
 const recoveryObservations=new Map();
@@ -223,6 +304,7 @@ function expireUISession(){
   if(uiSessionExpired)return;
   uiSessionExpired=true;
   currentTaskId=null;savedView=null;updateTaskContext();
+  clearProfileSelection();if(profileDialog.open)profileDialog.close();
   recoveryObservations.clear();tasksEl.querySelectorAll('[data-field-recovery]').forEach(panel=>panel.remove());
   const notice=document.getElementById('session-expired');
   notice.hidden=false;

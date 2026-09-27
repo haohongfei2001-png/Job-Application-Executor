@@ -11,7 +11,8 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from .. import browser
+from .. import browser, settings
+from .profile_setup import profile_setup_state, select_profile
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
@@ -40,6 +41,14 @@ class Supervisor:
         self._command_lock = threading.RLock()
         self._ui_tickets: dict[str, float] = {}
         self._ui_sessions: dict[str, float] = {}
+
+    def configure_profile(self, text, expected_version):
+        current = select_profile(text, expected_version)
+        # TaskSpec holds its own immutable profile_ref; only future tasks change.
+        self.manager.settings = current
+        self.worker.settings = current
+        return {"settings_version": settings.settings_version(current),
+                "profile_selected": True, "submit_capability": False}
 
     def _expire_ui(self):
         now = time.monotonic()
@@ -475,13 +484,18 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
             morsel = cookie.get(UI_COOKIE)
             return morsel.value if morsel else ""
 
-        def _read_json(self):
+        def _read_json(self, *, limit=65536, strict=False):
             size = int(self.headers.get("Content-Length", "0"))
-            if size < 0 or size > 65536 or self.headers.get("Transfer-Encoding"):
+            if size < 0 or size > limit or self.headers.get("Transfer-Encoding"):
                 raise ValueError("invalid request size")
             if self.command == "POST" and self.headers.get_content_type() != "application/json":
                 raise ValueError("JSON required")
-            data = json.loads(self.rfile.read(size)) if size else {}
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                raise ValueError("incomplete request")
+            data = json.loads(raw, object_pairs_hook=settings._object,
+                              parse_constant=settings._constant) if strict and size else (
+                                  json.loads(raw) if size else {})
             if not isinstance(data, dict):
                 raise ValueError("object required")
             return data
@@ -529,6 +543,20 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/state":
                         self._send_json(200, supervisor.ui_state())
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/profile-setup":
+                        self._send_json(200, profile_setup_state())
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/profile-setup":
+                        if origin != expected_origin:
+                            self._send_json(403, {"error": "local_origin_required"})
+                            return
+                        data = self._read_json(limit=2 * 1024 * 1024, strict=True)
+                        if set(data) != {"profile_json", "expected_settings_version"}:
+                            raise ValueError("invalid profile envelope")
+                        result = supervisor.run_mutation(lambda: supervisor.configure_profile(
+                            data["profile_json"], data["expected_settings_version"]))
+                        self._send_json(200, result)
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/readiness":
                         self._send_json(200, supervisor.readiness())
@@ -652,7 +680,7 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         self._send_json(200, result)
                         return
                     self._send_json(404, {"error": "not_found"})
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, UnicodeError, RecursionError):
                     self._send_json(400, {"error": "invalid_request"})
                 except RuntimeError:
                     self._send_json(409, {"error": "state_conflict"})

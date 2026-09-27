@@ -1498,3 +1498,110 @@ def test_diagnostic_provider_state_never_loads_credentials_or_starts_processes(
     assert "very-private-profile" not in serialized
     assert str(tmp_path) not in serialized
     assert report["safety"]["submit_capability"] is False
+
+
+def test_profile_setup_authenticated_gui_route_preserves_tasks_and_never_starts_external_work(tmp_path, monkeypatch):
+    from executor import settings
+    q, worker, supervisor = _supervisor(tmp_path)
+    task = q.enqueue(_spec(tmp_path))
+    original_task = q.get(task["task_id"])
+    parent = tmp_path / "profile-authority"
+    parent.mkdir(mode=0o700)
+    monkeypatch.setattr(settings, "PATH", parent / "settings.json")
+    monkeypatch.setattr(settings, "PACKAGED", True)
+    original = {"profile_path": original_task["spec"]["profile_ref"],
+                "deepseek": {"enabled": False}, "future_preference": {"text": "完整\n" * 1000}}
+    settings.save_settings(original)
+    before_profile = Path(original["profile_path"]).read_bytes()
+    calls = []
+    monkeypatch.setattr(supervisor.manager.provider, "decide", lambda *_: calls.append("provider"))
+    monkeypatch.setattr(worker, "run_once", lambda *_: calls.append("worker"))
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    session = supervisor.consume_ui_ticket(supervisor.issue_ui_ticket())
+    cookie = "application_executor_session=" + session
+
+    def request(method="GET", data=None, *, auth=True, origin=base, host=None):
+        headers = {"Content-Type": "application/json"}
+        if auth:
+            headers["Cookie"] = cookie
+        if origin is not None:
+            headers["Origin"] = origin
+        if host is not None:
+            headers["Host"] = host
+        raw = None if data is None else (data.encode() if isinstance(data, str) else json.dumps(data).encode())
+        req = urllib.request.Request(base + "/ui/api/profile-setup", data=raw,
+                                     headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as error:
+            return error.code, json.load(error)
+
+    try:
+        assert request(auth=False)[0] == 401
+        assert request(host="other.example")[0] == 403
+        status, state = request()
+        assert status == 200 and state["profile_selected"]
+        assert str(parent) not in json.dumps(state) and "PRIVATE" not in json.dumps(state)
+        profile = {"fields": {"identity.full_name": {"value": "PRIVATE_NEW", "user_confirmed": False}},
+                   "research": [{"original": "完整长研究\n" * 1000}]}
+        envelope = {"profile_json": json.dumps(profile, ensure_ascii=False),
+                    "expected_settings_version": state["settings_version"]}
+        before = {p.name: p.read_bytes() for p in parent.iterdir()}
+        assert request("POST", envelope, origin=None)[0] == 403
+        assert request("POST", envelope, origin="https://evil.example")[0] == 403
+        assert request("POST", {**envelope, "extra": "PRIVATE"})[0] == 400
+        assert request("POST", {**envelope, "profile_json": '{"token":"PRIVATE_KEY"}'})[0] == 400
+        duplicate = json.dumps(envelope)[:-1] + ',"profile_json":"PRIVATE_DUPLICATE"}'
+        assert request("POST", duplicate)[0] == 400
+        monkeypatch.setattr(supervisor, "mutation_fenced", lambda: True)
+        assert request("POST", envelope)[0] == 409
+        assert {p.name: p.read_bytes() for p in parent.iterdir()} == before
+        monkeypatch.setattr(supervisor, "mutation_fenced", lambda: False)
+        status, result = request("POST", envelope)
+        assert status == 200 and result["profile_selected"] is True
+        assert result["submit_capability"] is False
+        selected = settings.load_settings()
+        assert Path(selected["profile_path"]).parent == parent
+        assert json.loads(Path(selected["profile_path"]).read_text()) == profile
+        assert selected["future_preference"] == original["future_preference"]
+        assert supervisor.manager.settings == worker.settings == selected
+        assert request()[1] == result
+        assert request("POST", envelope)[0] == 409  # Same stale view cannot replay.
+        assert q.get(task["task_id"]) == original_task
+        assert Path(original["profile_path"]).read_bytes() == before_profile
+        assert calls == [] and len(q.tasks()) == 1
+        assert "PRIVATE" not in json.dumps(result) and str(parent) not in json.dumps(result)
+        supervisor._ui_sessions.clear()
+        assert request("POST", {**envelope, "expected_settings_version": result["settings_version"]})[0] == 401
+        assert settings.load_settings() == selected
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_profile_setup_request_bound_does_not_change_existing_endpoint_limit(tmp_path):
+    _q, _worker, supervisor = _supervisor(tmp_path)
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    cookie = "application_executor_session=" + supervisor.consume_ui_ticket(supervisor.issue_ui_ticket())
+    try:
+        for path, size in [("/ui/api/profile-setup", 2 * 1024 * 1024 + 1),
+                           ("/ui/api/chat", 65537)]:
+            req = urllib.request.Request(base + path, data=b"{}",
+                headers={"Cookie": cookie, "Origin": base, "Content-Type": "application/json",
+                         "Content-Length": str(size)}, method="POST")
+            with pytest.raises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(req)
+            assert error.value.code == 400
+            assert json.load(error.value) == {"error": "invalid_request"}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

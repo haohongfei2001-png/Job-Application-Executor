@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import fcntl
 import os
 import secrets
 import stat
@@ -83,21 +85,34 @@ def _constant(_value):
     raise ValueError("settings_unavailable")
 
 
+def _read_at(parent):
+    try:
+        descriptor = os.open(PATH.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=parent)
+    except FileNotFoundError:
+        return _defaults()
+    with os.fdopen(descriptor, "rb") as handle:
+        _regular(os.fstat(handle.fileno()))
+        data = handle.read(_LIMIT + 1)
+        if len(data) > _LIMIT:
+            raise ValueError("settings_unavailable")
+    result = json.loads(data.decode("utf-8"), object_pairs_hook=_object,
+                        parse_constant=_constant)
+    if not isinstance(result, dict):
+        raise ValueError("settings_unavailable")
+    return result
+
+
+def settings_version(data):
+    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def load_settings():
     try:
         with _parent(PATH, create=False) as parent:
-            descriptor = os.open(PATH.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                                 dir_fd=parent)
-            with os.fdopen(descriptor, "rb") as handle:
-                _regular(os.fstat(handle.fileno()))
-                data = handle.read(_LIMIT + 1)
-                if len(data) > _LIMIT:
-                    raise ValueError("settings_unavailable")
-            result = json.loads(data.decode("utf-8"), object_pairs_hook=_object,
-                                parse_constant=_constant)
-            if not isinstance(result, dict):
-                raise ValueError("settings_unavailable")
-            return result
+            return _read_at(parent)
     except FileNotFoundError:
         return _defaults()
     except (OSError, UnicodeError, ValueError, TypeError):
@@ -105,36 +120,71 @@ def load_settings():
         raise ValueError("settings_unavailable") from None
 
 
-def save_settings(data):
+def _encoded(data):
+    if not isinstance(data, dict):
+        raise ValueError("settings_unavailable")
+    encoded = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+    json.loads(encoded.decode("utf-8"), object_pairs_hook=_object, parse_constant=_constant)
+    if len(encoded) > _LIMIT:
+        raise ValueError("settings_unavailable")
+    return encoded
+
+
+def _write_at(parent, encoded):
     temporary = None
     try:
-        if not isinstance(data, dict):
-            raise ValueError("settings_unavailable")
-        encoded = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
-        json.loads(encoded.decode("utf-8"), object_pairs_hook=_object, parse_constant=_constant)
-        if len(encoded) > _LIMIT:
-            raise ValueError("settings_unavailable")
+        try:
+            existing = os.stat(PATH.name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            _regular(existing)
+        temporary = ".settings-" + secrets.token_hex(16) + ".tmp"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=parent)
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, PATH.name, src_dir_fd=parent, dst_dir_fd=parent)
+        temporary = None
+        os.fsync(parent)
+    finally:
+        if temporary is not None:
+            os.unlink(temporary, dir_fd=parent)
+
+
+def save_settings(data):
+    try:
+        encoded = _encoded(data)  # Validate before creating a directory.
         with _parent(PATH, create=True) as parent:
-            try:
-                existing = os.stat(PATH.name, dir_fd=parent, follow_symlinks=False)
-            except FileNotFoundError:
-                existing = None
-            if existing is not None:
-                _regular(existing)
-            temporary = ".settings-" + secrets.token_hex(16) + ".tmp"
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                 0o600, dir_fd=parent)
-            try:
-                os.fchmod(descriptor, 0o600)
-                with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(encoded)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, PATH.name, src_dir_fd=parent, dst_dir_fd=parent)
-                temporary = None
-                os.fsync(parent)
-            finally:
-                if temporary is not None:
-                    os.unlink(temporary, dir_fd=parent)
+            # The directory itself is the lock: no second settings/lock authority.
+            fcntl.flock(parent, fcntl.LOCK_EX)
+            _write_at(parent, encoded)
+    except (OSError, UnicodeError, ValueError, TypeError):
+        raise ValueError("settings_unavailable") from None
+
+
+class SettingsConflict(RuntimeError):
+    pass
+
+
+def change_settings(expected_version, change):
+    """Serialize a compare-and-publish change through the same pinned authority."""
+    if (not isinstance(expected_version, str) or len(expected_version) != 64
+            or any(c not in "0123456789abcdef" for c in expected_version)):
+        raise ValueError("settings_unavailable")
+    try:
+        with _parent(PATH, create=True) as parent:
+            fcntl.flock(parent, fcntl.LOCK_EX)
+            current = _read_at(parent)
+            if settings_version(current) != expected_version:
+                raise SettingsConflict("settings_changed")
+            updated = change(parent, current)
+            _write_at(parent, _encoded(updated))
+            return updated
+    except SettingsConflict:
+        raise
     except (OSError, UnicodeError, ValueError, TypeError):
         raise ValueError("settings_unavailable") from None

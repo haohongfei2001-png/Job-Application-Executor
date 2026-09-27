@@ -710,3 +710,145 @@ def test_task_workspace_late_saved_view_reply_cannot_revive_expired_session():
             assert errors == []
         finally:
             browser.close()
+
+
+@pytest.fixture
+def profile_setup_service(tmp_path, monkeypatch):
+    """Actual loopback endpoint and private authority, synthetic applicant only."""
+    import threading
+    from types import SimpleNamespace
+    from executor import settings
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    from executor.autonomy.worker import Worker
+    from executor.autonomy.manager import ManagerController
+    from executor.autonomy.supervisor import Supervisor, create_server
+    parent = tmp_path / "profile-settings"
+    parent.mkdir(mode=0o700)
+    monkeypatch.setattr(settings, "PATH", parent / "settings.json")
+    monkeypatch.setattr(settings, "PACKAGED", True)
+    old = parent / "previous-profile.json"
+    old.write_text('{"fields":{"identity.full_name":{"value":"PRIVATE_OLD"}}}')
+    old.chmod(0o600)
+    original = {"profile_path": str(old), "deepseek": {"enabled": False},
+                "unknown_preference": {"full": "完整\n" * 1000}}
+    settings.save_settings(original)
+    queue = TaskQueue(tmp_path / "task-runtime")
+    worker = Worker(queue, settings=original)
+    calls = []
+    provider = SimpleNamespace(available=False, decide=lambda *_: calls.append("provider"))
+    manager = ManagerController(queue, worker, provider=provider, settings=original)
+    supervisor = Supervisor(queue, worker=worker, manager=manager, token="x" * 40)
+    task = queue.enqueue(TaskSpec(company="Synthetic Co", role="Engineer", job_id="profile-test",
+                                 target_url="https://synthetic.example.test/job/profile-test",
+                                 profile_ref=str(old), live_authorized=False))
+    monkeypatch.setattr(supervisor, "readiness", lambda: {
+        "ready_for_live_e2e": False, "message": "合成资料设置检查", "submit_capability": False})
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        yield settings, queue, supervisor, base, task["task_id"], calls
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_task_workspace_profile_setup_actual_file_save_and_complete_authority(profile_setup_service):
+    from pathlib import Path
+    settings, queue, supervisor, base, tid, calls = profile_setup_service
+    before = queue.get(tid)
+    old = Path(before["spec"]["profile_ref"])
+    old_bytes = old.read_bytes()
+    profile = {"fields": {"identity.full_name": {"value": "PRIVATE_NEW", "user_confirmed": False}},
+               "research": [{"description": "完整长研究 👩🏽‍💻\n" * 1000}],
+               "unknown": {"source": "<img src=x onerror=alert(1)>"}}
+    errors, writes = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 600, "height": 800})
+        try:
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("request", lambda request: writes.append(request.url) if request.method == "POST" else None)
+            page.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            page.get_by_role("button", name="资料设置", exact=True).click()
+            expect(page.locator("#profile-file")).to_be_enabled()
+            expect(page.locator("#profile-save")).to_be_disabled()
+            page.locator("#profile-file").set_input_files({
+                "name": "synthetic-profile.json", "mimeType": "application/json",
+                "buffer": json.dumps(profile, ensure_ascii=False).encode("utf-8")})
+            expect(page.locator("#profile-save")).to_be_enabled()
+            assert writes == [] and settings.load_settings()["profile_path"] == str(old)
+            page.locator("#profile-save").click()
+            expect(page.locator("#profile-status")).to_contain_text("资料已保存在本机")
+            selected = settings.load_settings()
+            new = Path(selected["profile_path"])
+            assert new != old and json.loads(new.read_text()) == profile
+            assert new.stat().st_mode & 0o777 == 0o600
+            assert selected["unknown_preference"]["full"] == "完整\n" * 1000
+            assert supervisor.manager._profile_ref() == str(new)
+            assert supervisor.worker.settings == selected
+            assert queue.get(tid) == before and old.read_bytes() == old_bytes
+            assert writes == [base + "/ui/api/profile-setup"] and calls == []
+            assert page.locator("#profile-file").input_value() == ""
+            assert page.locator("#chat").inner_text().find("PRIVATE_NEW") == -1
+            assert page.locator("#profile-dialog img").count() == 0
+            page.locator("#profile-close").click()
+            expect(page.locator("#profile-setup")).to_be_focused()
+            assert page.locator("#profile-status").inner_text() == ""
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            page.get_by_role("button", name="资料设置", exact=True).click()
+            expect(page.locator("#profile-status")).to_contain_text("已选择本机资料")
+            expect(page.locator("#profile-save")).to_be_disabled()
+            assert page.locator("#profile-file").input_value() == ""
+            assert errors == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("interruption", ["close", "expired_session"])
+def test_task_workspace_profile_setup_stale_file_read_never_sends_or_revives_private_selection(
+    profile_setup_service, interruption
+):
+    settings, queue, supervisor, base, tid, calls = profile_setup_service
+    before = settings.PATH.read_bytes(), queue.get(tid)
+    writes, errors = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("request", lambda request: writes.append(request.url) if request.method == "POST" else None)
+            page.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            page.get_by_role("button", name="资料设置", exact=True).click()
+            expect(page.locator("#profile-file")).to_be_enabled()
+            page.locator("#profile-file").set_input_files({
+                "name": "synthetic.json", "mimeType": "application/json",
+                "buffer": b'{"name":"PRIVATE_DELAYED"}'})
+            page.evaluate("""() => {
+                File.prototype.text = () => new Promise(resolve => {
+                    window.__finishProfileRead = () => resolve('{"name":"PRIVATE_DELAYED"}');
+                });
+            }""")
+            page.locator("#profile-save").click()
+            page.wait_for_function("typeof window.__finishProfileRead === 'function'")
+            if interruption == "close":
+                page.locator("#profile-close").click()
+                page.get_by_role("button", name="资料设置", exact=True).click()
+                expect(page.locator("#profile-file")).to_be_enabled()
+            else:
+                supervisor._ui_sessions.clear()
+                page.evaluate("state()")
+                expect(page.locator("#session-expired")).to_be_visible()
+                expect(page.locator("#profile-dialog")).not_to_be_visible()
+            page.evaluate("window.__finishProfileRead()")
+            page.wait_for_function("document.querySelector('#profile-file').value === ''")
+            assert settings.PATH.read_bytes() == before[0]
+            assert queue.get(tid) == before[1]
+            assert not list(settings.PATH.parent.glob("profile-*.json"))
+            assert writes == [] and calls == [] and errors == []
+            assert page.locator("#profile-status").inner_text().find("PRIVATE_DELAYED") == -1
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+        finally:
+            browser.close()
