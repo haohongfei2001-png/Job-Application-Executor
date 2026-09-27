@@ -863,8 +863,9 @@ def test_task_workspace_profile_setup_stale_file_read_never_sends_or_revives_pri
             browser.close()
 
 @pytest.mark.parametrize("availability", [True, False, "constructor_failure"])
+@pytest.mark.parametrize("interruption", ["close", "escape"])
 def test_task_workspace_explicit_provider_load_actual_authenticated_service_preserves_authority(
-    profile_setup_service, monkeypatch, availability
+    profile_setup_service, monkeypatch, availability, interruption
 ):
     from pathlib import Path
     from types import SimpleNamespace
@@ -918,7 +919,14 @@ def test_task_workspace_explicit_provider_load_actual_authenticated_service_pres
             assert loads == ["load"] and external_calls == []
             assert before == (settings.PATH.read_bytes(), queue.tasks(), queue.recent_events(1000),
                               {p.name: p.read_bytes() for p in settings.PATH.parent.iterdir()})
-            page.locator("#readiness-close").click()
+            if interruption == "close":
+                page.locator("#readiness-close").click()
+            else:
+                page.locator("#readiness-dialog").press("Escape")
+            expect(page.locator("#readiness-dialog")).not_to_be_visible()
+            # Native close() restores focus before its queued close event runs.
+            # Observe the real completion condition; keep the exact empty oracle.
+            expect(page.locator("#provider-load-status")).to_have_text("")
             expect(page.get_by_role("button", name="运行条件", exact=True)).to_be_focused()
             assert page.locator("#provider-load-status").inner_text() == ""
             assert page.evaluate("localStorage.length + sessionStorage.length") == 0
