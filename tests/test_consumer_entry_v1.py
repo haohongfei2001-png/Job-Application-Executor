@@ -2424,7 +2424,8 @@ def test_actual_recovery_preparation_http_auth_refresh_and_private_state_preserv
         assert not thread.is_alive()
 
 
-@pytest.mark.parametrize("clipboard", ["success", "rejected", "unavailable", "late_success", "late_failure"])
+@pytest.mark.parametrize("clipboard", ["success", "rejected", "unavailable", "late_success", "late_failure",
+                                    "late_rapid_success", "late_programmatic_failure"])
 def test_recovery_preparation_browser_keeps_copy_uncertainty_and_closed_page_fenced(
         monkeypatch, clipboard):
     from playwright.sync_api import expect, sync_playwright
@@ -2460,7 +2461,7 @@ def test_recovery_preparation_browser_keeps_copy_uncertainty_and_closed_page_fen
                   window.__copied.push(text);
                   if(mode==='rejected')return Promise.reject(new Error('PRIVATE_CLIPBOARD_ERROR'));
                   if(mode.startsWith('late_'))return new Promise((resolve,reject)=>{
-                    window.__finishCopy=()=>mode==='late_success'?resolve():reject(new Error('PRIVATE_LATE_ERROR'));
+                    window.__finishCopy=()=>mode.endsWith('success')?resolve():reject(new Error('PRIVATE_LATE_ERROR'));
                   });
                   return Promise.resolve();
                 }}
@@ -2475,10 +2476,21 @@ def test_recovery_preparation_browser_keeps_copy_uncertainty_and_closed_page_fen
             page.get_by_role("button", name="复制诊断", exact=True).click()
             if clipboard.startswith("late_"):
                 expect(page.locator("#copy-result")).to_have_text("正在复制…")
-                page.get_by_text("查看安全诊断", exact=True).click()
+                if clipboard == "late_rapid_success":
+                    page.evaluate("""() => {
+                      const details=document.getElementById('diagnostics-details');
+                      details.open=false;details.open=true;
+                    }""")
+                elif clipboard == "late_programmatic_failure":
+                    page.evaluate("document.getElementById('diagnostics-details').open=false")
+                else:
+                    page.get_by_text("查看安全诊断", exact=True).click()
                 expect(page.locator("#copy-result")).to_have_text("")
                 page.evaluate("window.__finishCopy()")
-                page.get_by_text("查看安全诊断", exact=True).click()
+                if clipboard == "late_programmatic_failure":
+                    page.evaluate("document.getElementById('diagnostics-details').open=true")
+                elif clipboard != "late_rapid_success":
+                    page.get_by_text("查看安全诊断", exact=True).click()
                 expect(page.locator("#copy-result")).to_have_text("")
                 expect(page.locator("#manual-diagnostics")).to_be_hidden()
                 assert page.locator("#manual-diagnostics").input_value() == ""
@@ -2496,6 +2508,7 @@ def test_recovery_preparation_browser_keeps_copy_uncertainty_and_closed_page_fen
                 page.get_by_text("查看安全诊断", exact=True).click()
                 expect(page.locator("#manual-diagnostics")).to_be_hidden()
                 assert page.locator("#manual-diagnostics").input_value() == ""
+            assert page.evaluate("window.__copied.length") == (0 if clipboard == "unavailable" else 1)
             assert all(method == "GET" for method, _ in requests)
             assert requests.count(("GET", "http://preparation-ui.test/")) == 1
             assert all(url in {"http://preparation-ui.test/", "http://preparation-ui.test/favicon.ico"}

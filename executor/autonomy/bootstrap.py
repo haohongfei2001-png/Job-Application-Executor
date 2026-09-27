@@ -170,7 +170,12 @@ const copyButton=document.getElementById('copy-diagnostics'),details=document.ge
 copyResult=document.getElementById('copy-result'),manualReport=document.getElementById('manual-diagnostics');
 let copyEpoch=0;
 function clearCopy(){{copyEpoch++;copyResult.textContent='';manualReport.value='';manualReport.hidden=true;copyButton.disabled=false;}}
-details.addEventListener('toggle',()=>{{if(!details.open)clearCopy();}});
+// Summary activation clears before the browser's default close operation.
+details.querySelector('summary').addEventListener('click',()=>{{if(details.open)clearCopy();}});
+// Attribute records preserve even close+reopen in the same turn; queued toggle
+// events may coalesce and are too late to fence the clipboard result.
+new MutationObserver(records=>{{if(records.some(record=>record.oldValue!==null))clearCopy();}})
+  .observe(details,{{attributes:true,attributeFilter:['open'],attributeOldValue:true}});
 copyButton.addEventListener('click',async function(){{
   if(!details.open||this.disabled)return;
   const epoch=++copyEpoch,report=document.getElementById('safe-diagnostics').textContent;
