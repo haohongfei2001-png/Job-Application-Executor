@@ -302,6 +302,64 @@ def launch_consumer(root, port, *, presenter=None):
 
 
 
+def restore_installed_consumer(root):
+    """Explicit cold-app rollback through the existing retained-state transaction.
+
+    Derive the destination from this verified installed source, never a request
+    path or Git checkout. No service stop, task restore, window, model or retry.
+    """
+    boundary = {"final_click_actor": "user", "submit_capability": False}
+    if sys.platform != "darwin":
+        return {"ok": False, "restored": False, "reason": "macos_required", **boundary}
+    try:
+        from .consumer import (
+            APP_NAME, _trusted_bundle, _native_packaged_launcher,
+            _packaged_launcher, rollback_macos_app,
+        )
+        source = Path(__file__).absolute().parents[2]
+        app = source.parent.parent.parent
+        executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+        if (app.name != APP_NAME + ".app"
+                or source != app / "Contents" / "Resources" / "release"
+                or any(path.is_symlink() for path in (source, *source.parents))):
+            return {"ok": False, "restored": False,
+                    "reason": "installed_restore_unverified", **boundary}
+        identity = _consumer_release_identity()
+        expected = identity["expected"]
+        if (identity["packaged"] is not True
+                or type(expected) is not str or len(expected) != 64
+                or any(c not in "0123456789abcdef" for c in expected)
+                or not _trusted_bundle(app)
+                or executable.read_text(encoding="utf-8") not in {
+                    _packaged_launcher(), _native_packaged_launcher()}):
+            return {"ok": False, "restored": False,
+                    "reason": "installed_restore_unverified", **boundary}
+        # This uses the app/native/worker/migration locks and the original
+        # durable WAL/answer-key backup, both release identities, final-path
+        # health and compensation. Contention refuses without retiring an owner.
+        result = rollback_macos_app(app.parent, task_state_root=root)
+        if (type(result) is dict and result.get("ok") is True
+                and result.get("restored") is True):
+            return {"ok": True, "restored": True, **boundary}
+        reason = result.get("reason") if type(result) is dict else None
+        reasons = {
+            "rollback_unavailable", "update_in_progress", "update_lock_unavailable",
+            "task_state_in_use", "task_state_unavailable", "legacy_rollback_unsupported",
+            "rollback_identity_unverified", "rollback_startup_isolation_unsupported",
+            "rollback_unhealthy", "rollback_state_incompatible", "rollback_identity_changed",
+            "rollback_start_failed", "rollback_activation_failed", "manual_recovery_required",
+            "rollback_recovery_required", "rollback_post_activation_unhealthy",
+        }
+        return {"ok": False, "restored": False,
+                "reason": reason if type(reason) is str and reason in reasons
+                else "restore_unconfirmed", **boundary}
+    except Exception:
+        # An exception can occur after a move. Do not retry or claim unchanged
+        # authority; preserved bundles/capsules remain available for diagnosis.
+        return {"ok": False, "restored": False,
+                "reason": "restore_unconfirmed", **boundary}
+
+
 def launch_native_consumer(root, port, *, smoke=False):
     """Run the owned installed app through one verified native presenter."""
     from .consumer import _native_packaged_launcher, _trusted_bundle
@@ -352,7 +410,10 @@ def main(argv=None):
     for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch"):
         commands.add_parser(name)
     native = commands.add_parser("native-launch")
-    native.add_argument("--native-smoke", action="store_true")
+    native_mode = native.add_mutually_exclusive_group()
+    native_mode.add_argument("--native-smoke", action="store_true")
+    native_mode.add_argument("--restore-previous", action="store_true")
+    commands.add_parser("restore-app")
     delivered = commands.add_parser("install-bundle")
     delivered.add_argument("--candidate", type=Path, required=True)
     delivered.add_argument("--destination", type=Path)
@@ -401,7 +462,10 @@ def main(argv=None):
         elif args.command == "launch":
             result = launch_consumer(args.runtime, args.port)
         elif args.command == "native-launch":
-            result = launch_native_consumer(args.runtime, args.port, smoke=args.native_smoke)
+            result = (restore_installed_consumer(args.runtime) if args.restore_previous else
+                      launch_native_consumer(args.runtime, args.port, smoke=args.native_smoke))
+        elif args.command == "restore-app":
+            result = restore_installed_consumer(args.runtime)
         elif args.command == "install-bundle":
             from .consumer import install_macos_bundle
 

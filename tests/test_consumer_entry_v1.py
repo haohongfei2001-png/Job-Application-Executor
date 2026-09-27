@@ -4720,3 +4720,215 @@ def test_successful_final_health_requires_retained_identity_and_free_recovery_sl
         assert not (state / "service.json").exists()
     with ProcessLock(state / "worker.lock"):
         pass
+
+
+def test_installed_restore_entry_preserves_real_current_journal_and_retained_backup(
+    tmp_path, monkeypatch
+):
+    import shutil
+    import sqlite3
+    from contextlib import closing
+    from types import SimpleNamespace
+    from executor.autonomy import state_compatibility
+    from test_task_state_compatibility_v1 import legacy_state, authority, encrypted_answers
+
+    actual = Path(__file__).resolve().parents[1]
+    repo = tmp_path / "Job-Application-Executor"
+    repo.mkdir()
+    shutil.copytree(actual / "executor", repo / "executor",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copy2(actual / "requirements.txt", repo / "requirements.txt")
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    apps = tmp_path / "Applications"
+    empty = tmp_path / "empty-build-state"
+    assert install_macos_app(repo, destination=apps, platform="darwin", task_state_root=empty)["ok"]
+    app = apps / (consumer.APP_NAME + ".app")
+    source = app / "Contents" / "Resources" / "release"
+    first = (source / "release-source-manifest.json").read_bytes()
+    with (repo / "executor" / "__init__.py").open("a") as handle:
+        handle.write("\n# Synthetic explicitly displaced version.\n")
+    assert install_macos_app(repo, destination=apps, platform="darwin", task_state_root=empty)["ok"]
+    second = (source / "release-source-manifest.json").read_bytes()
+    assert first != second
+    monkeypatch.setattr(cli, "__file__", str(source / "executor" / "autonomy" / "cli.py"))
+    # Only entry-platform admission is selected; consumer health/backup uses
+    # real child processes and the platform's original runtime metadata.
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(platform="darwin"))
+    for name in ("lifecycle", "open_ui", "ensure_chrome", "launch_native_consumer"):
+        monkeypatch.setattr(cli, name, lambda *a, **kw: pytest.fail("restore is a cold transaction"))
+    from executor.autonomy.worker import ProcessLock
+    actual_transaction = consumer.rollback_macos_app
+    receipts = []
+    def observed_transaction(*args, **kwargs):
+        result = actual_transaction(*args, **kwargs)
+        receipts.append(result)
+        return result
+    monkeypatch.setattr(consumer, "rollback_macos_app", observed_transaction)
+    state = tmp_path / "synthetic-private-state"
+    with closing(legacy_state(state)) as db:
+        key = encrypted_answers(state, db)
+        before = authority(db)
+        answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        profile = "\n".join("PRIVATE_RESTORE_PROFILE_" + str(i) for i in range(1000))
+        (state / "profile.json").write_text(profile)
+        (state / "auth.token").write_text("PRIVATE_RESTORE_TOKEN")
+        for guard in (state_compatibility.native_window_guard(state),
+                      ProcessLock(state / "worker.lock"), ProcessLock(state / "migration.lock")):
+            with guard:
+                denied = cli.restore_installed_consumer(state)
+                assert denied["ok"] is False and denied["reason"] == "task_state_in_use"
+                assert (source / "release-source-manifest.json").read_bytes() == second
+                assert authority(db) == before
+                assert (state / "task-answers.key").read_bytes() == key
+        result = cli.restore_installed_consumer(state)
+        assert result == {"ok": True, "restored": True,
+                          "final_click_actor": "user", "submit_capability": False}
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == answers
+        assert (state / "task-answers.key").read_bytes() == key
+        assert (state / "profile.json").read_text() == profile
+        assert (state / "auth.token").read_text() == "PRIVATE_RESTORE_TOKEN"
+        assert (source / "release-source-manifest.json").read_bytes() == first
+        displaced = apps / ("." + consumer.APP_NAME + ".app.failed")
+        assert (displaced / "Contents" / "Resources" / "release" /
+                "release-source-manifest.json").read_bytes() == second
+        assert not (apps / ("." + consumer.APP_NAME + ".app.previous")).exists()
+        capsules = list(apps.glob(".jae-task-state-backup-*"))
+        assert len(capsules) == 1
+        capsule = capsules[0]
+        manifest = json.loads((capsule / "backup-manifest.json").read_text())
+        external = receipts[-1]["task_state_backup"]["receipt"]
+        assert manifest == external
+        assert state_compatibility.verify_task_state_backup(capsule, external)
+        with closing(sqlite3.connect(capsule / "tasks.sqlite3")) as snapshot:
+            assert authority(snapshot) == before
+            assert snapshot.execute("SELECT * FROM task_answer_events").fetchall() == answers
+        assert (capsule / "task-answers.key").read_bytes() == key
+        assert "PRIVATE_" not in json.dumps(result)
+        assert str(tmp_path) not in json.dumps(result)
+        # No retained slot remains: a second explicit command is a refusal,
+        # never a blind compensation/replay of the completed transaction.
+        repeated = cli.restore_installed_consumer(state)
+        assert repeated["ok"] is False and repeated["reason"] == "rollback_unavailable"
+        assert (source / "release-source-manifest.json").read_bytes() == first
+        assert authority(db) == before
+
+
+@pytest.mark.parametrize("fault", [
+    "platform", "checkout", "unverified", "digest_bool", "digest_mutable",
+    "source_alias", "untrusted", "legacy_launcher",
+])
+def test_installed_restore_entry_refuses_unadmitted_location_before_transaction(
+    tmp_path, monkeypatch, fault
+):
+    from types import SimpleNamespace
+    app = tmp_path / "Applications" / (consumer.APP_NAME + ".app")
+    source = app / "Contents" / "Resources" / "release"
+    module = source / "executor" / "autonomy" / "cli.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# synthetic admission fixture\n")
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(consumer._native_packaged_launcher())
+    identity = {"packaged": True, "expected": "a" * 64}
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(cli, "__file__", str(module))
+    monkeypatch.setattr(cli, "_consumer_release_identity", lambda: identity)
+    monkeypatch.setattr(consumer, "_trusted_bundle", lambda _: True)
+    monkeypatch.setattr(consumer, "rollback_macos_app",
+                        lambda *a, **kw: pytest.fail("refuse before activation/backup"))
+    if fault == "platform":
+        monkeypatch.setattr(cli, "sys", SimpleNamespace(platform="linux"))
+    elif fault == "checkout":
+        monkeypatch.setattr(cli, "__file__", str(tmp_path / "repo" / "executor" / "autonomy" / "cli.py"))
+    elif fault == "unverified":
+        identity["packaged"] = False
+    elif fault == "digest_bool":
+        identity["expected"] = True
+    elif fault == "digest_mutable":
+        identity["expected"] = "main"
+    elif fault == "source_alias":
+        alias = tmp_path / "alias"
+        alias.symlink_to(source, target_is_directory=True)
+        monkeypatch.setattr(cli, "__file__", str(alias / "executor" / "autonomy" / "cli.py"))
+    elif fault == "untrusted":
+        monkeypatch.setattr(consumer, "_trusted_bundle", lambda _: False)
+    elif fault == "legacy_launcher":
+        executable.write_text(consumer._legacy_launcher(tmp_path / "Job-Application-Executor"))
+    result = cli.restore_installed_consumer(tmp_path / "state")
+    assert result == {"ok": False, "restored": False,
+                      "reason": "macos_required" if fault == "platform" else "installed_restore_unverified",
+                      "final_click_actor": "user", "submit_capability": False}
+    assert not (tmp_path / "state").exists()
+    assert "PRIVATE_" not in json.dumps(result)
+    assert str(tmp_path) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("outcome", [
+    {"ok": False, "reason": "task_state_in_use"},
+    {"ok": False, "reason": "update_in_progress"},
+    {"ok": False, "reason": "rollback_state_incompatible"},
+    {"ok": False, "reason": "rollback_post_activation_unhealthy"},
+    {"ok": False, "reason": "manual_recovery_required"},
+    {"ok": False, "reason": "PRIVATE_UNKNOWN_REASON", "path": "PRIVATE_PATH"},
+    {"ok": 1, "restored": True, "path": "PRIVATE_PATH"},
+    {"ok": True, "restored": 1, "path": "PRIVATE_PATH"},
+    None, "exception",
+])
+def test_installed_restore_entry_has_finite_outcome_without_retry_or_private_echo(
+    tmp_path, monkeypatch, outcome
+):
+    from types import SimpleNamespace
+    app = tmp_path / "Applications" / (consumer.APP_NAME + ".app")
+    source = app / "Contents" / "Resources" / "release"
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(consumer._native_packaged_launcher())
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(cli, "__file__", str(source / "executor" / "autonomy" / "cli.py"))
+    monkeypatch.setattr(cli, "_consumer_release_identity",
+                        lambda: {"packaged": True, "expected": "a" * 64})
+    monkeypatch.setattr(consumer, "_trusted_bundle", lambda _: True)
+    calls = []
+    state = tmp_path / "state"
+    def transaction(destination, *, task_state_root):
+        calls.append((destination, task_state_root))
+        if outcome == "exception":
+            raise OSError("PRIVATE_PATH PRIVATE_EXCEPTION")
+        return outcome
+    monkeypatch.setattr(consumer, "rollback_macos_app", transaction)
+    result = cli.restore_installed_consumer(state)
+    assert calls == [(app.parent, state)]
+    assert result["ok"] is False and result["restored"] is False
+    known = {"task_state_in_use", "update_in_progress", "rollback_state_incompatible",
+             "rollback_post_activation_unhealthy", "manual_recovery_required"}
+    expected = outcome.get("reason") if type(outcome) is dict else None
+    assert result["reason"] == (expected if expected in known else "restore_unconfirmed")
+    assert result["submit_capability"] is False and result["final_click_actor"] == "user"
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+
+
+def test_native_restore_is_explicit_exclusive_and_never_automatic(tmp_path, monkeypatch, capsys):
+    calls = []
+    receipt = {"ok": True, "restored": True, "final_click_actor": "user",
+               "submit_capability": False}
+    monkeypatch.setattr(cli, "restore_installed_consumer",
+                        lambda root: calls.append(("restore", root)) or receipt)
+    monkeypatch.setattr(cli, "launch_native_consumer",
+                        lambda root, port, *, smoke=False:
+                        calls.append(("launch", root, port, smoke)) or {"ok": True})
+    assert cli.main(["--runtime", str(tmp_path), "native-launch"]) == 0
+    assert calls == [("launch", tmp_path, 9344, False)]
+    calls.clear()
+    assert cli.main(["--runtime", str(tmp_path), "native-launch", "--restore-previous"]) == 0
+    assert calls == [("restore", tmp_path)]
+    calls.clear()
+    assert cli.main(["--runtime", str(tmp_path), "restore-app"]) == 0
+    assert calls == [("restore", tmp_path)]
+    calls.clear()
+    with pytest.raises(SystemExit) as error:
+        cli.main(["--runtime", str(tmp_path), "native-launch", "--restore-previous", "--native-smoke"])
+    assert error.value.code == 2 and calls == []
+    assert '"submit_capability": false' in capsys.readouterr().out
