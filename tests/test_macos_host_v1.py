@@ -487,3 +487,195 @@ def test_hosted_mac_actual_window_inherits_lease_and_blocks_second_launch(compil
     finally:
         if presenter is not None:
             presenter.close()
+
+
+def test_repeated_exact_surface_focus_command_cannot_reload_or_reissue_ticket(tmp_path, monkeypatch):
+    import io
+    from executor.autonomy import macos_host as module
+
+    root = _candidate(tmp_path)
+    replies = [
+        {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1},
+        {"ok": True, "request": 2, "surface": "dashboard", "window_count": 1, "focus_only": True},
+        {"ok": True, "request": 3, "surface": "dashboard", "window_count": 1},
+    ]
+    class Child:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO("".join(json.dumps(reply) + "\n" for reply in replies))
+            self.returncode = None
+        def poll(self):
+            return self.returncode
+        def terminate(self):
+            self.returncode = 0
+        def wait(self, **kwargs):
+            return self.returncode
+    child = Child()
+    starts = []
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: starts.append((a, k)) or child)
+    monkeypatch.setattr(module.select, "select", lambda readers, *a: (readers, [], []))
+    presenter = NativePresenter(root)
+    try:
+        first = ConsumerSurface.dashboard(43210, "PRIVATE_FOCUS_TICKET")
+        assert presenter(first)
+        assert presenter(first)
+        other = ConsumerSurface.dashboard(43210, "PRIVATE_NEW_EXPLICIT_TICKET")
+        assert presenter(other)
+        commands = [json.loads(line) for line in child.stdin.getvalue().splitlines()]
+        assert commands[0] == native_command(first, 1)
+        assert commands[1] == {"command": "focus", "request": 2}
+        assert commands[2] == native_command(other, 3)
+        assert "PRIVATE_" not in json.dumps(commands[1])
+        assert len(starts) == 1
+        assert presenter.current_surface == other
+        assert "PRIVATE_" not in repr(presenter)
+    finally:
+        presenter.close()
+    assert presenter.current_surface is None
+
+
+@pytest.mark.parametrize("bad_reply", [
+    {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1, "focus_only": True},
+    {"ok": True, "request": 2, "surface": "dashboard", "window_count": 1},
+    {"ok": True, "request": True, "surface": "dashboard", "window_count": 1, "focus_only": True},
+    {"ok": True, "request": 2, "surface": "dashboard", "window_count": True, "focus_only": True},
+    {"ok": True, "request": 2, "surface": "dashboard", "window_count": 1, "focus_only": 1},
+])
+def test_focus_requires_exact_ack_and_never_falls_back_to_reloading(tmp_path, monkeypatch, bad_reply):
+    import io
+    from executor.autonomy import macos_host as module
+
+    root = _candidate(tmp_path)
+    first = {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1}
+    class Child:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(json.dumps(first) + "\n" + json.dumps(bad_reply) + "\n")
+            self.returncode = None
+        def poll(self):
+            return self.returncode
+        def terminate(self):
+            self.returncode = 0
+        def wait(self, **kwargs):
+            return self.returncode
+    child = Child()
+    commands = []
+    original_write = child.stdin.write
+    child.stdin.write = lambda payload: commands.append(json.loads(payload)) or original_write(payload)
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: child)
+    monkeypatch.setattr(module.select, "select", lambda readers, *a: (readers, [], []))
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: pytest.fail("focus refusal opened browser"))
+    presenter = NativePresenter(root)
+    surface = ConsumerSurface.dashboard(43210, "PRIVATE_FOCUS_REFUSAL")
+    assert presenter(surface)
+    assert not presenter(surface)
+    assert commands == [native_command(surface, 1), {"command": "focus", "request": 2}]
+    assert child.returncode == 0
+    assert presenter.process is None and presenter.current_surface is None
+
+
+def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(compiled_host):
+    import queue
+
+    state = {"admissions": 0, "pages": 0, "writes": 0}
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_POST(self):
+            state["writes"] += 1
+            self.send_response(403)
+            self.end_headers()
+        def do_GET(self):
+            cookies = SimpleCookie()
+            cookies.load(self.headers.get("Cookie", ""))
+            capability = cookies.get("focus_session")
+            if self.path == "/ui-login?ticket=PRIVATE_FOCUS_CANARY" and state["admissions"] == 0:
+                state["admissions"] += 1
+                self.send_response(303)
+                self.send_header("Location", "/ui")
+                self.send_header("Set-Cookie", "focus_session=SYNTHETIC_FOCUS_COOKIE; HttpOnly; SameSite=Strict; Path=/ui")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+            elif self.path == "/ui" and capability and capability.value == "SYNTHETIC_FOCUS_COOKIE":
+                state["pages"] += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(b"""<!doctype html><body><label>Unsent note
+                  <textarea id='native-draft'>PRIVATE_UNSENT_FOCUS_CANARY</textarea></label>
+                  <script>const draft=document.getElementById('native-draft');
+                    draft.focus();draft.setSelectionRange(3,9);</script></body>""")
+            else:
+                self.send_response(401)
+                self.end_headers()
+    class Loopback(ThreadingHTTPServer):
+        def server_bind(self):
+            socketserver.TCPServer.server_bind(self)
+            self.server_name = "127.0.0.1"
+            self.server_port = self.server_address[1]
+    server = Loopback(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    child = None
+    reader = None
+    messages = queue.Queue()
+    stdout = []
+    try:
+        child = subprocess.Popen([str(compiled_host / "AIApplicationWindow"), "--focus-smoke"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1)
+        def read_messages():
+            for line in child.stdout:
+                stdout.append(line)
+                messages.put(json.loads(line))
+        reader = threading.Thread(target=read_messages, daemon=True)
+        reader.start()
+        def send(command):
+            child.stdin.write(json.dumps(command) + "\n")
+            child.stdin.flush()
+        def reply():
+            return messages.get(timeout=5)
+        send({"command": "focus", "request": 1})
+        assert reply() == {"ok": False, "reason": "host_focus_unavailable"}
+        for command in [
+            {"command": "focus", "request": True},
+            {"command": "focus", "request": 1.0},
+            {"command": "focus", "request": -1},
+            {"command": "focus", "request": 1, "url": "PRIVATE_FORGED_ROUTE"},
+        ]:
+            send(command)
+            assert reply() == {"ok": False, "reason": "host_input_invalid"}
+        surface = ConsumerSurface.dashboard(server.server_port, "PRIVATE_FOCUS_CANARY")
+        send(native_command(surface, 1))
+        assert reply() == {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1}
+        assert reply() == {"ok": True, "focus_fixture_ready": True, "window_count": 1}
+        for request in (2, 3, 4):
+            send({"command": "focus", "request": request})
+            assert reply() == {"ok": True, "request": request, "surface": "dashboard",
+                               "window_count": 1, "focus_only": True}
+        assert reply() == {"ok": True, "focus_only": True, "window_count": 1,
+                           "draft_and_selection_retained": True, "reopen_count": 3}
+        assert child.wait(timeout=5) == 0
+        reader.join(timeout=3)
+        assert state == {"admissions": 1, "pages": 1, "writes": 0}
+        assert "PRIVATE_" not in "".join(stdout)
+        assert "127.0.0.1" not in "".join(stdout)
+    finally:
+        if child is not None:
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=3)
+            if reader is not None:
+                reader.join(timeout=3)
+            child.stdin.close()
+            child.stdout.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)

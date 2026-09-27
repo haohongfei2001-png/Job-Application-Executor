@@ -64,6 +64,15 @@ static BOOL initial(NSDictionary *command) {
         || [query.firstObject.value rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound) return NO;
     return !dashboard || [origin(url) isEqual:service];
 }
+static BOOL focusRequest(NSDictionary *command) {
+    if (![command isKindOfClass:[NSDictionary class]] || command.count != 2
+        || ![command[@"command"] isEqual:@"focus"]
+        || ![command[@"request"] isKindOfClass:[NSNumber class]]
+        || CFGetTypeID((__bridge CFTypeRef)command[@"request"]) == CFBooleanGetTypeID()
+        || CFNumberIsFloatType((__bridge CFNumberRef)command[@"request"])
+        || [command[@"request"] longLongValue] < 1) return NO;
+    return YES;
+}
 @interface JAEHost : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate>
 @property NSWindow *window;
 @property WKWebView *view;
@@ -73,10 +82,17 @@ static BOOL initial(NSDictionary *command) {
 @property BOOL smoke;
 @property BOOL consumerSmoke;
 @property BOOL failureSmoke;
+@property BOOL focusSmoke;
+@property NSUInteger focusCount;
+@property (strong) NSDictionary *focusSnapshot;
+@property (strong) WKNavigation *focusNavigation;
+@property (strong) WKWebView *focusView;
 @property NSTextField *failureMessage;
 @property WKNavigation *activeNavigation;
 @property BOOL finished;
 - (BOOL)allows:(NSURL *)url;
+- (BOOL)focusWindow;
+- (void)observeFocus;
 - (void)present:(NSDictionary *)command;
 @end
 
@@ -144,7 +160,66 @@ static BOOL initial(NSDictionary *command) {
     return [self.surface isEqual:@"bootstrap"] && [current isEqual:self.initialOrigin]
         && ([url.path isEqual:@"/"] || [url.path isEqual:@"/retry"]);
 }
+- (BOOL)focusWindow {
+    // An explicit owned reopen restores orientation only. No ticket, service
+    // restart, navigation, task command or change to the WebKit editing state.
+    if (!self.window || !self.surface || self.finished) return NO;
+    if (self.window.isMiniaturized) [self.window deminiaturize:nil];
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    return YES;
+}
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)visible {
+    if (sender != NSApp) return NO;
+    [self focusWindow];
+    return NO; // The existing window handled it; never construct another.
+}
+- (void)observeFocus {
+    // Fixed read-only cloud oracle. Applicant values stay in memory and are
+    // never reported. Production focus does not execute a DOM probe.
+    NSString *probe = @"(() => { const e=document.getElementById('native-draft'); return e ? {value:e.value,active:document.activeElement===e,start:e.selectionStart,end:e.selectionEnd} : null; })()";
+    [self.view evaluateJavaScript:probe completionHandler:^(id result, NSError *error) {
+        if (self.finished) return;
+        BOOL snapshot = !error && [result isKindOfClass:[NSDictionary class]]
+            && [result[@"active"] isEqual:@YES];
+        if (!self.focusSnapshot) {
+            if (!snapshot) {
+                self.finished = YES; report(@{@"ok": @NO, @"reason": @"native_focus_fixture_unavailable"}); [NSApp terminate:nil]; return;
+            }
+            self.focusSnapshot = result;
+            self.focusNavigation = self.activeNavigation;
+            self.focusView = self.view;
+            report(@{@"ok": @YES, @"focus_fixture_ready": @YES, @"window_count": @1});
+            return;
+        }
+        BOOL retained = snapshot && [self.focusSnapshot isEqual:result]
+            && self.focusNavigation == self.activeNavigation && self.focusView == self.view
+            && !self.view.hidden && self.failureMessage.hidden
+            && !self.window.isMiniaturized && self.window.isVisible;
+        self.finished = YES;
+        report(@{@"ok": @(retained), @"focus_only": @YES, @"window_count": @1,
+                 @"draft_and_selection_retained": @(retained), @"reopen_count": @(self.focusCount)});
+        [NSApp terminate:nil];
+    }];
+}
 - (void)present:(NSDictionary *)command {
+    if (focusRequest(command)) {
+        BOOL focused = [self focusWindow];
+        if (!focused) { report(@{@"ok": @NO, @"reason": @"host_focus_unavailable"}); return; }
+        report(@{@"ok": @YES, @"request": command[@"request"], @"surface": self.surface,
+                 @"window_count": @1, @"focus_only": @YES});
+        if (self.focusSmoke) {
+            self.focusCount++;
+            if (self.focusCount == 3) {
+                // Exercise the ordinary Cocoa reopen delegate through the same
+                // no-navigation path; neither event is a new presentation.
+                [self applicationShouldHandleReopen:NSApp hasVisibleWindows:YES];
+                [self applicationShouldHandleReopen:NSApp hasVisibleWindows:NO];
+                [self observeFocus];
+            }
+        }
+        return;
+    }
     if (!initial(command)) { report(@{@"ok": @NO, @"reason": @"host_input_invalid"}); return; }
     NSURL *url = [NSURL URLWithString:command[@"url"]];
     self.surface = command[@"surface"]; self.initialOrigin = origin(url); self.serviceOrigin = command[@"service_origin"];
@@ -189,6 +264,7 @@ static BOOL initial(NSDictionary *command) {
     if (self.failureSmoke && !self.finished) {
         self.finished = YES; report(@{@"ok": @NO, @"reason": @"expected_native_failure_missing"}); [NSApp terminate:nil]; return;
     }
+    if (self.focusSmoke && !self.finished) { [self observeFocus]; return; }
     if (!self.smoke || self.finished) return;
     // Fixed cloud-only smoke probe, no arbitrary script input or task action.
     NSString *probe = self.consumerSmoke
@@ -208,7 +284,7 @@ static BOOL initial(NSDictionary *command) {
         [NSApp terminate:nil];
     }];
 }
-- (void)windowWillClose:(NSNotification *)notification { [NSApp terminate:nil]; }
+- (void)windowWillClose:(NSNotification *)notification { self.finished = YES; [NSApp terminate:nil]; }
 @end
 
 int main(int argc, const char *argv[]) {
@@ -216,7 +292,8 @@ int main(int argc, const char *argv[]) {
         JAEHost *host = [JAEHost new];
         host.consumerSmoke = argc == 2 && strcmp(argv[1], "--consumer-smoke") == 0;
         host.failureSmoke = argc == 2 && strcmp(argv[1], "--failure-smoke") == 0;
-        host.smoke = host.consumerSmoke || host.failureSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
+        host.focusSmoke = argc == 2 && strcmp(argv[1], "--focus-smoke") == 0;
+        host.smoke = host.consumerSmoke || host.failureSmoke || host.focusSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
         [NSApplication sharedApplication];
         NSApp.delegate = host;
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -340,6 +417,7 @@ class NativePresenter:
         self.directory = Path(directory).absolute()
         self.process = None
         self.sequence = 0
+        self.current_surface = None
 
     def __repr__(self) -> str:
         return "<NativePresenter credential_in_report=False>"
@@ -350,7 +428,14 @@ class NativePresenter:
             command = native_command(surface, self.sequence)
             if sys.platform != "darwin" or not verify_native_host(self.directory):
                 return False
-            if self.process is None or self.process.poll() is not None:
+            reuse = self.process is not None and self.process.poll() is None
+            focus_only = reuse and self.current_surface == surface
+            if focus_only:
+                # The exact same in-memory capability has already been
+                # presented. Reopening must not consume it again or reload edits.
+                command = {"command": "focus", "request": self.sequence}
+            if not reuse:
+                self.current_surface = None
                 self.process = subprocess.Popen(
                     [str(self.directory / "AIApplicationWindow"),
                      *(["--consumer-smoke"] if self.consumer_smoke else [])],
@@ -364,12 +449,18 @@ class NativePresenter:
                 self.close()
                 return False
             reply = json.loads(self.process.stdout.readline(4096))
+            expected = {"ok": True, "request": self.sequence,
+                        "surface": surface.surface, "window_count": 1}
+            if focus_only:
+                expected["focus_only"] = True
             accepted = (isinstance(reply, dict)
                         and type(reply.get("request")) is int
                         and type(reply.get("window_count")) is int
-                        and reply == {"ok": True, "request": self.sequence,
-                                 "surface": surface.surface, "window_count": 1})
-            if not accepted:
+                        and reply == expected
+                        and (not focus_only or reply.get("focus_only") is True))
+            if accepted:
+                self.current_surface = surface
+            else:
                 self.close()
             return accepted
         except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
@@ -397,6 +488,7 @@ class NativePresenter:
 
     def close(self) -> None:
         process, self.process = self.process, None
+        self.current_surface = None
         if process is not None:
             if process.poll() is None:
                 process.terminate()
