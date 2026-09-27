@@ -199,6 +199,10 @@ class TaskQueue:
                     db.execute("ALTER TABLE browser_bindings ADD COLUMN document_epoch TEXT")
                 db.execute('''CREATE TABLE IF NOT EXISTS profile_write_barriers (
                     profile_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL, created REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS task_view_context (
+                    slot INTEGER PRIMARY KEY CHECK(slot=1), task_id TEXT,
+                    revision INTEGER NOT NULL CHECK(revision>=0))''')
+                db.execute("INSERT OR IGNORE INTO task_view_context VALUES(1,NULL,0)")
             self.path.chmod(0o600)
 
     @contextmanager
@@ -215,6 +219,43 @@ class TaskQueue:
                 raise
             finally:
                 db.close()
+
+
+    @staticmethod
+    def _task_view_context(db):
+        row = db.execute("SELECT task_id,revision FROM task_view_context WHERE slot=1").fetchone()
+        if (row is None or type(row["revision"]) is not int or row["revision"] < 0
+                or (row["task_id"] is not None and (
+                    not isinstance(row["task_id"], str)
+                    or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", row["task_id"])))):
+            return {"task_id": None, "revision": None}
+        task_id = row["task_id"]
+        if task_id is not None and db.execute(
+                "SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone() is None:
+            task_id = None
+        return {"task_id": task_id, "revision": row["revision"]}
+
+    def task_view_context(self):
+        """A remembered view is local orientation, never command authority."""
+        with self.tx() as db:
+            return self._task_view_context(db)
+
+    def remember_task_view(self, task_id, *, expected_revision):
+        if (type(expected_revision) is not int or expected_revision < 0
+                or (task_id is not None and (
+                    not isinstance(task_id, str)
+                    or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", task_id)))):
+            raise ValueError("invalid task view context")
+        with self.tx() as db:
+            current = self._task_view_context(db)
+            if current["revision"] != expected_revision:
+                raise RuntimeError("stale task view context")
+            if task_id is not None and db.execute(
+                    "SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone() is None:
+                raise ValueError("task view target unavailable")
+            db.execute("UPDATE task_view_context SET task_id=?,revision=revision+1 WHERE slot=1",
+                       (task_id,))
+            return self._task_view_context(db)
 
     def _event(self, db, task_id, kind, stage):
         db.execute("INSERT INTO events(task_id,at,kind,stage) VALUES(?,?,?,?)", (task_id, self.clock(), kind, stage))

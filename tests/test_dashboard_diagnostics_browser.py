@@ -554,3 +554,159 @@ def test_task_workspace_expiry_clears_orientation_and_never_replays_selection():
             assert errors == []
         finally:
             browser.close()
+
+
+def test_task_workspace_explicit_remember_restores_only_view_across_page_reopen():
+    tasks = [
+        {"task_id": "alpha", "company": "Alpha", "role": "Engineer", "stage": "DISCOVERED", "revision": 1},
+        {"task_id": "beta", "company": "Beta", "role": "Designer", "stage": "DISCOVERED", "revision": 2},
+    ]
+    saved = {"task_id": None, "revision": 0}
+    posts, errors = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("remember-workspace.test", 1)[-1]
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/task-view-context":
+                    data = json.loads(route.request.post_data)
+                    posts.append(data)
+                    assert set(data) == {"task_id", "expected_revision"}
+                    assert data["expected_revision"] == saved["revision"]
+                    saved.update(task_id=data["task_id"], revision=saved["revision"] + 1)
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps(saved))
+                else:
+                    assert route.request.method == "GET"
+                    route.fulfill(status=200, content_type="application/json",
+                        body=json.dumps({"tasks": tasks, "ui_context": saved}))
+
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://remember-workspace.test/**", route_request)
+            page.goto("https://remember-workspace.test/")
+            expect(page.get_by_role("button", name="记住当前任务", exact=True)).to_be_disabled()
+            page.get_by_role("button", name="查看任务 · Beta · Designer", exact=True).click()
+            expect(page.locator('[data-task-select="beta"]')).to_have_attribute("aria-pressed", "true")
+            assert posts == [], "view navigation itself never writes"
+            page.locator("#message").fill("UNSENT_PRIVATE_BODY")
+            page.get_by_role("button", name="记住当前任务", exact=True).click()
+            expect(page.locator("#toast")).to_contain_text("下次打开只恢复查看位置")
+            assert posts == [{"task_id": "beta", "expected_revision": 0}]
+            assert page.locator("#message").input_value() == "UNSENT_PRIVATE_BODY"
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            page.reload()
+            expect(page.locator('[data-task-select="beta"]')).to_have_attribute("aria-pressed", "true")
+            expect(page.locator("#task-context")).to_contain_text("Beta · Designer")
+            assert posts == [{"task_id": "beta", "expected_revision": 0}]
+            assert "UNSENT_PRIVATE_BODY" not in json.dumps(saved)
+            assert page.locator("#message").input_value() == ""
+            page.get_by_role("button", name="忘记查看位置", exact=True).click()
+            expect(page.locator("#toast")).to_contain_text("现有任务和输入保持不变")
+            assert posts[-1] == {"task_id": None, "expected_revision": 1}
+            page.reload()
+            expect(page.locator("#task-context")).to_contain_text("尚未选中")
+            assert page.locator('[data-current-task="true"]').count() == 0
+            assert len(posts) == 2
+            assert tasks[0]["revision"] == 1 and tasks[1]["revision"] == 2
+            assert errors == []
+        finally:
+            browser.close()
+
+
+def test_task_workspace_uncertain_save_requires_explicit_readback_without_replay():
+    task = {"task_id": "beta", "company": "Beta", "role": "Designer", "stage": "DISCOVERED", "revision": 2}
+    saved = {"task_id": None, "revision": 0}
+    posts, errors = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("uncertain-view.test", 1)[-1]
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/task-view-context":
+                    posts.append(json.loads(route.request.post_data))
+                    saved.update(task_id="beta", revision=1)
+                    route.fulfill(status=200, content_type="application/json",
+                        body='{"task_id":"wrong","revision":1}')
+                else:
+                    assert route.request.method == "GET"
+                    route.fulfill(status=200, content_type="application/json",
+                        body=json.dumps({"tasks": [task], "ui_context": saved}))
+
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://uncertain-view.test/**", route_request)
+            page.goto("https://uncertain-view.test/")
+            page.get_by_role("button", name="查看任务 · Beta · Designer", exact=True).click()
+            page.locator("#message").fill("UNSENT_STAYS_LOCAL")
+            remember = page.get_by_role("button", name="记住当前任务", exact=True)
+            remember.click()
+            expect(page.locator("#saved-task-view")).to_contain_text("保存结果未确认")
+            expect(remember).to_be_disabled()
+            assert len(posts) == 1
+            page.evaluate("state()")
+            expect(page.locator("#saved-task-view")).to_contain_text("保存结果未确认")
+            expect(remember).to_be_disabled()
+            page.evaluate("document.getElementById('remember-task-view').dispatchEvent(new MouseEvent('click',{bubbles:true}))")
+            assert len(posts) == 1
+            page.get_by_role("button", name="重新读取查看位置", exact=True).click()
+            expect(page.locator("#saved-task-view")).to_contain_text("已记住一个任务")
+            expect(remember).to_be_enabled()
+            assert len(posts) == 1
+            assert page.locator("#message").input_value() == "UNSENT_STAYS_LOCAL"
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert errors == []
+        finally:
+            browser.close()
+
+
+def test_task_workspace_late_saved_view_reply_cannot_revive_expired_session():
+    task = {"task_id": "beta", "company": "Beta", "role": "Designer", "stage": "DISCOVERED", "revision": 2}
+    pending, requests, errors = [], [], []
+    expired = False
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("late-view.test", 1)[-1]
+                requests.append((route.request.method, path))
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/task-view-context":
+                    pending.append(route)
+                elif expired:
+                    route.fulfill(status=401, content_type="application/json", body='{"error":"ui_session_required"}')
+                else:
+                    route.fulfill(status=200, content_type="application/json",
+                        body=json.dumps({"tasks": [task], "ui_context": {"task_id": None, "revision": 0}}))
+
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://late-view.test/**", route_request)
+            page.goto("https://late-view.test/")
+            page.get_by_role("button", name="查看任务 · Beta · Designer", exact=True).click()
+            page.locator("#message").fill("UNSENT_LATE_VIEW")
+            with page.expect_request("https://late-view.test/ui/api/task-view-context"):
+                page.get_by_role("button", name="记住当前任务", exact=True).click()
+            assert len(pending) == 1
+            expired = True
+            page.evaluate("readiness()")
+            expect(page.locator("#session-expired")).to_be_visible()
+            checkpoint = list(requests)
+            with page.expect_response("https://late-view.test/ui/api/task-view-context"):
+                pending[0].fulfill(status=200, content_type="application/json",
+                    body='{"task_id":"beta","revision":1}')
+            expect(page.locator("#saved-task-view")).to_contain_text("面板会话已失效")
+            expect(page.locator('[data-task-select="beta"]')).to_have_attribute("aria-pressed", "false")
+            expect(page.get_by_role("button", name="记住当前任务", exact=True)).to_be_disabled()
+            expect(page.get_by_role("button", name="重新读取查看位置", exact=True)).to_be_disabled()
+            expect(page.locator("#session-expired")).to_be_focused()
+            assert requests == checkpoint
+            assert page.locator("#message").input_value() == "UNSENT_LATE_VIEW"
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert errors == []
+        finally:
+            browser.close()

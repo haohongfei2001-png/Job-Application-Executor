@@ -27,6 +27,7 @@ h1{font-size:18px;margin:0}.statusbar{display:flex;align-items:center;gap:10px;f
 .review{font-size:12px;line-height:1.5;margin-top:9px;padding:9px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0}.review.warning{background:#fff7ed;border-color:#fed7aa;color:#9a3412}
 .private-review{max-height:52vh;overflow:auto;white-space:pre-wrap}.private-review table{width:100%;border-collapse:collapse;margin-top:8px}.private-review th,.private-review td{border:1px solid #cbd5e1;padding:6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 .taskcontrols{display:flex;gap:6px;margin-top:9px}.taskcontrols button{font-size:12px;padding:6px 9px;background:#f1f5f9;color:#111;border:1px solid #d7dce2}
+.task-view-controls{flex-wrap:wrap}.task-view-controls button{min-height:44px}
 .factinput{display:flex;gap:5px;margin-top:8px}.factinput input,.factinput select{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.factinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}
 .factinput .remember-fact{flex:0 0 16px;width:16px;min-width:16px;padding:0}
 .otpinput{display:flex;gap:5px;margin-top:8px}.otpinput input{min-width:0;flex:1;border:1px solid #cbd5e1;border-radius:7px;padding:7px}.otpinput button{font-size:12px;padding:6px 8px;background:#e2e8f0;color:#111}.otpnote{font-size:12px;color:#64748b;line-height:1.4;margin-top:7px}
@@ -69,6 +70,12 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   </form>
   <div id="candidates" class="candidates"></div>
   <p id="task-context" class="task-context" role="status" tabindex="-1">尚未选中任务。可用键盘浏览任务卡片。</p>
+  <div class="taskcontrols task-view-controls" aria-label="本地查看位置">
+    <button id="remember-task-view" type="button" disabled>记住当前任务</button>
+    <button id="forget-task-view" type="button" disabled>忘记查看位置</button>
+    <button id="refresh-task-view" type="button" disabled>重新读取查看位置</button>
+  </div>
+  <p id="saved-task-view" class="task-context" role="status">查看位置尚未读取。未发送输入不会保存。</p>
   <div id="tasks" class="empty" role="region" aria-label="任务列表">正在读取任务…</div>
 </aside>
 <main>
@@ -119,6 +126,69 @@ const recoveryObservations=new Map();
 let uiSessionExpired=false;
 let currentTaskId=null;
 const taskContext=document.getElementById('task-context');
+const rememberView=document.getElementById('remember-task-view');
+const forgetView=document.getElementById('forget-task-view');
+const refreshView=document.getElementById('refresh-task-view');
+const savedViewLabel=document.getElementById('saved-task-view');
+let savedView=null,viewInitialized=false,viewPending=false,viewUnknown=false;
+function validView(value){
+  return value&&Object.keys(value).length===2&&Number.isSafeInteger(value.revision)&&value.revision>=0
+    &&(value.task_id===null||typeof value.task_id==='string'&&/^[A-Za-z0-9_.:-]{1,120}$/.test(value.task_id));
+}
+function updateSavedViewControls(){
+  const unavailable=uiSessionExpired||viewPending||viewUnknown||!validView(savedView);
+  rememberView.disabled=unavailable||!currentTaskId;
+  forgetView.disabled=unavailable||savedView.task_id===null;
+  refreshView.disabled=uiSessionExpired||viewPending;
+  const message=uiSessionExpired?'面板会话已失效，请重新打开应用。':
+    viewUnknown?'保存结果未确认；请重新读取查看位置，不会自动重试。':
+    !validView(savedView)?'查看位置尚未读取。未发送输入不会保存。':
+    savedView.task_id===null?'未记住查看位置。未发送输入不会保存。':
+    '已记住一个任务的查看位置。只保存任务标识，不会自动操作或保存未发送输入。';
+  if(savedViewLabel.textContent!==message)savedViewLabel.textContent=message;
+}
+function acceptSavedView(state){
+  if(uiSessionExpired)return;
+  if(!validView(state?.ui_context))return;
+  savedView={...state.ui_context};
+  if(!viewInitialized){
+    viewInitialized=true;
+    currentTaskId=(state.tasks||[]).some(task=>task.task_id===savedView.task_id)?savedView.task_id:null;
+  }
+  updateSavedViewControls();
+}
+async function saveTaskView(taskId){
+  if(uiSessionExpired||viewPending||viewUnknown||!validView(savedView))return;
+  const expected=savedView.revision;
+  viewPending=true;updateSavedViewControls();
+  try{
+    const response=await uiRequest('/ui/api/task-view-context',{method:'POST',
+      headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      body:JSON.stringify({task_id:taskId,expected_revision:expected})});
+    if(!response.ok)throw new Error();
+    const result=await response.json();
+    if(uiSessionExpired||!validView(result)||result.task_id!==taskId||result.revision!==expected+1)throw new Error();
+    const readback=await state();
+    if(!readback||!validView(readback.ui_context)||readback.ui_context.task_id!==taskId
+      ||readback.ui_context.revision!==result.revision)throw new Error();
+    viewUnknown=false;
+    notify(taskId===null?'已忘记查看位置。现有任务和输入保持不变。':'已记住当前任务；下次打开只恢复查看位置。');
+  }catch(_){
+    if(!uiSessionExpired){viewUnknown=true;notify('查看位置保存未确认；请重新读取后核对，不会自动重试。');}
+  }finally{viewPending=false;updateSavedViewControls();}
+}
+rememberView.onclick=()=>{if(currentTaskId)void saveTaskView(currentTaskId);};
+forgetView.onclick=()=>void saveTaskView(null);
+refreshView.onclick=async()=>{
+  if(uiSessionExpired||viewPending)return;
+  viewPending=true;updateSavedViewControls();
+  const result=await state();
+  if(!uiSessionExpired){
+    if(result&&validView(result.ui_context)){viewUnknown=false;notify('已重新读取查看位置；没有重复保存或操作任务。');}
+    else notify('无法确认查看位置；现有任务和输入保持不变。');
+  }
+  viewPending=false;updateSavedViewControls();
+};
 function updateTaskContext(){
   const cards=[...tasksEl.querySelectorAll('[data-task-card]')];
   const current=cards.find(card=>card.dataset.taskCard===currentTaskId);
@@ -132,6 +202,7 @@ function updateTaskContext(){
   const message=uiSessionExpired?'面板会话已失效，请重新打开应用。':
     title?'当前查看：'+title+'。任务操作请使用该卡片按钮。':'尚未选中任务。可用键盘浏览任务卡片。';
   if(taskContext.textContent!==message)taskContext.textContent=message;
+  updateSavedViewControls();
 }
 tasksEl.addEventListener('click',event=>{
   const button=event.target.closest('button[data-task-select]');
@@ -151,7 +222,7 @@ tasksEl.addEventListener('keydown',event=>{
 function expireUISession(){
   if(uiSessionExpired)return;
   uiSessionExpired=true;
-  currentTaskId=null;updateTaskContext();
+  currentTaskId=null;savedView=null;updateTaskContext();
   recoveryObservations.clear();tasksEl.querySelectorAll('[data-field-recovery]').forEach(panel=>panel.remove());
   const notice=document.getElementById('session-expired');
   notice.hidden=false;
@@ -257,6 +328,7 @@ function acceptRecoveryObservation(taskId,observed){
 }
 function render(state){
   if(uiSessionExpired)return;
+  acceptSavedView(state);
   const counts={running:0,need:0,ready:0,done:0};
   (state.tasks||[]).forEach(t=>counts[stageGroup(t.stage)]++);
   Object.entries(counts).forEach(([k,v])=>document.getElementById(k).textContent=v);
@@ -640,13 +712,14 @@ async function state(){
     const r=await uiRequest('/ui/api/state',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
     const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
+    acceptSavedView(data);
     const openReview=tasksEl.querySelector('[data-private-review-open]');
     if(openReview){
       const current=(data.tasks||[]).find(t=>t.task_id===openReview.dataset.privateReviewOpen);
       if(!current||current.stage!=='READY_TO_SUBMIT'||current.revision!==Number(openReview.dataset.revision)||!current.review_values_available)render(data);
     }else if(![...tasksEl.querySelectorAll('.factinput input:not([type=checkbox]),.factinput select,.otpinput input')].some(input=>input.value))render(data);
-    updateLabel(data.update);
-  }catch(e){if(!uiSessionExpired)document.getElementById('health').textContent='连接异常'}
+    updateLabel(data.update);return data;
+  }catch(e){if(!uiSessionExpired)document.getElementById('health').textContent='连接异常';return null;}
 }
 function bubble(text,kind,actions){
   const d=document.createElement('div');d.className='bubble '+kind;d.textContent=text;

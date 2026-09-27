@@ -178,6 +178,7 @@ class Supervisor:
             "ok": True,
             "worker_active": self.worker.active,
             "update": reconciled_update_state(self.queue.root),
+            "ui_context": self.queue.task_view_context(),
             **state,
         }
 
@@ -577,6 +578,14 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                             raise ValueError("invalid update envelope")
                         result = supervisor.begin_update(self.server.server_address[1])
                         self._send_json(200 if result.get("ok") else 409, result)
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/task-view-context":
+                        data = self._read_json()
+                        if set(data) != {"task_id", "expected_revision"}:
+                            raise ValueError("invalid task view envelope")
+                        result = supervisor.run_mutation(lambda: supervisor.queue.remember_task_view(
+                            data["task_id"], expected_revision=data["expected_revision"]))
+                        self._send_json(200, result)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/chat":
                         data = self._read_json()
