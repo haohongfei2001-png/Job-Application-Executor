@@ -84,6 +84,8 @@ static BOOL focusRequest(NSDictionary *command) {
 @property BOOL consumerSmoke;
 @property BOOL failureSmoke;
 @property BOOL focusSmoke;
+@property BOOL releaseSmoke;
+@property (strong) NSDictionary *releaseRequest;
 @property NSUInteger focusCount;
 @property (strong) NSDictionary *focusSnapshot;
 @property (strong) WKNavigation *focusNavigation;
@@ -95,6 +97,7 @@ static BOOL focusRequest(NSDictionary *command) {
 - (BOOL)focusWindow;
 - (void)observeFocus;
 - (void)present:(NSDictionary *)command;
+- (void)commitRelease:(NSDictionary *)request;
 @end
 
 @implementation JAEHost
@@ -114,7 +117,18 @@ static BOOL focusRequest(NSDictionary *command) {
     self.window.delegate = self;
     NSView *content = [[NSView alloc] initWithFrame:self.view.frame];
     self.view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.view.frame = NSMakeRect(0, 0, 1024, 716);
     [content addSubview:self.view];
+    NSPopUpButton *appActions = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(820, 722, 184, 30) pullsDown:YES];
+    appActions.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    appActions.accessibilityLabel = @"应用更新和回退";
+    [appActions addItemWithTitle:@"应用"];
+    [appActions addItemWithTitle:@"从交付包更新…"];
+    [appActions addItemWithTitle:@"回退到保留版本…"];
+    appActions.itemArray[1].target = appActions.itemArray[2].target = self;
+    appActions.itemArray[1].action = @selector(updateApplication:);
+    appActions.itemArray[2].action = @selector(restoreApplication:);
+    [content addSubview:appActions];
     self.failureMessage = [NSTextField labelWithString:@"本机工作台暂不可用。请关闭窗口后重新打开；工作台没有自动重试，任务状态需重新连接后确认。"];
     self.failureMessage.frame = NSMakeRect(24, 24, 976, 92);
     self.failureMessage.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
@@ -138,7 +152,13 @@ static BOOL focusRequest(NSDictionary *command) {
     NSMenuItem *smaller = [viewMenu addItemWithTitle:@"缩小" action:@selector(zoomOut:) keyEquivalent:@"-"];
     NSMenuItem *normal = [viewMenu addItemWithTitle:@"实际大小" action:@selector(zoomReset:) keyEquivalent:@"0"];
     larger.target = smaller.target = normal.target = self;
-    [menu addItem:editItem]; [menu addItem:viewItem]; NSApp.mainMenu = menu;
+    NSMenu *releaseMenu = [NSMenu new];
+    NSMenuItem *releaseItem = [[NSMenuItem alloc] initWithTitle:@"应用" action:nil keyEquivalent:@""];
+    releaseItem.submenu = releaseMenu;
+    NSMenuItem *update = [releaseMenu addItemWithTitle:@"从交付包更新…" action:@selector(updateApplication:) keyEquivalent:@""];
+    NSMenuItem *restore = [releaseMenu addItemWithTitle:@"回退到保留版本…" action:@selector(restoreApplication:) keyEquivalent:@""];
+    update.target = restore.target = self;
+    [menu addItem:releaseItem]; [menu addItem:editItem]; [menu addItem:viewItem]; NSApp.mainMenu = menu;
     [self.window makeKeyAndOrderFront:nil];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         char *line = NULL; size_t capacity = 0;
@@ -150,6 +170,40 @@ static BOOL focusRequest(NSDictionary *command) {
         }
         free(line);
     });
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(updateApplication:) || item.action == @selector(restoreApplication:))
+        return self.surface != nil && !self.finished && !self.smoke;
+    return YES;
+}
+- (BOOL)confirmRelease:(NSString *)title {
+    if (!self.surface || self.finished || self.smoke) return NO;
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = title;
+    alert.informativeText = @"将关闭当前窗口并在安全停止点检查应用。请先保存窗口中尚未保存的输入。现有任务和已保存答案不会恢复成旧快照；忙碌、版本或状态无法核对时会拒绝操作。不会提交申请或下载文件。";
+    [alert addButtonWithTitle:@"继续"]; [alert addButtonWithTitle:@"取消"];
+    return [alert runModal] == NSAlertFirstButtonReturn;
+}
+- (void)commitRelease:(NSDictionary *)request {
+    if (!self.surface || self.finished || self.releaseRequest) return;
+    self.releaseRequest = request; self.finished = YES;
+    [self.window close];
+}
+- (void)updateApplication:(id)sender {
+    if (![self confirmRelease:@"从本地交付包更新应用？"]) return;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = @"选择完整交付包文件夹";
+    panel.canChooseFiles = NO; panel.canChooseDirectories = YES;
+    panel.allowsMultipleSelection = NO; panel.canCreateDirectories = NO;
+    if ([panel runModal] != NSModalResponseOK || panel.URLs.count != 1) return;
+    NSURL *selected = panel.URLs.firstObject;
+    if (!selected.isFileURL || !selected.path.isAbsolutePath || selected.path.length > 2048
+        || [selected.path rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound) return;
+    [self commitRelease:@{@"action": @"update", @"distribution": selected.path}];
+}
+- (void)restoreApplication:(id)sender {
+    if ([self confirmRelease:@"回退到保留的应用版本？"])
+        [self commitRelease:@{@"action": @"restore"}];
 }
 - (void)zoomIn:(id)sender { self.view.pageZoom = MIN(2.0, self.view.pageZoom + 0.1); }
 - (void)zoomOut:(id)sender { self.view.pageZoom = MAX(0.5, self.view.pageZoom - 0.1); }
@@ -266,6 +320,15 @@ static BOOL focusRequest(NSDictionary *command) {
         self.finished = YES; report(@{@"ok": @NO, @"reason": @"expected_native_failure_missing"}); [NSApp terminate:nil]; return;
     }
     if (self.focusSmoke && !self.finished) { [self observeFocus]; return; }
+    if (self.releaseSmoke && !self.finished) {
+        // Fixed cloud oracle invokes the same terminal handoff; no installer,
+        // path picker, task command or candidate execution inside this host.
+        NSMenuItem *item = [NSApp.mainMenu itemWithTitle:@"应用"];
+        if (!item || item.submenu.numberOfItems != 2) {
+            self.finished = YES; report(@{@"ok": @NO, @"reason": @"release_menu_missing"}); [NSApp terminate:nil]; return;
+        }
+        [self commitRelease:@{@"action": @"restore"}]; return;
+    }
     if (!self.smoke || self.finished) return;
     // Fixed cloud-only smoke probe, no arbitrary script input or task action.
     NSString *probe = self.consumerSmoke
@@ -285,7 +348,11 @@ static BOOL focusRequest(NSDictionary *command) {
         [NSApp terminate:nil];
     }];
 }
-- (void)windowWillClose:(NSNotification *)notification { self.finished = YES; [NSApp terminate:nil]; }
+- (void)windowWillClose:(NSNotification *)notification {
+    self.finished = YES;
+    if (self.releaseRequest) report(@{@"ok": @YES, @"release_request": self.releaseRequest});
+    [NSApp terminate:nil];
+}
 @end
 
 int main(int argc, const char *argv[]) {
@@ -294,7 +361,8 @@ int main(int argc, const char *argv[]) {
         host.consumerSmoke = argc == 2 && strcmp(argv[1], "--consumer-smoke") == 0;
         host.failureSmoke = argc == 2 && strcmp(argv[1], "--failure-smoke") == 0;
         host.focusSmoke = argc == 2 && strcmp(argv[1], "--focus-smoke") == 0;
-        host.smoke = host.consumerSmoke || host.failureSmoke || host.focusSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
+        host.releaseSmoke = argc == 2 && strcmp(argv[1], "--release-smoke") == 0;
+        host.smoke = host.consumerSmoke || host.failureSmoke || host.focusSmoke || host.releaseSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
         [NSApplication sharedApplication];
         NSApp.delegate = host;
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -405,6 +473,23 @@ def native_command(surface: ConsumerSurface, request: int) -> dict:
         raise ValueError("invalid consumer presentation") from None
 
 
+
+def native_release_request(value) -> dict | None:
+    """Finite terminal host intent; neither a URL nor a task command."""
+    if type(value) is not dict or type(value.get("action")) is not str:
+        return None
+    if value == {"action": "restore"}:
+        return {"action": "restore"}
+    if set(value) != {"action", "distribution"} or value["action"] != "update":
+        return None
+    candidate = value["distribution"]
+    if (type(candidate) is not str or not candidate or len(candidate) > 2048
+            or any(ord(char) < 32 or ord(char) == 127 for char in candidate)
+            or not Path(candidate).is_absolute()):
+        return None
+    return {"action": "update", "distribution": candidate}
+
+
 class NativePresenter:
     """One trusted native window, no fallback and no credential report."""
     def __init__(self, directory: str | Path, *, consumer_smoke: bool = False,
@@ -420,6 +505,8 @@ class NativePresenter:
         self.sequence = 0
         self.current_surface = None
         self._command_lock = threading.RLock()
+        self._release_request = None
+        self._closed_for_release = False
 
     def __repr__(self) -> str:
         return "<NativePresenter credential_in_report=False>"
@@ -453,6 +540,8 @@ class NativePresenter:
                 # presented. Reopening must not consume it again or reload edits.
                 command = {"command": "focus", "request": self.sequence}
             if not reuse:
+                self._release_request = None
+                self._closed_for_release = False
                 self.current_surface = None
                 self.process = subprocess.Popen(
                     [str(self.directory / "AIApplicationWindow"),
@@ -467,6 +556,13 @@ class NativePresenter:
                 self.close()
                 return False
             reply = json.loads(self.process.stdout.readline(4096))
+            if (type(reply) is dict and set(reply) == {"ok", "release_request"}
+                    and reply["ok"] is True
+                    and native_release_request(reply["release_request"]) is not None):
+                # A user can close for release while an owned focus ACK waits.
+                # Preserve the terminal event, but do not call it a focus ACK.
+                self._release_request = native_release_request(reply["release_request"])
+                return False
             expected = {"ok": True, "request": self.sequence,
                         "surface": surface.surface, "window_count": 1}
             if focus_only:
@@ -498,11 +594,33 @@ class NativePresenter:
                 return (closed and reply == {"ok": True, "native_page": True,
                     "window_count": 1, "zoom_reset": True,
                     "external_navigation_denied": True})
+            with self._command_lock:
+                raw = process.stdout.read(8193)
+                if raw:
+                    if len(raw) > 8192 or self._release_request is not None:
+                        self._release_request = None
+                        return False
+                    reply = json.loads(raw)
+                    if (type(reply) is not dict or set(reply) != {"ok", "release_request"}
+                            or reply["ok"] is not True):
+                        return False
+                    self._release_request = native_release_request(reply["release_request"])
+                    if self._release_request is None:
+                        return False
+                self._closed_for_release = closed and self._release_request is not None
             return closed
         except (OSError, ValueError, TypeError, subprocess.SubprocessError):
             return False
         finally:
             self.close()
+
+    def take_release_request(self) -> dict | None:
+        with self._command_lock:
+            if not self._closed_for_release:
+                return None
+            request, self._release_request = self._release_request, None
+            self._closed_for_release = False
+            return request
 
     def close(self) -> None:
         with self._command_lock:

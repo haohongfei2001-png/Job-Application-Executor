@@ -5706,3 +5706,205 @@ def test_locked_bootstrap_entry_never_canonicalizes_an_unadmitted_caller_root(
     _assert_retirement_inventory(tmp_path, before)
     _assert_retirement_authority(root, db, authority)
     assert not (root / "bootstrap.json").exists()
+
+
+def _native_handoff_entry(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from executor.autonomy import runtime_paths
+    app = tmp_path / "Applications" / (consumer.APP_NAME + ".app")
+    source = app / "Contents" / "Resources" / "release"
+    module = source / "executor" / "autonomy" / "cli.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# synthetic entry routing admission only\n")
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(consumer._native_packaged_launcher())
+    root = tmp_path / "owned-task-state"
+    root.mkdir()
+    canary = root / "retained-private"
+    canary.write_bytes(b"PRIVATE_NATIVE_HANDOFF_AUTHORITY" * 1000)
+    monkeypatch.setattr(cli, "__file__", str(module))
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(cli, "_consumer_release_identity",
+                        lambda: {"packaged": True, "expected": "a" * 64})
+    monkeypatch.setattr(consumer, "_trusted_bundle", lambda p: p == app)
+    monkeypatch.setattr(runtime_paths, "default_runtime", lambda p: root)
+    return app, source, executable, root, canary
+
+
+@pytest.mark.parametrize("action", ["restore", "update"])
+def test_native_foreground_handoff_releases_real_window_lease_before_safe_stop_and_transaction(
+    tmp_path, monkeypatch, action
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from executor.autonomy import macos_host, native_reopen, state_compatibility
+    app, source, executable, root, canary = _native_handoff_entry(tmp_path, monkeypatch)
+    baseline = canary.read_bytes()
+    calls = []
+    actual_guard = state_compatibility.native_window_guard
+    @contextmanager
+    def observed_guard(authority):
+        with actual_guard(authority) as fd:
+            calls.append("lease_enter")
+            yield fd
+        calls.append("lease_exit")
+    monkeypatch.setattr(state_compatibility, "native_window_guard", observed_guard)
+    intent = ({"action": "restore"} if action == "restore" else
+              {"action": "update", "distribution": str(tmp_path / "Chosen Delivery")})
+    class Presenter:
+        def __init__(self, directory, **kwargs):
+            assert directory == source.parent / "native-host"
+            assert type(kwargs["ownership_fd"]) is int
+            calls.append("presenter")
+        def focus(self):
+            pytest.fail("handoff cannot focus another window")
+        def wait_for_close(self):
+            with pytest.raises(BlockingIOError):
+                with actual_guard(root):
+                    pytest.fail("window released its parent lease too early")
+            calls.append("window_exit")
+            return True
+        def take_release_request(self):
+            calls.append("intent")
+            return intent
+        def close(self):
+            calls.append("presenter_close")
+    class Reopen:
+        def start(self):
+            calls.append("ipc_start")
+        def close(self):
+            calls.append("ipc_close")
+    monkeypatch.setattr(macos_host, "NativePresenter", Presenter)
+    monkeypatch.setattr(native_reopen, "create_owned_reopen_server", lambda *a: Reopen())
+    monkeypatch.setattr(cli, "launch_consumer", lambda *a, **k: {"ok": True, "opened": True})
+    def stopped(authority, port):
+        assert authority == root and port == 9344
+        assert calls[-1] == "lease_exit"
+        with actual_guard(root):
+            pass
+        calls.append("stop")
+        return {"ok": True, "stopped": True}
+    monkeypatch.setattr(cli, "_stop_owned_service", stopped)
+    def transact(authority, candidate=None):
+        assert authority == root and calls[-1] == "stop"
+        assert candidate == (intent.get("distribution"))
+        with state_compatibility.task_state_guard(root):
+            pass
+        calls.append("transaction")
+        return {"ok": True, "restored" if action == "restore" else "updated": True,
+                "final_click_actor": "user", "submit_capability": False}
+    monkeypatch.setattr(cli, "restore_installed_consumer",
+        transact if action == "restore" else lambda *a: pytest.fail("update cannot restore"))
+    monkeypatch.setattr(cli, "update_installed_consumer",
+        transact if action == "update" else lambda *a: pytest.fail("restore cannot update"))
+    def reopened(command, **kwargs):
+        assert calls[-1] == "transaction"
+        from executor.autonomy.process_entry import CLI_ENTRY_SCRIPT
+        assert command == [str(app / "Contents/Resources/runtime/bin/python"),
+                           "-I", "-B", "-c", CLI_ENTRY_SCRIPT, str(source),
+                           "--runtime", str(root), "--port", "9344", "native-launch"]
+        assert kwargs["cwd"] == source
+        assert kwargs["start_new_session"] is True
+        assert all(kwargs[key] == -3 for key in ("stdin", "stdout", "stderr"))
+        with actual_guard(root), state_compatibility.task_state_guard(root):
+            pass
+        calls.append("reopen_active")
+        return object()
+    monkeypatch.setattr(cli, "subprocess", SimpleNamespace(Popen=reopened, DEVNULL=-3))
+    result = cli.launch_native_consumer(root, 9344)
+    assert calls == ["lease_enter", "presenter", "ipc_start", "window_exit", "intent",
+                     "ipc_close", "presenter_close", "lease_exit", "stop",
+                     "transaction", "reopen_active"]
+    assert result == {"ok": True, "restored" if action == "restore" else "updated": True,
+                      "final_click_actor": "user", "submit_capability": False,
+                      "reopen_requested": True}
+    assert canary.read_bytes() == baseline
+    assert not (root / "tasks.sqlite3").exists()
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("reason", [
+    "worker_active", "otp_in_flight", "runnable_task_pending",
+    "worker_stopping_at_safe_checkpoint", "service_identity_changed",
+    "service_identity_unverified", "update_in_progress",
+])
+def test_native_release_busy_or_unowned_service_never_enters_transaction_or_retries(
+    tmp_path, monkeypatch, reason
+):
+    from types import SimpleNamespace
+    app, source, executable, root, canary = _native_handoff_entry(tmp_path, monkeypatch)
+    before = canary.read_bytes()
+    calls = []
+    monkeypatch.setattr(cli, "_stop_owned_service",
+                        lambda *a: calls.append("stop") or {"ok": False, "reason": reason})
+    monkeypatch.setattr(cli, "restore_installed_consumer", lambda *a: pytest.fail("busy transaction"))
+    monkeypatch.setattr(cli, "update_installed_consumer", lambda *a: pytest.fail("busy update"))
+    monkeypatch.setattr(cli, "subprocess",
+        SimpleNamespace(Popen=lambda *a, **k: pytest.fail("busy reopen"), DEVNULL=-3))
+    result = cli.handoff_installed_consumer(root, 9344, {"action": "restore"})
+    assert result == {"ok": False, "reason": reason,
+                      "final_click_actor": "user", "submit_capability": False}
+    assert calls == ["stop"] and canary.read_bytes() == before
+    assert not (root / "worker.lock").exists()
+
+
+@pytest.mark.parametrize("fault", ["foreign_root", "checkout", "alias", "unverified", "legacy_launcher"])
+def test_native_handoff_refuses_unadmitted_installation_before_service_retirement(
+    tmp_path, monkeypatch, fault
+):
+    app, source, executable, root, canary = _native_handoff_entry(tmp_path, monkeypatch)
+    before = canary.read_bytes()
+    supplied = root
+    if fault == "foreign_root":
+        supplied = tmp_path / "other"
+    elif fault == "checkout":
+        monkeypatch.setattr(cli, "__file__", str(tmp_path / "executor/autonomy/cli.py"))
+    elif fault == "alias":
+        supplied = tmp_path / "alias"
+        supplied.symlink_to(root, target_is_directory=True)
+    elif fault == "unverified":
+        monkeypatch.setattr(cli, "_consumer_release_identity",
+                            lambda: {"packaged": True, "expected": ""})
+    elif fault == "legacy_launcher":
+        executable.write_text("unadmitted launcher")
+    monkeypatch.setattr(cli, "_stop_owned_service", lambda *a: pytest.fail("unadmitted service stop"))
+    monkeypatch.setattr(cli, "restore_installed_consumer", lambda *a: pytest.fail("unadmitted rollback"))
+    result = cli.handoff_installed_consumer(supplied, 9344, {"action": "restore"})
+    assert result["ok"] is False and result["reason"] == "native_release_installation_unverified"
+    assert canary.read_bytes() == before and not (root / "worker.lock").exists()
+
+
+@pytest.mark.parametrize("fault", ["refusal", "unconfirmed", "active_changed", "reopen_failed"])
+def test_native_handoff_never_replays_transaction_or_claims_unobserved_readiness(
+    tmp_path, monkeypatch, fault
+):
+    from types import SimpleNamespace
+    app, source, executable, root, canary = _native_handoff_entry(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(cli, "_stop_owned_service",
+                        lambda *a: calls.append("stop") or {"ok": False, "reason": "service_record_missing"})
+    def transact(authority):
+        calls.append("transaction")
+        if fault == "refusal":
+            return {"ok": False, "restored": False, "reason": "rollback_state_incompatible",
+                    "final_click_actor": "user", "submit_capability": False}
+        if fault == "unconfirmed":
+            raise OSError("PRIVATE_TRANSACTION_PATH")
+        if fault == "active_changed":
+            executable.write_text("changed activated slot")
+        return {"ok": True, "restored": True, "final_click_actor": "user", "submit_capability": False}
+    monkeypatch.setattr(cli, "restore_installed_consumer", transact)
+    def reopen(*args, **kwargs):
+        calls.append("reopen")
+        if fault == "reopen_failed":
+            raise OSError("PRIVATE_REOPEN_PATH")
+        pytest.fail("refused/changed release cannot reopen")
+    monkeypatch.setattr(cli, "subprocess", SimpleNamespace(Popen=reopen, DEVNULL=-3))
+    before = canary.read_bytes()
+    result = cli.handoff_installed_consumer(root, 9344, {"action": "restore"})
+    assert calls == ["stop", "transaction"] + (["reopen"] if fault == "reopen_failed" else [])
+    assert result.get("reopen_requested") is not True
+    assert "ready_for_live_e2e" not in result and "native_page" not in result
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+    assert canary.read_bytes() == before

@@ -1265,3 +1265,137 @@ def test_app_transaction_directory_admission_is_inert_for_ordinary_missing_path(
     destination = tmp_path / "ordinary-missing-parent" / "Applications"
     assert consumer._app_transaction_directory(destination) == destination.resolve()
     assert not destination.parent.exists()
+
+
+@pytest.mark.parametrize("value", [
+    None, [], {}, {"action": True}, {"action": "restore", "distribution": "/private"},
+    {"action": "stop"}, {"action": "update"}, {"action": "update", "distribution": None},
+    {"action": "update", "distribution": "relative"},
+    {"action": "update", "distribution": "/a\nPRIVATE_HOST_PATH"},
+    {"action": "update", "distribution": "/" + "a" * 2048},
+    {"action": "update", "distribution": "/ok", "destination": "/other"},
+    {"action": "update", "distribution": "/ok", "task_state_root": "/other"},
+])
+def test_native_release_terminal_intent_is_finite_and_never_a_task_or_destination(value):
+    from executor.autonomy.macos_host import native_release_request
+    assert native_release_request(value) is None
+
+
+@pytest.mark.parametrize("intent", [
+    {"action": "restore"}, {"action": "update", "distribution": "/Synthetic Delivery"},
+])
+def test_presenter_yields_one_release_intent_only_after_actual_child_exit(tmp_path, intent):
+    import io
+    presenter = NativePresenter(tmp_path)
+    class Child:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(json.dumps({"ok": True, "release_request": intent}) + "\n")
+            self.returncode = None
+            self.closed = False
+        def poll(self):
+            return self.returncode
+        def wait(self, **kwargs):
+            self.returncode = 0
+            self.closed = True
+            return 0
+        def terminate(self):
+            pytest.fail("normal terminal intent must not kill its owner")
+    child = Child()
+    presenter.process = child
+    assert presenter.take_release_request() is None
+    assert presenter.wait_for_close()
+    assert child.closed and child.stdin.closed and child.stdout.closed
+    assert presenter.process is None
+    assert presenter.take_release_request() == intent
+    assert presenter.take_release_request() is None
+    assert "Synthetic Delivery" not in repr(presenter)
+
+
+@pytest.mark.parametrize("raw,code", [
+    ('{"ok":true,"release_request":{"action":"restore"}}\n', 1),
+    ('{"ok":1,"release_request":{"action":"restore"}}\n', 0),
+    ('{"ok":true,"release_request":{"action":"restore","task":"private"}}\n', 0),
+    ('{"ok":true,"release_request":{"action":"restore"}}\n' * 2, 0),
+    ("PRIVATE_BAD_REPLY" * 1000, 0),
+])
+def test_presenter_never_admits_failed_ambiguous_or_oversized_terminal_stream(tmp_path, raw, code):
+    import io
+    presenter = NativePresenter(tmp_path)
+    class Child:
+        stdin = io.StringIO()
+        stdout = io.StringIO(raw)
+        def poll(self):
+            return code
+        def wait(self, **kwargs):
+            return code
+    presenter.process = Child()
+    presenter.wait_for_close()
+    assert presenter.take_release_request() is None
+    assert presenter.process is None
+
+
+def test_terminal_release_during_focus_is_retained_without_becoming_focus_ack(tmp_path, monkeypatch):
+    import io
+    from executor.autonomy import macos_host as module
+    root = _candidate(tmp_path)
+    surface = ConsumerSurface.dashboard(43210, "PRIVATE_FOCUS_RELEASE")
+    event = {"ok": True, "release_request": {"action": "restore"}}
+    class Child:
+        stdin = io.StringIO()
+        stdout = io.StringIO(json.dumps(event) + "\n")
+        returncode = None
+        def poll(self):
+            return self.returncode
+        def wait(self, **kwargs):
+            self.returncode = 0
+            return 0
+        def terminate(self):
+            pytest.fail("focus cannot kill a terminal release owner")
+    presenter = NativePresenter(root)
+    presenter.process = Child()
+    presenter.current_surface = surface
+    monkeypatch.setattr(module.sys, "platform", "darwin")
+    monkeypatch.setattr(module.select, "select", lambda readers, *args: (readers, [], []))
+    assert not presenter.focus()
+    assert presenter.take_release_request() is None
+    assert presenter.wait_for_close()
+    assert presenter.take_release_request() == {"action": "restore"}
+
+
+def test_hosted_mac_actual_menu_handoff_exits_one_window_without_service_or_task_action(compiled_host):
+    from executor.autonomy.loopback_http import LoopbackHTTPServer
+    state = {"pages": 0, "writes": 0}
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+        def do_GET(self):
+            state["pages"] += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<html><body>SYNTHETIC_RELEASE_MENU</body></html>")
+        def do_POST(self):
+            state["writes"] += 1
+            self.send_response(403)
+            self.end_headers()
+    server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        surface = ConsumerSurface.dashboard(server.server_port, "PRIVATE_RELEASE_MENU_TICKET")
+        result = subprocess.run([str(compiled_host / "AIApplicationWindow"), "--release-smoke"],
+            input=json.dumps(native_command(surface, 1)) + "\n",
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=25)
+        assert result.returncode == 0
+        replies = [json.loads(line) for line in result.stdout.splitlines()]
+        assert replies == [
+            {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1},
+            {"ok": True, "release_request": {"action": "restore"}},
+        ]
+        assert state == {"pages": 1, "writes": 0}
+        assert "PRIVATE_" not in result.stdout
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)

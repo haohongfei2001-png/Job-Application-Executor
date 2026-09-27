@@ -469,6 +469,70 @@ def update_installed_consumer(root, distribution):
                 "reason": "update_unconfirmed", **boundary}
 
 
+
+def handoff_installed_consumer(root, port, release_request):
+    """One explicit native intent after both presenter and window lease close.
+
+    Stop only the authenticated exact safe-checkpoint service, then reuse the
+    admitted cold transaction. Reopen uses the activated app's own launcher,
+    never the old interpreter/source or a web-origin command.
+    """
+    boundary = {"final_click_actor": "user", "submit_capability": False}
+    from .macos_host import native_release_request
+    intent = native_release_request(release_request)
+    if intent is None:
+        return {"ok": False, "reason": "native_release_intent_invalid", **boundary}
+    try:
+        from .consumer import APP_NAME, _trusted_bundle, _native_packaged_launcher
+        from .runtime_paths import default_runtime
+        source = Path(__file__).absolute().parents[2]
+        app = source.parent.parent.parent
+        executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+        observed_root = Path(root).expanduser().absolute()
+        identity = _consumer_release_identity()
+        expected = identity.get("expected")
+        if (sys.platform != "darwin" or app.name != APP_NAME + ".app"
+                or source != app / "Contents" / "Resources" / "release"
+                or any(p.is_symlink() for p in (source, *source.parents,
+                                                observed_root, *observed_root.parents))
+                or identity.get("packaged") is not True
+                or type(expected) is not str or len(expected) != 64
+                or any(c not in "0123456789abcdef" for c in expected)
+                or observed_root != Path(default_runtime(source)).expanduser().absolute()
+                or not _trusted_bundle(app)
+                or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
+            return {"ok": False, "reason": "native_release_installation_unverified", **boundary}
+        stopped = _stop_owned_service(observed_root, port)
+        if (stopped.get("ok") is not True
+                and stopped.get("reason") != "service_record_missing"):
+            # Busy tasks/OTP/UNKNOWN writes cannot become an update retry.
+            return {"ok": False, "reason": stopped.get("reason", "service_stop_refused"), **boundary}
+        result = (restore_installed_consumer(observed_root) if intent["action"] == "restore"
+                  else update_installed_consumer(observed_root, intent["distribution"]))
+        completed = "restored" if intent["action"] == "restore" else "updated"
+        if type(result) is not dict or result.get("ok") is not True or result.get(completed) is not True:
+            return result if type(result) is dict else {
+                "ok": False, "reason": "native_release_unconfirmed", **boundary}
+        # Read back the actual activated slot. A launch request is not a claim
+        # of window/service readiness, signing or consumer certification.
+        if (not _trusted_bundle(app)
+                or any(p.is_symlink() for p in (app, *app.parents))
+                or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
+            return {**result, "reopen_requested": False, "reason": "activated_app_unverified"}
+        try:
+            from .process_entry import CLI_ENTRY_SCRIPT
+            active_python = app / "Contents" / "Resources" / "runtime" / "bin" / "python"
+            subprocess.Popen([str(active_python), "-I", "-B", "-c", CLI_ENTRY_SCRIPT,
+                str(source), "--runtime", str(observed_root), "--port", str(port),
+                "native-launch"], cwd=source, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except (OSError, ValueError):
+            return {**result, "reopen_requested": False, "reason": "activated_app_reopen_failed"}
+        return {**result, "reopen_requested": True}
+    except Exception:
+        return {"ok": False, "reason": "native_release_unconfirmed", **boundary}
+
+
 def launch_native_consumer(root, port, *, smoke=False):
     """Run the owned installed app through one verified native presenter."""
     from .consumer import _native_packaged_launcher, _trusted_bundle
@@ -484,6 +548,8 @@ def launch_native_consumer(root, port, *, smoke=False):
     from .state_compatibility import native_window_guard
     from .native_reopen import create_owned_reopen_server, request_owned_focus
 
+    release_request = None
+    result = None
     try:
         # Acquire before service startup or issuing a UI ticket. A duplicate
         # invocation has no authority to reload the existing unsent workbench.
@@ -496,9 +562,11 @@ def launch_native_consumer(root, port, *, smoke=False):
                 result = launch_consumer(root, port, presenter=presenter)
                 opened = result.get("opened") is True and result.get("ok") is True
                 closed = presenter.wait_for_close() if opened else False
-                return {"ok": opened and closed, "opened": opened,
-                        "native_window": opened, "native_page": closed if smoke else None,
-                        "final_click_actor": "user"}
+                if opened and closed and not smoke:
+                    release_request = presenter.take_release_request()
+                result = {"ok": opened and closed, "opened": opened,
+                          "native_window": opened, "native_page": closed if smoke else None,
+                          "final_click_actor": "user"}
             finally:
                 reopen.close()
                 presenter.close()
@@ -509,6 +577,9 @@ def launch_native_consumer(root, port, *, smoke=False):
         return {"ok": False, "opened": False, "reason": "native_window_already_open"}
     except (OSError, ValueError):
         return {"ok": False, "opened": False, "reason": "native_window_state_invalid"}
+    if release_request is not None:
+        return handoff_installed_consumer(root, port, release_request)
+    return result
 
 
 def main(argv=None):
