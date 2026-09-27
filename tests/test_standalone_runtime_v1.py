@@ -218,6 +218,8 @@ def test_actual_loaded_runtime_provenance_reports_owned_process_and_refuses_cont
     private.mkdir()
     (private / "not-imported.py").write_text("PRIVATE_CREDENTIAL_CANARY")
     private_before = (private / "not-imported.py").read_bytes()
+    (private / "synthetic-import.py").write_text("VALUE = 42\n", encoding="utf-8")
+    (private / "synthetic_namespace").mkdir()
     # Real imported product/dependencies; an explicit diagnostic does not load
     # a provider, credential process, browser driver or applicant journal.
     script = r"""import json,pathlib,sys,types
@@ -236,6 +238,30 @@ if mode=="external_module":
     injected=types.ModuleType("synthetic_external_loaded")
     injected.__file__=str(private/"not-imported.py")
     sys.modules[injected.__name__]=injected
+elif mode in ("masked_loader_origin","missing_advertised_origin"):
+    import importlib.util
+    spec=importlib.util.spec_from_file_location("synthetic_loader_import",private/"synthetic-import.py")
+    injected=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=injected
+    spec.loader.exec_module(injected)
+    assert injected.VALUE==42
+    if mode=="masked_loader_origin":
+        injected.__file__=str(release/"executor"/"__init__.py")
+    else:
+        del injected.__file__
+elif mode=="masked_namespace_spec":
+    import importlib
+    sys.path.append(str(private))
+    try:
+        injected=importlib.import_module("synthetic_namespace")
+    finally:
+        sys.path.pop()
+    # Preserve real loader-observed search locations independently of the
+    # subsequently mutable advertised namespace path.
+    observed=tuple(injected.__spec__.submodule_search_locations)
+    assert observed==(str(private/"synthetic_namespace"),)
+    injected.__spec__.submodule_search_locations=list(observed)
+    injected.__path__=[str(release/"executor")]
 elif mode=="external_search":
     sys.path.append(str(private))
 elif mode=="empty_search":
@@ -258,10 +284,12 @@ finally:
     if restore:
         restore[0].write_bytes(restore[1])
 """
-    # Preserve the complete fixture once across eight independent cold processes.
+    # Preserve the complete fixture once: all original eight cold processes plus
+    # three real loaded-origin regressions, without another runtime copy/build.
     results = {}
     modes = ("owned", "external_module", "external_search", "empty_search",
-             "namespace", "startup_drift", "dependency_payload", "nonisolated")
+             "namespace", "startup_drift", "dependency_payload", "nonisolated",
+             "masked_loader_origin", "missing_advertised_origin", "masked_namespace_spec")
     for mode in modes:
         command = [str(runtime / "bin" / "python")]
         if mode != "nonisolated":
@@ -300,7 +328,84 @@ finally:
     assert results["startup_drift"]["source_matches_startup"] is False
     assert results["dependency_payload"]["dependency_lock_matches"] is False
     assert results["nonisolated"]["isolated_interpreter"] is False
+    for mode in ("masked_loader_origin", "missing_advertised_origin", "masked_namespace_spec"):
+        assert results[mode]["loaded_modules_owned"] is False
     assert verify_runtime_candidate(runtime, repo)
     assert (private / "not-imported.py").read_bytes() == private_before
     assert not any(path.name in {"tasks.sqlite3", "auth.token", "service.json"}
                    for path in resources.rglob("*"))
+
+
+
+@pytest.mark.parametrize("defect", [
+    "owned", "no_advertised", "builtin", "frozen", "namespace_owned",
+    "foreign_file", "foreign_origin", "missing_file_foreign_origin",
+    "relative_origin", "empty_origin", "foreign_namespace", "foreign_spec_namespace",
+    "builtin_wrong_loader", "frozen_wrong_loader", "malformed_file",
+    "malformed_origin", "malformed_namespace", "malformed_spec_namespace",
+])
+def test_module_origin_contract_checks_advertised_and_loader_metadata_independently(
+    tmp_path, defect
+):
+    """Pure metadata boundary, separate from the real-runtime positive above."""
+    import types
+    from importlib.machinery import BuiltinImporter, FrozenImporter, ModuleSpec
+    from executor.autonomy.runtime_provenance import _module_origins_owned
+
+    owned = tmp_path / "owned"
+    foreign = tmp_path / "PRIVATE_FOREIGN"
+    owned.mkdir()
+    foreign.mkdir()
+    module = types.ModuleType("synthetic_origin")
+    path = str(owned / "module.py")
+    module.__file__ = path
+    module.__spec__ = ModuleSpec(module.__name__, loader=None, origin=path)
+    positive = defect in {"owned", "no_advertised", "builtin", "frozen", "namespace_owned"}
+    if defect == "no_advertised":
+        del module.__file__
+    elif defect in {"builtin", "frozen", "builtin_wrong_loader", "frozen_wrong_loader"}:
+        del module.__file__
+        frozen = defect.startswith("frozen")
+        module.__spec__.origin = "frozen" if frozen else "built-in"
+        module.__spec__.loader = (
+            FrozenImporter if frozen else BuiltinImporter
+        ) if positive else object()
+    elif defect == "namespace_owned":
+        del module.__file__
+        module.__path__ = [str(owned)]
+        module.__spec__.origin = None
+        module.__spec__.submodule_search_locations = [str(owned)]
+    elif defect == "foreign_file":
+        module.__file__ = str(foreign / "module.py")
+    elif defect in {"foreign_origin", "missing_file_foreign_origin"}:
+        module.__spec__.origin = str(foreign / "module.py")
+        if defect == "missing_file_foreign_origin":
+            del module.__file__
+    elif defect == "relative_origin":
+        module.__spec__.origin = "relative.py"
+    elif defect == "empty_origin":
+        module.__spec__.origin = ""
+    elif defect == "foreign_namespace":
+        module.__path__ = [str(foreign)]
+    elif defect == "foreign_spec_namespace":
+        module.__path__ = [str(owned)]
+        module.__spec__.submodule_search_locations = [str(foreign)]
+    elif defect == "malformed_file":
+        module.__file__ = 42
+    elif defect == "malformed_origin":
+        module.__spec__.origin = 42
+    elif defect == "malformed_namespace":
+        module.__path__ = [42]
+    elif defect == "malformed_spec_namespace":
+        module.__spec__.submodule_search_locations = [42]
+
+    observations = []
+    def inside(value):
+        observations.append(value)
+        return isinstance(value, str) and Path(value).is_absolute() and Path(value).is_relative_to(owned)
+
+    assert _module_origins_owned(module, inside) is positive
+    if defect in {"foreign_origin", "missing_file_foreign_origin", "foreign_spec_namespace"}:
+        assert any(isinstance(value, str) and "PRIVATE_FOREIGN" in value for value in observations)
+    assert list(foreign.iterdir()) == []
+

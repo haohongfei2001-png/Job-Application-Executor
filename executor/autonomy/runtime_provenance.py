@@ -98,6 +98,64 @@ def packaged_provenance(repo_root: str | Path) -> dict | None:
     return report
 
 
+
+
+def _module_origins_owned(module, inside) -> bool:
+    """One observed module; inside is the caller's fixed ownership predicate."""
+    from importlib.machinery import BuiltinImporter, FrozenImporter
+
+    advertised = getattr(module, "__file__", None)
+    if advertised is not None and not inside(advertised):
+        return False
+    namespace = getattr(module, "__path__", ())
+    if any(not inside(path) for path in tuple(namespace)):
+        return False
+    spec = getattr(module, "__spec__", None)
+    if spec is None:
+        # Dynamic builtin submodules may lack a spec; absence supplies no new
+        # positive file origin or dependency evidence.
+        return True
+    origin = getattr(spec, "origin", None)
+    if origin in ("built-in", "frozen"):
+        expected = BuiltinImporter if origin == "built-in" else FrozenImporter
+        if getattr(spec, "loader", None) is not expected:
+            return False
+    elif origin is not None and not inside(origin):
+        return False
+    locations = getattr(spec, "submodule_search_locations", None)
+    return locations is None or all(inside(path) for path in tuple(locations))
+
+
+def _loaded_module_origins_owned(root: Path, release: Path) -> bool:
+    """Read advertised and loader origins; no dependency execution or echoes.
+
+    __file__ is mutable and may be removed or redirected after a real import.
+    Namespace __path__ and ModuleSpec search locations are independent metadata.
+    An owned advertised path never overrides a foreign loader observation.
+    """
+    def inside(path):
+        if not isinstance(path, str) or not path:
+            return False
+        value = Path(path)
+        if (not value.is_absolute()
+                or any(item.is_symlink() for item in (value, *value.parents))):
+            return False
+        resolved = value.resolve()
+        return resolved.is_relative_to(root) or resolved.is_relative_to(release)
+
+    try:
+        for module in tuple(sys.modules.values()):
+            if module is None:
+                continue
+            if not _module_origins_owned(module, inside):
+                return False
+        package = sys.modules.get("executor")
+        expected = str(release / "executor" / "__init__.py")
+        return (package is not None and getattr(package, "__file__", None) == expected
+                and getattr(getattr(package, "__spec__", None), "origin", None) == expected)
+    except (OSError, UnicodeError, ValueError, RuntimeError, TypeError, AttributeError):
+        return False
+
 def loaded_process_provenance(repo_root: str | Path, *, source_identity: dict) -> dict | None:
     """Observe this process, never infer loaded provenance from payload hashes.
 
@@ -156,22 +214,7 @@ def loaded_process_provenance(repo_root: str | Path, *, source_identity: dict) -
         # Snapshot without importing missing modules or invoking provider code.
         # Builtin/frozen modules have no filesystem origin. Namespace search
         # paths must also stay owned; an empty path is never the current folder.
-        def modules_owned():
-            for module in tuple(sys.modules.values()):
-                if module is None:
-                    continue
-                origin = getattr(module, "__file__", None)
-                if origin is not None and (
-                        not isinstance(origin, str) or not origin
-                        or not inside(origin, allow_release=True)):
-                    return False
-                namespace = getattr(module, "__path__", ())
-                if any(not inside(path, allow_release=True) for path in tuple(namespace)):
-                    return False
-            package = sys.modules.get("executor")
-            return (package is not None
-                    and getattr(package, "__file__", None) == str(release / "executor" / "__init__.py"))
-        report["loaded_modules_owned"] = modules_owned()
+        report["loaded_modules_owned"] = _loaded_module_origins_owned(root, release)
         # Hash/check dependencies only on the explicit diagnostic path and only
         # after process ownership passes. No repeated full-runtime health hash.
         checks = ("isolated_interpreter", "interpreter_owned", "stdlib_owned",
@@ -179,7 +222,7 @@ def loaded_process_provenance(repo_root: str | Path, *, source_identity: dict) -
         if all(report[key] for key in checks):
             from .release import installed_dependencies_match
             report["dependency_lock_matches"] = installed_dependencies_match(release) is True
-            report["loaded_modules_owned"] = modules_owned()
+            report["loaded_modules_owned"] = _loaded_module_origins_owned(root, release)
             report["search_paths_owned"] = bool(sys.path) and all(
                 inside(path, allow_release=True) for path in tuple(sys.path))
         # Re-admit the source after inspecting actual loaded dependency payloads.

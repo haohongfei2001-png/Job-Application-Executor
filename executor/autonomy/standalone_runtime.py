@@ -41,11 +41,8 @@ try:
     with sync_playwright() as driver:
         assert driver.chromium.name == 'chromium'
     stage=14
-    for module in tuple(sys.modules.values()):
-        origin=getattr(module,'__file__',None)
-        if origin:
-            path=pathlib.Path(origin).resolve()
-            assert path.is_relative_to(root) or path.is_relative_to(release)
+    from executor.autonomy.runtime_provenance import _loaded_module_origins_owned
+    assert _loaded_module_origins_owned(root,release)
     stage=15
     images=[]
     if sys.platform=='darwin':
