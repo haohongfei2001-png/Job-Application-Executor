@@ -518,7 +518,8 @@ def handoff_installed_consumer(root, port, release_request):
         if (not _trusted_bundle(app)
                 or any(p.is_symlink() for p in (app, *app.parents))
                 or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
-            return {**result, "reopen_requested": False, "reason": "activated_app_unverified"}
+            return {"ok": False, completed: False, "reopen_requested": False,
+                    "reason": "activated_app_unverified", **boundary}
         try:
             from .process_entry import CLI_ENTRY_SCRIPT
             active_python = app / "Contents" / "Resources" / "runtime" / "bin" / "python"

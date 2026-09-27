@@ -5978,3 +5978,49 @@ def test_hardlinked_legacy_lock_cannot_certify_an_empty_old_authority(tmp_path, 
     assert "PRIVATE_" not in json.dumps(result)
     assert not (apps / (consumer.APP_NAME + ".app")).exists()
     assert not (apps / ("." + consumer.APP_NAME + ".app.installing")).exists()
+
+
+@pytest.mark.parametrize("action", ["restore", "update"])
+@pytest.mark.parametrize("fault", ["launcher_changed", "bundle_alias"])
+def test_native_handoff_never_claims_completion_after_activated_slot_loses_authority(
+    tmp_path, monkeypatch, action, fault
+):
+    from types import SimpleNamespace
+    app, source, executable, root, canary = _native_handoff_entry(tmp_path, monkeypatch)
+    before = canary.read_bytes()
+    calls = []
+
+    def stopped(authority, port):
+        assert authority == root and port == 9344
+        calls.append("stop")
+        return {"ok": False, "reason": "service_record_missing"}
+    monkeypatch.setattr(cli, "_stop_owned_service", stopped)
+
+    distribution = str(tmp_path / "Chosen Delivery")
+    def transact(authority, candidate=None):
+        assert authority == root and candidate == (distribution if action == "update" else None)
+        calls.append("transaction")
+        if fault == "launcher_changed":
+            executable.write_text("changed activated slot")
+        else:
+            retained = tmp_path / "retained-altered-app"
+            app.rename(retained)
+            app.symlink_to(retained, target_is_directory=True)
+        return {"ok": True, "restored" if action == "restore" else "updated": True,
+                "final_click_actor": "user", "submit_capability": False}
+    monkeypatch.setattr(cli, "restore_installed_consumer",
+        transact if action == "restore" else lambda *args: pytest.fail("restore replay"))
+    monkeypatch.setattr(cli, "update_installed_consumer",
+        transact if action == "update" else lambda *args: pytest.fail("update replay"))
+    monkeypatch.setattr(cli, "subprocess", SimpleNamespace(
+        Popen=lambda *args, **kwargs: pytest.fail("unverified slot reopened"), DEVNULL=-3))
+
+    intent = ({"action": "restore"} if action == "restore" else
+              {"action": "update", "distribution": distribution})
+    result = cli.handoff_installed_consumer(root, 9344, intent)
+    assert calls == ["stop", "transaction"]
+    assert result == {"ok": False, "restored" if action == "restore" else "updated": False,
+                      "reopen_requested": False, "reason": "activated_app_unverified",
+                      "final_click_actor": "user", "submit_capability": False}
+    assert canary.read_bytes() == before
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
