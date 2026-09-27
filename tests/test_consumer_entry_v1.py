@@ -4991,3 +4991,191 @@ def test_installed_restore_cannot_substitute_another_task_authority(tmp_path, mo
         assert not observed.exists()
     if fault == "alternate_private":
         assert (observed / "private.txt").read_text() == "PRIVATE_ALTERNATE_AUTHORITY"
+
+def _installed_update_entry_fixture(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from executor.autonomy.runtime_paths import default_runtime
+    from executor.autonomy import app_distribution
+    monkeypatch.setenv("HOME", str(tmp_path / "Synthetic Home"))
+    app = tmp_path / "Applications" / (consumer.APP_NAME + ".app")
+    source = app / "Contents" / "Resources" / "release"
+    module = source / "executor" / "autonomy" / "cli.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# synthetic installed routing fixture\n")
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(consumer._native_packaged_launcher())
+    identity = {"packaged": True, "expected": "a" * 64}
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(cli, "__file__", str(module))
+    monkeypatch.setattr(cli, "_consumer_release_identity", lambda: identity)
+    monkeypatch.setattr(consumer, "_trusted_bundle", lambda _: True)
+    root = default_runtime(source)
+    delivery = tmp_path / "Chosen Public Delivery"
+    delivery.mkdir()
+    (delivery / "receipt-canary").write_text("PUBLIC_DELIVERY_PRESERVE")
+    return app, source, root, delivery, identity, app_distribution
+
+
+def test_installed_update_routes_one_delivery_to_its_own_app_and_task_authority(tmp_path, monkeypatch):
+    app, source, root, delivery, _identity, distribution = _installed_update_entry_fixture(
+        tmp_path, monkeypatch)
+    calls = []
+    def transaction(candidate, *, destination, task_state_root):
+        calls.append((candidate, destination, task_state_root))
+        return {"ok": True, "installed": True, "replaced": True,
+                "app_path": "PRIVATE_APP", "task_state_backup": {"path": "PRIVATE_BACKUP"}}
+    monkeypatch.setattr(distribution, "install_macos_distribution", transaction)
+    result = cli.update_installed_consumer(root, delivery)
+    assert calls == [(delivery, app.parent, root)]
+    assert result == {"ok": True, "updated": True, "final_click_actor": "user",
+                      "submit_capability": False}
+    assert not root.exists()
+    assert (delivery / "receipt-canary").read_text() == "PUBLIC_DELIVERY_PRESERVE"
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("fault", [
+    "platform", "checkout", "unverified", "digest_bool", "digest_mutable",
+    "source_alias", "untrusted", "legacy_launcher", "alternate_empty",
+    "alternate_private", "state_alias", "ancestor_alias",
+    "candidate_relative", "candidate_alias", "candidate_ancestor_alias",
+])
+def test_installed_update_refuses_substituted_authorities_before_intake_or_locks(
+    tmp_path, monkeypatch, fault
+):
+    from types import SimpleNamespace
+    app, source, root, delivery, identity, distribution = _installed_update_entry_fixture(
+        tmp_path, monkeypatch)
+    root.mkdir(parents=True)
+    sentinel = root / "private-state"
+    sentinel.write_bytes(b"PRIVATE_CURRENT_AUTHORITY")
+    supplied_root, supplied_delivery = root, delivery
+    if fault == "platform":
+        monkeypatch.setattr(cli, "sys", SimpleNamespace(platform="linux"))
+    elif fault == "checkout":
+        monkeypatch.setattr(cli, "__file__", str(tmp_path / "repo/executor/autonomy/cli.py"))
+    elif fault == "unverified":
+        identity["packaged"] = False
+    elif fault == "digest_bool":
+        identity["expected"] = True
+    elif fault == "digest_mutable":
+        identity["expected"] = "main"
+    elif fault == "source_alias":
+        alias = tmp_path / "source-alias"
+        alias.symlink_to(source, target_is_directory=True)
+        monkeypatch.setattr(cli, "__file__", str(alias / "executor/autonomy/cli.py"))
+    elif fault == "untrusted":
+        monkeypatch.setattr(consumer, "_trusted_bundle", lambda _: False)
+    elif fault == "legacy_launcher":
+        (app / "Contents/MacOS/AIApplicationManager").write_text(
+            consumer._legacy_launcher(tmp_path / "Job-Application-Executor"))
+    elif fault in {"alternate_empty", "alternate_private"}:
+        supplied_root = tmp_path / "alternate"
+        if fault == "alternate_private":
+            supplied_root.mkdir()
+            (supplied_root / "private-state").write_bytes(b"PRIVATE_ALTERNATE_AUTHORITY")
+    elif fault == "state_alias":
+        retained = tmp_path / "retained-current"
+        root.rename(retained)
+        root.symlink_to(retained, target_is_directory=True)
+    elif fault == "ancestor_alias":
+        retained = tmp_path / "retained-parent"
+        root.parent.rename(retained)
+        root.parent.symlink_to(retained, target_is_directory=True)
+    elif fault == "candidate_relative":
+        supplied_delivery = Path("relative-delivery")
+    elif fault == "candidate_alias":
+        supplied_delivery = tmp_path / "delivery-alias"
+        supplied_delivery.symlink_to(delivery, target_is_directory=True)
+    elif fault == "candidate_ancestor_alias":
+        ancestor = tmp_path / "delivery-parent-alias"
+        ancestor.symlink_to(tmp_path, target_is_directory=True)
+        supplied_delivery = ancestor / delivery.name
+    from executor.autonomy import state_compatibility
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unadmitted authority reached intake, task locks or activation")
+    monkeypatch.setattr(distribution, "install_macos_distribution", forbidden)
+    monkeypatch.setattr(state_compatibility, "_private_lock_fd", forbidden)
+    monkeypatch.setattr(cli, "lifecycle", forbidden)
+    before = sentinel.read_bytes()
+    result = cli.update_installed_consumer(supplied_root, supplied_delivery)
+    expected = ("macos_required" if fault == "platform" else
+                "installed_update_state_unverified" if fault in {
+                    "alternate_empty", "alternate_private", "state_alias", "ancestor_alias"} else
+                "distribution_candidate_invalid" if fault.startswith("candidate_") else
+                "installed_update_unverified")
+    assert result == {"ok": False, "updated": False, "reason": expected,
+                      "final_click_actor": "user", "submit_capability": False}
+    assert sentinel.read_bytes() == before
+    assert not (root / "native-window.lock").exists()
+    assert not (root / "worker.lock").exists()
+    assert not (root / "migration.lock").exists()
+    assert not (app.parent / ("." + consumer.APP_NAME + ".app.transaction.lock")).exists()
+    assert (delivery / "receipt-canary").read_text() == "PUBLIC_DELIVERY_PRESERVE"
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+    if fault == "alternate_empty":
+        assert not supplied_root.exists()
+    if fault == "alternate_private":
+        assert (supplied_root / "private-state").read_bytes() == b"PRIVATE_ALTERNATE_AUTHORITY"
+
+
+@pytest.mark.parametrize("outcome", [
+    {"ok": False, "reason": "task_state_in_use"},
+    {"ok": False, "reason": "update_in_progress"},
+    {"ok": False, "reason": "distribution_candidate_invalid"},
+    {"ok": False, "reason": "manual_recovery_required"},
+    {"ok": False, "reason": "PRIVATE_REASON", "path": "PRIVATE_PATH"},
+    {"ok": 1, "installed": True, "replaced": True},
+    {"ok": True, "installed": 1, "replaced": True},
+    {"ok": True, "installed": True, "replaced": 1},
+    {"ok": True, "installed": True, "replaced": False},
+    None, "exception",
+])
+def test_installed_update_has_one_finite_private_safe_outcome_without_replay(
+    tmp_path, monkeypatch, outcome
+):
+    app, _source, root, delivery, _identity, distribution = _installed_update_entry_fixture(
+        tmp_path, monkeypatch)
+    calls = []
+    def transaction(candidate, *, destination, task_state_root):
+        calls.append((candidate, destination, task_state_root))
+        if outcome == "exception":
+            raise OSError("PRIVATE_MOVE_EXCEPTION")
+        return outcome
+    monkeypatch.setattr(distribution, "install_macos_distribution", transaction)
+    result = cli.update_installed_consumer(root, delivery)
+    assert calls == [(delivery, app.parent, root)]
+    reason = outcome.get("reason") if type(outcome) is dict else None
+    known = {"task_state_in_use", "update_in_progress", "distribution_candidate_invalid",
+             "manual_recovery_required"}
+    assert result == {"ok": False, "updated": False,
+                      "reason": reason if reason in known else "update_unconfirmed",
+                      "final_click_actor": "user", "submit_capability": False}
+    assert not root.exists()
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+
+
+def test_native_update_is_explicit_and_exclusive_without_launch_restore_or_restart(
+    tmp_path, monkeypatch, capsys
+):
+    calls = []
+    receipt = {"ok": True, "updated": True, "final_click_actor": "user",
+               "submit_capability": False}
+    monkeypatch.setattr(cli, "update_installed_consumer",
+                        lambda root, candidate: calls.append((root, candidate)) or receipt)
+    monkeypatch.setattr(cli, "restore_installed_consumer",
+                        lambda *_: pytest.fail("update cannot become rollback"))
+    monkeypatch.setattr(cli, "launch_native_consumer",
+                        lambda *a, **kw: pytest.fail("update cannot start a service/window"))
+    delivery = tmp_path / "Chosen Delivery"
+    assert cli.main(["--runtime", str(tmp_path), "native-launch",
+                     "--update-distribution", str(delivery)]) == 0
+    assert calls == [(tmp_path, delivery)]
+    calls.clear()
+    for conflicting in ("--restore-previous", "--native-smoke"):
+        with pytest.raises(SystemExit) as error:
+            cli.main(["--runtime", str(tmp_path), "native-launch", conflicting,
+                      "--update-distribution", str(delivery)])
+        assert error.value.code == 2 and calls == []
+    assert '"updated": true' in capsys.readouterr().out

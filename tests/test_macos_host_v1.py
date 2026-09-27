@@ -1020,6 +1020,29 @@ def test_hosted_mac_prebuilt_delivery_updates_rolls_back_and_reopens_without_com
     assert private_bytes() == actual_bytes
     active = consumer.install_macos_bundle(current, destination=apps, task_state_root=state)
     assert active["reason"] == "bundle_candidate_is_active"
+    # Run the real installed entry in its owned isolated Python. This fixture
+    # deliberately uses an explicit synthetic authority, not the user's default:
+    # the new installed updater must refuse substitution before archive intake.
+    from executor.autonomy.process_entry import CLI_ENTRY_SCRIPT
+    import os
+    owned_update_python = current / "Contents/Resources/runtime/bin/python"
+    refusal = subprocess.run([
+        str(owned_update_python), "-I", "-B", "-c", CLI_ENTRY_SCRIPT,
+        str(current_source), "--runtime", str(state), "native-launch",
+        "--update-distribution", str(delivery)],
+        cwd=tmp_path, env={**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated",
+                          "BROWSER": "/usr/bin/false"},
+        capture_output=True, text=True, timeout=30)
+    assert refusal.returncode == 1
+    assert json.loads(refusal.stdout) == {
+        "ok": False, "updated": False, "reason": "installed_update_state_unverified",
+        "final_click_actor": "user", "submit_capability": False}
+    assert private_key.decode() not in refusal.stdout + refusal.stderr
+    assert str(state) not in refusal.stdout and str(delivery) not in refusal.stdout
+    assert source_manifest(current_source) == initial
+    assert consumer._trusted_bundle(current) and tasks() == before
+    assert private_bytes() == actual_bytes
+    assert not (apps / ("." + consumer.APP_NAME + ".app.previous")).exists()
     # A genuinely different complete source version retains the exact same
     # compiled HOST_SOURCE contract, so no compiler is needed for this update.
     replacement = tmp_path / "replacement-source"

@@ -408,4 +408,3 @@ def test_module_origin_contract_checks_advertised_and_loader_metadata_independen
     if defect in {"foreign_origin", "missing_file_foreign_origin", "foreign_spec_namespace"}:
         assert any(isinstance(value, str) and "PRIVATE_FOREIGN" in value for value in observations)
     assert list(foreign.iterdir()) == []
-

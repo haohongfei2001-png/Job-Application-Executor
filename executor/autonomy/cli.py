@@ -367,6 +367,81 @@ def restore_installed_consumer(root):
                 "reason": "restore_unconfirmed", **boundary}
 
 
+def update_installed_consumer(root, distribution):
+    """Explicit installed-app update through the existing delivery transaction.
+
+    Only the candidate delivery is selectable. App destination and task authority
+    derive from this admitted installation, never from a browser/request path.
+    No service retirement, provider, window, download, Git update or retry.
+    """
+    boundary = {"final_click_actor": "user", "submit_capability": False}
+    if sys.platform != "darwin":
+        return {"ok": False, "updated": False, "reason": "macos_required", **boundary}
+    try:
+        from .consumer import (
+            APP_NAME, _trusted_bundle, _native_packaged_launcher, _packaged_launcher,
+        )
+        source = Path(__file__).absolute().parents[2]
+        app = source.parent.parent.parent
+        executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+        identity = _consumer_release_identity()
+        expected = identity.get("expected")
+        if (app.name != APP_NAME + ".app"
+                or source != app / "Contents" / "Resources" / "release"
+                or any(path.is_symlink() for path in (source, *source.parents))
+                or identity.get("packaged") is not True
+                or type(expected) is not str or len(expected) != 64
+                or any(c not in "0123456789abcdef" for c in expected)
+                or not _trusted_bundle(app)
+                or executable.read_text(encoding="utf-8") not in {
+                    _packaged_launcher(), _native_packaged_launcher()}):
+            return {"ok": False, "updated": False,
+                    "reason": "installed_update_unverified", **boundary}
+        from .runtime_paths import default_runtime
+        expected_root = Path(default_runtime(source)).expanduser().absolute()
+        observed_root = Path(root).expanduser().absolute()
+        if (observed_root != expected_root
+                or any(path.is_symlink() for path in (observed_root, *observed_root.parents))):
+            return {"ok": False, "updated": False,
+                    "reason": "installed_update_state_unverified", **boundary}
+        candidate = Path(distribution).expanduser()
+        if (not candidate.is_absolute()
+                or any(path.is_symlink() for path in (candidate, *candidate.parents))):
+            return {"ok": False, "updated": False,
+                    "reason": "distribution_candidate_invalid", **boundary}
+        from .app_distribution import install_macos_distribution
+        # Complete archive/receipt/source/runtime admission and the original
+        # app/native/worker/migration locks, WAL backup, health, activation and
+        # compensation remain inside the existing installer. No force takeover.
+        result = install_macos_distribution(candidate, destination=app.parent,
+                                            task_state_root=observed_root)
+        if (type(result) is dict and result.get("ok") is True
+                and result.get("installed") is True and result.get("replaced") is True):
+            return {"ok": True, "updated": True, **boundary}
+        reason = result.get("reason") if type(result) is dict else None
+        reasons = {
+            "distribution_candidate_invalid", "bundle_candidate_invalid",
+            "bundle_candidate_is_active", "update_in_progress", "update_lock_unavailable",
+            "task_state_in_use", "task_state_unavailable", "untrusted_app_path",
+            "current_identity_unverified", "legacy_state_migration_required",
+            "legacy_state_unavailable", "staging_pending", "source_snapshot_failed",
+            "runtime_snapshot_failed", "native_candidate_failed", "candidate_invalid",
+            "candidate_identity_unverified", "candidate_start_failed", "rollback_pending",
+            "failed_candidate_pending", "candidate_state_incompatible",
+            "activation_identity_changed", "rollback_required", "activation_failed",
+            "post_activation_recovery_required", "post_activation_unhealthy",
+            "manual_recovery_required",
+        }
+        return {"ok": False, "updated": False,
+                "reason": reason if type(reason) is str and reason in reasons
+                else "update_unconfirmed", **boundary}
+    except Exception:
+        # A move may already have happened. Preserve the installer's evidence,
+        # never replay a transaction or assert that the old version is active.
+        return {"ok": False, "updated": False,
+                "reason": "update_unconfirmed", **boundary}
+
+
 def launch_native_consumer(root, port, *, smoke=False):
     """Run the owned installed app through one verified native presenter."""
     from .consumer import _native_packaged_launcher, _trusted_bundle
@@ -420,6 +495,7 @@ def main(argv=None):
     native_mode = native.add_mutually_exclusive_group()
     native_mode.add_argument("--native-smoke", action="store_true")
     native_mode.add_argument("--restore-previous", action="store_true")
+    native_mode.add_argument("--update-distribution", type=Path)
     commands.add_parser("restore-app")
     delivered = commands.add_parser("install-bundle")
     delivered.add_argument("--candidate", type=Path, required=True)
@@ -473,6 +549,8 @@ def main(argv=None):
             result = launch_consumer(args.runtime, args.port)
         elif args.command == "native-launch":
             result = (restore_installed_consumer(args.runtime) if args.restore_previous else
+                      update_installed_consumer(args.runtime, args.update_distribution)
+                      if args.update_distribution is not None else
                       launch_native_consumer(args.runtime, args.port, smoke=args.native_smoke))
         elif args.command == "restore-app":
             result = restore_installed_consumer(args.runtime)
