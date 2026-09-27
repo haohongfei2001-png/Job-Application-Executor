@@ -2809,3 +2809,102 @@ def test_unverified_release_is_refused_before_any_business_import(
     assert result["bootstrap_reason"] == "release_unverified"
     assert result["ready_for_live_e2e"] is False
     assert result["submit_capability"] is False
+
+
+TRANSACTION_DEPENDENCY_PROBE = r"""
+import importlib.abc
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+home, apps, source = map(Path, sys.argv[2:5])
+action, busy = sys.argv[5], sys.argv[6] == 'busy'
+Path.home = classmethod(lambda cls: home)
+attempts = []
+class RefuseBusiness(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if any(fullname == name or fullname.startswith(name + '.') for name in (
+                'pydantic', 'playwright', 'executor.browser',
+                'executor.autonomy.queue', 'executor.autonomy.worker',
+                'executor.autonomy.supervisor')):
+            attempts.append(fullname)
+            raise ImportError('PRIVATE_TRANSACTION_DEPENDENCY_CANARY')
+sys.meta_path.insert(0, RefuseBusiness())
+from executor.autonomy import consumer
+if action == 'install':
+    result = consumer.install_macos_app(source, destination=apps, platform='darwin')
+else:
+    result = consumer.rollback_macos_app(apps)
+expected = 'task_state_in_use' if busy else (
+    'venv_missing' if action == 'install' else 'rollback_unavailable')
+assert result['ok'] is False and result['reason'] == expected
+assert not attempts, 'transaction admission imported business dependencies'
+assert 'PRIVATE' not in json.dumps(result)
+assert 'executor.autonomy.queue' not in sys.modules
+assert 'executor.autonomy.worker' not in sys.modules
+print(json.dumps({'ok': False, 'reason': result['reason']}))
+"""
+
+
+@pytest.mark.parametrize("action", ["install", "rollback"])
+@pytest.mark.parametrize("busy", [False, True])
+def test_cold_app_transaction_admission_remains_available_without_business_imports(
+        tmp_path, action, busy):
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    from executor.autonomy.runtime_paths import default_runtime
+    from executor.autonomy.state_compatibility import _private_lock_fd
+    home = tmp_path / "synthetic-transaction-home"
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    source = tmp_path / "missing-development-runtime"
+    source.mkdir()
+    state = default_runtime(
+        apps / (consumer.APP_NAME + ".app") / "Contents" / "Resources" / "release",
+        home=home)
+    queue = TaskQueue(state)
+    for index in range(3):
+        queue.enqueue(TaskSpec(
+            company="Synthetic Transaction " + str(index), role="Synthetic Role",
+            target_url="https://careers.synthetic.test/jobs/" + str(index),
+            profile_ref="PRIVATE_TRANSACTION_PROFILE_" + str(index),
+            attachment_refs={"resume": "PRIVATE_TRANSACTION_RESUME_" + str(index)},
+            live_authorized=False))
+    before_logical = (queue.tasks(), queue.recent_events(1000))
+    assert len(before_logical[0]) == 3 and before_logical[1]
+    key = state / "synthetic-private.key"
+    key.write_bytes(b"PRIVATE_TRANSACTION_KEY_CANARY")
+    key.chmod(0o600)
+    for suffix in (".app", ".app.previous", ".app.failed"):
+        bundle = apps / ((consumer.APP_NAME if suffix == ".app" else "." + consumer.APP_NAME) + suffix)
+        bundle.mkdir()
+        (bundle / "preserved-marker").write_bytes(b"PRIVATE_EXISTING_BUNDLE_CANARY")
+    bundle_bytes = {str(path.relative_to(apps)): path.read_bytes()
+                    for path in apps.rglob("preserved-marker")}
+    protected = [state / name for name in (
+        "tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm", "synthetic-private.key")]
+    before_bytes = {p.name: p.read_bytes() if p.exists() else None for p in protected}
+    lease = _private_lock_fd(state / "worker.lock") if busy else None
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", TRANSACTION_DEPENDENCY_PROBE,
+             str(Path(cli.__file__).resolve().parents[2]), str(home), str(apps),
+             str(source), action, "busy" if busy else "idle"],
+            capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {
+            "ok": False, "reason": "task_state_in_use" if busy else (
+                "venv_missing" if action == "install" else "rollback_unavailable")}
+        assert "PRIVATE" not in result.stdout
+    finally:
+        if lease is not None:
+            os.close(lease)
+    assert {p.name: p.read_bytes() if p.exists() else None for p in protected} == before_bytes
+    assert (queue.tasks(), queue.recent_events(1000)) == before_logical
+    assert {str(path.relative_to(apps)): path.read_bytes()
+            for path in apps.rglob("preserved-marker")} == bundle_bytes
+    assert not (apps / ("." + consumer.APP_NAME + ".app.installing")).exists()
+    # The child released both app/state guards; no force unlock or PID signalling.
+    descriptor = _private_lock_fd(apps / ("." + consumer.APP_NAME + ".app.transaction.lock"))
+    os.close(descriptor)
+    descriptor = _private_lock_fd(state / "worker.lock")
+    os.close(descriptor)

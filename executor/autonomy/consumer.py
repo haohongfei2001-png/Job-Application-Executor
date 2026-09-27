@@ -477,7 +477,7 @@ def install_macos_app(
         return {"ok": False, "reason": "update_lock_unavailable",
                 "message": "无法安全锁定应用目录；没有修改当前应用。"}
     try:
-        from .queue import default_runtime
+        from .runtime_paths import default_runtime
         from .state_compatibility import task_state_guard
 
         state_root = (Path(task_state_root).expanduser() if task_state_root is not None
@@ -767,7 +767,7 @@ def rollback_macos_app(destination: str | Path, *, task_state_root: str | Path |
         return {"ok": False, "reason": "update_lock_unavailable",
                 "message": "无法安全锁定应用目录；没有修改当前应用。"}
     try:
-        from .queue import default_runtime
+        from .runtime_paths import default_runtime
         from .state_compatibility import task_state_guard
 
         state_root = (Path(task_state_root).expanduser() if task_state_root is not None

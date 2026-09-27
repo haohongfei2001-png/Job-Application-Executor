@@ -52,4 +52,3 @@ def local_token(root):
     if len(token) < 32:
         raise ValueError("invalid private auth token")
     return token
-
