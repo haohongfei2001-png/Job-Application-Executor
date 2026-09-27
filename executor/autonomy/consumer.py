@@ -508,7 +508,10 @@ def _candidate_starts(python: Path, release: Path) -> bool:
     )
     try:
         with tempfile.TemporaryDirectory(prefix="jae-candidate-health-") as directory:
-            runtime = Path(directory)
+            # This is our newly created, disposable health journal, not a
+            # caller's task authority. macOS temp paths may traverse /var's
+            # alias; pass its existing canonical location to strict serve.
+            runtime = Path(directory).resolve(strict=True)
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0))
                 port = reservation.getsockname()[1]

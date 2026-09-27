@@ -1443,6 +1443,12 @@ def test_task_workspace_retired_update_same_turn_close_reopen_preserves_new_epoc
                     route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
                 elif path == "/ui/api/update-status":
                     pending.append(route)
+                    # Request emission precedes Python route admission. Publish
+                    # this causal barrier only after the held Route exists.
+                    page.evaluate(
+                        "(count) => { window.__testUpdateRouteAdmissions = count; }",
+                        len(pending),
+                    )
                 else:
                     route.fulfill(status=200, content_type="application/json",
                                   body='{"tasks":[],"update":{"status":"idle"},"ready_for_live_e2e":false}')
@@ -1452,11 +1458,13 @@ def test_task_workspace_retired_update_same_turn_close_reopen_preserves_new_epoc
             page.locator("#message").fill("UNSENT_NEW_UPDATE_EPOCH")
             with page.expect_request("https://retired-update-reopen.test/ui/api/update-status"):
                 page.locator("#update").click()
+            page.wait_for_function("window.__testUpdateRouteAdmissions === 1")
             assert len(pending) == 1
             # One actual event-loop task: the old close event is still queued
             # when the new dialog begins, without any test timing delays.
             with page.expect_request("https://retired-update-reopen.test/ui/api/update-status"):
                 page.evaluate("() => { closeUpdateDialog(); void startUpdate(); }")
+            page.wait_for_function("window.__testUpdateRouteAdmissions === 2")
             assert len(pending) == 2
             expect(page.locator("#update-dialog")).to_be_visible()
             expect(page.locator("#update-refresh")).to_be_disabled()

@@ -5268,3 +5268,67 @@ def test_actual_live_serve_acquires_default_authority_only_once_before_queue_ini
         pass
     assert not (root / "tasks.sqlite3").exists()
     assert not (root / "service.json").exists()
+
+
+@pytest.mark.parametrize("temporary_parent", ["canonical", "ancestor_alias"])
+def test_real_candidate_health_canonicalizes_only_owned_temporary_authority(
+    tmp_path, monkeypatch, temporary_parent
+):
+    """Real strict daemon, owned scratch journal and authenticated loopback."""
+    from executor.autonomy.worker import ProcessLock
+
+    canonical = tmp_path / "owned-health-temporaries"
+    canonical.mkdir()
+    alias = tmp_path / "temporary-parent-alias"
+    alias.symlink_to(canonical, target_is_directory=True)
+    supplied = alias if temporary_parent == "ancestor_alias" else canonical
+    canary = canonical / "unrelated-temporary-canary"
+    canary.write_bytes(b"PRIVATE_UNRELATED_TEMPORARY_UNCHANGED")
+    canary.chmod(0o640)
+    before = (canary.read_bytes(), canary.stat().st_mode, canary.stat().st_ino)
+    source = tmp_path / "owned-complete-release"
+    release.copy_source_candidate(Path(__file__).resolve().parents[1], source)
+    assert verify_source_candidate(source)
+    source_before = release.source_manifest(source)
+    actual_temporary = consumer.tempfile.TemporaryDirectory
+    actual_popen = consumer.subprocess.Popen
+    created, children, requested = [], [], []
+
+    def owned_temporary(*args, **kwargs):
+        assert kwargs == {"prefix": "jae-candidate-health-"}
+        context = actual_temporary(*args, **kwargs, dir=str(supplied))
+        created.append(Path(context.name))
+        if temporary_parent == "ancestor_alias":
+            # The daemon still refuses arbitrary aliased caller roots.
+            with pytest.raises(ValueError, match="worker_state_path_invalid"):
+                with ProcessLock(Path(context.name) / "worker.lock"):
+                    pytest.fail("the strict task-authority policy was weakened")
+            assert not (Path(context.name) / "worker.lock").exists()
+        return context
+
+    def real_child(command, **kwargs):
+        runtime = Path(command[-2])
+        requested.append(runtime)
+        assert runtime == created[-1].resolve(strict=True)
+        assert not any(path.is_symlink() for path in (runtime, *runtime.parents))
+        assert runtime.is_relative_to(canonical)
+        assert kwargs["env"]["APPLICATION_EXECUTOR_BROWSER_MODE"] == "isolated"
+        assert command[:4] == [sys.executable, "-I", "-B", "-c"]
+        child = actual_popen(command, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(consumer.tempfile, "TemporaryDirectory", owned_temporary)
+    monkeypatch.setattr(consumer.subprocess, "Popen", real_child)
+    # No mock of serve, ProcessLock, dependency provenance, HTTP or health:
+    # the returned True requires actual token auth, exact loaded source and
+    # the user-only final actor on the existing loopback readiness path.
+    assert _candidate_starts(Path(sys.executable), source) is True
+    assert len(created) == len(children) == len(requested) == 1
+    assert children[0].poll() is not None
+    assert not created[0].exists() and not requested[0].exists()
+    assert alias.is_symlink() and alias.readlink() == canonical
+    assert list(canonical.iterdir()) == [canary]
+    assert (canary.read_bytes(), canary.stat().st_mode, canary.stat().st_ino) == before
+    assert release.source_manifest(source) == source_before
+    assert verify_source_candidate(source)
