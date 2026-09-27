@@ -478,7 +478,12 @@ def _legacy_state_migration_needed(repo: Path, app: Path, target: Path) -> bool:
             raise ValueError("legacy_state_path_invalid")
         for child in root.iterdir():
             if child.name in {"worker.lock", "migration.lock", "native-window.lock"}:
-                if child.is_symlink() or not child.is_file():
+                # Only an owned ordinary single-link inode can be ignored as
+                # empty legacy lock state. An alias must not certify an empty
+                # authority without ever reading its payload.
+                metadata = child.stat(follow_symlinks=False)
+                if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                        or metadata.st_uid != os.geteuid()):
                     raise ValueError("legacy_state_path_invalid")
                 continue
             # Any remaining state (including unknown files, keys and service
@@ -884,6 +889,18 @@ def _install_macos_app_unlocked(
             "reason": "candidate_state_incompatible",
             "message": "新版本无法完整保留现有任务状态；现有应用和任务保持不变。",
         }
+
+    # Candidate startup and compatibility may take time. A historical journal
+    # can arrive after the initial admission check; refuse before the first
+    # app move rather than activating an empty, split task authority.
+    try:
+        late_legacy = _legacy_state_migration_needed(repo, app, task_state_root)
+    except (OSError, UnicodeError, ValueError):
+        return {"ok": False, "reason": "legacy_state_unavailable",
+                "message": "无法安全核对旧版任务状态；现有应用和任务保持不变。"}
+    if late_legacy:
+        return {"ok": False, "reason": "legacy_state_migration_required",
+                "message": "发现旧版任务状态，尚未完成安全迁移；现有应用、任务和已保存答案保持不变。"}
 
     # Health/compatibility can execute candidate code. Rebind both identities
     # and all occupied slots before the first move; never delete changed input.

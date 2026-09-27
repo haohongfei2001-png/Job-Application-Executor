@@ -5916,3 +5916,65 @@ def test_native_handoff_never_replays_transaction_or_claims_unobserved_readiness
     assert "ready_for_live_e2e" not in result and "native_page" not in result
     assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
     assert canary.read_bytes() == before
+
+@pytest.mark.parametrize("artifact", ["tasks.sqlite3-wal", "task-answers.key"])
+def test_legacy_authority_arriving_during_candidate_health_refuses_before_first_app_move(
+    tmp_path, monkeypatch, artifact
+):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    apps = tmp_path / "Applications"
+    state = repo / "runtime" / "autonomy"
+    target = tmp_path / "new-owned-state"
+    real_start = consumer._candidate_starts
+    starts = []
+    def start_then_legacy_arrives(runtime_python, release_root):
+        assert real_start(runtime_python, release_root)
+        assert not state.exists()
+        state.mkdir(parents=True)
+        (state / artifact).write_bytes(b"PRIVATE_LATE_LEGACY_AUTHORITY")
+        starts.append((runtime_python, release_root))
+        return True
+    monkeypatch.setattr(consumer, "_candidate_starts", start_then_legacy_arrives)
+    result = install_macos_app(repo, destination=apps, platform="darwin",
+                               task_state_root=target)
+    assert len(starts) == 1
+    assert result["ok"] is False
+    assert result["reason"] == "legacy_state_migration_required"
+    assert (state / artifact).read_bytes() == b"PRIVATE_LATE_LEGACY_AUTHORITY"
+    assert "PRIVATE_LATE" not in json.dumps(result)
+    assert str(state) not in json.dumps(result)
+    assert not (apps / (consumer.APP_NAME + ".app")).exists()
+    assert not (apps / ("." + consumer.APP_NAME + ".app.previous")).exists()
+    assert (apps / ("." + consumer.APP_NAME + ".app.installing")).is_dir()
+
+
+def test_hardlinked_legacy_lock_cannot_certify_an_empty_old_authority(tmp_path, monkeypatch):
+    repo = tmp_path / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    state = repo / "runtime" / "autonomy"
+    state.mkdir(parents=True)
+    unrelated = tmp_path / "unrelated-private-lock"
+    unrelated.write_bytes(b"PRIVATE_UNRELATED_LOCK")
+    os.link(unrelated, state / "worker.lock")
+    assert (state / "worker.lock").stat().st_nlink == 2
+    apps = tmp_path / "Applications"
+    target = tmp_path / "new-owned-state"
+    with pytest.raises(ValueError, match="legacy_state_path_invalid"):
+        consumer._legacy_state_migration_needed(repo, apps / (consumer.APP_NAME + ".app"), target)
+    monkeypatch.setattr(consumer, "_candidate_starts",
+                        lambda *_: pytest.fail("aliased old authority cannot start candidate"))
+    result = install_macos_app(repo, destination=apps, platform="darwin",
+                               task_state_root=target)
+    assert result["ok"] is False
+    assert result["reason"] == "legacy_state_unavailable"
+    assert unrelated.read_bytes() == b"PRIVATE_UNRELATED_LOCK"
+    assert "PRIVATE_" not in json.dumps(result)
+    assert not (apps / (consumer.APP_NAME + ".app")).exists()
+    assert not (apps / ("." + consumer.APP_NAME + ".app.installing")).exists()
