@@ -96,5 +96,3 @@ def packaged_provenance(repo_root: str | Path) -> dict | None:
     except (OSError, UnicodeError, ValueError, RuntimeError, TypeError):
         pass
     return report
-
-
