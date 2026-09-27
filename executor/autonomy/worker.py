@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-import fcntl
+import stat
 import hashlib
 import json
 import os
@@ -52,18 +52,31 @@ class ProcessLock:
         self.handle = None
 
     def __enter__(self):
-        private_dir(self.path.parent)
-        self.handle = self.path.open("a+")
-        os.chmod(self.path, 0o600)
+        # Match app activation admission before mkdir, chmod or private reads.
+        # An aliased root or a different lock inode is not the same authority.
+        from .state_compatibility import _private_lock_fd
+        path = self.path.expanduser().absolute()
+        root = path.parent
+        if any(part.is_symlink() for part in (root, *root.parents)):
+            raise ValueError("worker_state_path_invalid")
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        metadata = root.stat(follow_symlinks=False)
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                or any(part.is_symlink() for part in (root, *root.parents))):
+            raise ValueError("worker_state_path_invalid")
+        root.chmod(0o700)
         try:
-            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            self.handle.close()
+            fd = _private_lock_fd(path)
+        except BlockingIOError:
             raise RuntimeError("another local worker is active") from None
+        except (OSError, ValueError):
+            raise RuntimeError("local worker lock unavailable") from None
+        self.handle = os.fdopen(fd, "a+")
         return self
 
     def __exit__(self, *_):
         self.handle.close()
+        self.handle = None
 
 
 def outcome(plan):

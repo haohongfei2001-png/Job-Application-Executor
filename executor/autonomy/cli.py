@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
+from contextlib import ExitStack
 
 from .runtime_paths import RUNTIME, private_dir, local_token
 from .process_entry import isolated_cli_command
@@ -110,9 +111,15 @@ def serve(root, port):
     from .supervisor import Supervisor, create_server
     from .worker import ProcessLock, Worker
 
-    # Global repo lock also serializes daemons using different queue directories.
+    # Always own the actual journal's inode so install/rollback can fence
+    # this daemon. Retain the old global serialization for live browser use.
     isolated = browser_mode() in {"test", "isolated", "headless"}
-    with ProcessLock((Path(root) if isolated else RUNTIME) / "worker.lock"):
+    authority = Path(root).expanduser().absolute()
+    with ExitStack() as locks:
+        locks.enter_context(ProcessLock(authority / "worker.lock"))
+        if (not isolated and os.path.normpath(str(authority)) !=
+                os.path.normpath(str(Path(RUNTIME).expanduser().absolute()))):
+            locks.enter_context(ProcessLock(Path(RUNTIME) / "worker.lock"))
         from .state_compatibility import _refuse_live_service
         _refuse_live_service(Path(root))
         queue = TaskQueue(root)

@@ -5179,3 +5179,92 @@ def test_native_update_is_explicit_and_exclusive_without_launch_restore_or_resta
                       "--update-distribution", str(delivery)])
         assert error.value.code == 2 and calls == []
     assert '"updated": true' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode", ["live", "isolated", "headless"])
+def test_actual_serve_owns_selected_task_authority_before_business_initialization(
+        tmp_path, monkeypatch, mode):
+    from executor.autonomy import cli, queue as queue_module
+    from executor.autonomy.state_compatibility import task_state_guard
+
+    root = tmp_path / "selected-task-state"
+    global_root = tmp_path / "separate-global-state"
+    root.mkdir()
+    retained = root / "retained-private"
+    retained.write_bytes(b"SYNTHETIC_SELECTED_AUTHORITY_CANARY")
+    monkeypatch.setattr(cli, "RUNTIME", global_root)
+    monkeypatch.setattr(cli, "browser_mode", lambda: mode)
+
+    def never(*args, **kwargs):
+        pytest.fail("contended task authority reached business initialization")
+    monkeypatch.setattr(queue_module, "TaskQueue", never)
+    with task_state_guard(root):
+        payload = {p.name: p.read_bytes() for p in root.iterdir()}
+        inode = (root / "worker.lock").stat().st_ino
+        with pytest.raises(RuntimeError, match="another local worker is active"):
+            cli.serve(root, 9344)
+        assert {p.name: p.read_bytes() for p in root.iterdir()} == payload
+        assert (root / "worker.lock").stat().st_ino == inode
+    assert not global_root.exists()
+    assert retained.read_bytes() == b"SYNTHETIC_SELECTED_AUTHORITY_CANARY"
+    assert not (root / "tasks.sqlite3").exists()
+    assert not (root / "service.json").exists()
+
+
+def test_actual_live_serve_retains_global_serialization_and_releases_selected_lock_on_refusal(
+        tmp_path, monkeypatch):
+    from executor.autonomy import cli, queue as queue_module
+    from executor.autonomy.worker import ProcessLock
+    from executor.autonomy.state_compatibility import task_state_guard
+
+    root = tmp_path / "selected-task-state"
+    global_root = tmp_path / "global-state"
+    root.mkdir()
+    retained = root / "retained-private"
+    retained.write_bytes(b"SYNTHETIC_RETAINED_TASK_CANARY")
+    monkeypatch.setattr(cli, "RUNTIME", global_root)
+    monkeypatch.setattr(cli, "browser_mode", lambda: "live")
+    def never(*args, **kwargs):
+        pytest.fail("contended global browser authority reached business initialization")
+    monkeypatch.setattr(queue_module, "TaskQueue", never)
+    with ProcessLock(global_root / "worker.lock"):
+        global_payload = {p.name: p.read_bytes() for p in global_root.iterdir()}
+        with pytest.raises(RuntimeError, match="another local worker is active"):
+            cli.serve(root, 9344)
+        # Partial acquisition must not strand the selected journal's lease.
+        with task_state_guard(root):
+            pass
+        assert {p.name: p.read_bytes() for p in global_root.iterdir()} == global_payload
+    assert retained.read_bytes() == b"SYNTHETIC_RETAINED_TASK_CANARY"
+    assert not (root / "tasks.sqlite3").exists()
+    assert not (root / "service.json").exists()
+    assert not (global_root / "service.json").exists()
+
+
+def test_actual_live_serve_acquires_default_authority_only_once_before_queue_initialization(
+        tmp_path, monkeypatch):
+    from executor.autonomy import cli, queue as queue_module
+    from executor.autonomy.state_compatibility import task_state_guard
+
+    root = tmp_path / "same-authority"
+    monkeypatch.setattr(cli, "RUNTIME", root)
+    monkeypatch.setattr(cli, "browser_mode", lambda: "live")
+    reached = []
+    class ReachedQueue(Exception):
+        pass
+    def observe_queue(selected):
+        assert selected == root
+        reached.append(True)
+        # The actual service already owns this journal before the constructor.
+        with pytest.raises(BlockingIOError):
+            with task_state_guard(root):
+                pytest.fail("service did not hold its actual task lease")
+        raise ReachedQueue()
+    monkeypatch.setattr(queue_module, "TaskQueue", observe_queue)
+    with pytest.raises(ReachedQueue):
+        cli.serve(root, 9344)
+    assert reached == [True]
+    with task_state_guard(root):
+        pass
+    assert not (root / "tasks.sqlite3").exists()
+    assert not (root / "service.json").exists()

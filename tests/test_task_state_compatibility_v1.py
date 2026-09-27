@@ -1023,3 +1023,198 @@ def test_app_transaction_refuses_aliased_authority_before_activation(tmp_path, m
         # The refused transaction released its application lock.
         fd = consumer._acquire_app_transaction_lock(apps)
         os.close(fd)
+
+
+# The production daemon and release transaction must acquire the same owned
+# inode. These cases exercise ProcessLock itself, not a replacement test lock.
+@pytest.mark.parametrize("path_kind", [
+    "root_alias", "ancestor_alias", "missing_child", "missing_grandchild",
+])
+def test_worker_lock_refuses_aliased_authority_before_permissions_or_private_reads(
+        tmp_path, path_kind):
+    actual = tmp_path / "owned"
+    actual.mkdir()
+    root = actual / "state"
+    with closing(legacy_state(root)) as db:
+        encrypted_answers(root, db)
+        before = authority(db)
+        history = db.execute("SELECT * FROM task_answer_events").fetchall()
+        root.chmod(0o755)
+        payload = {path.name: path.read_bytes() for path in root.iterdir()}
+        mode = root.stat().st_mode
+        alias = tmp_path / "alias"
+        if path_kind == "root_alias":
+            alias.symlink_to(root, target_is_directory=True)
+            supplied = alias
+        else:
+            alias.symlink_to(actual, target_is_directory=True)
+            supplied = alias / ("state" if path_kind == "ancestor_alias" else
+                                "absent" if path_kind == "missing_child" else "absent/nested")
+        with pytest.raises(ValueError, match="worker_state_path_invalid") as failure:
+            with ProcessLock(supplied / "worker.lock"):
+                pytest.fail("aliased worker authority admitted")
+        assert str(failure.value) == "worker_state_path_invalid"
+        assert {path.name: path.read_bytes() for path in root.iterdir()} == payload
+        assert root.stat().st_mode == mode
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == history
+        assert sorted(path.name for path in actual.iterdir()) == ["state"]
+        assert alias.is_symlink()
+        assert not (root / "worker.lock").exists()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo", "directory"])
+def test_worker_lock_refuses_nonordinary_inode_without_reading_or_chmodding_it(
+        tmp_path, kind):
+    root = tmp_path / "state"
+    root.mkdir()
+    outside = tmp_path / "outside-private"
+    outside.write_bytes(b"SYNTHETIC_PRIVATE_LOCK_CANARY")
+    outside.chmod(0o640)
+    before_mode = outside.stat().st_mode
+    path = root / "worker.lock"
+    if kind == "symlink":
+        path.symlink_to(outside)
+    elif kind == "hardlink":
+        os.link(outside, path)
+    elif kind == "fifo":
+        os.mkfifo(path, 0o640)
+    else:
+        path.mkdir(mode=0o750)
+    entry = path.stat(follow_symlinks=False)
+    before = (entry.st_dev, entry.st_ino, entry.st_mode, entry.st_nlink)
+    guard = ProcessLock(path)
+    with pytest.raises(RuntimeError, match="local worker lock unavailable") as failure:
+        with guard:
+            pytest.fail("nonordinary worker inode admitted")
+    assert str(failure.value) == "local worker lock unavailable"
+    assert guard.handle is None
+    assert outside.read_bytes() == b"SYNTHETIC_PRIVATE_LOCK_CANARY"
+    assert outside.stat().st_mode == before_mode
+    entry = path.stat(follow_symlinks=False)
+    assert (entry.st_dev, entry.st_ino, entry.st_mode, entry.st_nlink) == before
+    assert sorted(p.name for p in root.iterdir()) == ["worker.lock"]
+
+
+def test_worker_lock_refuses_foreign_root_before_chmod_or_file_creation(tmp_path, monkeypatch):
+    from executor.autonomy import worker
+
+    root = tmp_path / "state"
+    root.mkdir(mode=0o750)
+    private = root / "retained-private"
+    private.write_bytes(b"SYNTHETIC_PRIVATE_ROOT_CANARY")
+    mode = root.stat().st_mode
+    current_uid = os.geteuid()
+    monkeypatch.setattr(worker.os, "geteuid", lambda: current_uid + 1)
+    with pytest.raises(ValueError, match="worker_state_path_invalid"):
+        with ProcessLock(root / "worker.lock"):
+            pytest.fail("foreign worker root admitted")
+    assert root.stat().st_mode == mode
+    assert private.read_bytes() == b"SYNTHETIC_PRIVATE_ROOT_CANARY"
+    assert sorted(p.name for p in root.iterdir()) == ["retained-private"]
+
+
+@pytest.mark.parametrize("replacement", ["ordinary", "symlink"])
+def test_worker_lock_rechecks_inode_after_real_kernel_acquisition_and_releases_refusal(
+        tmp_path, monkeypatch, replacement):
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    root.mkdir()
+    path = root / "worker.lock"
+    path.write_bytes(b"SYNTHETIC_ORIGINAL_LOCK")
+    path.chmod(0o640)
+    original_mode = path.stat().st_mode
+    displaced = root / "displaced"
+    outside = tmp_path / "outside-private"
+    outside.write_bytes(b"SYNTHETIC_REPLACEMENT_CANARY")
+    outside.chmod(0o640)
+    outside_mode = outside.stat().st_mode
+    real_flock = fcntl.flock
+    injected = []
+
+    def replace_after_acquisition(fd, operation):
+        real_flock(fd, operation)
+        if not injected:
+            injected.append(True)
+            path.rename(displaced)
+            if replacement == "symlink":
+                path.symlink_to(outside)
+            else:
+                path.write_bytes(b"SYNTHETIC_UNEXPECTED_NEW_LOCK")
+                path.chmod(0o640)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(state_compatibility.fcntl, "flock", replace_after_acquisition)
+        guard = ProcessLock(path)
+        with pytest.raises(RuntimeError, match="local worker lock unavailable") as failure:
+            with guard:
+                pytest.fail("replaced inode admitted")
+        assert str(failure.value) == "local worker lock unavailable"
+        assert guard.handle is None
+    assert injected == [True]
+    assert displaced.read_bytes() == b"SYNTHETIC_ORIGINAL_LOCK"
+    assert displaced.stat().st_mode == original_mode
+    assert outside.read_bytes() == b"SYNTHETIC_REPLACEMENT_CANARY"
+    assert outside.stat().st_mode == outside_mode
+    if replacement == "symlink":
+        assert path.is_symlink()
+    else:
+        assert path.read_bytes() == b"SYNTHETIC_UNEXPECTED_NEW_LOCK"
+        assert path.stat().st_mode & 0o777 == 0o640
+    # Independent real flock proves the rejected descriptor was closed.
+    with displaced.open("a+") as retained:
+        real_flock(retained, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert sorted(p.name for p in root.iterdir()) == ["displaced", "worker.lock"]
+
+
+@pytest.mark.parametrize("holder", ["worker", "release"])
+def test_worker_and_app_guard_share_one_inode_across_real_processes_without_authority_change(
+        tmp_path, holder):
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        before = authority(db)
+        history = db.execute("SELECT * FROM task_answer_events").fetchall()
+        schema = db.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+        parent = ProcessLock(root / "worker.lock") if holder == "worker" else task_state_guard(root)
+        # The child imports and acquires the actual OTHER production guard.
+        code = (
+            "import sys\nfrom pathlib import Path\n"
+            "from executor.autonomy.worker import ProcessLock\n"
+            "from executor.autonomy.state_compatibility import task_state_guard\n"
+            "root = Path(sys.argv[1])\n"
+            + ("guard = task_state_guard(root)\n" if holder == "worker" else
+               "guard = ProcessLock(root / 'worker.lock')\n")
+            + "try:\n    with guard:\n        pass\n"
+            "except (BlockingIOError, RuntimeError):\n"
+            "    print('REFUSED', flush=True)\n    sys.exit(87)\n"
+            "print('ACQUIRED', flush=True)\n"
+        )
+        with parent:
+            lock = root / "worker.lock"
+            identity = (lock.stat().st_dev, lock.stat().st_ino)
+            payload = {p.name: p.read_bytes() for p in root.iterdir()
+                       if p.name not in {"worker.lock", "migration.lock", "native-window.lock"}}
+            child = subprocess.run([sys.executable, "-c", code, str(root)],
+                                   capture_output=True, text=True, timeout=15)
+            assert child.returncode == 87, child.stderr
+            assert child.stdout.strip() == "REFUSED"
+            assert not child.stderr
+            assert (lock.stat().st_dev, lock.stat().st_ino) == identity
+            assert {p.name: p.read_bytes() for p in root.iterdir()
+                    if p.name not in {"worker.lock", "migration.lock", "native-window.lock"}} == payload
+        reopened = subprocess.run([sys.executable, "-c", code, str(root)],
+                                  capture_output=True, text=True, timeout=15)
+        assert reopened.returncode == 0, reopened.stderr
+        assert reopened.stdout.strip() == "ACQUIRED"
+        assert not reopened.stderr
+        assert (lock.stat().st_dev, lock.stat().st_ino) == identity
+        assert lock.stat().st_mode & 0o777 == 0o600
+        assert {p.name: p.read_bytes() for p in root.iterdir()
+                if p.name not in {"worker.lock", "migration.lock", "native-window.lock"}} == payload
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == history
+        assert db.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall() == schema
+        assert (root / "task-answers.key").read_bytes() == key
+        assert not list(tmp_path.glob("backup*"))
