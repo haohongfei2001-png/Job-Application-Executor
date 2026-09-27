@@ -1044,3 +1044,210 @@ def test_task_workspace_provider_load_uncertain_result_never_retries_or_claims_c
             assert page.evaluate("localStorage.length + sessionStorage.length") == 0
         finally:
             browser.close()
+
+
+@pytest.mark.parametrize("availability", [True, False, "constructor_failure"])
+def test_task_workspace_explicit_provider_refresh_actual_service_replaces_only_cached_client(
+    profile_setup_service, monkeypatch, availability
+):
+    from executor.autonomy import manager as manager_module
+    from types import SimpleNamespace
+
+    settings, queue, supervisor, base, tid, external_calls = profile_setup_service
+    old = SimpleNamespace(available=False)
+    supervisor.manager._provider = old
+    loads, writes, errors = [], [], []
+    before = (settings.PATH.read_bytes(), queue.tasks(), queue.recent_events(1000),
+              {p.name: p.read_bytes() for p in settings.PATH.parent.iterdir()})
+    def construct(configuration):
+        assert configuration is supervisor.manager.settings
+        loads.append("load")
+        if availability == "constructor_failure":
+            raise OSError("PRIVATE_REFRESH_KEYCHAIN")
+        return SimpleNamespace(available=availability,
+                               decide=lambda *_a, **_k: pytest.fail("refresh is not a model request"))
+    monkeypatch.setattr(manager_module, "DeepSeekManagerProvider", construct)
+    def readiness():
+        current = supervisor.manager.loaded_provider_state()
+        return {"ready_for_live_e2e": False, "provider_state": current["state"],
+                "message": "真实站点条件尚未验证。", "checks": {"deepseek_available": current["available"]},
+                "final_click_actor": "user", "submit_capability": False}
+    monkeypatch.setattr(supervisor, "readiness", readiness)
+    observed = supervisor.provider_refresh_state()
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 600, "height": 800})
+        try:
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("request", lambda request: writes.append((request.url, request.post_data))
+                    if request.method == "POST" else None)
+            page.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            page.locator("#message").fill("UNSENT_REFRESH_INPUT")
+            page.get_by_role("button", name="运行条件", exact=True).click()
+            expect(page.locator("#provider-refresh")).to_be_enabled()
+            expect(page.locator("#provider-load")).to_be_disabled()
+            page.evaluate("readiness()")
+            assert loads == [] and writes == []
+            page.locator("#provider-refresh").click()
+            expected_text = (
+                "已重新读取本机配置" if availability is True else
+                "已重新读取配置，但凭证暂不可用" if availability is False else
+                "重新读取失败，旧客户端已停止使用")
+            expect(page.locator("#provider-load-status")).to_contain_text(expected_text)
+            assert len(writes) == 1 and writes[0][0] == base + "/ui/api/provider-refresh"
+            assert json.loads(writes[0][1]) == {
+                "expected_settings_version": observed["configuration_version"],
+                "expected_refresh_revision": observed["refresh_revision"],
+            }
+            assert loads == ["load"] and supervisor.manager._provider is not old
+            current = supervisor.provider_refresh_state()
+            assert current["refresh_revision"] == observed["refresh_revision"] + 1
+            assert current["provider_state"] == (
+                "not_loaded" if availability == "constructor_failure" else
+                "available" if availability is True else "unavailable")
+            for _ in range(3):
+                page.evaluate("readiness()")
+            assert loads == ["load"] and len(writes) == 1 and external_calls == []
+            assert "PRIVATE_" not in page.locator("#readiness-dialog").inner_text()
+            assert "真实站点条件尚未验证" in page.locator("#readiness-summary").inner_text()
+            assert page.locator("#message").input_value() == "UNSENT_REFRESH_INPUT"
+            assert before == (settings.PATH.read_bytes(), queue.tasks(), queue.recent_events(1000),
+                              {p.name: p.read_bytes() for p in settings.PATH.parent.iterdir()})
+            page.locator("#readiness-close").click()
+            expect(page.locator("#provider-load-status")).to_have_text("")
+            expect(page.get_by_role("button", name="运行条件", exact=True)).to_be_focused()
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert errors == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("failure", ["transport", "malformed", "conflict", "readback_drift"])
+def test_task_workspace_provider_refresh_uncertain_ack_never_retries_or_exposes_credentials(failure):
+    writes, errors = [], []
+    completed = False
+    version = "f" * 64
+    def observation(revision=0):
+        return {"configuration_version": version, "refresh_revision": revision,
+                "provider_state": "unavailable", "provider_state_basis": "loaded_configuration",
+                "final_click_actor": "user", "submit_capability": False}
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                nonlocal completed
+                path = route.request.url.split("provider-refresh-unknown.test", 1)[-1]
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/provider-refresh" and route.request.method == "POST":
+                    writes.append(json.loads(route.request.post_data))
+                    completed = True
+                    if failure == "transport":
+                        route.abort("failed")
+                    else:
+                        result = {**observation(1), "refresh_status": "refreshed"}
+                        if failure == "malformed":
+                            result.update({"refresh_revision": True, "api_key": "PRIVATE_REFRESH_SECRET"})
+                        route.fulfill(status=409 if failure == "conflict" else 200,
+                                      content_type="application/json", body=json.dumps(result))
+                elif path == "/ui/api/provider-refresh":
+                    assert route.request.method == "GET"
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps(
+                        observation(2 if completed and failure == "readback_drift" else 0)))
+                else:
+                    assert route.request.method == "GET"
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                        "tasks": [], "provider_state": "unavailable", "ready_for_live_e2e": False,
+                        "message": "连接尚未验证", "checks": {}, "submit_capability": False}))
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://provider-refresh-unknown.test/**", route_request)
+            page.goto("https://provider-refresh-unknown.test/")
+            page.get_by_role("button", name="运行条件", exact=True).click()
+            expect(page.locator("#provider-refresh")).to_be_enabled()
+            page.locator("#provider-refresh").click()
+            expect(page.locator("#provider-load-status")).to_contain_text("刷新结果未确认")
+            expect(page.locator("#provider-refresh")).to_be_disabled()
+            page.evaluate("readiness()")
+            page.evaluate("document.querySelector('#provider-refresh').dispatchEvent(new MouseEvent('click'))")
+            assert writes == [{"expected_settings_version": version, "expected_refresh_revision": 0}]
+            assert "PRIVATE_REFRESH_SECRET" not in page.locator("#readiness-dialog").inner_text()
+            assert "已重新读取本机配置" not in page.locator("#readiness-dialog").inner_text()
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert errors == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
+def test_task_workspace_provider_refresh_duplicate_click_and_late_reply_do_not_revive_dialog(interruption):
+    pending, writes, errors = [], [], []
+    expired = False
+    version = "e" * 64
+    observation = {"configuration_version": version, "refresh_revision": 0,
+                   "provider_state": "unavailable", "provider_state_basis": "loaded_configuration",
+                   "final_click_actor": "user", "submit_capability": False}
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("provider-refresh-lifetime.test", 1)[-1]
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/provider-refresh" and route.request.method == "POST":
+                    writes.append(json.loads(route.request.post_data))
+                    pending.append(route)
+                elif expired:
+                    route.fulfill(status=401, content_type="application/json",
+                                  body='{"error":"ui_session_required"}')
+                elif path == "/ui/api/provider-refresh":
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps(observation))
+                else:
+                    assert route.request.method == "GET"
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                        "tasks": [], "provider_state": "unavailable", "ready_for_live_e2e": False,
+                        "message": "连接尚未验证", "checks": {}, "submit_capability": False}))
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://provider-refresh-lifetime.test/**", route_request)
+            page.goto("https://provider-refresh-lifetime.test/")
+            page.locator("#message").fill("UNSENT_REFRESH_LIFETIME")
+            page.get_by_role("button", name="运行条件", exact=True).click()
+            expect(page.locator("#provider-refresh")).to_be_enabled()
+            with page.expect_request(lambda request:
+                    request.url == "https://provider-refresh-lifetime.test/ui/api/provider-refresh"
+                    and request.method == "POST"):
+                page.locator("#provider-refresh").click()
+            expect(page.locator("#provider-refresh")).to_be_disabled()
+            page.evaluate("document.querySelector('#provider-refresh').dispatchEvent(new MouseEvent('click'))")
+            assert len(writes) == 1 and len(pending) == 1
+            if interruption == "expired_session":
+                expired = True
+                page.evaluate("state()")
+                expect(page.locator("#session-expired")).to_be_visible()
+            elif interruption == "close":
+                page.locator("#readiness-close").click()
+            else:
+                page.locator("#readiness-dialog").press("Escape")
+            expect(page.locator("#readiness-dialog")).not_to_be_visible()
+            if interruption != "expired_session":
+                page.get_by_role("button", name="运行条件", exact=True).click()
+                expect(page.locator("#provider-refresh")).to_be_disabled()
+            with page.expect_response(lambda response:
+                    response.url == "https://provider-refresh-lifetime.test/ui/api/provider-refresh"
+                    and response.request.method == "POST"):
+                pending[0].fulfill(status=200, content_type="application/json", body=json.dumps({
+                    **observation, "refresh_revision": 1, "provider_state": "available",
+                    "refresh_status": "refreshed"}))
+            page.wait_for_function("providerRefreshBusy === false")
+            assert page.locator("#provider-load-status").inner_text() == ""
+            assert "已重新读取本机配置" not in page.locator("#readiness-dialog").inner_text()
+            assert writes == [{"expected_settings_version": version, "expected_refresh_revision": 0}]
+            assert page.locator("#message").input_value() == "UNSENT_REFRESH_LIFETIME"
+            if interruption == "expired_session":
+                expect(page.locator("#provider-refresh")).to_be_disabled()
+                expect(page.locator("#session-expired")).to_be_focused()
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert errors == []
+        finally:
+            browser.close()

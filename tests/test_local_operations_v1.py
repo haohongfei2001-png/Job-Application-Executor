@@ -1954,3 +1954,185 @@ def test_loaded_process_diagnostic_refuses_host_or_damaged_authority_without_eff
 def test_source_checkout_has_no_packaged_loaded_process_claim(tmp_path):
     from executor.autonomy.runtime_provenance import loaded_process_provenance
     assert loaded_process_provenance(tmp_path, source_identity={}) is None
+
+
+@pytest.mark.parametrize("availability", [True, False, 1, None, "fault", "constructor_fault"])
+def test_explicit_provider_refresh_same_loaded_configuration_consumes_observation_without_task_work(
+    tmp_path, monkeypatch, availability
+):
+    from executor import settings
+    from executor.autonomy import manager as manager_module
+    from types import SimpleNamespace
+
+    queue, worker, supervisor = _supervisor(tmp_path)
+    task = queue.enqueue(_spec(tmp_path))
+    profile = Path(task["spec"]["profile_ref"])
+    profile.write_text(json.dumps({
+        "fields": {"identity.phone": {"value": "13800138000"}},
+        "complete_research": "PRIVATE_REFRESH_PROFILE\n" * 1000,
+    }))
+    configuration = {"profile_path": str(profile),
+                     "deepseek": {"keychain_service": "PRIVATE_REFRESH_SERVICE"},
+                     "full_unknown": "完整配置\n" * 1000}
+    old = SimpleNamespace(available=False)
+    supervisor.manager = ManagerController(queue, worker, provider=old, settings=configuration)
+    loads = []
+
+    class Provider:
+        @property
+        def available(self):
+            if availability == "fault":
+                raise OSError("PRIVATE_REFRESH_PROPERTY")
+            return availability
+
+        def decide(self, *_args, **_kwargs):
+            pytest.fail("refresh must never send a model request")
+
+    def construct(current):
+        assert current is configuration
+        loads.append("load")
+        if availability == "constructor_fault":
+            raise OSError("PRIVATE_REFRESH_CONSTRUCTOR")
+        return Provider()
+
+    monkeypatch.setattr(manager_module, "DeepSeekManagerProvider", construct)
+    monkeypatch.setattr(worker, "run_once", lambda: pytest.fail("no worker action"))
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: pytest.fail("no real credential process"))
+    before = queue.tasks(), queue.recent_events(1000), profile.read_bytes(), json.dumps(configuration)
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    cookie = "application_executor_session=" + supervisor.consume_ui_ticket(supervisor.issue_ui_ticket())
+
+    def request(data=None, *, raw=None, auth=True, origin=base, host=None):
+        headers = {"Content-Type": "application/json"}
+        if auth:
+            headers["Cookie"] = cookie
+        if origin is not None:
+            headers["Origin"] = origin
+        if host is not None:
+            headers["Host"] = host
+        body = raw if raw is not None else json.dumps(data).encode() if data is not None else None
+        req = urllib.request.Request(base + "/ui/api/provider-refresh", data=body, headers=headers,
+                                     method="GET" if body is None else "POST")
+        try:
+            with urllib.request.urlopen(req) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as error:
+            return error.code, json.load(error)
+
+    try:
+        assert request(auth=False)[0] == 401
+        status, observed = request(origin=None)
+        assert status == 200
+        version = settings.settings_version(configuration)
+        assert observed == {
+            "configuration_version": version, "refresh_revision": 0,
+            "provider_state": "unavailable", "provider_state_basis": "loaded_configuration",
+            "final_click_actor": "user", "submit_capability": False,
+        }
+        envelope = {"expected_settings_version": version, "expected_refresh_revision": 0}
+        assert request(envelope, auth=False)[0] == 401
+        assert request(envelope, origin=None)[0] == 403
+        assert request(envelope, origin="https://evil.example")[0] == 403
+        assert request(envelope, host="evil.example")[0] == 403
+        for raw in (b'[]', b'null', b'{"x":0,"x":1}', b'{"x":NaN}', b'{"api_key":"PRIVATE"}'):
+            assert request(raw=raw)[0] == 400
+        for revision in (True, False, 0.0, -1, "0", None, 9007199254740991):
+            assert request({**envelope, "expected_refresh_revision": revision})[0] == 400
+        for version_value in (None, True, 123, "", "F" * 64, "z" * 64):
+            assert request({**envelope, "expected_settings_version": version_value})[0] == 400
+        assert request({**envelope, "expected_settings_version": "a" * 64})[0] == 409
+        assert request({**envelope, "expected_refresh_revision": 1})[0] == 409
+        configuration["new_loaded_setting"] = "PRIVATE_CHANGED"
+        assert request(envelope)[0] == 409
+        del configuration["new_loaded_setting"]
+        worker.active = task["task_id"]
+        assert request(envelope)[0] == 409
+        worker.active = None
+        monkeypatch.setattr(supervisor, "mutation_fenced", lambda: True)
+        assert request(envelope)[0] == 409
+        monkeypatch.setattr(supervisor, "mutation_fenced", lambda: False)
+        assert loads == [] and supervisor.manager._provider is old
+        assert supervisor._provider_refresh_revision == 0
+        assert request(origin=None) == (200, observed), "read-only observation cannot reacquire credentials"
+        status, result = request(envelope)
+        assert status == 200
+        assert result == {
+            **observed, "refresh_revision": 1,
+            "provider_state": "not_loaded" if availability == "constructor_fault" else
+                              "available" if availability is True else "unavailable",
+            "refresh_status": "failed" if availability == "constructor_fault" else "refreshed",
+        }
+        assert supervisor.manager._provider is not old
+        assert (supervisor.manager._provider is None) is (availability == "constructor_fault")
+        assert request(envelope)[0] == 409, "same observed revision may be attempted only once"
+        read_status, readback = request(origin=None)
+        assert read_status == 200 and readback == {k: v for k, v in result.items() if k != "refresh_status"}
+        assert loads == ["load"]
+        assert "PRIVATE" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+        assert before == (queue.tasks(), queue.recent_events(1000), profile.read_bytes(), json.dumps(configuration))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_provider_refresh_serializes_concurrent_attempts_and_preserves_failed_revision(tmp_path, monkeypatch):
+    from executor.autonomy import manager as manager_module
+    queue, worker, supervisor = _supervisor(tmp_path)
+    old = supervisor.manager._provider
+    observed = supervisor.provider_refresh_state()
+    entered, release = threading.Event(), threading.Event()
+    loads, results = [], []
+    def construct(_configuration):
+        loads.append("load")
+        entered.set()
+        assert release.wait(5)
+        raise OSError("PRIVATE_REFRESH_FAILURE")
+    monkeypatch.setattr(manager_module, "DeepSeekManagerProvider", construct)
+    before = queue.tasks(), queue.recent_events(1000)
+    def attempt():
+        try:
+            results.append(supervisor.refresh_configured_provider(
+                observed["configuration_version"], observed["refresh_revision"]))
+        except RuntimeError:
+            results.append("conflict")
+    first = threading.Thread(target=attempt)
+    second = threading.Thread(target=attempt)
+    first.start()
+    try:
+        assert entered.wait(5)
+        second.start()
+    finally:
+        release.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+    assert not first.is_alive() and not second.is_alive()
+    assert loads == ["load"]
+    assert len(results) == 2 and "conflict" in results
+    receipt = next(x for x in results if isinstance(x, dict))
+    assert receipt["refresh_status"] == "failed" and receipt["provider_state"] == "not_loaded"
+    assert receipt["refresh_revision"] == 1
+    assert supervisor.manager._provider is None and old is not None
+    assert before == (queue.tasks(), queue.recent_events(1000))
+
+
+def test_provider_refresh_observation_cannot_replace_newly_loaded_client(tmp_path, monkeypatch):
+    from executor.autonomy import manager as manager_module
+    queue, worker, supervisor = _supervisor(tmp_path)
+    supervisor.manager._provider = None
+    observed = supervisor.provider_refresh_state()
+    loads = []
+    def construct(_configuration):
+        loads.append("load")
+        return _UnavailableProvider()
+    monkeypatch.setattr(manager_module, "DeepSeekManagerProvider", construct)
+    assert supervisor.load_configured_provider()["loaded"] is True
+    current = supervisor.manager._provider
+    with pytest.raises(RuntimeError):
+        supervisor.refresh_configured_provider(observed["configuration_version"], observed["refresh_revision"])
+    assert loads == ["load"] and supervisor.manager._provider is current
+    assert supervisor.provider_refresh_state()["refresh_revision"] == 1

@@ -39,6 +39,7 @@ class Supervisor:
         self._ui_lock = threading.RLock()
         self._mutation_lock = threading.RLock()
         self._command_lock = threading.RLock()
+        self._provider_refresh_revision = 0
         self._ui_tickets: dict[str, float] = {}
         self._ui_sessions: dict[str, float] = {}
         self._service_instance = secrets.token_urlsafe(32)
@@ -61,6 +62,8 @@ class Supervisor:
         """
         with self._command_lock:
             try:
+                if self.manager.loaded_provider_state()["state"] == "not_loaded":
+                    self._advance_provider_revision()
                 self.manager.provider
                 state = self.manager.loaded_provider_state()
                 loaded = state["state"] != "not_loaded"
@@ -71,6 +74,50 @@ class Supervisor:
                     "provider_state_basis": "loaded_configuration",
                     "loaded": loaded, "final_click_actor": "user",
                     "submit_capability": False}
+
+
+    def _advance_provider_revision(self):
+        if self._provider_refresh_revision >= 9007199254740991:
+            raise RuntimeError("provider refresh exhausted")
+        self._provider_refresh_revision += 1
+
+    def provider_refresh_state(self):
+        """Value-free loaded-configuration observation; never acquire credentials."""
+        with self._command_lock:
+            state = self.manager.loaded_provider_state()["state"]
+            return {"configuration_version": settings.settings_version(self.manager.settings),
+                    "refresh_revision": self._provider_refresh_revision,
+                    "provider_state": state,
+                    "provider_state_basis": "loaded_configuration",
+                    "final_click_actor": "user", "submit_capability": False}
+
+    def refresh_configured_provider(self, expected_version, expected_revision):
+        """Explicit serialized reacquisition of existing configured credentials.
+
+        No model request, credential-store write, settings edit or task action.
+        Consume the observation before attempting acquisition, including failure.
+        """
+        if (not isinstance(expected_version, str) or len(expected_version) != 64
+                or any(c not in "0123456789abcdef" for c in expected_version)
+                or type(expected_revision) is not int
+                or not 0 <= expected_revision < 9007199254740991):
+            raise ValueError("invalid provider refresh observation")
+        with self._mutation_lock:
+            with self._command_lock:
+                if (self.mutation_fenced() or self.worker.active is not None
+                        or settings.settings_version(self.manager.settings) != expected_version
+                        or self._provider_refresh_revision != expected_revision
+                        or self.manager.loaded_provider_state()["state"] == "not_loaded"):
+                    raise RuntimeError("provider refresh conflict")
+                self._advance_provider_revision()
+                try:
+                    self.manager.reload_configured_provider()
+                    if self.manager.loaded_provider_state()["state"] == "not_loaded":
+                        raise ValueError("provider not loaded")
+                    status = "refreshed"
+                except Exception:
+                    status = "failed"
+                return {**self.provider_refresh_state(), "refresh_status": status}
 
     def _expire_ui(self):
         now = time.monotonic()
@@ -644,6 +691,20 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         if data:
                             raise ValueError("invalid provider load envelope")
                         result = supervisor.run_mutation(supervisor.load_configured_provider)
+                        self._send_json(200, result)
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/provider-refresh":
+                        self._send_json(200, supervisor.provider_refresh_state())
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/provider-refresh":
+                        if origin != expected_origin:
+                            self._send_json(403, {"error": "local_origin_required"})
+                            return
+                        data = self._read_json(strict=True)
+                        if set(data) != {"expected_settings_version", "expected_refresh_revision"}:
+                            raise ValueError("invalid provider refresh envelope")
+                        result = supervisor.refresh_configured_provider(
+                            data["expected_settings_version"], data["expected_refresh_revision"])
                         self._send_json(200, result)
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/readiness":

@@ -449,6 +449,11 @@ class ManagerController:
             self._provider = DeepSeekManagerProvider(self.settings)
         return self._provider
 
+    def reload_configured_provider(self) -> DeepSeekManagerProvider:
+        """Supervisor owns serialization/admission; failed reload leaves no stale client."""
+        self._provider = None
+        return self.provider
+
     def loaded_provider_state(self) -> dict[str, Any]:
         """Observe loaded state without triggering lazy credential initialization."""
         if self._provider is None:

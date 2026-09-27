@@ -118,6 +118,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <p>需要时可读取已配置的模型凭证。此检查不会向模型发送请求，也不会开始或恢复任务；如系统要求新的权限，请自行决定。</p>
   <p id="provider-load-status" role="status"></p>
   <button id="provider-load" type="button" disabled>读取已配置凭证</button>
+  <button id="provider-refresh" type="button" disabled>重新读取已配置凭证</button>
   <div class="diagnostics-actions">
     <button id="readiness-close" class="headerbtn" type="button">关闭</button>
   </div>
@@ -216,6 +217,8 @@ const candidatesEl=document.getElementById('candidates');let pendingDiscovery=nu
 const recoveryObservations=new Map();
 const providerLoad=document.getElementById('provider-load'),providerLoadStatus=document.getElementById('provider-load-status');
 let providerLoadBusy=false,providerLoadUnknown=false,providerLoadState='unknown',providerLoadEpoch=0;
+const providerRefresh=document.getElementById('provider-refresh');
+let providerRefreshBusy=false,providerRefreshUnknown=false,providerRefreshObservation=null;
 let uiSessionExpired=false;
 let currentTaskId=null;
 const taskContext=document.getElementById('task-context');
@@ -315,7 +318,8 @@ tasksEl.addEventListener('keydown',event=>{
 function expireUISession(){
   if(uiSessionExpired)return;
   uiSessionExpired=true;
-  providerLoadEpoch++;providerLoad.disabled=true;providerLoadStatus.textContent='';
+  providerLoadEpoch++;providerLoad.disabled=true;providerRefresh.disabled=true;
+  providerRefreshObservation=null;providerLoadStatus.textContent='';
   currentTaskId=null;savedView=null;updateTaskContext();
   clearProfileSelection();if(profileDialog.open)profileDialog.close();
   recoveryObservations.clear();tasksEl.querySelectorAll('[data-field-recovery]').forEach(panel=>panel.remove());
@@ -769,10 +773,13 @@ const readinessLabels={
   deepseek_available:'DeepSeek 配置已加载',supervisor_running:'本地服务运行中'
 };
 function updateProviderLoadControl(){
-  providerLoad.disabled=uiSessionExpired||providerLoadBusy||providerLoadUnknown||providerLoadState!=='not_loaded';
+  providerLoad.disabled=uiSessionExpired||providerLoadBusy||providerRefreshBusy||providerRefreshUnknown||providerLoadUnknown||providerLoadState!=='not_loaded';
+  providerRefresh.disabled=uiSessionExpired||providerLoadBusy||providerRefreshBusy
+    ||providerRefreshUnknown||!providerRefreshObservation
+    ||!['available','unavailable'].includes(providerLoadState);
 }
 providerLoad.onclick=async()=>{
-  if(uiSessionExpired||providerLoadBusy||providerLoadUnknown||providerLoadState!=='not_loaded'||!readinessDialog.open)return;
+  if(uiSessionExpired||providerLoadBusy||providerRefreshBusy||providerRefreshUnknown||providerLoadUnknown||providerLoadState!=='not_loaded'||!readinessDialog.open)return;
   const epoch=providerLoadEpoch;
   providerLoadBusy=true;updateProviderLoadControl();
   providerLoadStatus.textContent='正在读取已配置凭证；没有调用模型或操作任务。';
@@ -789,7 +796,7 @@ providerLoad.onclick=async()=>{
     providerLoadStatus.textContent=result.loaded&&result.provider_state==='available'?
       '已加载本机配置；尚未验证模型连接，没有开始任务。':
       '已配置凭证暂不可用；没有开始任务。请核对现有模型配置或系统提示。';
-    await readiness();
+    await readiness();await observeProviderRefresh(epoch);
   }catch(_){
     if(!uiSessionExpired&&epoch===providerLoadEpoch&&readinessDialog.open){
       providerLoadUnknown=true;
@@ -798,6 +805,71 @@ providerLoad.onclick=async()=>{
   }finally{
     providerLoadBusy=false;updateProviderLoadControl();
   }
+};
+
+function validProviderRefresh(value,receipt=false){
+  const keys=['configuration_version','refresh_revision','provider_state','provider_state_basis',
+    'final_click_actor','submit_capability',...(receipt?['refresh_status']:[])];
+  return value&&typeof value==='object'&&!Array.isArray(value)
+    &&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key))
+    &&typeof value.configuration_version==='string'&&/^[a-f0-9]{64}$/.test(value.configuration_version)
+    &&Number.isSafeInteger(value.refresh_revision)&&value.refresh_revision>=0
+    &&['not_loaded','available','unavailable'].includes(value.provider_state)
+    &&value.provider_state_basis==='loaded_configuration'
+    &&value.final_click_actor==='user'&&value.submit_capability===false
+    &&(!receipt||['refreshed','failed'].includes(value.refresh_status))
+    &&(!receipt||value.refresh_status!=='failed'||value.provider_state==='not_loaded')
+    &&(!receipt||value.refresh_status!=='refreshed'||value.provider_state!=='not_loaded');
+}
+async function observeProviderRefresh(epoch){
+  try{
+    const response=await uiRequest('/ui/api/provider-refresh',{credentials:'same-origin'});
+    if(!response.ok)throw new Error();
+    const value=await response.json();
+    if(uiSessionExpired||epoch!==providerLoadEpoch||!readinessDialog.open)return;
+    if(!validProviderRefresh(value))throw new Error();
+    providerRefreshObservation=value;
+  }catch(_){
+    if(!uiSessionExpired&&epoch===providerLoadEpoch&&readinessDialog.open)
+      providerRefreshObservation=null;
+  }finally{updateProviderLoadControl();}
+}
+providerRefresh.onclick=async()=>{
+  if(uiSessionExpired||providerLoadBusy||providerRefreshBusy||providerRefreshUnknown
+    ||!readinessDialog.open||!providerRefreshObservation
+    ||!['available','unavailable'].includes(providerLoadState))return;
+  const epoch=providerLoadEpoch,expected=providerRefreshObservation;
+  providerRefreshBusy=true;providerRefreshObservation=null;updateProviderLoadControl();
+  providerLoadStatus.textContent='正在重新读取现有配置；没有调用模型或操作任务。';
+  try{
+    const response=await uiRequest('/ui/api/provider-refresh',{method:'POST',
+      headers:{'Content-Type':'application/json'},credentials:'same-origin',
+      body:JSON.stringify({expected_settings_version:expected.configuration_version,
+        expected_refresh_revision:expected.refresh_revision})});
+    if(!response.ok)throw new Error();
+    const result=await response.json();
+    if(uiSessionExpired||epoch!==providerLoadEpoch||!readinessDialog.open)return;
+    if(!validProviderRefresh(result,true)||result.configuration_version!==expected.configuration_version
+      ||result.refresh_revision!==expected.refresh_revision+1)throw new Error();
+    const readback=await uiRequest('/ui/api/provider-refresh',{credentials:'same-origin'});
+    if(!readback.ok)throw new Error();
+    const current=await readback.json();
+    if(uiSessionExpired||epoch!==providerLoadEpoch||!readinessDialog.open)return;
+    if(!validProviderRefresh(current)||current.configuration_version!==result.configuration_version
+      ||current.refresh_revision!==result.refresh_revision||current.provider_state!==result.provider_state)throw new Error();
+    providerRefreshObservation=current;providerLoadState=current.provider_state;
+    providerLoadStatus.textContent=result.refresh_status==='failed'?
+      '重新读取失败，旧客户端已停止使用；没有开始任务。请核对现有配置或系统提示。':
+      current.provider_state==='available'?
+        '已重新读取本机配置；尚未验证模型连接，没有开始任务。':
+        '已重新读取配置，但凭证暂不可用；没有开始任务。请核对现有配置或系统提示。';
+    await readiness();
+  }catch(_){
+    if(!uiSessionExpired&&epoch===providerLoadEpoch&&readinessDialog.open){
+      providerRefreshUnknown=true;providerRefreshObservation=null;
+      providerLoadStatus.textContent='刷新结果未确认；不会自动重试。可关闭此页后重新查看状态。';
+    }
+  }finally{providerRefreshBusy=false;updateProviderLoadControl();}
 };
 function renderReadinessDetails(data){
   providerLoadState=['not_loaded','available','unavailable'].includes(data?.provider_state)?data.provider_state:'unknown';
@@ -815,10 +887,13 @@ function renderReadinessDetails(data){
     '运行条件已就绪。最终提交仍由你本人完成。':
     (typeof data?.message==='string'&&data.message?'尚未就绪：'+data.message:'运行条件待检查；任务不会自动提交。');
 }
-readinessBtn.onclick=()=>{providerLoadEpoch++;providerLoadUnknown=false;providerLoadStatus.textContent='';
-  readinessDialog.showModal();updateProviderLoadControl();readinessClose.focus();void readiness();};
+readinessBtn.onclick=()=>{providerLoadEpoch++;providerLoadUnknown=false;providerRefreshUnknown=false;
+  providerRefreshObservation=null;providerLoadStatus.textContent='';
+  readinessDialog.showModal();updateProviderLoadControl();readinessClose.focus();
+  void readiness();void observeProviderRefresh(providerLoadEpoch);};
 readinessClose.onclick=()=>readinessDialog.close();
-readinessDialog.addEventListener('close',()=>{providerLoadEpoch++;providerLoadStatus.textContent='';
+readinessDialog.addEventListener('close',()=>{providerLoadEpoch++;providerRefreshObservation=null;
+  providerLoadStatus.textContent='';updateProviderLoadControl();
   if(!uiSessionExpired)readinessBtn.focus();});
 async function readiness(){
   if(uiSessionExpired)return;
