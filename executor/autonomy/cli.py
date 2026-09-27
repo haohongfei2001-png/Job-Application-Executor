@@ -16,7 +16,8 @@ import webbrowser
 from pathlib import Path
 from contextlib import ExitStack
 
-from .runtime_paths import RUNTIME, private_dir, local_token
+from .runtime_paths import (RUNTIME, private_dir, local_token, runtime_root,
+                            private_service_log)
 from .process_entry import isolated_cli_command
 from .consumer_presentation import ConsumerSurface, loopback_origin, present_surface
 
@@ -32,6 +33,7 @@ def ensure_chrome():
 
 
 def request(root, port, path, data=None):
+    root = runtime_root(root)
     req = urllib.request.Request(f"http://127.0.0.1:{port}" + path,
         data=json.dumps(data).encode() if data is not None else None,
         headers={"Authorization": "Bearer " + local_token(root), "Content-Type": "application/json"})
@@ -154,9 +156,15 @@ def serve(root, port):
 
 
 def lifecycle(action, root, port):
+    try:
+        root = runtime_root(root)
+    except (OSError, ValueError):
+        return {"ok": False, "reason": "service_runtime_unavailable"}
     if action in {"health", "status"}:
         try:
             return request(root, port, "/health")
+        except ValueError:
+            return {"ok": False, "reason": "service_runtime_unavailable"}
         except (OSError, urllib.error.URLError):
             return {"ok": False, "running": False}
     if action in {"stop", "restart"}:
@@ -172,20 +180,25 @@ def lifecycle(action, root, port):
     if action in {"start", "restart"}:
         try:
             return request(root, port, "/health")
+        except ValueError:
+            return {"ok": False, "reason": "service_runtime_unavailable"}
         except (OSError, urllib.error.URLError):
             pass
-        private_dir(root)
-        local_token(root)
-        log = Path(root) / "service.log"
-        with log.open("ab") as stream:
-            log.chmod(0o600)
-            child = subprocess.Popen(isolated_cli_command("--runtime", str(Path(root).resolve()), "--port", str(port), "serve"),
-                cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL, stdout=stream, stderr=stream, start_new_session=True)
+        try:
+            private_dir(root)
+            local_token(root)
+            with private_service_log(root) as stream:
+                child = subprocess.Popen(isolated_cli_command("--runtime", str(root), "--port", str(port), "serve"),
+                    cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL, stdout=stream, stderr=stream, start_new_session=True)
+        except (OSError, ValueError):
+            return {"ok": False, "reason": "service_runtime_unavailable"}
         for _ in range(50):
             if child.poll() is not None:
                 return {"ok": False, "reason": "service_start_failed"}
             try:
                 return request(root, port, "/health")
+            except ValueError:
+                return {"ok": False, "reason": "service_runtime_unavailable"}
             except (OSError, urllib.error.URLError):
                 time.sleep(.1)
         return {"ok": False, "reason": "health_timeout"}
@@ -253,6 +266,13 @@ def _open_dependency_recovery(root, port, *, presenter=None, reason="business_de
 
 def launch_consumer(root, port, *, presenter=None):
     loopback_origin(port)
+    try:
+        root = runtime_root(root)
+    except (OSError, ValueError):
+        return {"ok": False, "opened": False, "ready_for_live_e2e": False,
+                "checks": {}, "bootstrap_reason": "service_runtime_unavailable",
+                "message": "应用目录暂不可用。现有任务未修改。",
+                "final_click_actor": "user", "submit_capability": False}
     # Check disk integrity before starting an owned browser, then revalidate
     # again through the shared service/recovery admission path.
     identity = _consumer_release_identity()

@@ -5332,3 +5332,237 @@ def test_real_candidate_health_canonicalizes_only_owned_temporary_authority(
     assert (canary.read_bytes(), canary.stat().st_mode, canary.stat().st_ino) == before
     assert release.source_manifest(source) == source_before
     assert verify_source_candidate(source)
+
+
+@pytest.mark.parametrize("shape", ["root_alias", "ancestor_alias", "missing_descendant", "root_file", "foreign_root"])
+@pytest.mark.parametrize("action", ["start", "restart", "health", "status", "stop", "launch"])
+def test_service_parent_refuses_unadmitted_root_before_reads_or_effects(
+    tmp_path, monkeypatch, shape, action
+):
+    outside = tmp_path / "PRIVATE_OUTSIDE_PARENT_AUTHORITY"
+    outside.mkdir(mode=0o750)
+    secret = outside / "auth.token"
+    secret.write_text("PRIVATE_PARENT_TOKEN_" * 400)
+    secret.chmod(0o640)
+    (outside / "service.log").write_bytes(b"PRIVATE_PARENT_LOG_KEEP")
+    alias = tmp_path / "runtime-alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    if shape == "root_alias":
+        root = alias
+    elif shape == "ancestor_alias":
+        (outside / "child").mkdir()
+        root = alias / "child"
+    elif shape == "missing_descendant":
+        root = alias / "not-created" / "runtime"
+    elif shape == "foreign_root":
+        root = outside
+        owner = os.geteuid()
+        monkeypatch.setattr(cli.os, "geteuid", lambda: owner + 1)
+    else:
+        root = tmp_path / "not-a-runtime-directory"
+        root.write_bytes(b"PRIVATE_ORDINARY_ROOT_KEEP")
+    before = _retirement_inventory(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("root refusal must precede token, network, log, browser and process actions")
+    for name in ("request", "local_token", "private_dir", "_stop_owned_service",
+                 "ensure_chrome", "_consumer_release_identity", "open_ui"):
+        monkeypatch.setattr(cli, name, forbidden)
+    monkeypatch.setattr(cli.subprocess, "Popen", forbidden)
+    result = (cli.launch_consumer(root, 9344) if action == "launch"
+              else cli.lifecycle(action, root, 9344))
+    assert result["ok"] is False
+    assert result.get("bootstrap_reason", result.get("reason")) == "service_runtime_unavailable"
+    if action == "launch":
+        assert result["opened"] is False
+        assert result["ready_for_live_e2e"] is False
+        assert result["final_click_actor"] == "user" and result["submit_capability"] is False
+    assert "PRIVATE" not in json.dumps(result)
+    assert _retirement_inventory(tmp_path) == before
+    assert not (outside / "not-created").exists()
+
+
+@pytest.mark.parametrize("defect", ["symlink", "hardlink", "fifo", "directory",
+                                   "public", "foreign", "replaced", "oversized"])
+def test_shared_runtime_token_refuses_bad_inode_before_secret_use(
+    tmp_path, monkeypatch, defect
+):
+    from executor.autonomy import runtime_paths
+
+    monkeypatch.delenv("APPLICATION_EXECUTOR_LOCAL_TOKEN", raising=False)
+    root = tmp_path / "owned-runtime"
+    root.mkdir(mode=0o700)
+    path = root / "auth.token"
+    outside = tmp_path / "PRIVATE_TOKEN_OUTSIDE"
+    outside.write_bytes(b"PRIVATE_SECRET_TOKEN_PAYLOAD_" * 400)
+    outside.chmod(0o600)
+    if defect == "symlink":
+        path.symlink_to(outside)
+    elif defect == "hardlink":
+        os.link(outside, path)
+    elif defect == "fifo":
+        os.mkfifo(path, 0o600)
+    elif defect == "directory":
+        path.mkdir(mode=0o700)
+    else:
+        path.write_text("A" * (4097 if defect == "oversized" else 43))
+        path.chmod(0o644 if defect == "public" else 0o600)
+    before = _retirement_inventory(tmp_path)
+    actual_open, actual_fstat = os.open, os.fstat
+    descriptors, after_race = [], []
+
+    def opened(value, flags, *args, **kwargs):
+        fd = actual_open(value, flags, *args, **kwargs)
+        if Path(value) == path:
+            descriptors.append(fd)
+            if defect == "replaced":
+                path.rename(root / "displaced-original-token")
+                path.write_text("PRIVATE_REPLACEMENT_TOKEN_" * 3)
+                path.chmod(0o640)
+                after_race.append(_retirement_inventory(tmp_path))
+        return fd
+
+    def metadata(fd):
+        observed = actual_fstat(fd)
+        if defect == "foreign" and fd in descriptors:
+            values = list(observed)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return observed
+
+    monkeypatch.setattr(runtime_paths.os, "open", opened)
+    monkeypatch.setattr(runtime_paths.os, "fstat", metadata)
+    if defect != "oversized":
+        monkeypatch.setattr(runtime_paths.os, "fdopen",
+            lambda *_args, **_kwargs: pytest.fail("inadmissible token must not open a payload stream"))
+    with pytest.raises(ValueError, match=("invalid private auth token" if defect == "oversized"
+                                          else "private token permissions required")):
+        runtime_paths.local_token(root)
+    for fd in descriptors:
+        with pytest.raises(OSError):
+            fcntl.fcntl(fd, fcntl.F_GETFD)
+    assert _retirement_inventory(tmp_path) == (after_race[0] if after_race else before)
+    assert outside.read_bytes() == b"PRIVATE_SECRET_TOKEN_PAYLOAD_" * 400
+
+
+@pytest.mark.parametrize("defect", ["symlink", "hardlink", "fifo", "directory", "foreign", "replaced"])
+def test_service_parent_refuses_bad_log_before_chmod_or_child_start(
+    tmp_path, monkeypatch, defect
+):
+    from executor.autonomy import runtime_paths
+
+    monkeypatch.delenv("APPLICATION_EXECUTOR_LOCAL_TOKEN", raising=False)
+    root = tmp_path / "owned-runtime"
+    root.mkdir(mode=0o700)
+    token = root / "auth.token"
+    token.write_text("A" * 43)
+    token.chmod(0o600)
+    log = root / "service.log"
+    outside = tmp_path / "PRIVATE_LOG_OUTSIDE"
+    outside.write_bytes(b"PRIVATE_LOG_OUTSIDE_UNCHANGED")
+    outside.chmod(0o640)
+    if defect == "symlink":
+        log.symlink_to(outside)
+    elif defect == "hardlink":
+        os.link(outside, log)
+    elif defect == "fifo":
+        os.mkfifo(log, 0o600)
+    elif defect == "directory":
+        log.mkdir(mode=0o700)
+    else:
+        log.write_bytes(b"PRIVATE_OLD_LOG_KEEP")
+        log.chmod(0o640)
+    before = _retirement_inventory(tmp_path)
+    actual_open, actual_fstat = os.open, os.fstat
+    descriptors, after_race = [], []
+
+    def opened(value, flags, *args, **kwargs):
+        fd = actual_open(value, flags, *args, **kwargs)
+        if Path(value) == log:
+            descriptors.append(fd)
+            if defect == "replaced":
+                log.rename(root / "displaced-original-log")
+                log.write_bytes(b"PRIVATE_REPLACEMENT_LOG_KEEP")
+                log.chmod(0o640)
+                after_race.append(_retirement_inventory(tmp_path))
+        return fd
+
+    def metadata(fd):
+        observed = actual_fstat(fd)
+        if defect == "foreign" and fd in descriptors:
+            values = list(observed)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return observed
+
+    monkeypatch.setattr(runtime_paths.os, "open", opened)
+    monkeypatch.setattr(runtime_paths.os, "fstat", metadata)
+    monkeypatch.setattr(cli, "request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("synthetic service absent")))
+    monkeypatch.setattr(cli.subprocess, "Popen",
+        lambda *_args, **_kwargs: pytest.fail("inadmissible log must not start a child"))
+    result = cli.lifecycle("start", root, 9344)
+    assert result == {"ok": False, "reason": "service_runtime_unavailable"}
+    for fd in descriptors:
+        with pytest.raises(OSError):
+            fcntl.fcntl(fd, fcntl.F_GETFD)
+    assert _retirement_inventory(tmp_path) == (after_race[0] if after_race else before)
+    assert outside.read_bytes() == b"PRIVATE_LOG_OUTSIDE_UNCHANGED"
+
+
+def test_owned_service_log_preserves_append_and_private_descriptor(tmp_path):
+    from executor.autonomy.runtime_paths import private_service_log
+
+    root = tmp_path / "owned-runtime"
+    root.mkdir(mode=0o750)
+    log = root / "service.log"
+    log.write_bytes(b"SYNTHETIC_EXISTING_LOG\n")
+    log.chmod(0o640)
+    inode = log.stat().st_ino
+    with private_service_log(root) as stream:
+        fd = stream.fileno()
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        stream.write(b"SYNTHETIC_APPEND\n")
+    with pytest.raises(OSError):
+        fcntl.fcntl(fd, fcntl.F_GETFD)
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+    assert log.stat().st_ino == inode
+    assert log.read_bytes() == b"SYNTHETIC_EXISTING_LOG\nSYNTHETIC_APPEND\n"
+
+
+def test_actual_service_parent_start_health_and_authenticated_stop_keep_authority(
+    tmp_path, monkeypatch
+):
+    from executor.autonomy.worker import ProcessLock
+
+    monkeypatch.setenv("APPLICATION_EXECUTOR_BROWSER_MODE", "isolated")
+    monkeypatch.delenv("APPLICATION_EXECUTOR_LOCAL_TOKEN", raising=False)
+    root = tmp_path / "actual-parent-start"
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    try:
+        started = cli.lifecycle("start", root, port)
+        assert started["ok"] is True
+        health = cli.lifecycle("health", root, port)
+        assert health["ok"] is True and health["final_click_actor"] == "user"
+        identity = cli.request(root, port, "/v1/service-identity")
+        assert json.loads((root / "service.json").read_text()) == identity
+        assert identity["port"] == port
+        with pytest.raises(RuntimeError, match="another local worker"):
+            with ProcessLock(root / "worker.lock"):
+                pytest.fail("actual started daemon lost its selected task authority")
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert stat.S_IMODE((root / "auth.token").stat().st_mode) == 0o600
+        assert stat.S_IMODE((root / "service.log").stat().st_mode) == 0o600
+        token = (root / "auth.token").read_bytes()
+        assert cli.lifecycle("stop", root, port) == {"ok": True, "running": False}
+        assert not (root / "service.json").exists()
+        assert (root / "auth.token").read_bytes() == token
+        with ProcessLock(root / "worker.lock"):
+            pass
+    finally:
+        # Use only the existing authenticated exact-instance retirement path.
+        # No PID signalling, browser adoption or private user authority.
+        cli.lifecycle("stop", root, port)
