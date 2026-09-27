@@ -1428,3 +1428,57 @@ def test_task_workspace_retired_update_late_reply_never_revives_dialog_or_replay
             assert errors == []
         finally:
             browser.close()
+
+def test_task_workspace_retired_update_same_turn_close_reopen_preserves_new_epoch():
+    """Queued close/late reads cannot cancel or populate a new foreground read."""
+    pending, requests, errors = [], [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("retired-update-reopen.test", 1)[-1]
+                requests.append((route.request.method, path))
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/update-status":
+                    pending.append(route)
+                else:
+                    route.fulfill(status=200, content_type="application/json",
+                                  body='{"tasks":[],"update":{"status":"idle"},"ready_for_live_e2e":false}')
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://retired-update-reopen.test/**", route_request)
+            page.goto("https://retired-update-reopen.test/")
+            page.locator("#message").fill("UNSENT_NEW_UPDATE_EPOCH")
+            with page.expect_request("https://retired-update-reopen.test/ui/api/update-status"):
+                page.locator("#update").click()
+            assert len(pending) == 1
+            # One actual event-loop task: the old close event is still queued
+            # when the new dialog begins, without any test timing delays.
+            with page.expect_request("https://retired-update-reopen.test/ui/api/update-status"):
+                page.evaluate("() => { closeUpdateDialog(); void startUpdate(); }")
+            assert len(pending) == 2
+            expect(page.locator("#update-dialog")).to_be_visible()
+            expect(page.locator("#update-refresh")).to_be_disabled()
+            with page.expect_response("https://retired-update-reopen.test/ui/api/update-status"):
+                pending[0].fulfill(status=200, content_type="application/json",
+                                  body='{"status":"restart_required","reason":"PRIVATE_OLD_EPOCH"}')
+            page.evaluate("async () => { await Promise.resolve(); }")
+            expect(page.locator("#update-refresh")).to_be_disabled()
+            expect(page.locator("#send")).to_be_enabled()
+            assert page.evaluate("legacyUpdateObservation.status") == "idle"
+            assert "PRIVATE_" not in page.locator("#update-dialog").inner_text()
+            with page.expect_response("https://retired-update-reopen.test/ui/api/update-status"):
+                pending[1].fulfill(status=200, content_type="application/json", body='{"status":"idle"}')
+            page.wait_for_function("updateReadBusy === false")
+            expect(page.locator("#update-observation")).to_contain_text("这不代表已检查新版本")
+            expect(page.locator("#update-refresh")).to_be_enabled()
+            page.locator("#update-close").click()
+            assert page.locator("#update-observation").inner_text() == ""
+            expect(page.locator("#update")).to_be_focused()
+            assert page.locator("#message").input_value() == "UNSENT_NEW_UPDATE_EPOCH"
+            assert requests.count(("GET", "/ui/api/update-status")) == 2
+            assert all(method == "GET" for method, _ in requests)
+            assert errors == []
+        finally:
+            browser.close()

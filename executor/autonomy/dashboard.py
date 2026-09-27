@@ -333,7 +333,7 @@ function expireUISession(){
   if(uiSessionExpired)return;
   uiSessionExpired=true;
   updateEpoch++;updateReadBusy=false;updateRefresh.disabled=true;
-  updateObservation.textContent='';if(updateDialog.open)updateDialog.close();
+  updateObservation.textContent='';if(updateDialog.open)closeUpdateDialog();
   providerLoadEpoch++;providerLoad.disabled=true;providerRefresh.disabled=true;
   providerRefreshObservation=null;providerLoadStatus.textContent='';
   currentTaskId=null;savedView=null;updateTaskContext();
@@ -744,12 +744,24 @@ async function pollUpdate(){
     if(epoch===updateEpoch){updateReadBusy=false;updateRefresh.disabled=uiSessionExpired;}
   }
 }
-updateDialog.addEventListener('close',()=>{
+function clearUpdateObservation(){
   updateEpoch++;updateReadBusy=false;updateObservation.textContent='';
   updateRefresh.disabled=uiSessionExpired;
+}
+function closeUpdateDialog(){
+  // close events are queued; end the epoch before any late read or reopen.
+  clearUpdateObservation();updateDialog.close();
   if(!uiSessionExpired)updateBtn.focus();
+}
+updateDialog.addEventListener('cancel',event=>{
+  event.preventDefault();closeUpdateDialog();
 });
-updateClose.onclick=()=>updateDialog.close();
+updateDialog.addEventListener('close',()=>{
+  // A queued close from a prior epoch must not clear a newly opened dialog.
+  if(updateDialog.open)return;
+  clearUpdateObservation();if(!uiSessionExpired)updateBtn.focus();
+});
+updateClose.onclick=closeUpdateDialog;
 updateRefresh.onclick=pollUpdate;
 diagnosticsBtn.onclick=previewDiagnostics;
 updateBtn.onclick=startUpdate;

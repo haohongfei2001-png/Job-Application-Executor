@@ -287,16 +287,33 @@ with sync_playwright() as playwright:
         close.focus()
         page.keyboard.press('Enter')
         expect(page.locator('#diagnostics-dialog')).not_to_be_visible()
-        # Actual consumer action and feedback; no direct invocation of an updater.
+        # Actual app UI now reads only; retain the real authenticated backend
+        # refusal as a separate negative, with no direct updater invocation.
         probe_phase('update_refusal')
-        update=page.get_by_role('button',name='检查并更新',exact=True)
+        update=page.get_by_role('button',name='更新状态',exact=True)
+        observed_requests=[]
+        page.on('request',lambda request:observed_requests.append(
+            (request.method,urlsplit(request.url).path)))
         with page.expect_response(lambda response:
-                urlsplit(response.url).path=='/ui/api/update') as outcome:
+                urlsplit(response.url).path=='/ui/api/update-status') as outcome:
             update.click()
-        assert outcome.value.status==409
-        assert outcome.value.json()['reason']=='packaged_update_not_ready'
-        expect(page.locator('#toast')).to_contain_text('当前安装包尚不支持安全更新')
+        assert outcome.value.status==200
+        assert outcome.value.request.method=='GET'
+        assert outcome.value.json()['status']=='idle'
+        expect(page.locator('#update-dialog')).to_be_visible()
+        expect(page.locator('#update-observation')).to_contain_text('这不代表已检查新版本')
+        assert all(path!='/ui/api/update' for method,path in observed_requests)
+        assert all(method=='GET' for method,path in observed_requests)
+        page.locator('#update-close').click()
+        expect(page.locator('#update-dialog')).not_to_be_visible()
+        assert page.locator('#update-observation').inner_text()==''
+        expect(update).to_be_focused()
         expect(update).to_be_enabled()
+        refused_update=context.request.post(base+'/ui/api/update',
+            headers={'Content-Type':'application/json','Origin':base},data='{}')
+        assert refused_update.status==409
+        assert refused_update.json()['reason']=='packaged_update_not_ready'
+        # No new session/ticket/auth refresh or install/stop/restart operation.
         probe_phase('consumed_ticket_refusal')
         assert context.request.get(url).status==401
         unauthenticated=browser.new_context()

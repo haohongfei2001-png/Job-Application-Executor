@@ -1171,10 +1171,10 @@ def test_dashboard_uses_consumer_facing_status_language():
     assert '添加岗位请使用左侧表单' in DASHBOARD_HTML
     assert "查看诊断" in DASHBOARD_HTML
     assert "复制报告" in DASHBOARD_HTML
-    assert "检查并更新" in DASHBOARD_HTML
+    assert "更新状态" in DASHBOARD_HTML
     assert "/ui/api/diagnostics" in DASHBOARD_HTML
-    assert "/ui/api/update" in DASHBOARD_HTML
-    assert "otp_in_flight" in DASHBOARD_HTML
+    assert "/ui/api/update-status" in DASHBOARD_HTML
+    assert "不会安装版本、重启服务或恢复任务" in DASHBOARD_HTML
 
 
 def test_macos_rollback_refuses_unhealthy_retained_app_before_moving_current(tmp_path, monkeypatch):
