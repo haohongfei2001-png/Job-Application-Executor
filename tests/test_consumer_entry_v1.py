@@ -43,12 +43,15 @@ def test_local_http_bind_does_not_resolve_hostname(monkeypatch):
 def isolated_packaged_task_state(tmp_path, monkeypatch):
     # Consumer app transactions must never share the hosted runner's HOME.
     # Keep the production packaged path calculation, with a synthetic home.
-    from executor.autonomy import queue
+    from executor.autonomy import queue, runtime_paths
 
-    actual = queue.default_runtime
-    monkeypatch.setattr(queue, "default_runtime",
-                        lambda source, *, home=None: actual(
-                            source, home=home if home is not None else tmp_path / "synthetic-home"))
+    actual = runtime_paths.default_runtime
+    isolated = lambda source, *, home=None: actual(
+        source, home=home if home is not None else tmp_path / "synthetic-home")
+    # Both the legacy re-export and cold transaction import use this same
+    # synthetic authority. No test may fall back to the hosted runner HOME.
+    monkeypatch.setattr(queue, "default_runtime", isolated)
+    monkeypatch.setattr(runtime_paths, "default_runtime", isolated)
 
 
 FAKE_CANDIDATE_CLI = """from __future__ import annotations
@@ -2908,3 +2911,29 @@ def test_cold_app_transaction_admission_remains_available_without_business_impor
     os.close(descriptor)
     descriptor = _private_lock_fd(state / "worker.lock")
     os.close(descriptor)
+
+
+def test_transaction_default_state_fixture_never_falls_back_to_ambient_home(
+        tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from executor.autonomy import state_compatibility
+    apps = tmp_path / "isolated-app-guard"
+    apps.mkdir()
+    observed = []
+    @contextmanager
+    def observe_guard(root):
+        observed.append(root)
+        yield
+    def refuse_ambient_home(_cls):
+        pytest.fail("transaction test escaped its synthetic home")
+    monkeypatch.setattr(Path, "home", classmethod(refuse_ambient_home))
+    monkeypatch.setattr(state_compatibility, "task_state_guard", observe_guard)
+    install = consumer.install_macos_app(tmp_path / "no-runtime",
+        destination=apps, platform="darwin")
+    rollback = consumer.rollback_macos_app(apps)
+    assert install["ok"] is False and install["reason"] == "venv_missing"
+    assert rollback["ok"] is False and rollback["reason"] == "rollback_unavailable"
+    expected = (tmp_path / "synthetic-home" / "Library" / "Application Support"
+                / "AI投递经理" / "autonomy")
+    assert observed == [expected, expected]
+    assert not expected.exists()
