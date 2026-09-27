@@ -512,6 +512,26 @@ class TaskQueue:
             db.execute("UPDATE field_actions SET outcome=?,updated=? WHERE action_id=?",
                        (outcome, self.clock(), action_id))
 
+    def invalidate_field_readbacks(self, attempt_id: str) -> None:
+        """Retain uncertainty when a later control changes an earlier readback.
+
+        This revokes only local DOM evidence, never creates a replay or server
+        receipt. The owning active run and lease fence the atomic transition.
+        """
+        with self.tx() as db:
+            row = db.execute(
+                "SELECT r.outcome,r.owner,t.owner AS task_owner,t.lease_until FROM run_attempts r JOIN tasks t ON t.task_id=r.task_id WHERE r.attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if (row is None or row["outcome"] != "ATTEMPTED"
+                    or row["owner"] != row["task_owner"] or row["lease_until"] is None
+                    or row["lease_until"] <= self.clock()):
+                raise RuntimeError("field invalidation lease lost")
+            db.execute(
+                "UPDATE field_actions SET outcome='UNKNOWN_OUTCOME',updated=? WHERE attempt_id=? AND outcome='DOM_READBACK_UNVERIFIED'",
+                (self.clock(), attempt_id),
+            )
+
     def recovery_snapshot(self, tid: str, *, expected_revision: int | None = None) -> dict:
         """Read one stopped-task journal snapshot; never certify a saved draft.
 

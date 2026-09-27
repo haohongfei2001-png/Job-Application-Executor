@@ -576,6 +576,72 @@ class GenericWebAdapter(SiteAdapter):
                 completed.add(item.selector)
                 pending.remove(item)
         actions: list[dict] = []
+        # Keep complete successful control readbacks in memory for this one
+        # document/batch. Later reactive writes must not silently invalidate
+        # earlier evidence. Values never enter the operational journal.
+        signature = """e => [e.tagName.toLowerCase(), e.getAttribute('type'),
+                    e.id, e.getAttribute('name'), e.getAttribute('role'),
+                    e.getAttribute('aria-label'),
+                    [...(e.labels || [])].map(label => label.textContent.trim())]"""
+        document_epoch = page_document_epoch(self.page)
+        retained = []
+
+        def read_value(element, kind):
+            if kind == "checked":
+                return element.is_checked()
+            if kind == "combobox":
+                return str(element.evaluate(
+                    "e => e.value ?? e.getAttribute('aria-valuetext') ?? (e.innerText || '').trim()")).strip()
+            if kind == "select":
+                return (element.input_value(), element.evaluate("e => e.selectedIndex"))
+            return str(element.input_value() or "")
+
+        def verify_retained():
+            if not retained:
+                return
+            try:
+                getattr(self, "mutation_guard", lambda: None)()
+                # Read the complete retained set atomically in one browser
+                # round-trip, avoiding quadratic CDP traffic on large forms.
+                kept = self.page.evaluate(r"""({epoch, controls, selector}) => {
+                  if (String(performance.timeOrigin) !== epoch) return false;
+                  const ordinal = [...document.querySelectorAll(selector)];
+                  for (const [path, identity, kind, expected] of controls) {
+                    let matches;
+                    if (path.startsWith('__field_index__:')) {
+                      const index = path.slice('__field_index__:'.length);
+                      if (!/^[0-9]+$/.test(index)) return false;
+                      matches = ordinal[Number(index)] ? [ordinal[Number(index)]] : [];
+                    } else {
+                      try { matches = [...document.querySelectorAll(path)]; }
+                      catch (_) { return false; }
+                    }
+                    if (matches.length !== 1) return false;
+                    const e = matches[0], style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                    if (style.display === 'none' || ['hidden','collapse'].includes(style.visibility)
+                        || !(rect.width > 0 && rect.height > 0) || e.matches(':disabled')
+                        || e.closest('[aria-disabled="true"]')) return false;
+                    const signature = [e.tagName.toLowerCase(), e.getAttribute('type'),
+                      e.id, e.getAttribute('name'), e.getAttribute('role'), e.getAttribute('aria-label'),
+                      [...(e.labels || [])].map(label => label.textContent.trim())];
+                    if (JSON.stringify(signature) !== JSON.stringify(identity)) return false;
+                    const actual = kind === 'checked' ? e.checked
+                      : kind === 'combobox' ? String(e.value ?? e.getAttribute('aria-valuetext')
+                          ?? (e.innerText || '').trim()).trim()
+                      : kind === 'select' ? [e.value, e.selectedIndex] : String(e.value || '');
+                    if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
+                  }
+                  return true;
+                }""", {"epoch": document_epoch, "controls": retained,
+                       "selector": VISIBLE_FIELD_SELECTOR})
+                if kept is not True:
+                    raise BrowserOwnershipError("retained field readback changed")
+            except Exception:
+                invalidate = getattr(self, "field_readbacks_invalidate", None)
+                if callable(invalidate):
+                    invalidate()
+                raise BrowserOwnershipError("retained field outcome unknown") from None
+
         for resolution in ordered:
             getattr(self, "mutation_guard", lambda: None)()
             if resolution.status != ResolutionStatus.RESOLVED:
@@ -590,6 +656,7 @@ class GenericWebAdapter(SiteAdapter):
                 continue
             if dependency:
                 self.await_form_render()
+            verify_retained()
             if not self._collection_complete_now():
                 actions.append({"field_id": resolution.field_id, "ok": False,
                                 "reason": "form_collection_limit_exceeded"})
@@ -610,10 +677,7 @@ class GenericWebAdapter(SiteAdapter):
                 # Identity is captured without applicant values. A reactive
                 # replacement may retain the control contract, but an ordinal
                 # shift, relabel or type change cannot inherit its write proof.
-                signature_script = """e => [e.tagName.toLowerCase(), e.getAttribute('type'),
-                    e.id, e.getAttribute('name'), e.getAttribute('role'),
-                    e.getAttribute('aria-label'),
-                    [...(e.labels || [])].map(label => label.textContent.trim())]"""
+                signature_script = signature
                 control_signature = element.evaluate(signature_script)
                 expected_readback = None
                 if input_type == "file":
@@ -676,28 +740,29 @@ class GenericWebAdapter(SiteAdapter):
                         or current_element.evaluate(signature_script) != control_signature):
                     raise BrowserOwnershipError("field readback identity unknown")
                 kind, expected = expected_readback
-                if kind == "checked":
-                    actual = current_element.is_checked()
-                elif kind == "combobox":
-                    actual = str(current_element.evaluate(
-                        "e => e.value ?? e.getAttribute('aria-valuetext') ?? (e.innerText || '').trim()")).strip()
-                elif kind == "select":
-                    actual = (current_element.input_value(),
-                              current_element.evaluate("e => e.selectedIndex"))
-                else:
-                    actual = str(current_element.input_value() or "")
+                actual = read_value(current_element, kind)
                 if actual != expected:
                     raise BrowserOwnershipError("field readback outcome unknown")
+                verify_retained()
                 if action_id is not None:
                     self.field_action_finish(action_id, "DOM_READBACK_UNVERIFIED")
+                retained.append((resolution.selector, control_signature, kind, expected))
                 actions.append({"field_id": resolution.field_id, "ok": True,
                                 "source": resolution.source, "observed": "DOM_READBACK"})
             except Exception:
+                # Failure to observe this write also prevents retaining the
+                # earlier batch as verified DOM state. Revoke evidence only;
+                # the coarse run and unknown intents still forbid replay.
+                if retained:
+                    invalidate = getattr(self, "field_readbacks_invalidate", None)
+                    if callable(invalidate):
+                        invalidate()
                 if action_id is not None:
                     self.field_action_finish(action_id, "UNKNOWN_OUTCOME")
                 # The primitive may have reached the page before Playwright
                 # reported failure. Do not turn that uncertainty into a retry.
                 raise BrowserOwnershipError("field write outcome unknown") from None
+        verify_retained()
         return actions
 
     def validate(self, plan: ApplicationPlan) -> ValidationResult:

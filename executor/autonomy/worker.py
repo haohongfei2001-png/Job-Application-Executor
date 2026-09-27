@@ -141,6 +141,10 @@ class OperationalAudit:
             self.guard()
         self.action_queue.finish_field_action(action_id, outcome)
 
+    def invalidate_field_readbacks(self):
+        self.guard()
+        self.action_queue.invalidate_field_readbacks(self.action_attempt_id)
+
     def record_action(self, action):
         self.guard()
         # Queue events already record transitions. Do not retain arbitrary action text.

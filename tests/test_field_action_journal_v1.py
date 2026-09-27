@@ -437,3 +437,214 @@ def test_unavailable_choice_retains_unknown_journal_and_stops_later_write(tmp_pa
             payload = path.read_bytes()
             for canary in (b"PRIVATE_CONTROL_CANARY", b"PRIVATE_LABEL_CANARY", b"PRIVATE_VALUE_CANARY"):
                 assert canary not in payload
+
+
+def _retained_controls(kind):
+    if kind == "checked":
+        return "<label>Private first<input id='first' type='checkbox'></label>", True, "e.checked=false"
+    if kind == "select":
+        return ("<label>Private first<select id='first'><option value=''>Choose</option>"
+                "<option value='kept'>PRIVATE_VALUE_CANARY</option></select></label>",
+                "PRIVATE_VALUE_CANARY", "e.selectedIndex=0")
+    if kind == "aria":
+        return ("""<div id='first' role='combobox' aria-controls='choices' tabindex='0'>Choose</div>
+          <div id='choices' role='listbox'><div role='option' onclick="
+            document.querySelector('#first').innerText=this.innerText">PRIVATE_VALUE_CANARY</div></div>""",
+                "PRIVATE_VALUE_CANARY", "e.innerText='changed'")
+    return "<label>Private first<input id='first'></label>", "PRIVATE_VALUE_CANARY", "e.value='changed'"
+
+
+@pytest.mark.parametrize("kind", ["text", "checked", "select", "aria"])
+@pytest.mark.parametrize("change", ["value", "identity", "removed", "duplicate"])
+def test_later_field_collateral_change_revokes_complete_batch_before_next_write(tmp_path, kind, change):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    first, value, value_change = _retained_controls(kind)
+    mutation = {
+        "value": value_change,
+        "identity": "e.setAttribute('aria-label','changed identity')",
+        "removed": "e.remove()",
+        "duplicate": "e.after(e.cloneNode(true))",
+    }[change]
+    html = tmp_path / "collateral.html"
+    html.write_text("<!doctype html><body>" + first + """<input id='second'>
+      <input id='third'><button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.submits=0;window.writes=0;
+        document.querySelector('#second').addEventListener('input',()=>{
+          window.writes++;const e=document.querySelector('#first');""" + mutation + """});
+      </script>""", encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        resolutions = [FieldResolution(field_id="PRIVATE_CONTROL_CANARY_" + key,
+            selector="#" + key, label="PRIVATE_LABEL_CANARY",
+            value=value if key == "first" else "PRIVATE_VALUE_CANARY",
+            status=ResolutionStatus.RESOLVED) for key in ("first", "second", "third")]
+        with pytest.raises(BrowserOwnershipError, match="outcome unknown"):
+            adapter.apply_resolutions(resolutions)
+        assert adapter.page.locator("#second").input_value() == "PRIVATE_VALUE_CANARY"
+        assert adapter.page.locator("#third").input_value() == ""
+        assert adapter.page.evaluate("[window.writes,window.submits]") == [1, 0]
+        with pytest.raises(BrowserOwnershipError):
+            adapter.apply_resolutions(resolutions)
+        assert adapter.page.evaluate("[window.writes,window.submits]") == [1, 0]
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert [row["outcome"] for row in rebuilt.field_actions(tid)] == ["UNKNOWN_OUTCOME"] * 2
+    for operation in (lambda: rebuilt.require_field_action_readbacks(attempt),
+                      lambda: rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")):
+        with pytest.raises(RuntimeError, match="reconciliation"):
+            operation()
+    clock[0] += 11
+    assert rebuilt.claim("replacement-worker") is None
+    assert rebuilt.get(tid)["blocker"] == "unknown_outcome"
+    snapshot = rebuilt.recovery_snapshot(tid)
+    assert snapshot["field_actions"]["unknown_outcome"] == 2
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        rebuilt.resume(tid)
+    for path in queue.root.rglob("*"):
+        if path.is_file():
+            payload = path.read_bytes()
+            for canary in (b"PRIVATE_CONTROL_CANARY", b"PRIVATE_LABEL_CANARY", b"PRIVATE_VALUE_CANARY"):
+                assert canary not in payload
+
+
+@pytest.mark.parametrize("kind", ["text", "checked", "select", "aria"])
+def test_same_contract_reactive_replacement_keeps_whole_batch_dom_readback(tmp_path, kind):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    first, value, _mutation = _retained_controls(kind)
+    html = tmp_path / "retained-redraw.html"
+    html.write_text("<!doctype html><body>" + first + """<input id='second'>
+      <input id='third'><button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.submits=0;
+        document.querySelector('#second').addEventListener('input',()=>{
+          const e=document.querySelector('#first'), clone=e.cloneNode(true);
+          clone.value=e.value;clone.checked=e.checked;
+          if(e.tagName==='SELECT')clone.selectedIndex=e.selectedIndex;
+          e.replaceWith(clone);
+        });
+      </script>""", encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        resolutions = [FieldResolution(field_id=key, selector="#" + key,
+            label="Private label", value=value if key == "first" else "PRIVATE_VALUE_CANARY",
+            status=ResolutionStatus.RESOLVED) for key in ("first", "second", "third")]
+        actions = adapter.apply_resolutions(resolutions)
+        assert len(actions) == 3 and all(action["ok"] for action in actions)
+        assert adapter.page.locator("#third").input_value() == "PRIVATE_VALUE_CANARY"
+        assert adapter.page.evaluate("window.submits") == 0
+    assert [row["outcome"] for row in queue.field_actions(tid)] == ["DOM_READBACK_UNVERIFIED"] * 3
+    queue.require_field_action_readbacks(attempt)
+    queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+def test_between_actions_change_revokes_old_readback_before_new_intent(tmp_path):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    html = tmp_path / "between-actions.html"
+    html.write_text("<!doctype html><body><input id='first'><input id='second'>", encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        def finish(action_id, outcome):
+            audit.finish_field_action(action_id, outcome)
+            if outcome == "DOM_READBACK_UNVERIFIED":
+                adapter.page.locator("#first").evaluate("e => e.value = 'changed after observation'")
+        adapter.field_action_finish = finish
+        fields = [FieldResolution(field_id=key, selector="#" + key, label="Private",
+            value="PRIVATE_VALUE_CANARY", status=ResolutionStatus.RESOLVED)
+            for key in ("first", "second")]
+        with pytest.raises(BrowserOwnershipError, match="retained field outcome unknown"):
+            adapter.apply_resolutions(fields)
+        assert adapter.page.locator("#second").input_value() == ""
+    assert len(queue.field_actions(tid)) == 1
+    assert queue.field_actions(tid)[0]["outcome"] == "UNKNOWN_OUTCOME"
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        queue.require_field_action_readbacks(attempt)
+
+
+@pytest.mark.parametrize("fence", ["expired", "other_owner", "returned"])
+def test_readback_invalidation_cannot_bypass_run_or_lease_fence(tmp_path, fence):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    action = queue.begin_field_action(attempt, hashlib.sha256(b"first").hexdigest())
+    queue.finish_field_action(action, "DOM_READBACK_UNVERIFIED")
+    if fence == "expired":
+        clock[0] += 11
+    elif fence == "other_owner":
+        with queue.tx() as db:
+            db.execute("UPDATE tasks SET owner=? WHERE task_id=?", ("other", tid))
+    else:
+        queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    before = queue.field_actions(tid)
+    with pytest.raises(RuntimeError, match="invalidation lease lost"):
+        queue.invalidate_field_readbacks(attempt)
+    assert queue.field_actions(tid) == before
+
+
+def test_readback_invalidation_is_atomic_idempotent_and_never_grants_replay(tmp_path):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    for key in ("first", "second"):
+        action = queue.begin_field_action(attempt, hashlib.sha256(key.encode()).hexdigest())
+        queue.finish_field_action(action, "DOM_READBACK_UNVERIFIED")
+    current = queue.begin_field_action(attempt, hashlib.sha256(b"third").hexdigest())
+    queue.invalidate_field_readbacks(attempt)
+    queue.invalidate_field_readbacks(attempt)
+    states = {row["action_id"]: row["outcome"] for row in queue.field_actions(tid)}
+    assert states.pop(current) == "ATTEMPTED"
+    assert len(states) == 2 and set(states.values()) == {"UNKNOWN_OUTCOME"}
+    queue.finish_field_action(current, "UNKNOWN_OUTCOME")
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert {row["outcome"] for row in rebuilt.field_actions(tid)} == {"UNKNOWN_OUTCOME"}
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"fourth").hexdigest())
+
+
+@pytest.mark.parametrize("current_failure", ["value", "identity"])
+def test_current_readback_failure_also_revokes_collateral_old_evidence(tmp_path, current_failure):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    mutation = "this.value=''" if current_failure == "value" else "this.setAttribute('aria-label','changed')"
+    html = tmp_path / "current-and-retained-fault.html"
+    html.write_text("<!doctype html><body><input id='first'><input id='second' oninput=\""
+        "document.querySelector('#first').value='changed';" + mutation
+        + "\"><input id='third'>", encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        fields = [FieldResolution(field_id=key, selector="#" + key, label="Private",
+            value="PRIVATE_VALUE_CANARY", status=ResolutionStatus.RESOLVED)
+            for key in ("first", "second", "third")]
+        with pytest.raises(BrowserOwnershipError, match="outcome unknown"):
+            adapter.apply_resolutions(fields)
+        assert adapter.page.locator("#third").input_value() == ""
+    assert len(queue.field_actions(tid)) == 2
+    assert {row["outcome"] for row in queue.field_actions(tid)} == {"UNKNOWN_OUTCOME"}
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        queue.require_field_action_readbacks(attempt)
+
+
+def test_final_batch_observation_cannot_return_stale_last_control_proof(tmp_path):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    html = tmp_path / "last-action-fault.html"
+    html.write_text("<!doctype html><body><input id='first'>", encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        def finish(action_id, outcome):
+            audit.finish_field_action(action_id, outcome)
+            adapter.page.locator("#first").evaluate("e => e.value = 'changed before return'")
+        adapter.field_action_finish = finish
+        field = FieldResolution(field_id="first", selector="#first", label="Private",
+            value="PRIVATE_VALUE_CANARY", status=ResolutionStatus.RESOLVED)
+        with pytest.raises(BrowserOwnershipError, match="retained field outcome unknown"):
+            adapter.apply_resolutions([field])
+    assert len(queue.field_actions(tid)) == 1
+    assert queue.field_actions(tid)[0]["outcome"] == "UNKNOWN_OUTCOME"
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")

@@ -622,6 +622,9 @@ class ApplicationExecutor:
         if callable(getattr(self.audit, "begin_field_action", None)):
             adapter.field_action_begin = self.audit.begin_field_action
             adapter.field_action_finish = self.audit.finish_field_action
+            invalidate = getattr(self.audit, "invalidate_field_readbacks", None)
+            if callable(invalidate):
+                adapter.field_readbacks_invalidate = invalidate
         adapter.existing_browser_only = self.existing_browser_only
         adapter.browser_binding_get = getattr(self, "browser_binding_get", None)
         adapter.browser_binding_set = getattr(self, "browser_binding_set", None)
