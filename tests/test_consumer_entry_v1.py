@@ -5807,8 +5807,16 @@ def test_native_foreground_handoff_releases_real_window_lease_before_safe_stop_a
         assert kwargs["cwd"] == source
         assert kwargs["start_new_session"] is True
         assert all(kwargs[key] == -3 for key in ("stdin", "stdout", "stderr"))
-        with actual_guard(root), state_compatibility.task_state_guard(root):
-            pass
+        # The transaction guard also owns native-window.lock. Prove both
+        # authorities are free sequentially; nesting intentionally contends.
+        with actual_guard(root):
+            with pytest.raises(BlockingIOError):
+                with state_compatibility.task_state_guard(root):
+                    pytest.fail("activation must still refuse a live window")
+        with state_compatibility.task_state_guard(root):
+            with pytest.raises(BlockingIOError):
+                with actual_guard(root):
+                    pytest.fail("reopen must still refuse a live transaction")
         calls.append("reopen_active")
         return object()
     monkeypatch.setattr(cli, "subprocess", SimpleNamespace(Popen=reopened, DEVNULL=-3))

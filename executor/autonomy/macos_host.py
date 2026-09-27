@@ -93,6 +93,7 @@ static BOOL focusRequest(NSDictionary *command) {
 @property NSTextField *failureMessage;
 @property WKNavigation *activeNavigation;
 @property BOOL finished;
+@property BOOL windowClosing;
 - (BOOL)allows:(NSURL *)url;
 - (BOOL)focusWindow;
 - (void)observeFocus;
@@ -349,8 +350,13 @@ static BOOL focusRequest(NSDictionary *command) {
     }];
 }
 - (void)windowWillClose:(NSNotification *)notification {
-    self.finished = YES;
-    if (self.releaseRequest) report(@{@"ok": @YES, @"release_request": self.releaseRequest});
+    // AppKit termination can re-enter the close delegate. Consume the one
+    // terminal intent before reporting or requesting application termination.
+    if (self.windowClosing) return;
+    self.windowClosing = YES; self.finished = YES;
+    NSDictionary *request = self.releaseRequest;
+    self.releaseRequest = nil;
+    if (request) report(@{@"ok": @YES, @"release_request": request});
     [NSApp terminate:nil];
 }
 @end

@@ -1389,6 +1389,8 @@ def test_hosted_mac_actual_menu_handoff_exits_one_window_without_service_or_task
             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=25)
         assert result.returncode == 0
         replies = [json.loads(line) for line in result.stdout.splitlines()]
+        # Cocoa termination may close the same window again. The wire oracle
+        # must stay exact: one admission and one terminal intent, no filtering.
         assert replies == [
             {"ok": True, "request": 1, "surface": "dashboard", "window_count": 1},
             {"ok": True, "release_request": {"action": "restore"}},
