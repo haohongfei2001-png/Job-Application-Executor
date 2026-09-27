@@ -1382,3 +1382,75 @@ def test_owned_scratch_canonicalization_never_admits_a_caller_journal_alias(
         assert alias.is_symlink()
         assert (alias.lstat().st_dev, alias.lstat().st_ino) == (
             alias_identity.st_dev, alias_identity.st_ino)
+
+@pytest.mark.parametrize("name", ["tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm"])
+def test_journal_hardlink_cannot_enter_guard_or_candidate_snapshot(tmp_path, monkeypatch, name):
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        authority_before = authority(db)
+        source = root / name
+        assert source.is_file()
+        outside = tmp_path / ("external-" + name)
+        os.link(source, outside)
+        outside_identity = (outside.stat().st_dev, outside.stat().st_ino)
+        outside_bytes = outside.read_bytes()
+
+        with pytest.raises(ValueError, match="task_state_path_invalid"):
+            with task_state_guard(root):
+                pytest.fail("hardlinked journal cannot certify a unique authority")
+        assert not any((root / lock).exists() for lock in (
+            "native-window.lock", "worker.lock", "migration.lock"))
+
+        def no_candidate(*_args, **_kwargs):
+            pytest.fail("candidate cannot run after hardlinked journal refusal")
+        monkeypatch.setattr(state_compatibility.subprocess, "run", no_candidate)
+        assert task_state_candidate_compatible(
+            sys.executable, candidate(tmp_path, "pass"), root) is False
+        assert outside.read_bytes() == outside_bytes
+        assert (outside.stat().st_dev, outside.stat().st_ino) == outside_identity
+        assert authority(db) == authority_before
+
+
+def test_hardlinked_answer_key_refuses_before_candidate_snapshot(tmp_path, monkeypatch):
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        authority_before = authority(db)
+        outside = tmp_path / "external-answer-key"
+        os.link(root / "task-answers.key", outside)
+        identity = (outside.stat().st_dev, outside.stat().st_ino)
+
+        def no_candidate(*_args, **_kwargs):
+            pytest.fail("candidate cannot run after hardlinked answer-key refusal")
+        monkeypatch.setattr(state_compatibility.subprocess, "run", no_candidate)
+        assert task_state_candidate_compatible(
+            sys.executable, candidate(tmp_path, "pass"), root) is False
+        assert authority(db) == authority_before
+        assert (root / "task-answers.key").read_bytes() == key
+        assert outside.read_bytes() == key
+        assert (outside.stat().st_dev, outside.stat().st_ino) == identity
+
+
+def test_hardlinked_service_record_is_not_read_as_old_writer_proof(tmp_path, monkeypatch):
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    root.mkdir()
+    outside = tmp_path / "external-service-record"
+    payload = b"PRIVATE_SERVICE_RECORD_CANARY"
+    outside.write_bytes(payload)
+    os.link(outside, root / "service.json")
+    identity = (outside.stat().st_dev, outside.stat().st_ino)
+
+    def no_json(_raw):
+        pytest.fail("hardlinked service record must not be parsed")
+    monkeypatch.setattr(state_compatibility.json, "loads", no_json)
+    with pytest.raises(ValueError, match="task_service_record_invalid"):
+        with task_state_guard(root):
+            pytest.fail("hardlinked service record cannot certify a stopped writer")
+    assert outside.read_bytes() == payload
+    assert (outside.stat().st_dev, outside.stat().st_ino) == identity

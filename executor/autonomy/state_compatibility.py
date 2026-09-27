@@ -23,6 +23,19 @@ def _state_paths(root: Path):
         "tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm")]
 
 
+def _owned_journal_entries(root: Path) -> bool:
+    """Reject aliases in every SQLite authority file before candidate reads."""
+    for path in _state_paths(root):
+        try:
+            info = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid()):
+            return False
+    return True
+
+
 def _refuse_live_service(root: Path):
     """A legacy daemon may not honor worker.lock; probe only, never signal it."""
     registry = root / "service.json"
@@ -32,7 +45,9 @@ def _refuse_live_service(root: Path):
     # cannot certify that the old writer is stopped, even with the new lock.
     with os.fdopen(os.open(registry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK),
                    encoding="utf-8") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        info = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid()):
             raise ValueError("task_service_record_invalid")
         raw = handle.read(65537)
     if len(raw) > 65536:
@@ -110,7 +125,7 @@ def task_state_guard(root: str | Path):
     metadata = root.stat(follow_symlinks=False)
     if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
             or any(path.is_symlink() for path in (root, *root.parents))
-            or any(p.is_symlink() for p in _state_paths(root))):
+            or not _owned_journal_entries(root)):
         raise ValueError("task_state_path_invalid")
     root.chmod(0o700)
     # A queue constructor writes schema/derived state under migration.lock even
@@ -239,7 +254,8 @@ def _answer_key(root: Path):
         return None
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.getuid()
                 or info.st_mode & 0o077 or info.st_size != 44):
             raise ValueError("task_answer_key_invalid")
         key = handle.read(45)
@@ -293,7 +309,7 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
             return True
         metadata = root.stat(follow_symlinks=False)
         if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
-                or any(p.is_symlink() for p in _state_paths(root))):
+                or not _owned_journal_entries(root)):
             return False
     except OSError:
         return False
