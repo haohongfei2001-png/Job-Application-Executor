@@ -4768,6 +4768,10 @@ def test_installed_restore_entry_preserves_real_current_journal_and_retained_bac
     monkeypatch.setattr(consumer, "rollback_macos_app", observed_transaction)
     from executor.autonomy.runtime_paths import default_runtime
     state = default_runtime(source)
+    # The original legacy_state fixture creates only its leaf authority.
+    # Prepare the real nested packaged namespace, not a different task root.
+    state.parent.mkdir(parents=True, exist_ok=True)
+    assert not state.exists()
     with closing(legacy_state(state)) as db:
         key = encrypted_answers(state, db)
         before = authority(db)
