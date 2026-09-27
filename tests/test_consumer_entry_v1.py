@@ -2937,3 +2937,210 @@ def test_transaction_default_state_fixture_never_falls_back_to_ambient_home(
                 / "AI投递经理" / "autonomy")
     assert observed == [expected, expected]
     assert not expected.exists()
+
+# JCR08: installed preferences use the same persistent owned runtime as tasks;
+# they must not require/read a checkout or replace a private authority through links.
+def test_packaged_settings_path_is_stable_across_versions_without_legacy_fallback(tmp_path):
+    from executor import settings
+    home = tmp_path / "synthetic-home"
+    first = tmp_path / "first" / "AI投递经理.app" / "Contents" / "Resources" / "release"
+    second = tmp_path / "second" / "AI投递经理.app" / "Contents" / "Resources" / "release"
+    expected = home / "Library" / "Application Support" / "AI投递经理" / "autonomy" / "settings.json"
+    assert settings.default_settings_path(first, home=home) == expected
+    assert settings.default_settings_path(second, home=home) == expected
+    ordinary = tmp_path / "ordinary-source"
+    assert settings.default_settings_path(ordinary, home=home) == (
+        home / "Job-Application-Executor" / "config" / "settings.json")
+    ordinary.mkdir()
+    (ordinary / release.MANIFEST_NAME).write_text("{}")
+    assert settings.default_settings_path(ordinary, home=home) == expected
+
+
+def test_actual_packaged_settings_cold_import_uses_owned_home_and_no_business_dependencies(tmp_path):
+    root = tmp_path / "AI投递经理.app" / "Contents" / "Resources" / "release"
+    package = root / "executor"
+    autonomy = package / "autonomy"
+    autonomy.mkdir(parents=True)
+    actual = Path(__file__).resolve().parents[1] / "executor"
+    for relative in ("__init__.py", "settings.py", "autonomy/__init__.py",
+                     "autonomy/runtime_paths.py", "autonomy/release.py"):
+        (package / relative).write_bytes((actual / relative).read_bytes())
+    home = tmp_path / "synthetic-home"
+    legacy = home / "Job-Application-Executor" / "config" / "settings.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"profile_path":"PRIVATE_LEGACY_SETTINGS_CANARY"}')
+    legacy.chmod(0o600)
+    before = legacy.read_bytes(), stat.S_IMODE(legacy.stat().st_mode)
+    program = """
+import importlib.abc, json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+class RejectBusiness(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, *_args):
+        if name.split('.')[0] in {'pydantic', 'playwright'} or name in {
+            'executor.autonomy.queue', 'executor.autonomy.worker',
+            'executor.autonomy.manager', 'executor.autonomy.supervisor'}:
+            raise AssertionError('business dependency must not be imported')
+sys.meta_path.insert(0, RejectBusiness())
+from executor import settings
+assert settings.PACKAGED is True
+assert settings.PATH == Path.home() / 'Library' / 'Application Support' / 'AI投递经理' / 'autonomy' / 'settings.json'
+if sys.argv[2] == 'first':
+    assert settings.load_settings()['profile_path'] is None
+else:
+    assert settings.load_settings()['profile_path'] == 'PRIVATE_OWNED_SETTINGS_CANARY'
+    assert settings.load_settings()['unknown_owned_preference'] == '完整 👩🏽‍💻' * 1000
+payload = {'profile_path': 'PRIVATE_OWNED_SETTINGS_CANARY', 'deepseek': {'enabled': False},
+           'unknown_owned_preference': '完整 👩🏽‍💻' * 1000}
+settings.save_settings(payload)
+assert settings.load_settings() == payload
+assert settings.PATH.stat().st_mode & 0o777 == 0o600
+print('OWNED_SETTINGS_PASS')
+"""
+    second = tmp_path / "next" / "AI投递经理.app" / "Contents" / "Resources" / "release"
+    for relative in ("__init__.py", "settings.py", "autonomy/__init__.py",
+                     "autonomy/runtime_paths.py", "autonomy/release.py"):
+        destination = second / "executor" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((actual / relative).read_bytes())
+    for source_root, phase in ((root, "first"), (second, "upgrade"), (root, "rollback")):
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", program,
+                                 str(source_root), phase],
+                                env={**os.environ, "HOME": str(home)}, capture_output=True,
+                                text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "OWNED_SETTINGS_PASS"
+        assert "PRIVATE_" not in result.stdout + result.stderr
+    assert (legacy.read_bytes(), stat.S_IMODE(legacy.stat().st_mode)) == before
+
+
+def test_settings_atomic_roundtrip_preserves_complete_values_and_private_modes(tmp_path, monkeypatch):
+    from executor import settings
+    target = tmp_path / "owned" / "nested" / "settings.json"
+    monkeypatch.setattr(settings, "PATH", target)
+    monkeypatch.setattr(settings, "PACKAGED", True)
+    assert settings.load_settings() == {
+        "resume_path": None, "profile_path": None, "auth_wait_seconds": 900}
+    payload = {"profile_path": "PRIVATE_PROFILE_CANARY",
+               "unknown_owned_preference": {"text": "完整 👩🏽‍💻\n" * 1000},
+               "deepseek": {"enabled": False, "keychain_service": "existing-service"}}
+    settings.save_settings(payload)
+    first = target.read_bytes()
+    assert settings.load_settings() == payload
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+    settings.save_settings({**payload, "auth_wait_seconds": 300})
+    assert target.read_bytes() != first
+    assert settings.load_settings()["unknown_owned_preference"] == payload["unknown_owned_preference"]
+    assert list(target.parent.iterdir()) == [target]
+
+
+@pytest.mark.parametrize("fault", ["file_sync", "atomic_replace"])
+def test_settings_write_fault_preserves_previous_complete_authority(tmp_path, monkeypatch, fault):
+    from executor import settings
+    target = tmp_path / "settings.json"
+    target.write_text('{"profile_path":"PRIVATE_PREVIOUS_CANARY"}')
+    target.chmod(0o600)
+    before = target.read_bytes(), target.stat().st_mode
+    monkeypatch.setattr(settings, "PATH", target)
+    def refuse(*_args, **_kwargs):
+        raise OSError("PRIVATE_WRITE_ERROR_CANARY")
+    monkeypatch.setattr(settings.os, "fsync" if fault == "file_sync" else "replace", refuse)
+    with pytest.raises(ValueError, match="^settings_unavailable$") as error:
+        settings.save_settings({"profile_path": "PRIVATE_NEW_CANARY"})
+    assert "PRIVATE_" not in str(error.value)
+    assert (target.read_bytes(), target.stat().st_mode) == before
+    assert list(tmp_path.iterdir()) == [target]
+    assert settings.load_settings() == {"profile_path": "PRIVATE_PREVIOUS_CANARY"}
+
+
+@pytest.mark.parametrize("shape", ["malformed", "array", "duplicate", "nonfinite", "directory", "symlink", "hardlink"])
+def test_settings_refuses_ambiguous_or_aliased_read_authority_without_value_echo(tmp_path, monkeypatch, shape):
+    from executor import settings
+    target = tmp_path / "settings.json"
+    original = tmp_path / "PRIVATE_OTHER_SETTINGS_CANARY"
+    original.write_text('{"profile_path":"PRIVATE_OTHER_VALUE_CANARY"}')
+    original.chmod(0o600)
+    before = original.read_bytes(), original.stat().st_mode
+    payloads = {
+        "malformed": '{"profile_path":"PRIVATE_PARSE_CANARY"',
+        "array": '["PRIVATE_ARRAY_CANARY"]',
+        "duplicate": '{"profile_path":"first","profile_path":"PRIVATE_DUPLICATE_CANARY"}',
+        "nonfinite": '{"wait":NaN,"private":"PRIVATE_NAN_CANARY"}',
+    }
+    if shape in payloads:
+        target.write_text(payloads[shape])
+        target.chmod(0o600)
+    elif shape == "directory":
+        target.mkdir()
+    elif shape == "symlink":
+        target.symlink_to(original)
+    else:
+        os.link(original, target)
+    monkeypatch.setattr(settings, "PATH", target)
+    with pytest.raises(ValueError, match="^settings_unavailable$") as error:
+        settings.load_settings()
+    assert "PRIVATE_" not in str(error.value)
+    assert (original.read_bytes(), original.stat().st_mode) == before
+
+
+@pytest.mark.parametrize("alias", ["ancestor", "leaf", "hardlink", "directory"])
+def test_settings_save_refuses_alias_and_keeps_outside_authority_unchanged(tmp_path, monkeypatch, alias):
+    from executor import settings
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original = outside / "settings.json"
+    original.write_text('{"profile_path":"PRIVATE_OUTSIDE_CANARY"}')
+    original.chmod(0o600)
+    if alias == "ancestor":
+        parent = tmp_path / "alias"
+        parent.symlink_to(outside, target_is_directory=True)
+        target = parent / "settings.json"
+    else:
+        parent = tmp_path / "owned"
+        parent.mkdir(mode=0o700)
+        target = parent / "settings.json"
+        if alias == "leaf":
+            target.symlink_to(original)
+        elif alias == "hardlink":
+            os.link(original, target)
+        else:
+            target.mkdir()
+    before = original.read_bytes(), original.stat().st_mode
+    monkeypatch.setattr(settings, "PATH", target)
+    with pytest.raises(ValueError, match="^settings_unavailable$"):
+        settings.save_settings({"profile_path": "PRIVATE_REPLACEMENT_CANARY"})
+    assert (original.read_bytes(), original.stat().st_mode) == before
+    assert not list(parent.glob(".settings-*.tmp"))
+
+
+def test_packaged_settings_refuses_public_permissions_and_does_not_chmod_private_input(tmp_path, monkeypatch):
+    from executor import settings
+    parent = tmp_path / "owned"
+    parent.mkdir(mode=0o700)
+    target = parent / "settings.json"
+    target.write_text('{"profile_path":"PRIVATE_PERMISSIONS_CANARY"}')
+    target.chmod(0o644)
+    monkeypatch.setattr(settings, "PATH", target)
+    monkeypatch.setattr(settings, "PACKAGED", True)
+    before = target.read_bytes(), target.stat().st_mode
+    with pytest.raises(ValueError, match="^settings_unavailable$"):
+        settings.load_settings()
+    with pytest.raises(ValueError, match="^settings_unavailable$"):
+        settings.save_settings({"profile_path": None})
+    assert (target.read_bytes(), target.stat().st_mode) == before
+    target.chmod(0o600)
+    parent.chmod(0o755)
+    with pytest.raises(ValueError, match="^settings_unavailable$"):
+        settings.load_settings()
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o755
+
+
+@pytest.mark.parametrize("payload", [[], {"wait": float("nan")}, {"value": object()}, {1: "first", "1": "duplicate"}])
+def test_settings_invalid_save_does_not_create_a_second_authority(tmp_path, monkeypatch, payload):
+    from executor import settings
+    target = tmp_path / "absent" / "settings.json"
+    monkeypatch.setattr(settings, "PATH", target)
+    with pytest.raises(ValueError, match="^settings_unavailable$"):
+        settings.save_settings(payload)
+    assert not target.parent.exists()
