@@ -253,6 +253,15 @@ def _read_distribution_receipt(path: Path) -> tuple[dict, bytes]:
     return receipt, encoded
 
 
+def _distribution_pax_matches(member: tarfile.TarInfo) -> bool:
+    # CPython's PAX writer appends one slash to directory paths; its reader
+    # strips it from member.name but retains it in pax_headers["path"].
+    # Accept only that exact canonical representation, never other metadata.
+    expected = member.name + ("/" if member.isdir() else "")
+    return all(key == "path" and value == expected
+               for key, value in member.pax_headers.items())
+
+
 @contextmanager
 def stage_macos_distribution(distribution: str | Path):
     """Yield a privately staged, receipt-bound app without running its payload.
@@ -319,14 +328,13 @@ def stage_macos_distribution(distribution: str | Path):
                                 or any(part in ("", ".", "..") for part in relative.parts)
                                 or not relative.parts or relative.parts[0] != app.name
                                 or _private_name(Path(*relative.parts[1:]))
-                                or not (member.isdir() or member.isfile())
+                                or member.type not in (tarfile.DIRTYPE, tarfile.REGTYPE)
                                 or member.size < 0 or (member.isdir() and member.size != 0)
                                 or member.mode not in (0o644, 0o755)
                                 or (member.isdir() and member.mode != 0o755)
                                 or member.uid != 0 or member.gid != 0 or member.mtime != 0
                                 or member.uname or member.gname
-                                or any(key != "path" or value != name
-                                       for key, value in member.pax_headers.items())):
+                                or not _distribution_pax_matches(member)):
                             raise ValueError("distribution_archive_member")
                         target = work.joinpath(*relative.parts)
                         if not target.parent.is_dir():

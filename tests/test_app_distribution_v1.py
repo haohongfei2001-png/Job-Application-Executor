@@ -622,6 +622,11 @@ def _intake_artifact(tmp_path, members):
             elif kind == "device":
                 info.type = tarfile.CHRTYPE
                 archive.addfile(info)
+            elif kind == "contiguous":
+                info.type = tarfile.CONTTYPE
+                data = value.encode()
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
             else:
                 data = value.encode()
                 info.size = len(data)
@@ -639,7 +644,7 @@ def _intake_artifact(tmp_path, members):
 
 @pytest.mark.parametrize("attack", [
     "parent", "absolute", "backslash", "other-root", "duplicate", "symlink",
-    "hardlink", "device", "private", "undeclared", "missing-parent",
+    "hardlink", "device", "contiguous", "private", "undeclared", "missing-parent",
 ])
 def test_distribution_intake_rejects_actual_archive_attacks_without_payload_execution(
     tmp_path, monkeypatch, attack
@@ -656,6 +661,7 @@ def test_distribution_intake_rejects_actual_archive_attacks_without_payload_exec
         "symlink": (root + "/alias", "symlink", str(tmp_path / "private-key")),
         "hardlink": (root + "/alias", "hardlink", str(tmp_path / "private-key")),
         "device": (root + "/device", "device", ""),
+        "contiguous": (root + "/contiguous", "contiguous", "noncanonical regular type"),
         "private": (root + "/task-answers.key", "file", "CANARY_PRIVATE_PAYLOAD"),
         "undeclared": (root + "/unknown", "file", "CANARY_UNDECLARED"),
         "missing-parent": (root + "/not-created/file", "file", "CANARY_UNDECLARED"),
@@ -766,3 +772,39 @@ def test_distribution_intake_rejects_nonzero_data_after_tar_end(tmp_path, monkey
     with pytest.raises(ValueError):
         with module.stage_macos_distribution(directory):
             pytest.fail("trailing archive yielded")
+
+
+@pytest.mark.parametrize("directory", [True, False])
+def test_actual_stdlib_unicode_pax_round_trip_binds_the_writer_directory_slash(directory):
+    import io
+    from executor.autonomy.app_distribution import _distribution_pax_matches
+    name = APP_NAME + ".app" + ("" if directory else "/Contents/原话完整文件")
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        member = tarfile.TarInfo(name)
+        member.type = tarfile.DIRTYPE if directory else tarfile.REGTYPE
+        member.mode = 0o755 if directory else 0o644
+        member.uid = member.gid = member.mtime = 0
+        member.uname = member.gname = ""
+        member.pax_headers = {}
+        archive.addfile(member)
+    stream.seek(0)
+    with tarfile.open(fileobj=stream, mode="r:") as archive:
+        actual = archive.next()
+        assert actual.name == name
+        assert actual.pax_headers == {"path": name + ("/" if directory else "")}
+        assert _distribution_pax_matches(actual) is True
+
+
+@pytest.mark.parametrize("headers", [
+    {"path": APP_NAME + ".app"},
+    {"path": APP_NAME + ".app" + "//"},
+    {"path": APP_NAME + ".app" + "/../other/"},
+    {"path": APP_NAME + ".app" + "/", "mtime": "0"},
+])
+def test_distribution_pax_admission_refuses_noncanonical_paths_and_metadata(headers):
+    from executor.autonomy.app_distribution import _distribution_pax_matches
+    member = tarfile.TarInfo(APP_NAME + ".app")
+    member.type = tarfile.DIRTYPE
+    member.pax_headers = headers
+    assert _distribution_pax_matches(member) is False
