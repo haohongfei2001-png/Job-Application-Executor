@@ -74,6 +74,17 @@ jobs:
   macos_consumer_release:
     runs-on: macos-latest
     timeout-minutes: 12
+    # Every original hosted-Mac file still runs exactly once. Independent
+    # transaction and native integration suites keep their complete fixtures
+    # within the existing job budget; one shard failure cannot skip the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: consumer_transactions
+            tests: tests/test_consumer_entry_v1.py tests/test_task_state_compatibility_v1.py
+          - suite: native_integration
+            tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py tests/test_macos_host_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -91,18 +102,19 @@ jobs:
       - name: Hosted Mac candidate, activation and rollback tests
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
-        run: python -m pytest -q tests/test_release_candidate_v1.py tests/test_consumer_entry_v1.py tests/test_task_state_compatibility_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py tests/test_macos_host_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py
+        run: python -m pytest -q --durations=15 ${{ matrix.tests }}
 
       - name: Hosted Mac retired updater public and CLI entrypoints
+        if: matrix.suite == 'native_integration'
         run: python -m pytest -q tests/test_local_operations_v1.py -k 'retired_public_updater_entries or retired_module_cli or retired_cli_never'
 
       - name: Build unsigned standalone Mac app at round boundary
-        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        if: (github.event_name == 'push' || github.event.pull_request.draft == false) && matrix.suite == 'native_integration'
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
         run: python scripts/build_macos_app.py --standalone-runtime "$JAE_STANDALONE_RUNTIME" --output "$RUNNER_TEMP/jae-unsigned-distribution"
       - name: Retain unsigned engineering artifact
-        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        if: (github.event_name == 'push' || github.event.pull_request.draft == false) && matrix.suite == 'native_integration'
         uses: actions/upload-artifact@v4
         with:
           name: jae-unsigned-macos-${{ github.run_id }}-${{ github.run_attempt }}
