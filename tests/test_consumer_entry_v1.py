@@ -4626,3 +4626,97 @@ def test_post_health_restore_rename_error_never_moves_foreign_quarantine_or_over
         assert not (state / "service.json").exists()
     with ProcessLock(state / "worker.lock"):
         pass
+
+
+@pytest.mark.parametrize("action", ["install", "rollback"])
+@pytest.mark.parametrize("scenario", [
+    "unchanged", "retained_resealed", "retained_replaced",
+    "destination_occupied", "destination_alias",
+])
+def test_successful_final_health_requires_retained_identity_and_free_recovery_slot(
+    tmp_path, monkeypatch, action, scenario
+):
+    import shutil
+    from contextlib import closing
+    from test_task_state_compatibility_v1 import authority
+    from executor.autonomy.state_compatibility import verify_task_state_backup
+    from executor.autonomy.worker import ProcessLock
+
+    repo, apps, state, db, key = _identity_transaction_fixture(
+        tmp_path, rollback=action == "rollback")
+    app = apps / (consumer.APP_NAME + ".app")
+    previous = apps / ("." + consumer.APP_NAME + ".app.previous")
+    failed = apps / ("." + consumer.APP_NAME + ".app.failed")
+    retained = failed if action == "rollback" else previous
+    destination = previous if action == "rollback" else failed
+    displaced = apps / ".independent-success-displaced"
+    actual_start = consumer._candidate_starts
+    starts = []
+    after_health = {}
+
+    def snapshot():
+        return {
+            path.relative_to(apps).as_posix():
+            (path.stat(follow_symlinks=False).st_dev,
+             path.stat(follow_symlinks=False).st_ino,
+             stat.S_IMODE(path.stat(follow_symlinks=False).st_mode))
+            for path in [apps, *apps.rglob("*")]
+        }
+
+    def start(python, source):
+        healthy = actual_start(python, source)
+        assert healthy
+        starts.append(source)
+        if len(starts) == 2:
+            assert source.parents[2] == app
+            assert retained.is_dir() and not destination.exists()
+            if scenario == "retained_resealed":
+                _reseal_changed_source(retained)
+            elif scenario == "retained_replaced":
+                retained.rename(displaced)
+                shutil.copytree(displaced, retained, symlinks=True)
+                assert consumer._trusted_bundle(retained)
+            elif scenario == "destination_occupied":
+                destination.mkdir()
+                assert not list(destination.iterdir())
+            elif scenario == "destination_alias":
+                destination.symlink_to(tmp_path / "absent-success-foreign", target_is_directory=True)
+                assert destination.is_symlink() and not destination.exists()
+            after_health["files"] = _identity_file_inventory(apps)
+            after_health["locations"] = snapshot()
+        # Return the actual SUCCESSFUL startup. Only retained/slot admission,
+        # not an invented health error, may prevent transaction completion.
+        return healthy
+
+    with closing(db):
+        expected_authority = authority(db)
+        expected_answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        private_before = _identity_file_inventory(state)
+        monkeypatch.setattr(consumer, "_candidate_starts", start)
+        result = (rollback_macos_app(apps, task_state_root=state) if action == "rollback"
+                  else install_macos_app(repo, destination=apps, platform="darwin",
+                                         task_state_root=state))
+        assert len(starts) == 2
+        assert result["ok"] is (scenario == "unchanged")
+        if scenario == "unchanged":
+            assert result["restored" if action == "rollback" else "installed"] is True
+        else:
+            assert result["reason"] == ("rollback_recovery_required" if action == "rollback"
+                                       else "post_activation_recovery_required")
+            assert "installed" not in result and "restored" not in result
+        # Even a healthy candidate cannot authorize replacement/cleanup of a
+        # different retained inode, resealed release or empty/aliased stranger.
+        assert _identity_file_inventory(apps) == after_health["files"]
+        assert snapshot() == after_health["locations"]
+        assert _identity_file_inventory(state) == private_before
+        assert authority(db) == expected_authority
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == expected_answers
+        assert (state / "task-answers.key").read_bytes() == key
+        backup = result["task_state_backup"]
+        assert verify_task_state_backup(Path(backup["path"]), backup["receipt"])
+        assert backup["receipt"]["activation"] == "NOT_AUTHORIZED"
+        assert "PRIVATE_" not in json.dumps(result)
+        assert not (state / "auth.token").exists()
+        assert not (state / "service.json").exists()
+    with ProcessLock(state / "worker.lock"):
+        pass

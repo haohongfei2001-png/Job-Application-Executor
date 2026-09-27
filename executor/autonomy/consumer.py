@@ -994,6 +994,16 @@ def _install_macos_app_unlocked(
             "message": ("新版本启用后未通过健康检查；已恢复上一版本。"
                         if replaced else "新版本启用后未通过健康检查；失败候选已保留供诊断。"),
         }
+    # A healthy active candidate does not prove that its known-good retained
+    # release or recovery slot stayed unchanged while startup yielded.
+    if ((replaced and _bundle_transaction_identity(rollback) != current_identity)
+            or (not replaced and (rollback.exists() or rollback.is_symlink()))
+            or failed.exists() or failed.is_symlink()):
+        return {
+            "ok": False,
+            "reason": "post_activation_recovery_required",
+            "message": "候选可启动，但保留版本或恢复位置发生变化；所有版本保留当前位置，更新尚未确认完成。",
+        }
     return {
         "ok": True,
         "installed": True,
@@ -1159,6 +1169,15 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
             "ok": False,
             "reason": "rollback_post_activation_unhealthy",
             "message": "回退版本启用后无法启动；已恢复原应用。",
+        }
+    # Final-path health is only one part of transactional completion. Retain
+    # the exact displaced current version and refuse a newly occupied slot.
+    if (_bundle_transaction_identity(failed) != current_identity
+            or previous.exists() or previous.is_symlink()):
+        return {
+            "ok": False,
+            "reason": "rollback_recovery_required",
+            "message": "回退版本可启动，但保留版本或恢复位置发生变化；所有版本保留当前位置，回退尚未确认完成。",
         }
     return {
         "ok": True,
