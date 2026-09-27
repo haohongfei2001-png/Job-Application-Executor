@@ -267,6 +267,11 @@ class DeepSeekMapper:
         self.reasoning_effort = str(cfg.get("reasoning_effort") or "low")
         self.max_tokens = int(cfg.get("max_tokens") or 500)
         env_name = str(cfg.get("api_key_env") or "DEEPSEEK_API_KEY")
+        self.api_key = None
+        # Disabled configuration is not consent to read environment/Keychain
+        # credentials. Availability stays false without acquiring any secret.
+        if not self.enabled:
+            return
         self.api_key = os.getenv(env_name)
         if not self.api_key:
             services = [

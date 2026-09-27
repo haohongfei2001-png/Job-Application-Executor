@@ -861,3 +861,176 @@ def test_task_workspace_profile_setup_stale_file_read_never_sends_or_revives_pri
             assert page.evaluate("localStorage.length + sessionStorage.length") == 0
         finally:
             browser.close()
+
+@pytest.mark.parametrize("availability", [True, False, "constructor_failure"])
+def test_task_workspace_explicit_provider_load_actual_authenticated_service_preserves_authority(
+    profile_setup_service, monkeypatch, availability
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from executor.autonomy import manager as manager_module
+
+    settings, queue, supervisor, base, tid, external_calls = profile_setup_service
+    supervisor.manager._provider = None
+    loads = []
+    before = (settings.PATH.read_bytes(), queue.tasks(), queue.recent_events(1000),
+              {p.name: p.read_bytes() for p in settings.PATH.parent.iterdir()})
+    def construct(configuration):
+        assert configuration is supervisor.manager.settings
+        loads.append("load")
+        if availability == "constructor_failure":
+            raise OSError("PRIVATE_KEYCHAIN_FAILURE")
+        return SimpleNamespace(available=availability,
+                               decide=lambda *_a, **_k: pytest.fail("presence is not a model request"))
+    monkeypatch.setattr(manager_module, "DeepSeekManagerProvider", construct)
+    def readiness():
+        state = supervisor.manager.loaded_provider_state()
+        return {"ready_for_live_e2e": False, "message": "真实站点条件尚未验证。",
+                "provider_state": state["state"], "provider_state_basis": "loaded_configuration",
+                "checks": {"deepseek_available": state["available"]},
+                "final_click_actor": "user", "submit_capability": False}
+    monkeypatch.setattr(supervisor, "readiness", readiness)
+    errors, writes = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 600, "height": 800})
+        try:
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("request", lambda request: writes.append((request.url, request.post_data))
+                    if request.method == "POST" else None)
+            page.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            page.get_by_role("button", name="运行条件", exact=True).click()
+            expect(page.locator("#provider-load")).to_be_enabled()
+            page.evaluate("readiness()")
+            assert loads == [] and writes == [], "opening/polling must not acquire credentials"
+            page.locator("#message").fill("UNSENT_PRIVATE_INPUT")
+            page.locator("#provider-load").click()
+            expect(page.locator("#provider-load-status")).to_contain_text(
+                "已加载本机配置" if availability is True else "已配置凭证暂不可用")
+            assert loads == ["load"] and writes == [(base + "/ui/api/provider-load", "{}")]
+            assert "PRIVATE_" not in page.locator("#readiness-dialog").inner_text()
+            assert "真实站点条件尚未验证" in page.locator("#readiness-summary").inner_text()
+            assert "已就绪" not in page.locator("#readiness-summary").inner_text()
+            assert page.locator("#message").input_value() == "UNSENT_PRIVATE_INPUT"
+            for _ in range(3):
+                page.evaluate("readiness()")
+            assert loads == ["load"] and external_calls == []
+            assert before == (settings.PATH.read_bytes(), queue.tasks(), queue.recent_events(1000),
+                              {p.name: p.read_bytes() for p in settings.PATH.parent.iterdir()})
+            page.locator("#readiness-close").click()
+            expect(page.get_by_role("button", name="运行条件", exact=True)).to_be_focused()
+            assert page.locator("#provider-load-status").inner_text() == ""
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert errors == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
+def test_task_workspace_provider_load_late_reply_never_revives_closed_or_expired_dialog(interruption):
+    pending, writes, errors = [], [], []
+    expired = False
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("provider-lifetime.test", 1)[-1]
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/provider-load":
+                    assert route.request.method == "POST" and route.request.post_data == "{}"
+                    writes.append(path)
+                    pending.append(route)
+                elif expired:
+                    route.fulfill(status=401, content_type="application/json",
+                                  body='{"error":"ui_session_required"}')
+                else:
+                    assert route.request.method == "GET"
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                        "tasks": [], "ready_for_live_e2e": False, "provider_state": "not_loaded",
+                        "checks": {}, "message": "未调用模型", "submit_capability": False}))
+
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://provider-lifetime.test/**", route_request)
+            page.goto("https://provider-lifetime.test/")
+            page.get_by_role("button", name="运行条件", exact=True).click()
+            expect(page.locator("#provider-load")).to_be_enabled()
+            page.locator("#message").fill("UNSENT_PROVIDER_INPUT")
+            with page.expect_request("https://provider-lifetime.test/ui/api/provider-load"):
+                page.locator("#provider-load").click()
+            assert len(pending) == 1
+            expect(page.locator("#provider-load")).to_be_disabled()
+            page.evaluate("readiness()")
+            expect(page.locator("#provider-load")).to_be_disabled()
+            page.evaluate("document.querySelector('#provider-load').dispatchEvent(new MouseEvent('click'))")
+            assert writes == ["/ui/api/provider-load"]
+            if interruption == "expired_session":
+                expired = True
+                page.evaluate("state()")
+                expect(page.locator("#session-expired")).to_be_visible()
+                expect(page.locator("#readiness-dialog")).not_to_be_visible()
+            else:
+                if interruption == "close":
+                    page.locator("#readiness-close").click()
+                else:
+                    page.locator("#readiness-dialog").press("Escape")
+                page.get_by_role("button", name="运行条件", exact=True).click()
+                expect(page.locator("#provider-load")).to_be_disabled()
+            with page.expect_response("https://provider-lifetime.test/ui/api/provider-load"):
+                pending[0].fulfill(status=200, content_type="application/json", body=json.dumps({
+                    "provider_state": "available", "provider_state_basis": "loaded_configuration",
+                    "loaded": True, "final_click_actor": "user", "submit_capability": False}))
+            page.wait_for_function("providerLoadBusy === false")
+            assert page.locator("#provider-load-status").inner_text() == ""
+            assert "已加载本机配置" not in page.locator("#readiness-dialog").inner_text()
+            assert writes == ["/ui/api/provider-load"] and errors == []
+            assert page.locator("#message").input_value() == "UNSENT_PROVIDER_INPUT"
+            if interruption == "expired_session":
+                expect(page.locator("#session-expired")).to_be_focused()
+                expect(page.locator("#provider-load")).to_be_disabled()
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("failure", ["transport", "malformed"])
+def test_task_workspace_provider_load_uncertain_result_never_retries_or_claims_connection(failure):
+    writes, errors = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            def route_request(route):
+                path = route.request.url.split("provider-unknown.test", 1)[-1]
+                if path == "/":
+                    route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
+                elif path == "/ui/api/provider-load":
+                    writes.append(route.request.post_data)
+                    if failure == "transport":
+                        route.abort("failed")
+                    else:
+                        route.fulfill(status=200, content_type="application/json",
+                                      body='{"loaded":1,"provider_state":"available","api_key":"PRIVATE"}')
+                else:
+                    assert route.request.method == "GET"
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                        "tasks": [], "ready_for_live_e2e": False, "provider_state": "not_loaded",
+                        "checks": {}, "message": "连接尚未验证", "submit_capability": False}))
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("https://provider-unknown.test/**", route_request)
+            page.goto("https://provider-unknown.test/")
+            page.get_by_role("button", name="运行条件", exact=True).click()
+            expect(page.locator("#provider-load")).to_be_enabled()
+            page.locator("#provider-load").click()
+            expect(page.locator("#provider-load-status")).to_contain_text("检查结果未确认")
+            expect(page.locator("#provider-load")).to_be_disabled()
+            page.evaluate("readiness()")
+            page.evaluate("document.querySelector('#provider-load').dispatchEvent(new MouseEvent('click'))")
+            expect(page.locator("#provider-load")).to_be_disabled()
+            assert writes == ["{}"] and errors == []
+            assert "PRIVATE" not in page.locator("#readiness-dialog").inner_text()
+            assert "已加载本机配置" not in page.locator("#readiness-dialog").inner_text()
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+        finally:
+            browser.close()

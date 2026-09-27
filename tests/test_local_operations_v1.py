@@ -1711,3 +1711,171 @@ def test_preflight_explicit_empty_loaded_settings_never_reads_unrelated_disk_con
     assert result["remediation"] == ["configure_profile_path"]
     assert result["ready_for_live_e2e"] is False
     assert result["submit_capability"] is False
+
+@pytest.mark.parametrize("available", [True, False, 1, None, "fault", "constructor_fault"])
+def test_explicit_provider_load_authenticated_and_value_free_without_task_or_model_work(
+    tmp_path, monkeypatch, available
+):
+    from executor.autonomy import manager as manager_module
+
+    queue, worker, supervisor = _supervisor(tmp_path)
+    task = queue.enqueue(_spec(tmp_path))
+    profile = Path(task["spec"]["profile_ref"])
+    profile.write_text(json.dumps({
+        "fields": {"identity.phone": {"value": "13800138000"}},
+        "complete_research": "PRIVATE_PROVIDER_PROFILE\n" * 1000,
+    }))
+    configuration = {"profile_path": str(profile),
+                     "deepseek": {"keychain_service": "PRIVATE_CONFIG_REF"},
+                     "full_unknown": "完整配置\n" * 1000}
+    supervisor.manager = ManagerController(queue, worker, settings=configuration)
+    calls = []
+
+    class Provider:
+        @property
+        def available(self):
+            if available == "fault":
+                raise RuntimeError("PRIVATE_PROVIDER_PROPERTY")
+            return available
+
+        def decide(self, *_args, **_kwargs):
+            pytest.fail("credential presence is not a model call")
+
+    def construct(current):
+        assert current is configuration
+        calls.append("load")
+        if available == "constructor_fault":
+            raise OSError("PRIVATE_PROVIDER_CONSTRUCTOR")
+        return Provider()
+
+    monkeypatch.setattr(manager_module, "DeepSeekManagerProvider", construct)
+    monkeypatch.setattr(worker, "run_once", lambda: pytest.fail("must not start tasks"))
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: pytest.fail("no real credential process"))
+    before = queue.tasks(), queue.recent_events(1000), profile.read_bytes(), json.dumps(configuration)
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    cookie = "application_executor_session=" + supervisor.consume_ui_ticket(supervisor.issue_ui_ticket())
+
+    def request(raw=b"{}", *, method="POST", auth=True, origin=base, host=None):
+        headers = {"Content-Type": "application/json"}
+        if auth:
+            headers["Cookie"] = cookie
+        if origin is not None:
+            headers["Origin"] = origin
+        if host is not None:
+            headers["Host"] = host
+        req = urllib.request.Request(base + "/ui/api/provider-load", method=method,
+                                     data=raw if method == "POST" else None, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as error:
+            return error.code, json.load(error)
+
+    try:
+        assert request(auth=False)[0] == 401
+        assert request(origin=None)[0] == 403
+        assert request(origin="https://evil.example")[0] == 403
+        assert request(host="evil.example")[0] == 403
+        assert request(method="GET")[0] == 404
+        for raw in (b'{"secret":"PRIVATE"}', b'{"x":0,"x":1}', b'{"x":NaN}',
+                    b'[]', b'null', b'"PRIVATE"'):
+            assert request(raw)[0] == 400
+        monkeypatch.setattr(supervisor, "mutation_fenced", lambda: True)
+        assert request()[0] == 409
+        assert calls == [] and supervisor.manager._provider is None
+        monkeypatch.setattr(supervisor, "mutation_fenced", lambda: False)
+        status, result = request()
+        assert status == 200
+        assert result == {
+            "provider_state": "available" if available is True else "unavailable",
+            "provider_state_basis": "loaded_configuration",
+            "loaded": available != "constructor_fault",
+            "final_click_actor": "user", "submit_capability": False,
+        }
+        if available != "constructor_fault":
+            assert request() == (200, result)
+            assert calls == ["load"], "a loaded provider is never reacquired by repeat foreground requests"
+        else:
+            assert supervisor.manager._provider is None
+            assert calls == ["load"]
+        assert supervisor.manager.state()["manager_available"] is (
+            available is True or available == "constructor_fault")
+        assert "PRIVATE" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+        assert before == (queue.tasks(), queue.recent_events(1000), profile.read_bytes(),
+                          json.dumps(configuration))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_provider_load_serializes_two_foreground_initializations(tmp_path, monkeypatch):
+    from executor.autonomy import manager as manager_module
+    queue, worker, supervisor = _supervisor(tmp_path)
+    task = queue.enqueue(_spec(tmp_path))
+    supervisor.manager = ManagerController(queue, worker, settings={"deepseek": {"enabled": False}})
+    entered, release_load = threading.Event(), threading.Event()
+    calls, results = [], []
+    provider = _UnavailableProvider()
+
+    def construct(_configuration):
+        calls.append("load")
+        entered.set()
+        assert release_load.wait(5)
+        return provider
+
+    monkeypatch.setattr(manager_module, "DeepSeekManagerProvider", construct)
+    before = queue.tasks(), queue.recent_events(1000)
+    def load_once():
+        results.append(supervisor.run_mutation(supervisor.load_configured_provider))
+
+    first = threading.Thread(target=load_once)
+    second = threading.Thread(target=load_once)
+    first.start()
+    try:
+        assert entered.wait(5)
+        second.start()
+    finally:
+        release_load.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+    assert not first.is_alive() and not second.is_alive()
+    assert calls == ["load"] and len(results) == 2 and results[0] == results[1]
+    assert supervisor.manager._provider is provider
+    assert before == (queue.tasks(), queue.recent_events(1000))
+    assert queue.get(task["task_id"])["stage"] == task["stage"]
+
+
+def test_explicit_empty_provider_configuration_never_reads_ambient_settings(tmp_path, monkeypatch):
+    from executor.autonomy import manager as manager_module
+
+    queue, worker, _supervisor_instance = _supervisor(tmp_path)
+    configuration = {}
+    seen = []
+    monkeypatch.setattr(manager_module, "load_settings",
+                        lambda: pytest.fail("explicit empty configuration is authoritative"))
+    monkeypatch.setattr(manager_module, "DeepSeekMapper",
+                        lambda current: seen.append(current) or _UnavailableProvider())
+    controller = ManagerController(queue, worker, settings=configuration)
+    assert controller.settings is configuration
+    assert controller.loaded_provider_state() == {"state": "not_loaded", "available": False}
+    assert controller.provider.available is False
+    assert seen == [configuration] and seen[0] is configuration
+
+
+def test_disabled_provider_configuration_never_acquires_environment_or_keychain(monkeypatch):
+    from executor import resolver
+
+    with monkeypatch.context() as isolated_patch:
+        isolated_patch.setattr(resolver.os, "getenv",
+                               lambda *_a, **_k: pytest.fail("disabled provider must not read credentials"))
+        isolated_patch.setattr(resolver, "_keychain_key",
+                               lambda *_a, **_k: pytest.fail("disabled provider must not query Keychain"))
+        mapper = resolver.DeepSeekMapper({"deepseek": {
+            "enabled": False, "keychain_service": "PRIVATE_DISABLED", "api_key_env": "PRIVATE_DISABLED_ENV",
+        }})
+    assert mapper.available is False and mapper.api_key is None

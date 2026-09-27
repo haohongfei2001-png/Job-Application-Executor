@@ -128,7 +128,7 @@ class DeepSeekManagerProvider:
     """Semantic manager. It can propose only typed high-level decisions."""
 
     def __init__(self, settings: dict[str, Any] | None = None):
-        self.settings = settings or load_settings()
+        self.settings = settings if settings is not None else load_settings()
         # Reuse the existing DeepSeek configuration and Keychain lookup without
         # duplicating or persisting credentials.
         self.client = DeepSeekMapper(self.settings)
@@ -438,7 +438,7 @@ class ManagerController:
     ):
         self.queue = queue
         self.worker = worker
-        self.settings = settings or load_settings()
+        self.settings = settings if settings is not None else load_settings()
         self._provider = provider
 
     @property
@@ -461,6 +461,7 @@ class ManagerController:
                 "available": available}
 
     def state(self) -> dict[str, Any]:
+        provider = self.loaded_provider_state()
         tasks = [safe_task_view(task) for task in self.queue.tasks()]
         counts: dict[str, int] = {}
         for task in tasks:
@@ -468,8 +469,8 @@ class ManagerController:
         return {
             "tasks": tasks,
             "counts": counts,
-            "manager_available": bool(
-                self._provider.available if self._provider is not None else True
+            "manager_available": (
+                provider["state"] == "not_loaded" or provider["available"] is True
             ),
             "final_click_actor": "user",
         }

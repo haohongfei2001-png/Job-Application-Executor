@@ -50,6 +50,25 @@ class Supervisor:
         return {"settings_version": settings.settings_version(current),
                 "profile_selected": True, "submit_capability": False}
 
+    def load_configured_provider(self):
+        """Explicit credential initialization, no model call or task mutation.
+
+        Serialize with manager conversations so two foreground requests cannot
+        acquire credentials twice or replace an already loaded client.
+        """
+        with self._command_lock:
+            try:
+                self.manager.provider
+                state = self.manager.loaded_provider_state()
+                loaded = state["state"] != "not_loaded"
+                status = state["state"]
+            except Exception:
+                loaded, status = False, "unavailable"
+            return {"provider_state": status,
+                    "provider_state_basis": "loaded_configuration",
+                    "loaded": loaded, "final_click_actor": "user",
+                    "submit_capability": False}
+
     def _expire_ui(self):
         now = time.monotonic()
         self._ui_tickets = {k: v for k, v in self._ui_tickets.items() if v > now}
@@ -576,6 +595,16 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                             raise ValueError("invalid profile envelope")
                         result = supervisor.run_mutation(lambda: supervisor.configure_profile(
                             data["profile_json"], data["expected_settings_version"]))
+                        self._send_json(200, result)
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/provider-load":
+                        if origin != expected_origin:
+                            self._send_json(403, {"error": "local_origin_required"})
+                            return
+                        data = self._read_json(strict=True)
+                        if data:
+                            raise ValueError("invalid provider load envelope")
+                        result = supervisor.run_mutation(supervisor.load_configured_provider)
                         self._send_json(200, result)
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/readiness":
