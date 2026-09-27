@@ -1879,3 +1879,78 @@ def test_disabled_provider_configuration_never_acquires_environment_or_keychain(
             "enabled": False, "keychain_service": "PRIVATE_DISABLED", "api_key_env": "PRIVATE_DISABLED_ENV",
         }})
     assert mapper.available is False and mapper.api_key is None
+
+
+@pytest.mark.parametrize("damage", [
+    "none", "source_alias", "runtime_alias", "host_venv", "startup_mismatch",
+    "invalid_identity", "missing_manifest", "unreadable_source",
+])
+def test_loaded_process_diagnostic_refuses_host_or_damaged_authority_without_effects(
+    tmp_path, monkeypatch, damage
+):
+    from executor.autonomy import runtime_provenance, release
+
+    candidate, runtime, source, _payload = _diagnostic_packaged_fixture(tmp_path)
+    queue, worker, supervisor = _supervisor(tmp_path)
+    task = queue.enqueue(_spec(tmp_path))
+    profile = Path(task["spec"]["profile_ref"])
+    profile.write_text(json.dumps({"full_profile": "PRIVATE_ORIGIN_REPORT\n" * 1000,
+                                   "fields": {"identity.phone": {"value": "13800138000"}}}))
+    supervisor.release_identity = {
+        "status": "verified", "source_sha256": source["source_sha256"],
+    }
+    if damage == "source_alias":
+        real = candidate.with_name("private-source")
+        candidate.rename(real)
+        candidate.symlink_to(real, target_is_directory=True)
+    elif damage == "runtime_alias":
+        real = runtime.with_name("private-runtime")
+        runtime.rename(real)
+        runtime.symlink_to(real, target_is_directory=True)
+    elif damage == "host_venv":
+        (runtime / "pyvenv.cfg").write_text("home = PRIVATE_HOST\n")
+    elif damage == "startup_mismatch":
+        supervisor.release_identity["source_sha256"] = "0" * 64
+    elif damage == "invalid_identity":
+        supervisor.release_identity = {"status": "PRIVATE_INVALID", "source_sha256": None}
+    elif damage == "missing_manifest":
+        (candidate / release.MANIFEST_NAME).unlink()
+    elif damage == "unreadable_source":
+        def unreadable(_root):
+            raise OSError("PRIVATE_ORIGIN_EXCEPTION")
+        monkeypatch.setattr(runtime_provenance, "current_packaged_source", unreadable)
+    _diagnostics_forbid_git_and_processes(monkeypatch)
+    monkeypatch.setattr(release, "installed_dependencies_match",
+                        lambda *_: pytest.fail("host process cannot certify the app lock"))
+    from executor import resolver
+    monkeypatch.setattr(resolver, "_keychain_key",
+                        lambda *_a, **_k: pytest.fail("diagnostics cannot read credentials"))
+    monkeypatch.setattr(worker, "run_once", lambda: pytest.fail("no task activation"))
+    before = queue.tasks(), queue.recent_events(1000), profile.read_bytes()
+    report = runtime_provenance.loaded_process_provenance(
+        candidate, source_identity=supervisor.release_identity)
+    assert report["status"] == "unverified"
+    assert report["verification_scope"] == "current_process_origins_and_dependency_lock"
+    assert report["dependency_lock_matches"] is False
+    assert report["signing_certified"] is False and report["live_readiness_certified"] is False
+    assert set(report) == {
+        "status", "verification_scope", "isolated_interpreter", "interpreter_owned",
+        "stdlib_owned", "search_paths_owned", "loaded_modules_owned",
+        "dependency_lock_matches", "source_matches_startup",
+        "signing_certified", "live_readiness_certified",
+    }
+    encoded = json.dumps(report)
+    assert "PRIVATE" not in encoded and str(tmp_path) not in encoded
+    assert before == (queue.tasks(), queue.recent_events(1000), profile.read_bytes())
+    assert not (queue.root / "service.json").exists()
+    if damage == "none":
+        # Payload integrity can pass while THIS host process remains unowned.
+        complete = diagnostics.collect_diagnostics(supervisor, repo_root=candidate)
+        assert complete["packaged_release"]["runtime_verified_now"] is True
+        assert complete["loaded_process"] == report
+        assert complete["safety"]["submit_capability"] is False
+
+
+def test_source_checkout_has_no_packaged_loaded_process_claim(tmp_path):
+    from executor.autonomy.runtime_provenance import loaded_process_provenance
+    assert loaded_process_provenance(tmp_path, source_identity={}) is None

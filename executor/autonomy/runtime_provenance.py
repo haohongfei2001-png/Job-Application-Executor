@@ -96,3 +96,98 @@ def packaged_provenance(repo_root: str | Path) -> dict | None:
     except (OSError, UnicodeError, ValueError, RuntimeError, TypeError):
         pass
     return report
+
+
+def loaded_process_provenance(repo_root: str | Path, *, source_identity: dict) -> dict | None:
+    """Observe this process, never infer loaded provenance from payload hashes.
+
+    This is an explicit diagnostic observation, not a startup/health subprocess,
+    signer or live-readiness certificate. No dependency/provider is initialized
+    here; metadata/payload inspection uses the existing exact release lock.
+    """
+    supplied = Path(repo_root).expanduser().absolute()
+    if not is_packaged_source(supplied):
+        return None
+    report = {
+        "status": "unverified",
+        "verification_scope": "current_process_origins_and_dependency_lock",
+        "isolated_interpreter": False, "interpreter_owned": False,
+        "stdlib_owned": False, "search_paths_owned": False,
+        "loaded_modules_owned": False, "dependency_lock_matches": False,
+        "source_matches_startup": False,
+        "signing_certified": False, "live_readiness_certified": False,
+    }
+    try:
+        # A source-only staging receipt is not an installed runtime layout.
+        if (supplied.name != "release" or supplied.parent.name != "Resources"
+                or supplied.parent.parent.name != "Contents"
+                or not supplied.parent.parent.parent.name.endswith(".app")
+                or any(path.is_symlink() for path in (supplied, *supplied.parents))):
+            return report
+        runtime = supplied.parent / "runtime"
+        if (runtime.is_symlink() or not runtime.is_dir()
+                or (runtime / "pyvenv.cfg").exists()):
+            return report
+        source = current_packaged_source(supplied)
+        report["source_matches_startup"] = (
+            isinstance(source_identity, dict) and source["status"] == "verified"
+            and source_identity == source)
+        if not report["source_matches_startup"]:
+            return report
+        root = runtime.resolve()
+        release = supplied.resolve()
+        def inside(path, *, allow_release=False):
+            # Reject aliases, even when they resolve back into an owned tree.
+            value = Path(path)
+            if not value.is_absolute() or any(item.is_symlink() for item in (value, *value.parents)):
+                return False
+            resolved = value.resolve()
+            return resolved.is_relative_to(root) or (
+                allow_release and resolved.is_relative_to(release))
+        report["isolated_interpreter"] = (
+            sys.flags.isolated == 1 and sys.flags.ignore_environment == 1
+            and sys.flags.no_user_site == 1)
+        report["interpreter_owned"] = all(
+            inside(path) for path in (sys.executable, sys.prefix, sys.base_prefix))
+        import sysconfig
+        report["stdlib_owned"] = inside(sysconfig.get_path("stdlib"))
+        report["search_paths_owned"] = bool(sys.path) and all(
+            inside(path, allow_release=True) for path in tuple(sys.path))
+        # Snapshot without importing missing modules or invoking provider code.
+        # Builtin/frozen modules have no filesystem origin. Namespace search
+        # paths must also stay owned; an empty path is never the current folder.
+        def modules_owned():
+            for module in tuple(sys.modules.values()):
+                if module is None:
+                    continue
+                origin = getattr(module, "__file__", None)
+                if origin is not None and (
+                        not isinstance(origin, str) or not origin
+                        or not inside(origin, allow_release=True)):
+                    return False
+                namespace = getattr(module, "__path__", ())
+                if any(not inside(path, allow_release=True) for path in tuple(namespace)):
+                    return False
+            package = sys.modules.get("executor")
+            return (package is not None
+                    and getattr(package, "__file__", None) == str(release / "executor" / "__init__.py"))
+        report["loaded_modules_owned"] = modules_owned()
+        # Hash/check dependencies only on the explicit diagnostic path and only
+        # after process ownership passes. No repeated full-runtime health hash.
+        checks = ("isolated_interpreter", "interpreter_owned", "stdlib_owned",
+                  "search_paths_owned", "loaded_modules_owned")
+        if all(report[key] for key in checks):
+            from .release import installed_dependencies_match
+            report["dependency_lock_matches"] = installed_dependencies_match(release) is True
+            report["loaded_modules_owned"] = modules_owned()
+            report["search_paths_owned"] = bool(sys.path) and all(
+                inside(path, allow_release=True) for path in tuple(sys.path))
+        # Re-admit the source after inspecting actual loaded dependency payloads.
+        if current_packaged_source(supplied) != source:
+            report["source_matches_startup"] = False
+        if all(report[key] for key in (*checks, "dependency_lock_matches", "source_matches_startup")):
+            report["status"] = "verified"
+    except (OSError, UnicodeError, ValueError, RuntimeError, TypeError, AttributeError):
+        # Finite aggregate failure only: no origin/exception/credential echo.
+        report["status"] = "unverified"
+    return report

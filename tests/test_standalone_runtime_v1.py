@@ -195,3 +195,112 @@ def test_standalone_snapshot_refuses_recursive_destination_before_any_write(
     assert source_manifest(repo) == release_before
     if placement == "ancestor-alias":
         assert alias.is_symlink() and alias.resolve() == source.resolve()
+
+
+def test_actual_loaded_runtime_provenance_reports_owned_process_and_refuses_contamination(
+    tmp_path, monkeypatch
+):
+    """Real isolated app Python; no mocked positive provenance or smaller runtime."""
+    import json
+    import subprocess
+
+    source = Path(os.environ["JAE_STANDALONE_RUNTIME"])
+    assert source.is_dir()
+    app = tmp_path / "LoadedProcess.app"
+    resources = app / "Contents" / "Resources"
+    resources.mkdir(parents=True)
+    repo = resources / "release"
+    copy_source_candidate(Path(__file__).resolve().parents[1], repo)
+    runtime = resources / "runtime"
+    copy_standalone_runtime_candidate(source, runtime, repo)
+    assert verify_runtime_candidate(runtime, repo)
+    private = tmp_path / "PRIVATE_PROCESS_ORIGIN"
+    private.mkdir()
+    (private / "not-imported.py").write_text("PRIVATE_CREDENTIAL_CANARY")
+    private_before = (private / "not-imported.py").read_bytes()
+    # Real imported product/dependencies; an explicit diagnostic does not load
+    # a provider, credential process, browser driver or applicant journal.
+    script = r"""import json,pathlib,sys,types
+release=pathlib.Path(sys.argv[1]).resolve()
+sys.path.insert(0,str(release))
+from executor.autonomy import diagnostics
+from executor.autonomy.release import read_release_identity
+from executor.autonomy.runtime_provenance import loaded_process_provenance
+import executor.resolver as resolver
+resolver._keychain_key=lambda *_a,**_k: (_ for _ in ()).throw(AssertionError("no credential read"))
+mode=sys.argv[2]
+private=pathlib.Path(sys.argv[3]).resolve()
+identity=read_release_identity(release)
+restore=None
+if mode=="external_module":
+    injected=types.ModuleType("synthetic_external_loaded")
+    injected.__file__=str(private/"not-imported.py")
+    sys.modules[injected.__name__]=injected
+elif mode=="external_search":
+    sys.path.append(str(private))
+elif mode=="empty_search":
+    sys.path.append("")
+elif mode=="namespace":
+    injected=types.ModuleType("synthetic_external_namespace")
+    injected.__path__=[str(private)]
+    sys.modules[injected.__name__]=injected
+elif mode=="startup_drift":
+    identity={"status":"verified","source_sha256":"0"*64}
+elif mode=="dependency_payload":
+    import packaging
+    target=pathlib.Path(packaging.__file__)
+    restore=(target,target.read_bytes())
+    target.write_bytes(restore[1]+b"\n# synthetic dependency payload drift\n")
+try:
+    report=loaded_process_provenance(release,source_identity=identity)
+    print(json.dumps(report,sort_keys=True))
+finally:
+    if restore:
+        restore[0].write_bytes(restore[1])
+"""
+    # Preserve the complete fixture once across eight independent cold processes.
+    results = {}
+    modes = ("owned", "external_module", "external_search", "empty_search",
+             "namespace", "startup_drift", "dependency_payload", "nonisolated")
+    for mode in modes:
+        command = [str(runtime / "bin" / "python")]
+        if mode != "nonisolated":
+            command.append("-I")
+        command += ["-B", "-c", script, str(repo), mode, str(private)]
+        # Inherited Python startup configuration is explicitly poisoned for
+        # isolated positives/refusals. Nonisolated case gets a clean environment
+        # solely to reach the diagnostic, which must still deny isolation.
+        env = dict(os.environ)
+        if mode != "nonisolated":
+            env.update(PYTHONHOME=str(private), PYTHONPATH=str(private))
+        else:
+            env.pop("PYTHONHOME", None)
+            env.pop("PYTHONPATH", None)
+        observed = subprocess.run(command, cwd=private, env=env, check=True,
+                                  capture_output=True, text=True, timeout=30)
+        assert observed.stderr == ""
+        result = json.loads(observed.stdout)
+        assert result["verification_scope"] == "current_process_origins_and_dependency_lock"
+        assert result["signing_certified"] is False
+        assert result["live_readiness_certified"] is False
+        assert str(tmp_path) not in observed.stdout and "PRIVATE" not in observed.stdout
+        results[mode] = result
+    positive = results["owned"]
+    assert positive["status"] == "verified"
+    for key in ("isolated_interpreter", "interpreter_owned", "stdlib_owned",
+                "search_paths_owned", "loaded_modules_owned",
+                "dependency_lock_matches", "source_matches_startup"):
+        assert positive[key] is True
+    for mode in modes[1:]:
+        assert results[mode]["status"] == "unverified", (mode, results[mode])
+    assert results["external_module"]["loaded_modules_owned"] is False
+    assert results["namespace"]["loaded_modules_owned"] is False
+    assert results["external_search"]["search_paths_owned"] is False
+    assert results["empty_search"]["search_paths_owned"] is False
+    assert results["startup_drift"]["source_matches_startup"] is False
+    assert results["dependency_payload"]["dependency_lock_matches"] is False
+    assert results["nonisolated"]["isolated_interpreter"] is False
+    assert verify_runtime_candidate(runtime, repo)
+    assert (private / "not-imported.py").read_bytes() == private_before
+    assert not any(path.name in {"tasks.sqlite3", "auth.token", "service.json"}
+                   for path in resources.rglob("*"))

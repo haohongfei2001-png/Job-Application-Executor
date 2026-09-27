@@ -10,7 +10,8 @@ from .. import browser
 from .manager import safe_task_view
 from .release import is_packaged_source
 from .runtime_provenance import (packaged_provenance,
-                                 current_packaged_source as _current_packaged_source)
+                                 current_packaged_source as _current_packaged_source,
+                                 loaded_process_provenance)
 
 
 def _git(repo: Path, *args: str, timeout: int = 5) -> str | None:
@@ -122,6 +123,7 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
         and bool(re.fullmatch(r"[0-9a-f]{64}", digest))
     )
     payload = packaged_provenance(repo_root)
+    process = loaded_process_provenance(repo_root, source_identity=identity)
     matches_disk = (payload["source_verified_now"] and verified
                     and payload["source_sha256"] == digest) if payload is not None else None
     if not verified or (payload is not None and not payload["source_verified_now"]):
@@ -147,6 +149,7 @@ def collect_diagnostics(supervisor, *, repo_root: str | Path) -> dict[str, Any]:
         },
         **({"packaged_release": {**payload, "loaded_source_matches_disk": matches_disk}}
            if payload is not None else {}),
+        **({"loaded_process": process} if process is not None else {}),
         "system": {
             "supervisor": True,
             "worker_active": bool(supervisor.worker.active),
