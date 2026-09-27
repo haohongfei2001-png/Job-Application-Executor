@@ -957,6 +957,18 @@ def test_hosted_mac_prebuilt_delivery_updates_rolls_back_and_reopens_without_com
     private_key = Fernet.generate_key()
     (state / "task-answers.key").write_bytes(private_key)
     (state / "task-answers.key").chmod(0o600)
+    # A previously used consumer journal includes the real worker's auth and
+    # encrypted-answer schema. Freeze complete bytes only after that necessary
+    # initialization; never suppress those production migrations at launch.
+    from executor.autonomy.worker import Worker
+    existing_worker = Worker(queue, settings={})
+    assert existing_worker.active is None
+    with queue.tx() as db:
+        tables = {row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"auth_attempts", "task_answer_events"}.issubset(tables)
+        assert db.execute("SELECT count(*) FROM auth_attempts").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM task_answer_events").fetchone()[0] == 0
     def tasks():
         return [queue.get(task["task_id"]) for task in before]
     def private_bytes():
@@ -1027,3 +1039,76 @@ def test_hosted_mac_prebuilt_delivery_updates_rolls_back_and_reopens_without_com
             capture_output=True, text=True, timeout=15)
         assert stopped.returncode == 0
     assert not (state / "service.json").exists()
+
+@pytest.mark.parametrize("already_initialized", [False, True])
+def test_real_consumer_journal_initialization_keeps_task_authority_and_private_bytes(
+    tmp_path, already_initialized
+):
+    """Cold schema creation is necessary; reopening a complete journal is inert."""
+    import sqlite3
+    from cryptography.fernet import Fernet
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    from executor.autonomy.worker import Worker
+
+    state = tmp_path / "existing-consumer-journal"
+    queue = TaskQueue(state)
+    tasks = []
+    for index in range(3):
+        task = queue.enqueue(TaskSpec(
+            company="Synthetic journal " + str(index), role="Engineer",
+            target_url="https://example.invalid/jobs/journal-" + str(index),
+            profile_ref="synthetic-journal-profile-" + str(index) + ".json"))
+        tasks.append(queue.pause(task["task_id"]))
+    key_path = state / "task-answers.key"
+    key = Fernet.generate_key()
+    key_path.write_bytes(key)
+    key_path.chmod(0o600)
+
+    def snapshot():
+        with sqlite3.connect(queue.path.as_uri() + "?mode=ro", uri=True) as db:
+            schema = list(db.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"))
+            names = [row[1] for row in schema if row[0] == "table"]
+            # Every table, including operational receipts/events and encrypted
+            # facts, participates. Identifiers originate in sqlite_master only.
+            rows = {name: list(db.execute('SELECT * FROM "' +
+                    name.replace('"', '""') + '" ORDER BY rowid')) for name in names}
+        return schema, rows
+
+    def private_bytes():
+        return {name: (state / name).read_bytes() if (state / name).exists() else None
+                for name in ("tasks.sqlite3", "tasks.sqlite3-wal",
+                             "tasks.sqlite3-shm", "task-answers.key")}
+
+    initial_schema, initial_rows = snapshot()
+    if already_initialized:
+        initialized = Worker(queue, settings={})
+        assert initialized.active is None
+        initial_schema, initial_rows = snapshot()
+    original = private_bytes()
+    reopened = TaskQueue(state)
+    worker = Worker(reopened, settings={})
+    schema, rows = snapshot()
+    assert worker.active is None and worker.stop_event.is_set() is False
+    assert [reopened.get(task["task_id"]) for task in tasks] == tasks
+    assert all(rows[name] == values for name, values in initial_rows.items())
+    assert {"auth_attempts", "task_answer_events"}.issubset(rows)
+    assert rows["auth_attempts"] == [] and rows["task_answer_events"] == []
+    assert key_path.read_bytes() == key and key_path.stat().st_mode & 0o777 == 0o600
+    if already_initialized:
+        assert schema == initial_schema
+        assert private_bytes() == original
+    else:
+        # Check the exact new tables/indexes, retaining every old definition.
+        added = {(kind, name) for kind, name, _table, _sql in schema} - {
+            (kind, name) for kind, name, _table, _sql in initial_schema}
+        assert added == {
+            ("table", "auth_attempts"), ("index", "sqlite_autoindex_auth_attempts_1"),
+            ("index", "one_current_auth_attempt"), ("index", "unique_resend_command"),
+            ("table", "task_answer_events"), ("index", "task_answer_latest")}
+        assert all(entry in schema for entry in initial_schema)
+    complete = private_bytes()
+    repeated = Worker(TaskQueue(state), settings={})
+    assert repeated.active is None
+    assert snapshot() == (schema, rows)
+    assert private_bytes() == complete
