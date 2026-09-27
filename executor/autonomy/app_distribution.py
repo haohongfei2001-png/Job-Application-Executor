@@ -6,6 +6,7 @@ certify, sign, install on an owner device, or activate any applicant task.
 from __future__ import annotations
 
 import gzip
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -13,7 +14,7 @@ import stat
 import sys
 import tarfile
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .consumer import APP_NAME, _trusted_bundle, install_macos_app
 from .release import (RUNTIME_MANIFEST_NAME, source_manifest,
@@ -201,3 +202,182 @@ def build_macos_distribution(repo_root: str | Path, *,
         except OSError:
             pass  # Never delete an unrecognized concurrent artifact.
         raise
+
+
+# Intake bounds include tar headers/padding, not only declared member sizes.
+# They do not reduce the complete built runtime or any certification corpus.
+MAX_DISTRIBUTION_BYTES = 2 * 1024 * 1024 * 1024
+MAX_DISTRIBUTION_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
+MAX_DISTRIBUTION_MEMBERS = 100_000
+
+
+def _receipt_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("distribution_receipt_duplicate")
+        result[key] = value
+    return result
+
+
+def _read_distribution_receipt(path: Path) -> tuple[dict, bytes]:
+    _no_alias_path(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as file:
+        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            raise ValueError("distribution_receipt_invalid")
+        encoded = file.read(16 * 1024 + 1)
+    if len(encoded) > 16 * 1024:
+        raise ValueError("distribution_receipt_invalid")
+    receipt = json.loads(encoded, object_pairs_hook=_receipt_pairs)
+    literals = {
+        "format": "jae-macos-distribution-v1", "archive": ARCHIVE_NAME,
+        "app_name": APP_NAME + ".app", "signing": "unsigned",
+        "certification": "NOT_CERTIFIED", "final_click_actor": "user",
+        "task_state": "excluded", "build_host_metadata": "excluded",
+    }
+    digests = {"archive_sha256", "source_sha256", "runtime_sha256",
+               "requirements_sha256"}
+    required = set(literals) | digests
+    if (not isinstance(receipt, dict)
+            or set(receipt) not in (required, required | {"presentation"})
+            or any(type(receipt.get(key)) is not str or receipt[key] != value
+                   for key, value in literals.items())
+            or ("presentation" in receipt and receipt["presentation"] != "native")):
+        raise ValueError("distribution_receipt_invalid")
+    for key in digests:
+        value = receipt[key]
+        if (type(value) is not str or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)):
+            raise ValueError("distribution_receipt_invalid")
+    return receipt, encoded
+
+
+@contextmanager
+def stage_macos_distribution(distribution: str | Path):
+    """Yield a privately staged, receipt-bound app without running its payload.
+
+    This is unsigned local integrity admission, not publisher authenticity,
+    signing, health, activation, task migration or a certification receipt.
+    The existing app transaction remains the only activation authority.
+    The candidate and all staging files cease to exist when the caller exits.
+    """
+    try:
+        supplied = Path(distribution).expanduser().absolute()
+        _no_alias_path(supplied)
+        if not supplied.is_dir():
+            raise ValueError("distribution_directory_invalid")
+        receipt_path = supplied / RECEIPT_NAME
+        receipt, receipt_bytes = _read_distribution_receipt(receipt_path)
+        archive_path = supplied / ARCHIVE_NAME
+        _no_alias_path(archive_path)
+        if (not archive_path.is_file()
+                or not 0 < archive_path.stat().st_size <= MAX_DISTRIBUTION_BYTES):
+            raise ValueError("distribution_archive_invalid")
+    except (OSError, ValueError, TypeError, UnicodeError):
+        raise ValueError("distribution_intake_refused") from None
+    with tempfile.TemporaryDirectory(prefix=".jae-distribution-intake-") as temporary:
+        work = Path(temporary)
+        app = work / (APP_NAME + ".app")
+        expanded = work / "payload.tar"
+        try:
+            # One descriptor binds digest, decompression and final recheck.
+            fd = os.open(archive_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as raw:
+                original = os.fstat(raw.fileno())
+                if (not stat.S_ISREG(original.st_mode)
+                        or not 0 < original.st_size <= MAX_DISTRIBUTION_BYTES):
+                    raise ValueError("distribution_archive_invalid")
+                def digest():
+                    raw.seek(0)
+                    hashed = hashlib.sha256()
+                    read_bytes = 0
+                    for block in iter(lambda: raw.read(1024 * 1024), b""):
+                        read_bytes += len(block)
+                        if read_bytes > MAX_DISTRIBUTION_BYTES:
+                            raise ValueError("distribution_archive_size")
+                        hashed.update(block)
+                    return hashed.hexdigest()
+                if digest() != receipt["archive_sha256"]:
+                    raise ValueError("distribution_archive_digest")
+                raw.seek(0)
+                expanded_bytes = 0
+                with gzip.GzipFile(fileobj=raw, mode="rb") as zipped, expanded.open("xb") as target:
+                    for block in iter(lambda: zipped.read(1024 * 1024), b""):
+                        expanded_bytes += len(block)
+                        if expanded_bytes > MAX_DISTRIBUTION_EXPANDED_BYTES:
+                            raise ValueError("distribution_archive_expansion")
+                        target.write(block)
+                seen = set()
+                with expanded.open("rb") as payload, tarfile.open(fileobj=payload, mode="r:") as archive:
+                    for member in archive:
+                        name = member.name
+                        relative = PurePosixPath(name)
+                        if (len(seen) >= MAX_DISTRIBUTION_MEMBERS or name in seen
+                                or relative.is_absolute() or relative.as_posix() != name
+                                or "\\" in name or ":" in name
+                                or any(part in ("", ".", "..") for part in relative.parts)
+                                or not relative.parts or relative.parts[0] != app.name
+                                or _private_name(Path(*relative.parts[1:]))
+                                or not (member.isdir() or member.isfile())
+                                or member.size < 0 or (member.isdir() and member.size != 0)
+                                or member.mode not in (0o644, 0o755)
+                                or (member.isdir() and member.mode != 0o755)
+                                or member.uid != 0 or member.gid != 0 or member.mtime != 0
+                                or member.uname or member.gname
+                                or any(key != "path" or value != name
+                                       for key, value in member.pax_headers.items())):
+                            raise ValueError("distribution_archive_member")
+                        target = work.joinpath(*relative.parts)
+                        if not target.parent.is_dir():
+                            raise ValueError("distribution_archive_parent")
+                        seen.add(name)
+                        if member.isdir():
+                            target.mkdir(mode=0o755, exist_ok=False)
+                        else:
+                            source = archive.extractfile(member)
+                            if source is None:
+                                raise ValueError("distribution_archive_member")
+                            copied = 0
+                            with source, target.open("xb") as file:
+                                for block in iter(lambda: source.read(1024 * 1024), b""):
+                                    copied += len(block)
+                                    file.write(block)
+                            if copied != member.size:
+                                raise ValueError("distribution_archive_truncated")
+                            target.chmod(member.mode)
+                    # Only canonical zero padding may follow the final member.
+                    payload.seek(archive.offset)
+                    for block in iter(lambda: payload.read(1024 * 1024), b""):
+                        if any(block):
+                            raise ValueError("distribution_archive_trailing")
+                _no_alias_path(archive_path)
+                current = archive_path.stat(follow_symlinks=False)
+                if (current.st_dev != original.st_dev or current.st_ino != original.st_ino
+                        or current.st_size != original.st_size
+                        or digest() != receipt["archive_sha256"]):
+                    raise ValueError("distribution_archive_changed")
+            if _read_distribution_receipt(receipt_path) != (receipt, receipt_bytes):
+                raise ValueError("distribution_receipt_changed")
+            release = app / "Contents/Resources/release"
+            runtime = app / "Contents/Resources/runtime"
+            _bundle_members(app)
+            if (not _trusted_bundle(app)
+                    or not verify_source_candidate(release)
+                    or not verify_runtime_candidate(runtime, release)
+                    or source_manifest(release)["source_sha256"] != receipt["source_sha256"]):
+                raise ValueError("distribution_payload_invalid")
+            identity = json.loads((runtime / RUNTIME_MANIFEST_NAME).read_text())
+            if any(identity[key] != receipt[key]
+                   for key in ("runtime_sha256", "requirements_sha256")):
+                raise ValueError("distribution_payload_identity")
+            from .consumer import _native_packaged_launcher
+            native = (app / "Contents/MacOS/AIApplicationManager").read_text() == _native_packaged_launcher()
+            if native != (receipt.get("presentation") == "native"):
+                raise ValueError("distribution_presentation_mismatch")
+            expanded.unlink()
+        except (OSError, EOFError, ValueError, TypeError, KeyError, UnicodeError,
+                tarfile.TarError):
+            # Do not disclose applicant/build paths or untrusted archive text.
+            raise ValueError("distribution_intake_refused") from None
+        yield app

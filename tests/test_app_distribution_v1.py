@@ -158,6 +158,28 @@ def test_real_archive_relocates_without_checkout_runtime_or_private_build_state(
                 "tasks.sqlite3-wal", "tasks.sqlite3-shm", "task-answers.key",
                 "auth.token", "service.json"} for part in Path(member.name).parts)
         archive.extractall(extracted, filter="data")
+    # Intake the SAME full delivered archive; do not build a smaller fixture.
+    # No extracted payload is executed and no installed app/state is touched.
+    from executor.autonomy.app_distribution import stage_macos_distribution
+    before_archive = (output / ARCHIVE_NAME).stat()
+    with stage_macos_distribution(output) as admitted:
+        staged = admitted
+        assert _trusted_bundle(admitted)
+        staged_release = admitted / "Contents/Resources/release"
+        staged_runtime = admitted / "Contents/Resources/runtime"
+        assert source_manifest(staged_release)["source_sha256"] == receipt["source_sha256"]
+        assert verify_runtime_candidate(staged_runtime, staged_release)
+        staged_identity = json.loads((staged_runtime / "release-runtime-manifest.json").read_text())
+        assert staged_identity["runtime_sha256"] == receipt["runtime_sha256"]
+        assert staged_identity["requirements_sha256"] == receipt["requirements_sha256"]
+        assert not (staged_release / "runtime").exists()
+        assert not list(admitted.rglob("tasks.sqlite3"))
+        assert queue.get(task["task_id"]) == before
+    assert not staged.exists()
+    after_archive = (output / ARCHIVE_NAME).stat()
+    assert (after_archive.st_ino, after_archive.st_size, after_archive.st_mtime_ns) == (
+        before_archive.st_ino, before_archive.st_size, before_archive.st_mtime_ns)
+    assert json.loads((output / RECEIPT_NAME).read_text()) == receipt
     shutil.rmtree(repo)
     shutil.rmtree(prepared)
     app = extracted / (APP_NAME + ".app")
@@ -496,6 +518,16 @@ def test_hosted_mac_native_archive_relocates_and_launches_exact_verified_window_
         assert sorted(Path(m.name).name for m in native_members) == [
             "AIApplicationWindow", "native-host-manifest.json"]
         archive.extractall(relocated, filter="data")
+    from executor.autonomy.app_distribution import stage_macos_distribution
+    with stage_macos_distribution(output) as admitted:
+        staged = admitted
+        assert _trusted_bundle(admitted)
+        assert _native_bundle_matches(admitted / "Contents/Resources/release",
+            admitted / "Contents/Resources/native-host")
+        assert source_manifest(admitted / "Contents/Resources/release")["source_sha256"] == receipt["source_sha256"]
+        assert queue.get(task["task_id"]) == original
+    assert not staged.exists()
+    assert json.loads((output / RECEIPT_NAME).read_text()) == receipt
     shutil.rmtree(repo)
     shutil.rmtree(prepared)
     app = relocated / (APP_NAME + ".app")
@@ -568,3 +600,169 @@ def test_operator_build_refuses_conflicting_presentation_before_artifact_work(
                      "--output", str(output), *flags])
     assert stopped.value.code == 2
     assert not output.exists()
+
+
+def _intake_artifact(tmp_path, members):
+    import io
+    directory = tmp_path / "delivery"
+    directory.mkdir()
+    with tarfile.open(directory / ARCHIVE_NAME, "w:gz") as archive:
+        for name, kind, value in members:
+            info = tarfile.TarInfo(name)
+            info.uid = info.gid = info.mtime = 0
+            info.uname = info.gname = ""
+            info.mode = 0o755 if kind == "directory" else 0o644
+            if kind == "directory":
+                info.type = tarfile.DIRTYPE
+                archive.addfile(info)
+            elif kind in ("symlink", "hardlink"):
+                info.type = tarfile.SYMTYPE if kind == "symlink" else tarfile.LNKTYPE
+                info.linkname = value
+                archive.addfile(info)
+            elif kind == "device":
+                info.type = tarfile.CHRTYPE
+                archive.addfile(info)
+            else:
+                data = value.encode()
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+    receipt = {"format": "jae-macos-distribution-v1", "archive": ARCHIVE_NAME,
+        "archive_sha256": hashlib.sha256((directory / ARCHIVE_NAME).read_bytes()).hexdigest(),
+        "app_name": APP_NAME + ".app", "source_sha256": "0" * 64,
+        "runtime_sha256": "0" * 64, "requirements_sha256": "0" * 64,
+        "signing": "unsigned", "certification": "NOT_CERTIFIED",
+        "final_click_actor": "user", "task_state": "excluded",
+        "build_host_metadata": "excluded"}
+    (directory / RECEIPT_NAME).write_text(json.dumps(receipt))
+    return directory, receipt
+
+
+@pytest.mark.parametrize("attack", [
+    "parent", "absolute", "backslash", "other-root", "duplicate", "symlink",
+    "hardlink", "device", "private", "undeclared", "missing-parent",
+])
+def test_distribution_intake_rejects_actual_archive_attacks_without_payload_execution(
+    tmp_path, monkeypatch, attack
+):
+    from executor.autonomy import app_distribution as module
+    root = APP_NAME + ".app"
+    members = [(root, "directory", "")]
+    attacks = {
+        "parent": (root + "/../CANARY_INTAKE_ESCAPE", "file", "escape"),
+        "absolute": (str(tmp_path / "CANARY_INTAKE_ESCAPE"), "file", "escape"),
+        "backslash": (root + "/..\\CANARY_INTAKE_ESCAPE", "file", "escape"),
+        "other-root": ("other.app", "directory", ""),
+        "duplicate": (root, "directory", ""),
+        "symlink": (root + "/alias", "symlink", str(tmp_path / "private-key")),
+        "hardlink": (root + "/alias", "hardlink", str(tmp_path / "private-key")),
+        "device": (root + "/device", "device", ""),
+        "private": (root + "/task-answers.key", "file", "CANARY_PRIVATE_PAYLOAD"),
+        "undeclared": (root + "/unknown", "file", "CANARY_UNDECLARED"),
+        "missing-parent": (root + "/not-created/file", "file", "CANARY_UNDECLARED"),
+    }
+    members.append(attacks[attack])
+    private = tmp_path / "private-key"
+    private.write_text("CANARY_EXISTING_PRIVATE")
+    directory, receipt = _intake_artifact(tmp_path, members)
+    monkeypatch.setattr(module, "_trusted_bundle",
+        lambda *_args: pytest.fail("invalid intake reached bundle authority"))
+    # _bundle_members refuses the otherwise structurally regular unknown file.
+    with pytest.raises(ValueError):
+        with module.stage_macos_distribution(directory):
+            pytest.fail("unsafe archive yielded a candidate")
+    assert private.read_text() == "CANARY_EXISTING_PRIVATE"
+    assert not (tmp_path / "CANARY_INTAKE_ESCAPE").exists()
+    assert json.loads((directory / RECEIPT_NAME).read_text()) == receipt
+
+
+@pytest.mark.parametrize("field,value", [
+    ("archive_sha256", "1" * 64), ("source_sha256", "BAD"),
+    ("runtime_sha256", None), ("requirements_sha256", True),
+    ("archive", "../private-key"), ("app_name", "other.app"),
+    ("signing", "signed"), ("certification", "PASS"),
+    ("final_click_actor", "assistant"), ("task_state", "included"),
+    ("build_host_metadata", "included"), ("presentation", "web"),
+    ("extra", "CANARY_UNKNOWN"),
+])
+def test_distribution_intake_refuses_receipt_drift_before_candidate_or_state(
+    tmp_path, monkeypatch, field, value
+):
+    from executor.autonomy import app_distribution as module
+    directory, receipt = _intake_artifact(tmp_path, [(APP_NAME + ".app", "directory", "")])
+    receipt[field] = value
+    (directory / RECEIPT_NAME).write_text(json.dumps(receipt))
+    monkeypatch.setattr(module, "_trusted_bundle",
+        lambda *_args: pytest.fail("invalid receipt reached bundle authority"))
+    with pytest.raises(ValueError):
+        with module.stage_macos_distribution(directory):
+            pytest.fail("invalid receipt yielded a candidate")
+    assert json.loads((directory / RECEIPT_NAME).read_text()) == receipt
+
+
+def test_distribution_intake_refuses_duplicate_receipt_keys_and_aliases(tmp_path):
+    from executor.autonomy.app_distribution import stage_macos_distribution
+    directory, receipt = _intake_artifact(tmp_path, [(APP_NAME + ".app", "directory", "")])
+    path = directory / RECEIPT_NAME
+    path.write_text(json.dumps(receipt)[:-1] + ', "archive": "' + ARCHIVE_NAME + '"}')
+    with pytest.raises(ValueError):
+        with stage_macos_distribution(directory):
+            pytest.fail("duplicate receipt yielded")
+    path.unlink()
+    private = tmp_path / "private-receipt"
+    private.write_text(json.dumps(receipt))
+    path.symlink_to(private)
+    with pytest.raises(ValueError):
+        with stage_macos_distribution(directory):
+            pytest.fail("receipt alias yielded")
+    assert private.read_text() == json.dumps(receipt)
+
+
+@pytest.mark.parametrize("bound", ["compressed", "expanded", "members"])
+def test_distribution_intake_enforces_stream_and_member_bounds(tmp_path, monkeypatch, bound):
+    from executor.autonomy import app_distribution as module
+    directory, receipt = _intake_artifact(tmp_path, [
+        (APP_NAME + ".app", "directory", ""),
+        (APP_NAME + ".app/unknown", "file", "bounded malformed archive" * 1000),
+    ])
+    # Small limits only exercise negative bound branches; both positive tests
+    # above consume the complete real prepared distribution with normal limits.
+    limits = {"compressed": "MAX_DISTRIBUTION_BYTES",
+              "expanded": "MAX_DISTRIBUTION_EXPANDED_BYTES",
+              "members": "MAX_DISTRIBUTION_MEMBERS"}
+    monkeypatch.setattr(module, limits[bound], 1)
+    monkeypatch.setattr(module, "_trusted_bundle",
+        lambda *_args: pytest.fail("over-budget intake reached bundle authority"))
+    with pytest.raises(ValueError):
+        with module.stage_macos_distribution(directory):
+            pytest.fail("over-budget archive yielded a candidate")
+    assert json.loads((directory / RECEIPT_NAME).read_text()) == receipt
+
+
+def test_distribution_intake_refuses_archive_alias_without_reading_private_target(tmp_path):
+    from executor.autonomy.app_distribution import stage_macos_distribution
+    directory, receipt = _intake_artifact(tmp_path, [(APP_NAME + ".app", "directory", "")])
+    archive = directory / ARCHIVE_NAME
+    original = archive.read_bytes()
+    archive.unlink()
+    private = tmp_path / "private-archive"
+    private.write_bytes(original)
+    archive.symlink_to(private)
+    with pytest.raises(ValueError):
+        with stage_macos_distribution(directory):
+            pytest.fail("archive alias yielded")
+    assert private.read_bytes() == original
+
+
+def test_distribution_intake_rejects_nonzero_data_after_tar_end(tmp_path, monkeypatch):
+    import gzip
+    from executor.autonomy import app_distribution as module
+    directory, receipt = _intake_artifact(tmp_path, [(APP_NAME + ".app", "directory", "")])
+    archive = directory / ARCHIVE_NAME
+    archive.write_bytes(gzip.compress(gzip.decompress(archive.read_bytes()) + b"CANARY_TRAILING_PAYLOAD"))
+    receipt["archive_sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (directory / RECEIPT_NAME).write_text(json.dumps(receipt))
+    monkeypatch.setattr(module, "_trusted_bundle",
+        lambda *_args: pytest.fail("trailing payload reached bundle authority"))
+    with pytest.raises(ValueError):
+        with module.stage_macos_distribution(directory):
+            pytest.fail("trailing archive yielded")
