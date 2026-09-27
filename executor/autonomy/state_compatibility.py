@@ -101,11 +101,16 @@ def native_window_guard(root: str | Path):
 @contextmanager
 def task_state_guard(root: str | Path):
     """Share the daemon's lock through the entire app install or rollback transaction."""
-    root = Path(root).expanduser()
-    if root.is_symlink():
+    root = Path(root).expanduser().absolute()
+    # Match native-window admission: an ancestor alias is not a new empty
+    # authority. Refuse before mkdir, chmod, lock creation or private reads.
+    if any(path.is_symlink() for path in (root, *root.parents)):
         raise ValueError("task_state_path_invalid")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if not root.is_dir() or any(p.is_symlink() for p in _state_paths(root)):
+    metadata = root.stat(follow_symlinks=False)
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+            or any(path.is_symlink() for path in (root, *root.parents))
+            or any(p.is_symlink() for p in _state_paths(root))):
         raise ValueError("task_state_path_invalid")
     root.chmod(0o700)
     # A queue constructor writes schema/derived state under migration.lock even
@@ -279,11 +284,18 @@ def _answer_contract(db, key, secret):
 
 def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> bool:
     """Reject any candidate migration that loses or changes journal authority."""
-    root = Path(root).expanduser()
+    root = Path(root).expanduser().absolute()
     database = root / "tasks.sqlite3"
-    if not root.exists() and not root.is_symlink():
-        return True
-    if root.is_symlink() or not root.is_dir() or any(p.is_symlink() for p in _state_paths(root)):
+    try:
+        if any(path.is_symlink() for path in (root, *root.parents)):
+            return False
+        if not root.exists():
+            return True
+        metadata = root.stat(follow_symlinks=False)
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                or any(p.is_symlink() for p in _state_paths(root))):
+            return False
+    except OSError:
         return False
     try:
         key = _answer_key(root)

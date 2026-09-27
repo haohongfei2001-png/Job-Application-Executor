@@ -894,3 +894,124 @@ def test_bound_backup_requires_delete_journal_header_even_with_matching_external
         before = {p.name: p.read_bytes() for p in capsule.iterdir()}
         assert verify_task_state_backup(capsule, observed) is False
         assert {p.name: p.read_bytes() for p in capsule.iterdir()} == before
+
+
+# Exact authority admission precedes every private state read/mutation.
+@pytest.mark.parametrize("path_kind", [
+    "root_alias", "ancestor_alias", "missing_child", "missing_grandchild",
+])
+def test_state_alias_admission_refuses_before_locks_or_candidate_reads(tmp_path, monkeypatch, path_kind):
+    from executor.autonomy import state_compatibility
+
+    actual = tmp_path / "owned"
+    actual.mkdir()
+    state = actual / "state"
+    with closing(legacy_state(state)) as db:
+        encrypted_answers(state, db)
+        state.chmod(0o755)
+        before = authority(db)
+        history = db.execute("SELECT * FROM task_answer_events").fetchall()
+        payload = {path.name: path.read_bytes() for path in state.iterdir()}
+        mode = state.stat().st_mode
+        alias = tmp_path / "alias"
+        if path_kind == "root_alias":
+            alias.symlink_to(state, target_is_directory=True)
+            supplied = alias
+        else:
+            alias.symlink_to(actual, target_is_directory=True)
+            supplied = alias / ("state" if path_kind == "ancestor_alias" else
+                                "absent" if path_kind == "missing_child" else "absent/nested")
+
+        def never(*args, **kwargs):
+            pytest.fail("aliased authority reached private read or candidate startup")
+        monkeypatch.setattr(state_compatibility, "_answer_key", never)
+        monkeypatch.setattr(state_compatibility.subprocess, "run", never)
+        with pytest.raises(ValueError, match="task_state_path_invalid"):
+            with task_state_guard(supplied):
+                pytest.fail("aliased authority admitted")
+        assert task_state_candidate_compatible(Path(sys.executable), tmp_path, supplied) is False
+        assert authority(db) == before
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == history
+        assert {path.name: path.read_bytes() for path in state.iterdir()} == payload
+        assert state.stat().st_mode == mode
+        assert sorted(path.name for path in actual.iterdir()) == ["state"]
+        assert not any((state / name).exists() for name in
+                       ("native-window.lock", "worker.lock", "migration.lock"))
+        assert alias.is_symlink()
+
+
+def test_state_admission_refuses_foreign_root_before_chmod_or_private_read(tmp_path, monkeypatch):
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    with closing(legacy_state(root)) as db:
+        encrypted_answers(root, db)
+        root.chmod(0o755)
+        mode = root.stat().st_mode
+        payload = {path.name: path.read_bytes() for path in root.iterdir()}
+        before = authority(db)
+        current_uid = os.geteuid()
+        monkeypatch.setattr(state_compatibility.os, "geteuid", lambda: current_uid + 1)
+        def never(*args, **kwargs):
+            pytest.fail("foreign authority reached private read or candidate startup")
+        monkeypatch.setattr(state_compatibility, "_answer_key", never)
+        monkeypatch.setattr(state_compatibility.subprocess, "run", never)
+        with pytest.raises(ValueError, match="task_state_path_invalid"):
+            with task_state_guard(root):
+                pytest.fail("foreign root admitted")
+        assert task_state_candidate_compatible(Path(sys.executable), tmp_path, root) is False
+        assert root.stat().st_mode == mode
+        assert authority(db) == before
+        assert {path.name: path.read_bytes() for path in root.iterdir()} == payload
+
+
+@pytest.mark.parametrize("operation", ["install", "rollback"])
+@pytest.mark.parametrize("path_kind", ["ancestor_alias", "missing_child"])
+def test_app_transaction_refuses_aliased_authority_before_activation(tmp_path, monkeypatch, operation, path_kind):
+    from executor.autonomy import consumer
+
+    actual = tmp_path / "owned"
+    actual.mkdir()
+    state = actual / "state"
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    app = apps / (consumer.APP_NAME + ".app")
+    previous = apps / ("." + consumer.APP_NAME + ".app.previous")
+    for path, canary in ((app, "CURRENT_APP_CANARY"), (previous, "PREVIOUS_APP_CANARY")):
+        path.mkdir()
+        (path / "retained").write_text(canary)
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    supplied = alias / ("state" if path_kind == "ancestor_alias" else "absent")
+    with closing(legacy_state(state)) as db:
+        key = encrypted_answers(state, db)
+        before = authority(db)
+        state.chmod(0o755)
+        mode = state.stat().st_mode
+        payload = {path.name: path.read_bytes() for path in state.iterdir()}
+        def never(*args, **kwargs):
+            pytest.fail("aliased app transaction reached staging, health or activation")
+        monkeypatch.setattr(consumer, "_install_macos_app_unlocked", never)
+        monkeypatch.setattr(consumer, "_rollback_macos_app_unlocked", never)
+        if operation == "install":
+            result = consumer.install_macos_app(tmp_path / "unused-source",
+                destination=apps, platform="darwin", task_state_root=supplied)
+        else:
+            result = consumer.rollback_macos_app(apps, task_state_root=supplied)
+        assert result["ok"] is False
+        assert result["reason"] == "task_state_unavailable"
+        assert "task_state_backup" not in result
+        assert "owned" not in json.dumps(result)
+        assert authority(db) == before
+        assert (state / "task-answers.key").read_bytes() == key
+        assert {path.name: path.read_bytes() for path in state.iterdir()} == payload
+        assert state.stat().st_mode == mode
+        assert sorted(path.name for path in actual.iterdir()) == ["state"]
+        assert (app / "retained").read_text() == "CURRENT_APP_CANARY"
+        assert (previous / "retained").read_text() == "PREVIOUS_APP_CANARY"
+        assert not (apps / ("." + consumer.APP_NAME + ".app.installing")).exists()
+        assert not (apps / ("." + consumer.APP_NAME + ".app.failed")).exists()
+        assert not list(apps.glob(".jae-task-state-backup-*"))
+        # The refused transaction released its application lock.
+        fd = consumer._acquire_app_transaction_lock(apps)
+        os.close(fd)
