@@ -334,6 +334,13 @@ def restore_installed_consumer(root):
                     _packaged_launcher(), _native_packaged_launcher()}):
             return {"ok": False, "restored": False,
                     "reason": "installed_restore_unverified", **boundary}
+        from .runtime_paths import default_runtime
+        expected_root = Path(default_runtime(source)).expanduser().absolute()
+        observed_root = Path(root).expanduser().absolute()
+        if (observed_root != expected_root
+                or any(path.is_symlink() for path in (observed_root, *observed_root.parents))):
+            return {"ok": False, "restored": False,
+                    "reason": "installed_restore_state_unverified", **boundary}
         # This uses the app/native/worker/migration locks and the original
         # durable WAL/answer-key backup, both release identities, final-path
         # health and compensation. Contention refuses without retiring an owner.

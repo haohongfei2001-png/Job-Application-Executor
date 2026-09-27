@@ -4766,7 +4766,8 @@ def test_installed_restore_entry_preserves_real_current_journal_and_retained_bac
         receipts.append(result)
         return result
     monkeypatch.setattr(consumer, "rollback_macos_app", observed_transaction)
-    state = tmp_path / "synthetic-private-state"
+    from executor.autonomy.runtime_paths import default_runtime
+    state = default_runtime(source)
     with closing(legacy_state(state)) as db:
         key = encrypted_answers(state, db)
         before = authority(db)
@@ -4892,7 +4893,8 @@ def test_installed_restore_entry_has_finite_outcome_without_retry_or_private_ech
                         lambda: {"packaged": True, "expected": "a" * 64})
     monkeypatch.setattr(consumer, "_trusted_bundle", lambda _: True)
     calls = []
-    state = tmp_path / "state"
+    from executor.autonomy.runtime_paths import default_runtime
+    state = default_runtime(source)
     def transaction(destination, *, task_state_root):
         calls.append((destination, task_state_root))
         if outcome == "exception":
@@ -4932,3 +4934,56 @@ def test_native_restore_is_explicit_exclusive_and_never_automatic(tmp_path, monk
         cli.main(["--runtime", str(tmp_path), "native-launch", "--restore-previous", "--native-smoke"])
     assert error.value.code == 2 and calls == []
     assert '"submit_capability": false' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("fault", ["alternate_empty", "alternate_private", "state_alias", "ancestor_alias"])
+def test_installed_restore_cannot_substitute_another_task_authority(tmp_path, monkeypatch, fault):
+    from types import SimpleNamespace
+    from executor.autonomy.runtime_paths import default_runtime
+    app = tmp_path / "Applications" / (consumer.APP_NAME + ".app")
+    source = app / "Contents" / "Resources" / "release"
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(consumer._native_packaged_launcher())
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(cli, "__file__", str(source / "executor" / "autonomy" / "cli.py"))
+    monkeypatch.setattr(cli, "_consumer_release_identity",
+                        lambda: {"packaged": True, "expected": "a" * 64})
+    monkeypatch.setattr(consumer, "_trusted_bundle", lambda _: True)
+    monkeypatch.setattr(consumer, "rollback_macos_app",
+                        lambda *a, **kw: pytest.fail("wrong authority must not acquire app/task locks"))
+    current = default_runtime(source)
+    current.mkdir(parents=True)
+    private = "\n".join("PRIVATE_CURRENT_STATE_" + str(i) for i in range(1000))
+    sentinel = current / "private-unchanged.txt"
+    sentinel.write_text(private)
+    old = {str(p.relative_to(current)):p.read_bytes() for p in current.rglob("*") if p.is_file()}
+    observed = tmp_path / "alternate"
+    if fault == "alternate_private":
+        observed.mkdir()
+        (observed / "private.txt").write_text("PRIVATE_ALTERNATE_AUTHORITY")
+    elif fault == "state_alias":
+        retained = tmp_path / "retained-current-state"
+        current.rename(retained)
+        current.symlink_to(retained, target_is_directory=True)
+        observed = current
+    elif fault == "ancestor_alias":
+        parent = current.parent
+        retained = tmp_path / "retained-current-parent"
+        parent.rename(retained)
+        parent.symlink_to(retained, target_is_directory=True)
+        observed = current
+    result = cli.restore_installed_consumer(observed)
+    assert result == {"ok": False, "restored": False,
+                      "reason": "installed_restore_state_unverified",
+                      "final_click_actor": "user", "submit_capability": False}
+    assert {str(p.relative_to(current)):p.read_bytes() for p in current.rglob("*") if p.is_file()} == old
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+    assert not (current / "native-window.lock").exists()
+    assert not (current / "worker.lock").exists()
+    assert not (current / "migration.lock").exists()
+    assert not (app.parent / ("." + consumer.APP_NAME + ".app.transaction.lock")).exists()
+    if fault == "alternate_empty":
+        assert not observed.exists()
+    if fault == "alternate_private":
+        assert (observed / "private.txt").read_text() == "PRIVATE_ALTERNATE_AUTHORITY"
