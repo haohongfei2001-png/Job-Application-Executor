@@ -18,34 +18,13 @@ from .diagnostics import collect_diagnostics
 from .loopback_http import LoopbackHTTPServer
 from .manager import ManagerController, safe_task_view
 from .queue import TaskQueue, TaskSpec, private_dir
+from .runtime_paths import local_token
 from .release import is_packaged_source, read_release_identity
 from .updater import reconciled_update_state, safe_to_update, spawn_update
 from .worker import Worker
 
 
 UI_COOKIE = "application_executor_session"
-
-
-def local_token(root):
-    token = os.getenv("APPLICATION_EXECUTOR_LOCAL_TOKEN")
-    if token:
-        if len(token) < 32:
-            raise ValueError("local auth token must have at least 32 characters")
-        return token
-    path = private_dir(root) / "auth.token"
-    if not path.exists():
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(secrets.token_urlsafe(32))
-        except FileExistsError:
-            pass
-    if path.is_symlink() or path.stat().st_mode & 0o077:
-        raise ValueError("private token permissions required")
-    token = path.read_text().strip()
-    if len(token) < 32:
-        raise ValueError("invalid private auth token")
-    return token
 
 
 class Supervisor:

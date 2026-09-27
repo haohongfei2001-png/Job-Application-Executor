@@ -2516,3 +2516,288 @@ def test_recovery_preparation_browser_keeps_copy_uncertainty_and_closed_page_fen
             assert len(page.context.pages) == 1
         finally:
             browser.close()
+
+
+# Cold-entry regressions exercise production CLI/bootstrap in a fresh isolated
+# interpreter. Business imports must never be a prerequisite for recovery.
+DEPENDENCY_IMPORT_PROBE = r"""
+import importlib.abc
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+blocked = json.loads(sys.argv[2])
+attempts = []
+class RefuseBusiness(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if any(fullname == name or fullname.startswith(name + '.') for name in blocked):
+            attempts.append(fullname)
+            raise ImportError('PRIVATE_DEPENDENCY_IMPORT_CANARY')
+sys.meta_path.insert(0, RefuseBusiness())
+from executor.autonomy import cli, bootstrap, runtime_paths
+assert not attempts, 'cold recovery import touched business modules'
+assert cli.local_token is runtime_paths.local_token
+assert bootstrap.private_dir is runtime_paths.private_dir
+snapshot = bootstrap._preparation_snapshot()
+assert snapshot['ready_for_live_e2e'] is False
+assert snapshot['checks']['supervisor_running'] is False
+assert all(value is None for key, value in snapshot['checks'].items()
+           if key != 'supervisor_running')
+assert 'PRIVATE' not in json.dumps(snapshot)
+assert 'executor.autonomy.queue' not in sys.modules
+assert 'executor.autonomy.worker' not in sys.modules
+assert 'executor.autonomy.supervisor' not in sys.modules
+print(json.dumps({'ok': True, 'ready': False, 'submit': False}))
+"""
+
+
+@pytest.mark.parametrize("blocked", [
+    ["pydantic"], ["playwright"],
+    ["executor.browser", "executor.autonomy.queue",
+     "executor.autonomy.worker", "executor.autonomy.supervisor"],
+    ["executor.autonomy.preflight", "executor.autonomy.manager"],
+])
+def test_actual_cold_recovery_import_survives_missing_business_dependencies(blocked):
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", DEPENDENCY_IMPORT_PROBE,
+         str(Path(cli.__file__).resolve().parents[2]), json.dumps(blocked)],
+        capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"ok": True, "ready": False, "submit": False}
+    assert "PRIVATE" not in result.stdout
+
+
+def test_runtime_path_and_token_contract_remain_shared_and_fail_closed(
+        tmp_path, monkeypatch):
+    from executor.autonomy import queue, runtime_paths, supervisor
+    monkeypatch.delenv("APPLICATION_EXECUTOR_LOCAL_TOKEN", raising=False)
+    assert queue.private_dir is bootstrap.private_dir is runtime_paths.private_dir
+    assert queue.default_runtime(tmp_path / "dev-source") == runtime_paths.default_runtime(tmp_path / "dev-source")
+    assert runtime_paths.default_runtime(tmp_path / "release", home=tmp_path / "synthetic-home") == (
+        tmp_path / "synthetic-home" / "Library" / "Application Support" / "AI投递经理" / "autonomy")
+    assert cli.local_token is supervisor.local_token is runtime_paths.local_token
+    root = runtime_paths.private_dir(tmp_path / "owned")
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    first = runtime_paths.local_token(root)
+    token_path = root / "auth.token"
+    assert len(first) >= 32
+    assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+    before = token_path.read_bytes()
+    assert runtime_paths.local_token(root) == first
+    assert token_path.read_bytes() == before
+    token_path.chmod(0o644)
+    with pytest.raises(ValueError, match="private token permissions required"):
+        runtime_paths.local_token(root)
+    assert token_path.read_bytes() == before
+    token_path.unlink()
+    target = tmp_path / "foreign-token"
+    target.write_text("PRIVATE_FOREIGN_TOKEN_CANARY" * 3)
+    target.chmod(0o600)
+    token_path.symlink_to(target)
+    with pytest.raises(ValueError, match="private token permissions required"):
+        runtime_paths.local_token(root)
+    assert target.read_text() == "PRIVATE_FOREIGN_TOKEN_CANARY" * 3
+
+
+@pytest.mark.parametrize("fault", ["import", "collector"])
+def test_launch_dependency_recovery_never_admits_service_browser_or_ticket(
+        tmp_path, monkeypatch, fault):
+    import builtins
+    original_import = builtins.__import__
+    def guarded_import(name, *args, **kwargs):
+        if fault == "import" and name == "preflight":
+            raise ImportError("PRIVATE_DEPENDENCY_CANARY")
+        return original_import(name, *args, **kwargs)
+    if fault == "import":
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+    else:
+        monkeypatch.setattr(preflight, "collect_live_preflight",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("PRIVATE_COLLECTOR_CANARY")))
+    monkeypatch.setattr(cli, "browser_mode", lambda: "isolated")
+    actions = []
+    monkeypatch.setattr(cli, "lifecycle",
+        lambda action, *_args: actions.append(action) or {"ok": False})
+    monkeypatch.setattr(cli, "ensure_chrome",
+        lambda: pytest.fail("dependency recovery must not start Chrome"))
+    monkeypatch.setattr(cli, "open_ui",
+        lambda *_args, **_kwargs: pytest.fail("dependency recovery must not mint UI ticket"))
+    recovered = []
+    def recovery(root, port, reason, *, presenter=None):
+        recovered.append((root, port, reason, presenter))
+        return {"ok": True, "opened": True}
+    monkeypatch.setattr(bootstrap, "open_bootstrap", recovery)
+    presenter = lambda _surface: True
+    result = cli.launch_consumer(tmp_path, 9344, presenter=presenter)
+    assert recovered == [(tmp_path, 9344, "business_dependencies_unavailable", presenter)]
+    assert actions == ([] if fault == "import" else ["start", "health"])
+    assert result["ok"] is True and result["opened"] is True
+    assert result["ready_for_live_e2e"] is False
+    assert result["submit_capability"] is False and result["final_click_actor"] == "user"
+    assert result["checks"] == {}
+    assert "PRIVATE" not in json.dumps(result)
+
+
+BROKEN_BUSINESS_LAUNCH_PROBE = r"""
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+runtime = Path(sys.argv[2])
+service_port = int(sys.argv[3])
+children = []
+actual_popen = subprocess.Popen
+def record_child(command, **kwargs):
+    child = actual_popen(command, **kwargs)
+    if '-I' in command and 'bootstrap-serve' in command:
+        children.append((command, child))
+    return child
+subprocess.Popen = record_child
+seen = []
+def owned_presenter(surface):
+    assert surface.surface == 'bootstrap'
+    parsed = urllib.parse.urlsplit(surface.url)
+    assert parsed.hostname == '127.0.0.1'
+    with urllib.request.urlopen(surface.url, timeout=5) as response:
+        assert response.status == 200
+        assert response.headers['Cache-Control'] == 'no-store'
+        assert response.headers['Referrer-Policy'] == 'no-referrer'
+        text = response.read().decode()
+    assert '业务运行依赖暂不可用' in text
+    assert 'PRIVATE' not in text
+    assert '未核验' in text
+    # The task API and missing token remain denied on this real HTTP server.
+    for url, code in [(surface.url.split('?')[0], 403),
+                      (surface.url.replace('/?token=', '/v1/tasks?token='), 404)]:
+        try:
+            urllib.request.urlopen(url, timeout=5)
+            raise AssertionError('unauthorized route accepted')
+        except urllib.error.HTTPError as denied:
+            assert denied.code == code
+    retry_url = surface.url.replace('/?token=', '/retry?token=')
+    try:
+        urllib.request.urlopen(urllib.request.Request(retry_url, data=b''), timeout=5)
+        raise AssertionError('missing Origin accepted')
+    except urllib.error.HTTPError as denied:
+        assert denied.code == 403
+    seen.append(True)
+    return True
+webbrowser.open = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    AssertionError('external browser fallback forbidden'))
+try:
+    from executor.autonomy import cli
+    result = cli.launch_consumer(runtime, service_port, presenter=owned_presenter)
+    assert result['ok'] is True and result['opened'] is True
+    assert result['ready_for_live_e2e'] is False
+    assert result['submit_capability'] is False
+    assert result['bootstrap_reason'] == 'business_dependencies_unavailable'
+    assert seen == [True]
+    assert len(children) == 1
+    command, child = children[0]
+    assert '-I' in command and '-B' in command and 'bootstrap-serve' in command
+    assert 'serve' not in command
+    assert not (runtime / 'service.json').exists()
+    assert not (runtime / 'auth.token').exists()
+    assert 'executor.autonomy.queue' not in sys.modules
+    assert 'executor.autonomy.worker' not in sys.modules
+    assert 'PRIVATE' not in json.dumps(result)
+    print(json.dumps({'ok': True, 'opened': True, 'ready': False,
+                      'submit': False, 'owned_children': len(children)}))
+finally:
+    for _command, child in children:
+        if child.poll() is None:
+            child.terminate()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=5)
+"""
+
+
+@pytest.mark.parametrize("broken_module, fault", [
+    ("browser.py", "ImportError"), ("autonomy/queue.py", "ImportError"),
+    ("browser.py", "OSError"), ("autonomy/queue.py", "RuntimeError"),
+])
+def test_actual_launch_and_bootstrap_child_survive_broken_business_source_readonly(
+        tmp_path, broken_module, fault):
+    import shutil
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    source = tmp_path / "copied-owned-source"
+    source.mkdir()
+    original = Path(cli.__file__).resolve().parents[2]
+    shutil.copytree(original / "executor", source / "executor",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    # Preserve the complete production tree. Inject one business import fault;
+    # the actual cold CLI and actual spawned bootstrap modules are unmodified.
+    (source / "executor" / broken_module).write_text(
+        "raise " + fault + "('PRIVATE_BROKEN_DEPENDENCY_CANARY')\n", encoding="utf-8")
+    for relative in ("autonomy/cli.py", "autonomy/bootstrap.py", "autonomy/runtime_paths.py"):
+        assert (source / "executor" / relative).read_bytes() == (
+            original / "executor" / relative).read_bytes()
+    runtime = tmp_path / "private-journal"
+    queue = TaskQueue(runtime)
+    for index in range(3):
+        queue.enqueue(TaskSpec(
+            company="Synthetic Consumer " + str(index),
+            role="Synthetic Role " + str(index),
+            target_url="https://careers.synthetic.test/jobs/" + str(index + 100),
+            profile_ref="PRIVATE_PROFILE_CANARY_" + str(index),
+            attachment_refs={"resume": "PRIVATE_RESUME_CANARY_" + str(index)},
+            live_authorized=False))
+    assert len(queue.tasks()) == 3
+    assert queue.recent_events(1000)
+    before_logical = (queue.tasks(), queue.recent_events(1000))
+    key = runtime / "synthetic-private.key"
+    key.write_bytes(b"PRIVATE_JOURNAL_KEY_CANARY")
+    key.chmod(0o600)
+    preserved = [runtime / name for name in (
+        "tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm", "synthetic-private.key")]
+    before_bytes = {p.name: p.read_bytes() if p.exists() else None for p in preserved}
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        service_port = reservation.getsockname()[1]
+    env = dict(os.environ, APPLICATION_EXECUTOR_BROWSER_MODE="isolated")
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", BROKEN_BUSINESS_LAUNCH_PROBE,
+         str(source), str(runtime), str(service_port)], cwd=tmp_path, env=env,
+        capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "ok": True, "opened": True, "ready": False,
+        "submit": False, "owned_children": 1}
+    assert "PRIVATE" not in completed.stdout
+    assert {p.name: p.read_bytes() if p.exists() else None for p in preserved} == before_bytes
+    assert (queue.tasks(), queue.recent_events(1000)) == before_logical
+    assert not (runtime / "service.json").exists()
+    assert not (runtime / "auth.token").exists()
+
+
+def test_unverified_release_is_refused_before_any_business_import(
+        tmp_path, monkeypatch):
+    import builtins
+    actual_import = builtins.__import__
+    def refuse_business(name, *args, **kwargs):
+        if name in {"consumer", "preflight", "browser"}:
+            pytest.fail("unverified release must not import business runtime")
+        return actual_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", refuse_business)
+    monkeypatch.setattr(cli, "_consumer_release_identity",
+        lambda: {"packaged": True, "expected": ""})
+    seen = []
+    monkeypatch.setattr(bootstrap, "open_bootstrap",
+        lambda root, port, reason: seen.append(reason) or {"ok": True, "opened": True})
+    monkeypatch.setattr(cli, "lifecycle",
+        lambda *_args: pytest.fail("unverified runtime must not start"))
+    monkeypatch.setattr(cli, "open_ui",
+        lambda *_args: pytest.fail("unverified runtime must not mint a ticket"))
+    result = cli.launch_consumer(tmp_path, 9344)
+    assert seen == ["release_unverified"]
+    assert result["bootstrap_reason"] == "release_unverified"
+    assert result["ready_for_live_e2e"] is False
+    assert result["submit_capability"] is False

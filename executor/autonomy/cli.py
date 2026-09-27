@@ -13,13 +13,19 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-from ..otp.bridge import OtpBridge
-from ..browser import browser_mode, ensure_chrome
-from .queue import RUNTIME, TaskQueue, private_dir
+from .runtime_paths import RUNTIME, private_dir, local_token
 from .process_entry import isolated_cli_command
-from .supervisor import Supervisor, create_server, local_token
-from .worker import ProcessLock, Worker
 from .consumer_presentation import ConsumerSurface, loopback_origin, present_surface
+
+
+def browser_mode():
+    from ..browser import browser_mode as observe_mode
+    return observe_mode()
+
+
+def ensure_chrome():
+    from ..browser import ensure_chrome as start_owned_chrome
+    return start_owned_chrome()
 
 
 def request(root, port, path, data=None):
@@ -31,6 +37,11 @@ def request(root, port, path, data=None):
 
 
 def serve(root, port):
+    from ..otp.bridge import OtpBridge
+    from .queue import TaskQueue
+    from .supervisor import Supervisor, create_server
+    from .worker import ProcessLock, Worker
+
     # Global repo lock also serializes daemons using different queue directories.
     isolated = browser_mode() in {"test", "isolated", "headless"}
     with ProcessLock((Path(root) if isolated else RUNTIME) / "worker.lock"):
@@ -141,24 +152,51 @@ def _start_consumer_service(root, port):
     return started, health
 
 
+def _open_dependency_recovery(root, port, *, presenter=None, reason="business_dependencies_unavailable"):
+    from .bootstrap import open_bootstrap
+
+    bootstrap = (open_bootstrap(root, port, reason) if presenter is None else
+                 open_bootstrap(root, port, reason, presenter=presenter))
+    return {
+        "ok": bootstrap.get("ok") is True,
+        "opened": bootstrap.get("opened") is True,
+        "ready_for_live_e2e": False,
+        "checks": {},
+        "bootstrap_reason": reason,
+        "message": ("应用文件未通过校验；请重新安装可信版本。" if reason == "release_unverified"
+                    else "业务运行依赖暂不可用。现有任务未修改；可在恢复页查看诊断。"),
+        "final_click_actor": "user",
+        "submit_capability": False,
+    }
+
+
 def launch_consumer(root, port, *, presenter=None):
     loopback_origin(port)
-    from .consumer import humanize_preflight
-    from .preflight import collect_live_preflight
-
     # Check disk integrity before starting an owned browser, then revalidate
     # again through the shared service/recovery admission path.
     identity = _consumer_release_identity()
-    live_mode = browser_mode() not in {"test", "isolated", "headless"}
+    if identity["packaged"] and not identity["expected"]:
+        return _open_dependency_recovery(root, port, presenter=presenter,
+                                         reason="release_unverified")
+    try:
+        from .consumer import humanize_preflight
+        from .preflight import collect_live_preflight
+        live_mode = browser_mode() not in {"test", "isolated", "headless"}
+    except Exception:
+        # No service/browser/ticket action is admitted by a broken dependency.
+        return _open_dependency_recovery(root, port, presenter=presenter)
     if live_mode and (not identity["packaged"] or identity["expected"]):
         try:
             ensure_chrome()
         except Exception:
             pass
     started, health = _start_consumer_service(root, port)
-    result = collect_live_preflight(
-        supervisor_running=bool(health.get("ok")),
-    )
+    try:
+        result = collect_live_preflight(
+            supervisor_running=bool(health.get("ok")),
+        )
+    except Exception:
+        return _open_dependency_recovery(root, port, presenter=presenter)
     if not health.get("ok"):
         from .bootstrap import open_bootstrap
 

@@ -20,17 +20,7 @@ from ..discovery.core import normalize_component
 from .release import is_packaged_source
 from .state_compatibility import _private_lock_fd
 
-# A packaged release is immutable. Keep task state outside the app bundle so
-# replacing or rolling back source/runtime never replaces the applicant journal.
-def default_runtime(source_root: Path, *, home: Path | None = None) -> Path:
-    source_root = Path(source_root)
-    if is_packaged_source(source_root):
-        return (home or Path.home()) / "Library" / "Application Support" / "AI投递经理" / "autonomy"
-    return source_root / "runtime" / "autonomy"
-
-
-_SOURCE_ROOT = Path(__file__).resolve().parents[2]
-RUNTIME = default_runtime(_SOURCE_ROOT)
+from .runtime_paths import RUNTIME, default_runtime, private_dir
 SAFE_STAGES = {"DISCOVERED", "PROFILE_RESOLVED", "FORM_FILLED", "VALIDATED"}
 STOPPED = {"READY_TO_SUBMIT", "SUBMITTED", "VERIFIED", "CANCELLED"}
 STAGES = {str(x) for x in ApplicationStage}
@@ -118,13 +108,6 @@ class TaskSpec(BaseModel):
         if set(value) - {"resume", "photo"} or any(len(v) > 1000 for v in value.values()):
             raise ValueError("invalid attachment references")
         return value
-
-
-def private_dir(path):
-    path = Path(path)
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.chmod(0o700)
-    return path
 
 
 class TaskQueue:

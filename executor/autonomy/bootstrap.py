@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 from .loopback_http import LoopbackHTTPServer
-from .queue import private_dir
+from .runtime_paths import private_dir
 from .process_entry import isolated_cli_command
 from .release import read_release_identity
 from .consumer_presentation import ConsumerSurface, loopback_origin, present_surface
@@ -33,6 +33,7 @@ def _state_path(root: str | Path) -> Path:
 def _reason(code: str) -> str:
     return {
         "service_start_failed": "本地服务启动失败。现有任务没有被修改。",
+        "business_dependencies_unavailable": "业务运行依赖暂不可用。恢复页仍可打开；现有任务没有被修改。",
         "health_timeout": "本地服务未能通过健康检查。现有任务没有被修改。",
         "worker_stopping_at_safe_checkpoint": "服务仍在等待安全停止点。请稍后重试。",
         "release_mismatch": "新应用尚未接管旧版服务。现有任务没有被修改；请在安全停止后重试。",
@@ -65,6 +66,7 @@ def _safe_diagnostics(reason: str, version: str) -> dict:
     """A copy-safe bootstrap report that needs no running supervisor."""
     known = {
         "service_start_failed": "retry_service",
+        "business_dependencies_unavailable": "reinstall_verified_app",
         "health_timeout": "retry_service",
         "worker_stopping_at_safe_checkpoint": "retry_after_safe_checkpoint",
         "release_mismatch": "retry_after_old_service_stops",
