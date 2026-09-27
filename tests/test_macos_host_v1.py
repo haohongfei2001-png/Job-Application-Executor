@@ -764,3 +764,266 @@ def test_child_exit_during_focus_verification_never_replays_surface_or_starts_ch
     assert starts == [True]
     assert [json.loads(line) for line in child.stdin.getvalue().splitlines()] == [native_command(surface, 1)]
     presenter.close()
+
+def _prebuilt_release(tmp_path):
+    from pathlib import Path
+    from executor.autonomy.release import copy_source_candidate
+
+    source = tmp_path / "owned-release"
+    copy_source_candidate(Path(__file__).resolve().parents[1], source)
+    return source
+
+
+@pytest.mark.parametrize("defect", [
+    "digest", "source", "receipt_alias", "image_alias", "hardlink",
+    "fifo", "extra", "target_exists", "target_parent_alias",
+])
+def test_prebuilt_window_refuses_unsafe_delivery_without_execution_or_authority_write(
+    tmp_path, monkeypatch, defect
+):
+    import os
+    from executor.autonomy import consumer
+
+    release = _prebuilt_release(tmp_path)
+    root = _candidate(tmp_path)
+    program = root / "AIApplicationWindow"
+    receipt = root / HOST_RECEIPT
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    canary = outside / "private-canary"
+    canary.write_bytes(b"PRIVATE_PREBUILT_CANARY")
+    target = tmp_path / "staged-window"
+    if defect == "digest":
+        program.write_bytes(b"CHANGED_BINARY")
+    elif defect == "source":
+        data = json.loads(receipt.read_text())
+        data["source_sha256"] = "0" * 64
+        receipt.write_text(json.dumps(data))
+    elif defect == "receipt_alias":
+        saved = outside / "receipt"
+        receipt.rename(saved)
+        receipt.symlink_to(saved)
+    elif defect == "image_alias":
+        program.unlink()
+        program.symlink_to(canary)
+    elif defect == "hardlink":
+        os.link(program, outside / "linked-window")
+    elif defect == "fifo":
+        program.unlink()
+        os.mkfifo(program)
+    elif defect == "extra":
+        (root / "unknown").write_bytes(b"PRIVATE_UNKNOWN")
+    elif defect == "target_exists":
+        target.mkdir()
+        (target / "retained").write_bytes(b"RETAINED_TARGET")
+    else:
+        alias = tmp_path / "target-alias"
+        alias.symlink_to(outside, target_is_directory=True)
+        target = alias / "staged-window"
+    def authority():
+        return [(p.relative_to(tmp_path).as_posix(), p.lstat().st_mode,
+                 p.readlink().as_posix() if p.is_symlink() else
+                 (p.read_bytes() if p.is_file() else None))
+                for p in sorted(tmp_path.rglob("*"))]
+    before = authority()
+    monkeypatch.setattr(consumer.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("prebuilt refusal executed a compiler/image"))
+    assert consumer._copy_native_host_candidate(release, root, target) is False
+    assert authority() == before
+    assert canary.read_bytes() == b"PRIVATE_PREBUILT_CANARY"
+
+
+def test_prebuilt_window_copies_exact_source_bound_image_without_compiler(tmp_path, monkeypatch):
+    from executor.autonomy import consumer
+
+    release = _prebuilt_release(tmp_path)
+    root = _candidate(tmp_path)
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+    target = tmp_path / "staged-window"
+    monkeypatch.setattr(consumer.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("staging cannot execute compiler/image"))
+    assert consumer._copy_native_host_candidate(release, root, target) is True
+    assert {p.name: p.read_bytes() for p in target.iterdir()} == before
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+    assert consumer._native_bundle_matches(release, target)
+
+
+@pytest.mark.parametrize("change", ["inode", "bytes"])
+def test_prebuilt_window_refuses_source_change_during_copy_and_cleans_only_fresh_stage(
+    tmp_path, monkeypatch, change
+):
+    from executor.autonomy import consumer
+
+    release = _prebuilt_release(tmp_path)
+    root = _candidate(tmp_path)
+    target = tmp_path / "staged-window"
+    retained = tmp_path / "retained"
+    retained.write_bytes(b"PRIVATE_RETAINED")
+    real_copy = consumer.shutil.copyfileobj
+    calls = []
+    def changed_copy(source, output, *args, **kwargs):
+        real_copy(source, output, *args, **kwargs)
+        calls.append(True)
+        if len(calls) == 1:
+            program = root / "AIApplicationWindow"
+            if change == "inode":
+                program.rename(tmp_path / "original-image")
+                program.write_bytes(b"SYNTHETIC_EXECUTABLE")
+                program.chmod(0o755)
+            else:
+                program.write_bytes(b"CHANGED_BINARY")
+    monkeypatch.setattr(consumer.shutil, "copyfileobj", changed_copy)
+    assert consumer._copy_native_host_candidate(release, root, target) is False
+    assert not target.exists()
+    assert retained.read_bytes() == b"PRIVATE_RETAINED"
+    assert len(calls) == 1
+    assert (root / "AIApplicationWindow").exists()
+
+
+@pytest.mark.parametrize("options", [
+    {"native_presentation": False, "standalone_runtime": "unused"},
+    {"native_presentation": True},
+])
+def test_prebuilt_install_requires_native_standalone_mode_before_any_staging(
+    tmp_path, monkeypatch, options
+):
+    from executor.autonomy import consumer
+
+    monkeypatch.setattr(consumer, "copy_source_candidate",
+        lambda *_args: pytest.fail("invalid prebuilt mode staged source"))
+    result = consumer._install_macos_app_unlocked(tmp_path / "missing-source",
+        destination=tmp_path / "Applications", platform="darwin",
+        native_host=tmp_path / "missing-window", **options)
+    assert result["ok"] is False and result["reason"] == "native_prebuilt_mode_invalid"
+    assert not (tmp_path / "Applications").exists()
+
+
+def test_delivered_bundle_cli_keeps_explicit_and_default_task_authorities(tmp_path, monkeypatch, capsys):
+    from executor.autonomy import cli, consumer
+
+    candidate, apps, state = tmp_path / "delivery.app", tmp_path / "Applications", tmp_path / "state"
+    calls = []
+    monkeypatch.setattr(consumer, "install_macos_bundle",
+        lambda app, **kwargs: calls.append((app, kwargs)) or {"ok": True})
+    assert cli.main(["install-bundle", "--candidate", str(candidate),
+                     "--destination", str(apps)]) == 0
+    assert calls == [(candidate, {"destination": apps, "task_state_root": None})]
+    assert cli.main(["--runtime", str(state), "install-bundle",
+                     "--candidate", str(candidate)]) == 0
+    assert calls[-1] == (candidate, {"destination": None, "task_state_root": state})
+    assert "ticket=" not in capsys.readouterr().out
+
+
+def test_delivered_bundle_refuses_unverified_or_aliased_image_without_transaction(tmp_path, monkeypatch):
+    from executor.autonomy import consumer
+
+    root = tmp_path / "delivery.app"
+    root.mkdir()
+    alias = tmp_path / "delivery-alias.app"
+    alias.symlink_to(root, target_is_directory=True)
+    monkeypatch.setattr(consumer, "install_macos_app",
+        lambda *_args, **_kwargs: pytest.fail("unverified bundle entered transaction"))
+    for candidate in (root, alias):
+        result = consumer.install_macos_bundle(candidate, destination=tmp_path / "Applications",
+                                              platform="darwin")
+        assert result == {"ok": False, "reason": "bundle_candidate_invalid",
+                         "message": "交付应用无法核对；现有应用和任务保持不变。"}
+    assert list(root.iterdir()) == [] and alias.is_symlink()
+
+
+def test_hosted_mac_prebuilt_delivery_updates_rolls_back_and_reopens_without_compiler(
+    native_installed_app, tmp_path, monkeypatch
+):
+    from executor.autonomy import consumer
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    from executor.autonomy.release import copy_source_candidate, source_manifest
+    from pathlib import Path
+
+    f = native_installed_app
+    candidate = f["app"]
+    candidate_source = candidate / "Contents/Resources/release"
+    image = candidate / "Contents/Resources/native-host"
+    image_before = {p.name: p.read_bytes() for p in image.iterdir()}
+    apps = tmp_path / "Consumer Applications"
+    state = tmp_path / "existing-task-state"
+    queue = TaskQueue(state)
+    before = []
+    for i in range(3):
+        task = queue.enqueue(TaskSpec(company="Synthetic delivery " + str(i), role="Engineer",
+            target_url="https://example.invalid/jobs/delivery-" + str(i),
+            profile_ref="synthetic-profile-" + str(i) + ".json"))
+        before.append(queue.pause(task["task_id"]))
+    from cryptography.fernet import Fernet
+    private_key = Fernet.generate_key()
+    (state / "task-answers.key").write_bytes(private_key)
+    (state / "task-answers.key").chmod(0o600)
+    def tasks():
+        return [queue.get(task["task_id"]) for task in before]
+    def private_bytes():
+        names = ("tasks.sqlite3", "tasks.sqlite3-wal", "tasks.sqlite3-shm", "task-answers.key")
+        return {name: (state / name).read_bytes() if (state / name).exists() else None for name in names}
+    actual_bytes = private_bytes()
+    monkeypatch.setattr(consumer, "_stage_native_host",
+        lambda *_args: pytest.fail("delivered consumer update required Xcode"))
+    installed = consumer.install_macos_bundle(candidate, destination=apps, task_state_root=state)
+    assert installed["ok"] is True and installed["presentation"] == "native"
+    current = apps / (consumer.APP_NAME + ".app")
+    current_source = current / "Contents/Resources/release"
+    current_host = current / "Contents/Resources/native-host"
+    initial = source_manifest(current_source)
+    assert {p.name: p.read_bytes() for p in current_host.iterdir()} == image_before
+    assert consumer._trusted_bundle(current) and tasks() == before
+    assert private_bytes() == actual_bytes
+    active = consumer.install_macos_bundle(current, destination=apps, task_state_root=state)
+    assert active["reason"] == "bundle_candidate_is_active"
+    # A genuinely different complete source version retains the exact same
+    # compiled HOST_SOURCE contract, so no compiler is needed for this update.
+    replacement = tmp_path / "replacement-source"
+    copy_source_candidate(candidate_source, replacement)
+    initializer = replacement / "executor/__init__.py"
+    initializer.write_text(initializer.read_text() + "\n# prebuilt second source version\n")
+    updated = consumer.install_macos_app(replacement, destination=apps, task_state_root=state,
+        standalone_runtime=candidate / "Contents/Resources/runtime",
+        native_presentation=True, native_host=image)
+    assert updated["ok"] is True and updated["replaced"] is True
+    assert source_manifest(current_source) != initial
+    assert consumer._trusted_bundle(current) and tasks() == before
+    assert private_bytes() == actual_bytes
+    restored = consumer.rollback_macos_app(apps, task_state_root=state)
+    assert restored["ok"] is True and restored["restored"] is True
+    assert source_manifest(current_source) == initial
+    assert {p.name: p.read_bytes() for p in current_host.iterdir()} == image_before
+    assert consumer._trusted_bundle(current) and tasks() == before
+    assert private_bytes() == actual_bytes
+    assert {p.name: p.read_bytes() for p in image.iterdir()} == image_before
+    failed = apps / ("." + consumer.APP_NAME + ".app.failed")
+    assert consumer._trusted_bundle(failed)
+
+    from executor.autonomy.process_entry import CLI_ENTRY_SCRIPT
+    import os
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    owned_python = current / "Contents/Resources/runtime/bin/python"
+    command = [str(owned_python), "-I", "-B", "-c", CLI_ENTRY_SCRIPT,
+               str(current_source), "--runtime", str(state), "--port", str(port)]
+    env = {**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated",
+           "BROWSER": "/usr/bin/false"}
+    try:
+        launched = subprocess.run(command + ["native-launch", "--native-smoke"],
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+        assert launched.returncode == 0, launched.stdout
+        assert json.loads(launched.stdout) == {"ok": True, "opened": True,
+            "native_window": True, "native_page": True, "final_click_actor": "user"}
+        assert private_key.decode() not in launched.stdout + launched.stderr
+        assert "ticket=" not in launched.stdout + launched.stderr
+        assert "Bearer " not in launched.stdout + launched.stderr
+        health = subprocess.run(command + ["health"], cwd=tmp_path, env=env,
+            capture_output=True, text=True, timeout=10)
+        assert health.returncode == 0 and json.loads(health.stdout)["worker_active"] is None
+        assert tasks() == before and private_bytes() == actual_bytes
+    finally:
+        stopped = subprocess.run(command + ["stop"], cwd=tmp_path, env=env,
+            capture_output=True, text=True, timeout=15)
+        assert stopped.returncode == 0
+    assert not (state / "service.json").exists()

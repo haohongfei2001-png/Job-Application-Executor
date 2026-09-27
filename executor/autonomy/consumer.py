@@ -226,6 +226,73 @@ def _stage_native_host(python: Path, release: Path, target: Path) -> bool:
         return False
 
 
+def _copy_native_host_candidate(release: Path, source: Path, target: Path) -> bool:
+    """Stage a prebuilt window bound to the candidate's verified owned source.
+
+    No compiler, host import or image execution. Hold ordinary source files
+    open without following links, recheck identity, and verify staged digests.
+    The installer still owns runtime health, task backup and atomic activation.
+    """
+    from .macos_host import HOST_RECEIPT
+
+    handles = []
+    created = accepted = False
+    names = ("AIApplicationWindow", HOST_RECEIPT)
+    try:
+        source, target = Path(source).absolute(), Path(target).absolute()
+        if (target.exists() or any(part.is_symlink() for part in (target, *target.parents))
+                or not _native_bundle_matches(release, source)):
+            return False
+        for name in names:
+            path = source / name
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            handle = os.fdopen(fd, "rb")
+            handles.append((name, handle, os.fstat(handle.fileno())))
+            saved = handles[-1][2]
+            if not stat.S_ISREG(saved.st_mode) or saved.st_nlink != 1:
+                return False
+        target.mkdir(mode=0o700)
+        stage_stat = target.lstat()
+        stage_identity = (stage_stat.st_dev, stage_stat.st_ino)
+        created = True
+        for name, handle, saved in handles:
+            destination = target / name
+            with destination.open("xb") as output:
+                shutil.copyfileobj(handle, output)
+                output.flush()
+                os.fsync(output.fileno())
+            destination.chmod(0o755 if name == "AIApplicationWindow" else 0o600)
+            current, visible = os.fstat(handle.fileno()), (source / name).lstat()
+            identity = lambda value: (value.st_dev, value.st_ino, value.st_mode,
+                                      value.st_nlink, value.st_size, value.st_mtime_ns,
+                                      value.st_ctime_ns)
+            if identity(current) != identity(saved) or identity(visible) != identity(saved):
+                raise ValueError("native_candidate_changed")
+        current_stage = target.lstat()
+        if (target.is_symlink() or (current_stage.st_dev, current_stage.st_ino) != stage_identity
+                or not _native_bundle_matches(release, source)
+                or not _native_bundle_matches(release, target)):
+            raise ValueError("native_candidate_invalid")
+        accepted = True
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    finally:
+        for _name, handle, _saved in handles:
+            handle.close()
+        # A refusal removes only the fresh staging directory created here.
+        # Never overwrite, unlink or clean a preexisting candidate/target.
+        if created and not accepted:
+            try:
+                current_stage = target.lstat()
+                if not target.is_symlink() and (current_stage.st_dev, current_stage.st_ino) == stage_identity:
+                    for name in names:
+                        (target / name).unlink(missing_ok=True)
+                    target.rmdir()
+            except OSError:
+                pass  # Preserve any unrecognized or concurrently replaced path.
+
+
 def _isolated_bundle_startup(app: Path) -> bool:
     """Historical owned bundles are upgradeable, never isolated-start certified."""
     executable = app / "Contents" / "MacOS" / "AIApplicationManager"
@@ -455,6 +522,43 @@ def _prepare_task_state_release(python: Path, release: Path, state: Path,
         return False
 
 
+def install_macos_bundle(
+    candidate_app: str | Path, *,
+    destination: str | Path | None = None,
+    task_state_root: str | Path | None = None,
+    platform: str | None = None,
+) -> dict:
+    """Feed a verified delivered app through the existing release transaction.
+
+    A native distribution carries its compiled image, owned source and standalone
+    Python. It never requires a checkout, Xcode or a second task-state authority.
+    Unsigned integrity checks do not confer signing or consumer certification.
+    """
+    if (platform or sys.platform) != "darwin":
+        return {"ok": False, "reason": "macos_required"}
+    try:
+        candidate = Path(candidate_app).expanduser().absolute()
+        if any(part.is_symlink() for part in (candidate, *candidate.parents)):
+            raise ValueError("bundle_alias")
+        release = candidate / "Contents" / "Resources" / "release"
+        runtime = candidate / "Contents" / "Resources" / "runtime"
+        if not _trusted_bundle(candidate) or not verify_standalone_runtime(runtime, release):
+            raise ValueError("bundle_unverified")
+        launcher = candidate / "Contents" / "MacOS" / "AIApplicationManager"
+        native = launcher.read_text(encoding="utf-8") == _native_packaged_launcher()
+        apps = Path(destination).expanduser().absolute() if destination is not None else Path.home() / "Applications"
+        if candidate.resolve() == (apps / (APP_NAME + ".app")).resolve():
+            return {"ok": False, "reason": "bundle_candidate_is_active",
+                    "message": "候选已是当前应用；没有启动更新或修改任务。"}
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {"ok": False, "reason": "bundle_candidate_invalid",
+                "message": "交付应用无法核对；现有应用和任务保持不变。"}
+    options = {"native_host": candidate / "Contents" / "Resources" / "native-host"} if native else {}
+    return install_macos_app(release, destination=apps, platform=platform,
+        task_state_root=task_state_root, standalone_runtime=runtime,
+        native_presentation=native, **options)
+
+
 def install_macos_app(
     repo_root: str | Path,
     *,
@@ -463,6 +567,7 @@ def install_macos_app(
     task_state_root: str | Path | None = None,
     standalone_runtime: str | Path | None = None,
     native_presentation: bool = False,
+    native_host: str | Path | None = None,
 ) -> dict:
     if (platform or sys.platform) != "darwin":
         return _install_macos_app_unlocked(repo_root, destination=destination, platform=platform)
@@ -488,7 +593,7 @@ def install_macos_app(
                 result = _install_macos_app_unlocked(
                     repo_root, destination=apps_dir, platform=platform,
                     task_state_root=state_root, standalone_runtime=standalone_runtime,
-                    native_presentation=native_presentation,
+                    native_presentation=native_presentation, native_host=native_host,
                     _state_backup_evidence=backup_evidence)
                 return {**result, "task_state_backup": backup_evidence} if backup_evidence else result
         except BlockingIOError:
@@ -509,6 +614,7 @@ def _install_macos_app_unlocked(
     task_state_root: Path | None = None,
     standalone_runtime: str | Path | None = None,
     native_presentation: bool = False,
+    native_host: str | Path | None = None,
     _state_backup_evidence: dict | None = None,
 ) -> dict:
     """Stage a source-and-runtime snapshot, then atomically activate the Mac app."""
@@ -523,6 +629,9 @@ def _install_macos_app_unlocked(
     if type(native_presentation) is not bool:
         return {"ok": False, "reason": "presentation_mode_invalid",
                 "message": "应用呈现方式无法核对；现有应用保持不变。"}
+    if native_host is not None and (not native_presentation or standalone_runtime is None):
+        return {"ok": False, "reason": "native_prebuilt_mode_invalid",
+                "message": "预编译窗口需要独立运行环境和原生呈现；现有应用保持不变。"}
     repo = Path(repo_root).expanduser().resolve()
     python = repo / ".venv" / "bin" / "python"
     if standalone_runtime is None and not python.is_file():
@@ -597,8 +706,12 @@ def _install_macos_app_unlocked(
             "message": "无法准备独立运行环境；现有应用没有被替换。",
         }
     executable = macos / "AIApplicationManager"
-    if native_presentation and not _stage_native_host(
-            runtime / "bin" / "python", release, staging / "Contents" / "Resources" / "native-host"):
+    host_target = staging / "Contents" / "Resources" / "native-host"
+    native_ready = (not native_presentation or (
+        _copy_native_host_candidate(release, Path(native_host).expanduser(), host_target)
+        if native_host is not None else
+        _stage_native_host(runtime / "bin" / "python", release, host_target)))
+    if not native_ready:
         shutil.rmtree(staging)
         return {"ok": False, "reason": "native_candidate_failed",
                 "message": "原生窗口候选未通过校验；现有应用和任务保持不变。"}

@@ -279,6 +279,9 @@ def main(argv=None):
         commands.add_parser(name)
     native = commands.add_parser("native-launch")
     native.add_argument("--native-smoke", action="store_true")
+    delivered = commands.add_parser("install-bundle")
+    delivered.add_argument("--candidate", type=Path, required=True)
+    delivered.add_argument("--destination", type=Path)
     installer = commands.add_parser("install-app")
     installer.add_argument("--standalone-runtime", type=Path)
     installer.add_argument("--native-presentation", action="store_true")
@@ -325,6 +328,14 @@ def main(argv=None):
             result = launch_consumer(args.runtime, args.port)
         elif args.command == "native-launch":
             result = launch_native_consumer(args.runtime, args.port, smoke=args.native_smoke)
+        elif args.command == "install-bundle":
+            from .consumer import install_macos_bundle
+
+            supplied = sys.argv[1:] if argv is None else argv
+            explicit_runtime = any(value == "--runtime" or value.startswith("--runtime=")
+                                   for value in supplied)
+            result = install_macos_bundle(args.candidate, destination=args.destination,
+                task_state_root=args.runtime if explicit_runtime else None)
         elif args.command == "install-app":
             from .consumer import install_macos_app
 
