@@ -417,6 +417,26 @@ def _bundle_transaction_identity(app: Path) -> tuple | None:
         return None
 
 
+
+def _bundle_location_matches(app: Path, identity: tuple | None) -> bool:
+    """Only move the directory inode already owned by this transaction.
+
+    An unhealthy payload in the same owned directory can be quarantined. A
+    replaced/aliased directory is different authority, even if freshly sealed.
+    This is a recovery fence, not a healthy-payload or signing certificate.
+    """
+    if identity is None:
+        return False
+    try:
+        if any(path.is_symlink() for path in (app, *app.parents)):
+            return False
+        entry = app.stat(follow_symlinks=False)
+        return (stat.S_ISDIR(entry.st_mode)
+                and (entry.st_dev, entry.st_ino) == identity[:2])
+    except (OSError, TypeError):
+        return False
+
+
 def _legacy_state_migration_needed(repo: Path, app: Path, target: Path) -> bool:
     """Do not activate a new default journal while an old authority is stranded.
 
@@ -904,6 +924,18 @@ def _install_macos_app_unlocked(
     if (_bundle_transaction_identity(app) != candidate_identity
             or not _candidate_starts(active_runtime / "bin" / "python", active_release)
             or _bundle_transaction_identity(app) != candidate_identity):
+        # Health may have yielded to another actor. Never overwrite a newly
+        # occupied slot, move an unowned app inode, or activate changed retained
+        # payloads. Preserve every version for recovery without further moves.
+        if (not _bundle_location_matches(app, candidate_identity)
+                or failed.exists() or failed.is_symlink()
+                or (replaced and _bundle_transaction_identity(rollback) != current_identity)
+                or (not replaced and (rollback.exists() or rollback.is_symlink()))):
+            return {
+                "ok": False,
+                "reason": "post_activation_recovery_required",
+                "message": "健康检查期间版本身份或恢复位置发生变化；所有版本保持当前位置，需要核对恢复。",
+            }
         try:
             app.rename(failed)
             if replaced:
@@ -1074,6 +1106,14 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
     if (_bundle_transaction_identity(app) != previous_identity
             or not _candidate_starts(active_runtime / "bin" / "python", active_release)
             or _bundle_transaction_identity(app) != previous_identity):
+        if (not _bundle_location_matches(app, previous_identity)
+                or previous.exists() or previous.is_symlink()
+                or _bundle_transaction_identity(failed) != current_identity):
+            return {
+                "ok": False,
+                "reason": "rollback_recovery_required",
+                "message": "健康检查期间版本身份或恢复位置发生变化；所有版本保持当前位置，需要核对恢复。",
+            }
         try:
             app.rename(previous)
             failed.rename(app)
