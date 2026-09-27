@@ -89,23 +89,103 @@ def _safe_diagnostics(reason: str, version: str) -> dict:
     }
 
 
+_PREPARATION_ITEMS = (
+    ("live_browser_mode", "实时浏览器模式", "当前处于隔离验证模式；不会开始真实申请。"),
+    ("chrome_installed", "Chrome 安装", "需要已安装的 Chrome；本页不会下载或安装软件。"),
+    ("existing_cdp_session", "专用浏览器连接", "专用投递浏览器连接尚未就绪；本页不会打开浏览器或接管其他窗口。"),
+    ("profile_configured", "个人资料配置", "个人资料尚未配置；本页不收集或保存资料。"),
+    ("profile_exists", "资料文件可用", "已配置的资料文件不可用；现有资料不会被修改。"),
+    ("profile_loadable", "资料可安全读取", "资料尚未通过读取检查；不会以缺失值或猜测值填表。"),
+    ("deepseek_available", "模型本地配置", "现有模型配置尚不可用；本页不会申请 key、调用模型或产生费用。"),
+    ("supervisor_running", "本地服务", "服务尚未通过本次恢复检查；可明确点击下方按钮重试。"),
+)
+
+
+def _preparation_snapshot() -> dict:
+    """Only fixed booleans from the existing local, read-only preflight.
+
+    A missing business dependency must not prevent this recovery surface from
+    opening. Never include settings, paths, applicant values, credentials,
+    provider response text or exception details in the page/report.
+    """
+    try:
+        from .preflight import collect_live_preflight
+        result = collect_live_preflight(supervisor_running=False)
+        observed = result.get("checks") if type(result) is dict else None
+        observed = observed if type(observed) is dict else {}
+    except Exception:
+        observed = {}
+    checks = {key: observed.get(key) if type(observed.get(key)) is bool else None
+              for key, _label, _help in _PREPARATION_ITEMS}
+    # This is an unavailable-service recovery surface, never a live readiness
+    # certificate, even if a malformed collector claims all checks passed.
+    checks["supervisor_running"] = False
+    if checks["profile_configured"] is not True or checks["profile_exists"] is not True:
+        if checks["profile_loadable"] is True:
+            checks["profile_loadable"] = None
+    return {"scope": "local_configuration_only", "checks": checks,
+            "ready_for_live_e2e": False, "external_connection_verified": False,
+            "settings_mutation_available": False, "submit_capability": False}
+
+
+def _preparation_markup(snapshot: dict) -> str:
+    rows = []
+    for key, label, guidance in _PREPARATION_ITEMS:
+        passed = snapshot["checks"][key]
+        state = "可用" if passed is True else ("待处理" if passed is False else "未核验")
+        help_text = "本地配置可用；未验证真实账号、额度或招聘网站。" if passed is True else guidance
+        rows.append(f'<li data-check="{key}"><strong>{label}</strong> · '
+                    f'<span class="check-state">{state}</span><p>{help_text}</p></li>')
+    return "".join(rows)
+
+
 def _page(reason: str, token: str) -> str:
     safe_reason = html.escape(_reason(reason))
     safe_token = html.escape(token, quote=True)
     version = _version()
-    report = html.escape(json.dumps(_safe_diagnostics(reason, version), ensure_ascii=False, indent=2))
+    preparation = _preparation_snapshot()
+    preparation_html = _preparation_markup(preparation)
+    diagnostics = {**_safe_diagnostics(reason, version), "preparation": preparation}
+    report = html.escape(json.dumps(diagnostics, ensure_ascii=False, indent=2))
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI 投递经理 · 恢复</title><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f6f7f9;color:#111;margin:0}}
 main{{max-width:540px;margin:10vh auto;background:white;border:1px solid #e5e7eb;border-radius:16px;padding:28px}}
-h1{{font-size:21px}}p{{line-height:1.6}}button{{background:#111;color:white;border:0;border-radius:9px;padding:11px 17px;cursor:pointer}}
+h1{{font-size:21px}}h2{{font-size:17px}}p{{line-height:1.6}}li p{{margin:4px 0 12px;font-size:13px;color:#475569}}pre,textarea{{width:100%;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:anywhere}}textarea{{min-height:180px}}button{{background:#111;color:white;border:0;border-radius:9px;padding:11px 17px;cursor:pointer}}
 </style></head><body><main><h1>AI 投递经理</h1><p>{safe_reason}</p>
+<section aria-labelledby="preparation-title"><h2 id="preparation-title">打开应用前的准备</h2>
+<p>本页可在投递服务不可用时查看。检查只读取现有本地配置；不保存资料、不读取任务内容、不申请权限，也不访问招聘网站。</p>
+<p>配置可用不代表可以投递：真实账号、模型连接与额度、网站兼容性尚未核验。最终提交始终由你本人点击。</p>
+<ul id="preparation-checks">{preparation_html}</ul>
+<p>刷新本页可重新读取配置状态。不会自动重试服务或重复申请。</p></section>
 <p>可以重试本地服务。重试不会重放结果不明的浏览器写入，也不会提交申请。</p>
 <form action="/retry?token={safe_token}" method="post"><button type="submit">重试并打开面板</button></form>
 <p><small>本地版本：{version}</small></p>
-<details><summary>查看安全诊断</summary><p>报告不含申请人资料、验证码或凭证；分享前请先核对。</p><pre id="safe-diagnostics">{report}</pre><button id="copy-diagnostics" type="button">复制诊断</button></details>
-</main><script>document.getElementById('copy-diagnostics').addEventListener('click',async function(){{await navigator.clipboard.writeText(document.getElementById('safe-diagnostics').textContent);this.textContent='已复制';}});</script></body></html>"""
+<details id="diagnostics-details"><summary>查看安全诊断</summary><p>报告不含申请人资料、验证码或凭证；分享前请先核对。</p><pre id="safe-diagnostics">{report}</pre><button id="copy-diagnostics" type="button">复制诊断</button>
+<p id="copy-result" role="status" aria-live="polite"></p>
+<textarea id="manual-diagnostics" aria-label="手动复制安全诊断" readonly hidden></textarea></details>
+</main><script>
+const copyButton=document.getElementById('copy-diagnostics'),details=document.getElementById('diagnostics-details'),
+copyResult=document.getElementById('copy-result'),manualReport=document.getElementById('manual-diagnostics');
+let copyEpoch=0;
+function clearCopy(){{copyEpoch++;copyResult.textContent='';manualReport.value='';manualReport.hidden=true;copyButton.disabled=false;}}
+details.addEventListener('toggle',()=>{{if(!details.open)clearCopy();}});
+copyButton.addEventListener('click',async function(){{
+  if(!details.open||this.disabled)return;
+  const epoch=++copyEpoch,report=document.getElementById('safe-diagnostics').textContent;
+  this.disabled=true;manualReport.value='';manualReport.hidden=true;copyResult.textContent='正在复制…';
+  try{{
+    await navigator.clipboard.writeText(report);
+    if(epoch!==copyEpoch||!details.open)return;
+    copyResult.textContent='已复制安全诊断';
+  }}catch(e){{
+    if(epoch!==copyEpoch||!details.open)return;
+    copyResult.textContent='复制结果未确认；可选择下方报告手动复制。';
+    manualReport.value=report;manualReport.hidden=false;manualReport.focus();manualReport.select();
+  }}finally{{if(epoch===copyEpoch)this.disabled=false;}}
+}});
+</script></body></html>"""
 
 
 def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "service_unavailable") -> None:

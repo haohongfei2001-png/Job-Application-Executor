@@ -2231,3 +2231,275 @@ def test_actual_recovery_retry_revalidates_packaged_identity_before_ui_admission
             servers[0].shutdown()
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("value", [True, False, None, 1, "true", {"private": "PRIVATE_CHECK_CANARY"}])
+def test_recovery_preparation_only_accepts_fixed_boolean_evidence(monkeypatch, value):
+    keys = [item[0] for item in bootstrap._PREPARATION_ITEMS]
+    calls = []
+    def collect(*, supervisor_running):
+        calls.append(supervisor_running)
+        return {"ready_for_live_e2e": True,
+                "checks": {**{key: value for key in keys},
+                           "private_path": "/PRIVATE_PROFILE_CANARY"},
+                "remediation": ["PRIVATE_REMEDIATION_CANARY"],
+                "provider_error": "PRIVATE_KEY_CANARY"}
+    monkeypatch.setattr(preflight, "collect_live_preflight", collect)
+    result = bootstrap._preparation_snapshot()
+    assert calls == [False]
+    assert set(result["checks"]) == set(keys)
+    assert result["checks"]["supervisor_running"] is False
+    for key in keys[:-1]:
+        assert result["checks"][key] is (value if type(value) is bool else None)
+    assert result["ready_for_live_e2e"] is False
+    assert result["external_connection_verified"] is False
+    assert result["settings_mutation_available"] is False
+    assert result["submit_capability"] is False
+    assert "PRIVATE" not in json.dumps(result)
+    markup = bootstrap._preparation_markup(result)
+    assert "PRIVATE" not in markup
+    assert markup.count('data-check="') == 8
+
+
+@pytest.mark.parametrize("failure", ["collector_error", "missing_dependency", "malformed_result"])
+def test_recovery_preparation_remains_visible_without_business_preflight(monkeypatch, failure):
+    import builtins
+
+    if failure == "missing_dependency":
+        actual_import = builtins.__import__
+        def missing(name, *args, **kwargs):
+            if name == "preflight":
+                raise ImportError("PRIVATE_DEPENDENCY_PATH_CANARY")
+            return actual_import(name, *args, **kwargs)
+        monkeypatch.setattr(builtins, "__import__", missing)
+    elif failure == "collector_error":
+        def failed(**_kwargs):
+            raise ValueError("PRIVATE_PROFILE_ERROR_CANARY")
+        monkeypatch.setattr(preflight, "collect_live_preflight", failed)
+    else:
+        monkeypatch.setattr(preflight, "collect_live_preflight",
+                            lambda **_kwargs: ["PRIVATE_MALFORMED_CANARY"])
+    monkeypatch.setattr(bootstrap, "_version", lambda: "unknown")
+    monkeypatch.setattr(bootstrap, "read_release_identity", lambda _root: {"status": "unknown"})
+    page = bootstrap._page("service_start_failed", "opaque-recovery-token")
+    assert "打开应用前的准备" in page
+    assert "未核验" in page
+    assert "重试并打开面板" in page
+    assert "现有任务没有被修改" in page
+    assert "PRIVATE" not in page
+
+
+def test_recovery_preparation_refuses_contradictory_profile_readiness(monkeypatch):
+    monkeypatch.setattr(preflight, "collect_live_preflight", lambda **_kwargs: {
+        "checks": {"profile_configured": False, "profile_exists": True,
+                   "profile_loadable": True, "supervisor_running": True}})
+    result = bootstrap._preparation_snapshot()
+    assert result["checks"]["profile_loadable"] is None
+    assert result["checks"]["supervisor_running"] is False
+    assert result["ready_for_live_e2e"] is False
+
+
+@pytest.mark.parametrize("profile_case", ["absent", "missing", "unsafe", "valid"])
+def test_actual_recovery_preparation_reads_existing_config_without_changing_it(
+        tmp_path, monkeypatch, profile_case):
+    from executor import settings
+    from executor.autonomy import manager
+
+    config = tmp_path / "private-settings.json"
+    profile = tmp_path / "private-profile.json"
+    payload = {"deepseek": {"enabled": False}, "private_unknown": "PRIVATE_CONFIG_CANARY"}
+    if profile_case != "absent":
+        payload["profile_path"] = str(profile)
+    if profile_case == "unsafe":
+        profile.write_text('{"password":"PRIVATE_UNSAFE_PROFILE_CANARY"}')
+    elif profile_case == "valid":
+        profile.write_text("{}")
+    config.write_text(json.dumps(payload))
+    config.chmod(0o600)
+    if profile.exists():
+        profile.chmod(0o600)
+    baseline = {p: (p.read_bytes(), p.stat().st_mode) for p in tmp_path.iterdir()}
+    monkeypatch.setattr(settings, "PATH", config)
+    monkeypatch.setattr(settings, "save_settings",
+        lambda *_args: pytest.fail("preparation may not save settings"))
+    monkeypatch.setattr(preflight.browser, "browser_mode", lambda: "isolated")
+    monkeypatch.setattr(preflight.browser, "CHROME", str(tmp_path / "missing-chrome"))
+    monkeypatch.setattr(preflight.browser, "owned_cdp_session", lambda: False)
+    monkeypatch.setattr(preflight, "DeepSeekManagerProvider",
+        lambda _settings: type("UnavailableExistingProvider", (), {"available": False})())
+    monkeypatch.setattr(manager.DeepSeekManagerProvider, "decide",
+        lambda *_args: pytest.fail("preparation must not call model"))
+    monkeypatch.setattr(cli, "lifecycle",
+        lambda *_args: pytest.fail("read-only preparation must not start service"))
+    monkeypatch.setattr(cli, "request",
+        lambda *_args: pytest.fail("read-only preparation must not request ticket"))
+    snapshot = bootstrap._preparation_snapshot()
+    checks = snapshot["checks"]
+    assert checks["profile_configured"] is (profile_case != "absent")
+    assert checks["profile_exists"] is (profile_case in {"unsafe", "valid"})
+    assert checks["profile_loadable"] is (profile_case == "valid")
+    assert checks["deepseek_available"] is False
+    assert snapshot["ready_for_live_e2e"] is False
+    assert set(tmp_path.iterdir()) == set(baseline)
+    for path, (data, mode) in baseline.items():
+        assert path.read_bytes() == data
+        assert path.stat().st_mode == mode
+    assert str(profile) not in json.dumps(snapshot)
+    assert "PRIVATE" not in json.dumps(snapshot)
+
+
+def test_actual_recovery_preparation_http_auth_refresh_and_private_state_preservation(
+        tmp_path, monkeypatch):
+    import threading
+    from executor.autonomy.queue import TaskQueue
+
+    state = tmp_path / "preparation-state"
+    queue = TaskQueue(state)
+    baseline_logical = (queue.tasks(), queue.recent_events(1000))
+    # Capture the complete private byte oracle after all baseline SELECTs.
+    baseline = {path: (path.read_bytes(), path.stat().st_mode)
+                for path in state.iterdir() if path.is_file()}
+    observations = {"profile_configured": False, "profile_exists": False,
+                    "profile_loadable": False, "deepseek_available": False}
+    reads = []
+    def collect(*, supervisor_running):
+        assert supervisor_running is False
+        reads.append(True)
+        return {"checks": {**observations, "private_path": "PRIVATE_HTTP_CONFIG_CANARY"}}
+    monkeypatch.setattr(preflight, "collect_live_preflight", collect)
+    monkeypatch.setattr(bootstrap, "_version", lambda: "unknown")
+    monkeypatch.setattr(bootstrap, "read_release_identity", lambda _root: {"status": "unknown"})
+    monkeypatch.setattr(cli, "_start_consumer_service",
+        lambda *_args: pytest.fail("view/refresh may not start service"))
+    monkeypatch.setattr(cli, "request",
+        lambda *_args: pytest.fail("view/refresh may not issue UI ticket"))
+    created = threading.Event()
+    servers = []
+    actual_server = bootstrap.LoopbackHTTPServer
+    def record_server(*args, **kwargs):
+        server = actual_server(*args, **kwargs)
+        servers.append(server)
+        created.set()
+        return server
+    monkeypatch.setattr(bootstrap, "LoopbackHTTPServer", record_server)
+    thread = threading.Thread(target=bootstrap.serve_bootstrap,
+        args=(state, 9344, "service_start_failed"), daemon=True)
+    thread.start()
+    try:
+        assert created.wait(timeout=5)
+        base = "http://127.0.0.1:" + str(servers[0].server_port)
+        with pytest.raises(urllib.error.HTTPError) as unauthenticated:
+            urllib.request.urlopen(base + "/", timeout=5)
+        assert unauthenticated.value.code == 403
+        assert reads == []
+        token = json.loads((state / "bootstrap.json").read_text())["token"]
+        url = base + "/?token=" + token
+        with urllib.request.urlopen(url, timeout=5) as response:
+            first = response.read().decode()
+            assert response.headers["Cache-Control"] == "no-store"
+            assert response.headers["Referrer-Policy"] == "no-referrer"
+        assert 'data-check="profile_configured"' in first
+        assert "个人资料尚未配置" in first
+        assert "PRIVATE_HTTP_CONFIG_CANARY" not in first
+        observations.update(profile_configured=True, profile_exists=True, profile_loadable=True)
+        with urllib.request.urlopen(url, timeout=5) as response:
+            second = response.read().decode()
+        assert '资料可安全读取</strong> · <span class="check-state">可用' in second
+        assert "配置可用不代表可以投递" in second
+        assert reads == [True, True]
+        req = urllib.request.Request(url, headers={"Host": "foreign.test"})
+        with pytest.raises(urllib.error.HTTPError) as foreign:
+            urllib.request.urlopen(req, timeout=5)
+        assert foreign.value.code == 403
+        assert reads == [True, True]
+        for path, (data, mode) in baseline.items():
+            assert path.read_bytes() == data
+            assert path.stat().st_mode == mode
+        assert baseline_logical == (queue.tasks(), queue.recent_events(1000))
+        assert not (state / "service.json").exists()
+    finally:
+        if servers:
+            servers[0].shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("clipboard", ["success", "rejected", "unavailable", "late_success", "late_failure"])
+def test_recovery_preparation_browser_keeps_copy_uncertainty_and_closed_page_fenced(
+        monkeypatch, clipboard):
+    from playwright.sync_api import expect, sync_playwright
+
+    monkeypatch.setattr(preflight, "collect_live_preflight", lambda **_kwargs: {
+        "checks": {"profile_configured": False, "deepseek_available": False,
+                   "chrome_installed": False},
+        "private_exception": "PRIVATE_BROWSER_CONFIG_CANARY"})
+    monkeypatch.setattr(bootstrap, "_version", lambda: "unknown")
+    monkeypatch.setattr(bootstrap, "read_release_identity", lambda _root: {"status": "unknown"})
+    page_html = bootstrap._page("service_start_failed", "PRIVATE_RECOVERY_TOKEN")
+    requests = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 420, "height": 780})
+        try:
+            def route_request(route):
+                requests.append((route.request.method, route.request.url))
+                assert route.request.url in {"http://preparation-ui.test/", "http://preparation-ui.test/favicon.ico"}
+                if route.request.url.endswith("/favicon.ico"):
+                    route.fulfill(status=204, body="")
+                else:
+                    route.fulfill(status=200, content_type="text/html", body=page_html)
+            page.route("**/*", route_request)
+            page.goto("http://preparation-ui.test/")
+            assert page.locator("#preparation-checks li").count() == 8
+            assert "个人资料尚未配置" in page.locator("#preparation-checks").inner_text()
+            assert "PRIVATE" not in page.locator("#preparation-checks").inner_text()
+            page.evaluate("""mode => {
+              window.__copied=[];
+              Object.defineProperty(navigator,'clipboard',{configurable:true,value:
+                mode==='unavailable'?undefined:{writeText: text=>{
+                  window.__copied.push(text);
+                  if(mode==='rejected')return Promise.reject(new Error('PRIVATE_CLIPBOARD_ERROR'));
+                  if(mode.startsWith('late_'))return new Promise((resolve,reject)=>{
+                    window.__finishCopy=()=>mode==='late_success'?resolve():reject(new Error('PRIVATE_LATE_ERROR'));
+                  });
+                  return Promise.resolve();
+                }}
+              });
+            }""", clipboard)
+            page.get_by_text("查看安全诊断", exact=True).click()
+            report = json.loads(page.locator("#safe-diagnostics").inner_text())
+            assert report["preparation"]["ready_for_live_e2e"] is False
+            assert report["submit_capability"] is False
+            assert "PRIVATE" not in json.dumps(report)
+            assert page.evaluate("window.__copied.length") == 0
+            page.get_by_role("button", name="复制诊断", exact=True).click()
+            if clipboard.startswith("late_"):
+                expect(page.locator("#copy-result")).to_have_text("正在复制…")
+                page.get_by_text("查看安全诊断", exact=True).click()
+                expect(page.locator("#copy-result")).to_have_text("")
+                page.evaluate("window.__finishCopy()")
+                page.get_by_text("查看安全诊断", exact=True).click()
+                expect(page.locator("#copy-result")).to_have_text("")
+                expect(page.locator("#manual-diagnostics")).to_be_hidden()
+                assert page.locator("#manual-diagnostics").input_value() == ""
+            elif clipboard == "success":
+                expect(page.locator("#copy-result")).to_have_text("已复制安全诊断")
+                assert json.loads(page.evaluate("window.__copied[0]")) == report
+                expect(page.locator("#manual-diagnostics")).to_be_hidden()
+            else:
+                expect(page.locator("#copy-result")).to_contain_text("复制结果未确认")
+                fallback = page.get_by_role("textbox", name="手动复制安全诊断")
+                expect(fallback).to_be_visible()
+                expect(fallback).to_be_focused()
+                assert json.loads(fallback.input_value()) == report
+                assert fallback.get_attribute("readonly") is not None
+                page.get_by_text("查看安全诊断", exact=True).click()
+                expect(page.locator("#manual-diagnostics")).to_be_hidden()
+                assert page.locator("#manual-diagnostics").input_value() == ""
+            assert all(method == "GET" for method, _ in requests)
+            assert requests.count(("GET", "http://preparation-ui.test/")) == 1
+            assert all(url in {"http://preparation-ui.test/", "http://preparation-ui.test/favicon.ico"}
+                       for _method, url in requests)
+            assert len(page.context.pages) == 1
+        finally:
+            browser.close()
