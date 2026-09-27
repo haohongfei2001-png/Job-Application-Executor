@@ -2172,16 +2172,11 @@ def test_actual_recovery_retry_revalidates_packaged_identity_before_ui_admission
     def record_server(*args, **kwargs):
         server = actual_server(*args, **kwargs)
         servers.append(server)
-        return server
-    actual_state_path = bootstrap._state_path
-    def record_state(root):
-        path = actual_state_path(root)
         created.set()
-        return path
+        return server
+    # Observe the actual bound server; state-path admission can precede binding.
+    # The real HTTP handshake below still verifies credential publication.
     monkeypatch.setattr(bootstrap, "LoopbackHTTPServer", record_server)
-    # The event marks constructed server/state-path, so retry below verifies
-    # the actual credential publication, not a stubbed handler or health probe.
-    monkeypatch.setattr(bootstrap, "_state_path", record_state)
     thread = threading.Thread(target=bootstrap.serve_bootstrap,
         args=(state, 9344, "release_unverified"), daemon=True)
     thread.start()
