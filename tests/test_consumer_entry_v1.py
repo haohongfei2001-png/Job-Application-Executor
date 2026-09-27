@@ -3709,6 +3709,22 @@ def _retirement_inventory(root):
     return result
 
 
+def _assert_retirement_inventory(root, expected):
+    actual = _retirement_inventory(root)
+    # Compare every complete raw byte and mode. Avoid pytest rendering entire
+    # applicant/WAL/ciphertext values on failure; only changed relative paths
+    # belong in the bounded synthetic diagnosis.
+    identical = actual == expected
+    changed = sorted(name for name in set(actual) | set(expected)
+                     if actual.get(name) != expected.get(name))
+    assert identical, "complete raw inventory changed: " + ", ".join(changed)
+
+
+def _assert_retirement_authority(root, db, expected):
+    identical = _retirement_authority(root, db) == expected
+    assert identical, "complete task/events/UNKNOWN attempts/encrypted answers/key/profile/preferences changed"
+
+
 def _retirement_registry(root, record=None):
     record = record if record is not None else {
         "pid": os.getpid(), "port": 9344, "instance": "A" * 43}
@@ -3774,8 +3790,10 @@ def test_service_retirement_refuses_unowned_registry_without_pid_signals(
     elif defect == "directory":
         registry.unlink()
         registry.mkdir(mode=0o700)
-    before = _retirement_inventory(tmp_path)
+    # SQL inspection may update SQLite SHM read marks. Complete the logical
+    # oracle first; no fixture SELECT may occur between the two raw snapshots.
     authority_before = _retirement_authority(root, db)
+    before = _retirement_inventory(tmp_path)
 
     def forbidden(*_args, **_kwargs):
         pytest.fail("unowned registry must neither inspect/signal a PID nor contact a service")
@@ -3784,8 +3802,8 @@ def test_service_retirement_refuses_unowned_registry_without_pid_signals(
     monkeypatch.setattr(cli.subprocess, "run", forbidden)
     result = cli.lifecycle("stop", root, requested_port)
     assert result == {"ok": False, "reason": "service_identity_unverified"}
-    assert _retirement_inventory(tmp_path) == before
-    assert _retirement_authority(root, db) == authority_before
+    _assert_retirement_inventory(tmp_path, before)
+    _assert_retirement_authority(root, db, authority_before)
     assert (root / "task-answers.key").read_bytes() == key
     assert "PRIVATE_" not in json.dumps(result)
 
@@ -3831,7 +3849,7 @@ def test_service_retirement_requires_exact_typed_authenticated_readback(
     assert calls == [(record["port"], "/v1/service-identity", None)]
     assert json.loads(registry.read_text()) == (
         replacement if defect == "registry_replaced" else record)
-    assert _retirement_authority(root, db) == before
+    _assert_retirement_authority(root, db, before)
     assert "PRIVATE_" not in json.dumps(result)
 
 
@@ -3862,7 +3880,7 @@ def test_service_retirement_ack_never_adopts_replacement_or_private_failure(
         "service_identity_changed" if reply["ok"] is True else "service_stop_refused")}
     assert calls == ["/v1/service-identity", "/v1/service-stop"]
     assert json.loads(registry.read_text()) == replacement
-    assert _retirement_authority(root, db) == before
+    _assert_retirement_authority(root, db, before)
     assert "PRIVATE_" not in json.dumps(result)
 
 
@@ -3900,7 +3918,7 @@ def test_service_retirement_preserves_existing_task_otp_and_update_fences(
         result = supervisor.dispatch("POST", "/v1/service-stop", supervisor.service_identity())
         assert result == {"ok": False, "reason": reason}
         assert not supervisor.worker.stop_event.is_set()
-        assert _retirement_authority(root, db) == before
+        _assert_retirement_authority(root, db, before)
         assert "PRIVATE_" not in json.dumps(result)
     finally:
         server.server_close()
@@ -3939,7 +3957,7 @@ def test_exact_idle_service_retirement_fences_late_admission_and_is_idempotent(
         assert supervisor.dispatch("GET", "/health", {}) == health
         assert identity["instance"] not in json.dumps(health)
         assert health["final_click_actor"] == "user"
-        assert _retirement_authority(root, db) == before
+        _assert_retirement_authority(root, db, before)
         assert (root / "task-answers.key").read_bytes() == key
     finally:
         server.server_close()
@@ -3970,7 +3988,7 @@ def test_cold_restart_does_not_adopt_a_live_service_without_its_registry(
         with pytest.raises(RuntimeError, match="cold start reached"):
             cli.lifecycle("restart", root, 9344)
         assert calls == ["/health", "/health"]
-    assert _retirement_authority(root, db) == before
+    _assert_retirement_authority(root, db, before)
     assert not (root / "service.json").exists()
 
 
@@ -4028,7 +4046,7 @@ def test_actual_isolated_service_retires_without_pid_signals_or_private_replay(
             **identity, "instance": "B" * 43}) == {
                 "ok": False, "reason": "service_identity_changed"}
         assert cli.request(root, port, "/health")["ok"] is True
-        assert _retirement_authority(root, db) == before
+        _assert_retirement_authority(root, db, before)
         with monkeypatch.context() as stop_context:
             stop_context.setattr(cli.os, "kill",
                                  lambda *_: pytest.fail("retirement must not signal a PID"))
@@ -4046,7 +4064,7 @@ def test_actual_isolated_service_retires_without_pid_signals_or_private_replay(
             assert json.loads((root / "service.json").read_text()) == replacement
         else:
             assert not (root / "service.json").exists()
-        assert _retirement_authority(root, db) == before
+        _assert_retirement_authority(root, db, before)
         assert (root / "task-answers.key").read_bytes() == key
         assert b"PRIVATE_" not in log.read_bytes()
         assert identity["instance"].encode() not in log.read_bytes()
@@ -4078,6 +4096,6 @@ def test_service_start_refuses_live_legacy_writer_before_journal_initialization(
         cli.serve(root, 9344)
     assert probes == [(record["pid"], 0)]
     assert registry.read_bytes() == registry_before
-    assert _retirement_authority(root, db) == before
+    _assert_retirement_authority(root, db, before)
     with ProcessLock(root / "worker.lock"):
         pass  # Failed takeover releases only its own ordinary fence.
