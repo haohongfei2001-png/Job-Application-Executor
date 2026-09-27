@@ -241,7 +241,7 @@ def launch_native_consumer(root, port, *, smoke=False):
             or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
         return {"ok": False, "opened": False, "reason": "native_bundle_unverified"}
     from .state_compatibility import native_window_guard
-    from .native_reopen import NativeReopenServer, request_owned_focus
+    from .native_reopen import create_owned_reopen_server, request_owned_focus
 
     try:
         # Acquire before service startup or issuing a UI ticket. A duplicate
@@ -249,7 +249,7 @@ def launch_native_consumer(root, port, *, smoke=False):
         with native_window_guard(root) as window_fd:
             presenter = NativePresenter(source.parent / "native-host",
                 consumer_smoke=smoke, ownership_fd=window_fd)
-            reopen = NativeReopenServer(root, window_fd, lambda: presenter.focus())
+            reopen = create_owned_reopen_server(root, window_fd, lambda: presenter.focus())
             reopen.start()  # Optional IPC refusal never closes the primary window.
             try:
                 result = launch_consumer(root, port, presenter=presenter)

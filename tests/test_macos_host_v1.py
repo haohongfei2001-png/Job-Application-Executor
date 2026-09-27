@@ -580,11 +580,12 @@ def test_focus_requires_exact_ack_and_never_falls_back_to_reloading(tmp_path, mo
     assert presenter.process is None and presenter.current_surface is None
 
 
-def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(compiled_host):
+@pytest.mark.parametrize("long_runtime", [False, True])
+def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(compiled_host, long_runtime):
     import queue
     import tempfile
     from pathlib import Path
-    from executor.autonomy.native_reopen import NativeReopenServer
+    from executor.autonomy.native_reopen import create_owned_reopen_server
     from executor.autonomy.state_compatibility import native_window_guard
 
     state = {"admissions": 0, "pages": 0, "writes": 0}
@@ -632,7 +633,7 @@ def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(comp
     messages = queue.Queue()
     stdout = []
     temporary = tempfile.TemporaryDirectory(prefix="jwr-", dir="/private/tmp")
-    root = Path(temporary.name) / "state"
+    root = Path(temporary.name) / (("long-owned-segment-" * 7) if long_runtime else "state")
     owner = native_window_guard(root)
     ownership_fd = owner.__enter__()
     reopen = None
@@ -676,7 +677,7 @@ def test_hosted_mac_focus_and_cocoa_reopen_preserve_actual_unsent_workbench(comp
                                 "window_count": 1, "focus_only": True}
             assert child.pid == original_pid
             return True
-        reopen = NativeReopenServer(root, ownership_fd, owned_focus)
+        reopen = create_owned_reopen_server(root, ownership_fd, owned_focus)
         assert reopen.start()
         child_source = """
 import sys
@@ -718,6 +719,7 @@ print("FOCUSED" if request_owned_focus(sys.argv[2]) else "REFUSED")
             child.stdout.close()
         owner.__exit__(None, None, None)
         assert not (root / "native-focus.sock").exists()
+        assert not (root / "native-focus.loopback.json").exists()
         temporary.cleanup()
         server.shutdown()
         server.server_close()

@@ -390,3 +390,251 @@ def test_long_socket_path_refuses_reopen_without_deleting_private_state(short_re
         assert request_owned_focus(root) is False
         assert marker.read_bytes() == b"PRIVATE_LONG_PATH_CANARY" and calls == []
         assert (root / "native-window.lock").read_bytes() == b""
+
+
+# Long roots use the same window lease with a private nonce, never a task API.
+@pytest.fixture
+def long_reopen_root(tmp_path):
+    return tmp_path / ("long-owned-segment-" * 7)
+
+
+def test_long_root_reopen_real_children_preserve_all_populated_private_state(long_reopen_root, monkeypatch):
+    import socket
+    from executor.autonomy.native_reopen import create_owned_reopen_server, request_owned_focus
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    root = long_reopen_root
+    queue = TaskQueue(root)
+    tasks = [queue.enqueue(TaskSpec(company=f"Synthetic long reopen {index}", role="Engineer",
+        target_url=f"https://example.invalid/jobs/long-{index}", profile_ref=f"synthetic-{index}.json"))
+        for index in range(3)]
+    queue.pause(tasks[0]["task_id"])
+    queue.remember_task_view(tasks[0]["task_id"], expected_revision=0)
+    before = (queue.tasks(), queue.recent_events(1000), queue.task_view_context())
+    private = root / "PRIVATE_LONG_REOPEN_CANARY"
+    private.write_bytes(b"PRIVATE_LONG_REOPEN_CANARY")
+    calls = []
+    monkeypatch.setattr(socket, "getfqdn", lambda *a, **k: pytest.fail("focus resolved FQDN"))
+    child_source = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from executor.autonomy.native_reopen import request_owned_focus
+print("FOCUSED" if request_owned_focus(sys.argv[2]) else "REFUSED")
+"""
+    with native_window_guard(root) as fd:
+        server = create_owned_reopen_server(root, fd, lambda: calls.append(True) or True)
+        assert server.start() is True
+        endpoint = root / "native-focus.loopback.json"
+        try:
+            record = json.loads(endpoint.read_bytes())
+            assert stat.S_IMODE(root.stat().st_mode) == 0o700
+            assert stat.S_IMODE(endpoint.stat().st_mode) == 0o600
+            assert server.listener.getsockname() == ("127.0.0.1", record["port"])
+            assert record["root_identity"] == [root.stat().st_dev, root.stat().st_ino]
+            assert record["lease_identity"] == [os.fstat(fd).st_dev, os.fstat(fd).st_ino]
+            payload = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file() and p != endpoint}
+            for _ in range(2):
+                child = subprocess.run([sys.executable, "-I", "-B", "-c", child_source,
+                    str(Path(__file__).resolve().parents[1]), str(root)],
+                    capture_output=True, text=True, timeout=8, check=False)
+                assert child.returncode == 0 and child.stdout == "FOCUSED\n" and child.stderr == ""
+            assert calls == [True, True]
+            assert {p.name: p.read_bytes() for p in root.iterdir() if p.is_file() and p != endpoint} == payload
+            assert (queue.tasks(), queue.recent_events(1000), queue.task_view_context()) == before
+            for guard in (native_window_guard, task_state_guard):
+                with pytest.raises(BlockingIOError):
+                    with guard(root):
+                        pytest.fail("long focus released the existing writer/update fence")
+            assert "PRIVATE_" not in repr(server) and record["nonce"] not in repr(server)
+            assert not (root / "native-focus.sock").exists()
+        finally:
+            server.close()
+        assert not endpoint.exists() and private.read_bytes() == b"PRIVATE_LONG_REOPEN_CANARY"
+    assert request_owned_focus(root) is False
+    with native_window_guard(root):
+        pass
+
+
+@pytest.mark.parametrize("kind", ["missing_nonce", "wrong_nonce", "extra_private_route", "oversized"])
+def test_long_reopen_refuses_unauthenticated_or_non_focus_packets(long_reopen_root, kind):
+    import socket
+    from executor.autonomy.native_reopen import create_owned_reopen_server
+    root, calls = long_reopen_root, []
+    with native_window_guard(root) as fd:
+        server = create_owned_reopen_server(root, fd, lambda: calls.append(True) or True)
+        assert server.start()
+        try:
+            record = json.loads((root / "native-focus.loopback.json").read_bytes())
+            if kind == "missing_nonce":
+                packet = b'{"command":"focus"}\n'
+            elif kind == "wrong_nonce":
+                packet = b'{"command":"focus","nonce":"' + b"0" * 64 + b'"}\n'
+                assert record["nonce"] != "0" * 64
+            elif kind == "extra_private_route":
+                packet = json.dumps({"command": "focus", "nonce": record["nonce"],
+                    "url": "PRIVATE_FORGED_ROUTE"}).encode() + b"\n"
+            else:
+                packet = b"x" * 129
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+                connection.settimeout(2)
+                connection.connect(("127.0.0.1", record["port"]))
+                connection.sendall(packet)
+                connection.shutdown(socket.SHUT_WR)
+                reply = connection.recv(128)
+            assert reply == b'{"ok":false,"focus_only":false}\n'
+            assert calls == [] and b"PRIVATE_" not in reply and record["nonce"].encode() not in reply
+        finally:
+            server.close()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo", "malformed", "foreign_root"])
+def test_long_reopen_preserves_unrecognized_endpoint_authority(long_reopen_root, kind):
+    from executor.autonomy.native_reopen import create_owned_reopen_server, request_owned_focus
+    root, calls = long_reopen_root, []
+    with native_window_guard(root) as fd:
+        endpoint = root / "native-focus.loopback.json"
+        marker = root / "PRIVATE_ENDPOINT_CANARY"
+        marker.write_bytes(b"PRIVATE_ENDPOINT_CANARY")
+        if kind == "symlink":
+            endpoint.symlink_to(marker)
+        elif kind == "hardlink":
+            os.link(marker, endpoint)
+        elif kind == "fifo":
+            os.mkfifo(endpoint, 0o600)
+        elif kind == "malformed":
+            endpoint.write_bytes(b"PRIVATE_MALFORMED_ENDPOINT")
+            endpoint.chmod(0o600)
+        else:
+            record = {"format": "jae-native-loopback-focus-v1", "nonce": "0" * 64, "port": 9344,
+                "root_identity": [root.stat().st_dev, root.stat().st_ino + 1],
+                "lease_identity": [os.fstat(fd).st_dev, os.fstat(fd).st_ino]}
+            endpoint.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+            endpoint.chmod(0o600)
+        identity = (endpoint.lstat().st_dev, endpoint.lstat().st_ino, endpoint.lstat().st_mode)
+        server = create_owned_reopen_server(root, fd, lambda: calls.append(True) or True)
+        assert server.start() is False and request_owned_focus(root) is False
+        server.close()
+        assert (endpoint.lstat().st_dev, endpoint.lstat().st_ino, endpoint.lstat().st_mode) == identity
+        assert marker.read_bytes() == b"PRIVATE_ENDPOINT_CANARY" and calls == []
+        if kind in {"malformed", "foreign_root"}:
+            assert endpoint.read_bytes().startswith(b"PRIVATE_" if kind == "malformed" else b"{")
+        if kind == "symlink":
+            assert endpoint.readlink() == marker
+
+
+@pytest.mark.parametrize("changed", ["endpoint_inode", "nonce", "lease_inode"])
+def test_long_reopen_refuses_mutated_authority_and_preserves_replacement(long_reopen_root, changed):
+    from executor.autonomy.native_reopen import create_owned_reopen_server, request_owned_focus
+    root, calls = long_reopen_root, []
+    with native_window_guard(root) as fd:
+        server = create_owned_reopen_server(root, fd, lambda: calls.append(True) or True)
+        assert server.start()
+        endpoint = root / "native-focus.loopback.json"
+        try:
+            original = endpoint.read_bytes()
+            if changed == "endpoint_inode":
+                endpoint.rename(root / "original-endpoint")
+                endpoint.write_bytes(original)
+                endpoint.chmod(0o600)
+            elif changed == "nonce":
+                record = json.loads(original)
+                record["nonce"] = "0" * 64 if record["nonce"] != "0" * 64 else "1" * 64
+                endpoint.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+            else:
+                lease = root / "native-window.lock"
+                lease.rename(root / "original-lease")
+                lease.write_bytes(b"")
+                lease.chmod(0o600)
+            replacement = endpoint.read_bytes()
+            assert request_owned_focus(root) is False and calls == []
+        finally:
+            server.close()
+        assert endpoint.read_bytes() == replacement
+        assert (root / "native-window.lock").read_bytes() == b""
+
+
+def test_long_duplicate_cli_focuses_existing_window_without_new_service_or_ticket(long_reopen_root, monkeypatch):
+    from executor.autonomy import macos_host
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    cli = _recognized_app(long_reopen_root.parent, monkeypatch)
+    root = long_reopen_root
+    queue = TaskQueue(root)
+    task = queue.enqueue(TaskSpec(company="Synthetic long CLI reopen", role="Engineer",
+        target_url="https://example.invalid/jobs/reopen", profile_ref="synthetic.json"))
+    queue.pause(task["task_id"])
+    queue.remember_task_view(task["task_id"], expected_revision=0)
+    before = (queue.tasks(), queue.recent_events(1000), queue.task_view_context())
+    calls, nested = [], []
+    class Presenter:
+        def __init__(self, directory, *, consumer_smoke, ownership_fd):
+            assert os.fstat(ownership_fd).st_nlink == 1
+            calls.append("presenter")
+        def focus(self):
+            calls.append("focus")
+            return True
+        def wait_for_close(self):
+            nested.append(cli.launch_native_consumer(root, 9344))
+            calls.append("closed")
+            return True
+        def close(self):
+            calls.append("cleanup")
+    monkeypatch.setattr(macos_host, "NativePresenter", Presenter)
+    monkeypatch.setattr(cli, "launch_consumer",
+        lambda *a, **k: calls.append("service_and_ticket") or {"ok": True, "opened": True})
+    assert cli.launch_native_consumer(root, 9344) == {
+        "ok": True, "opened": True, "native_window": True, "native_page": None,
+        "final_click_actor": "user"}
+    assert nested == [{"ok": True, "opened": True, "native_window": True,
+        "focus_only": True, "final_click_actor": "user"}]
+    assert calls == ["presenter", "service_and_ticket", "focus", "closed", "cleanup"]
+    assert (queue.tasks(), queue.recent_events(1000), queue.task_view_context()) == before
+    assert not (root / "native-focus.loopback.json").exists()
+
+
+def test_long_stale_endpoint_requires_actual_kernel_lease_before_recovery(long_reopen_root):
+    from executor.autonomy.native_reopen import create_owned_reopen_server, request_owned_focus
+    root, calls = long_reopen_root, []
+    with native_window_guard(root) as fd:
+        lease_identity = [os.fstat(fd).st_dev, os.fstat(fd).st_ino]
+    endpoint = root / "native-focus.loopback.json"
+    stale = {"format": "jae-native-loopback-focus-v1", "nonce": "0" * 64, "port": 9344,
+        "root_identity": [root.stat().st_dev, root.stat().st_ino],
+        "lease_identity": lease_identity}
+    endpoint.write_text(json.dumps(stale, sort_keys=True, separators=(",", ":")) + "\n")
+    endpoint.chmod(0o600)
+    before = endpoint.read_bytes()
+    refused = create_owned_reopen_server(root, -1, lambda: calls.append(True) or True)
+    assert refused.start() is False and request_owned_focus(root) is False
+    assert endpoint.read_bytes() == before and calls == []
+    with native_window_guard(root) as fd:
+        recovered = create_owned_reopen_server(root, fd, lambda: calls.append(True) or True)
+        assert recovered.start()
+        try:
+            assert json.loads(endpoint.read_bytes())["nonce"] != stale["nonce"]
+            assert request_owned_focus(root) is True and calls == [True]
+        finally:
+            recovered.close()
+    assert not endpoint.exists()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("port", True), ("port", 9344.0), ("port", -1),
+    ("nonce", "PRIVATE_FORGED_NONCE"), ("extra", "PRIVATE_EXTRA_FIELD"),
+    ("root_identity", [True, 1]),
+])
+def test_long_reopen_rejects_invalid_metadata_before_any_socket(long_reopen_root, monkeypatch, field, value):
+    import socket
+    from executor.autonomy.native_reopen import create_owned_reopen_server, request_owned_focus
+    root = long_reopen_root
+    with native_window_guard(root) as fd:
+        endpoint = root / "native-focus.loopback.json"
+        record = {"format": "jae-native-loopback-focus-v1", "nonce": "0" * 64, "port": 9344,
+            "root_identity": [root.stat().st_dev, root.stat().st_ino],
+            "lease_identity": [os.fstat(fd).st_dev, os.fstat(fd).st_ino]}
+        record[field] = value
+        endpoint.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+        endpoint.chmod(0o600)
+        before = endpoint.read_bytes()
+        monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("invalid metadata opened a socket"))
+        server = create_owned_reopen_server(root, fd, lambda: pytest.fail("invalid metadata focused"))
+        assert server.start() is False and request_owned_focus(root) is False
+        assert endpoint.read_bytes() == before
