@@ -485,11 +485,21 @@ def _candidate_starts(python: Path, release: Path) -> bool:
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
+def _app_transaction_directory(destination: str | Path) -> Path:
+    """Refuse an aliased app authority before mkdir, locks or private snapshots."""
+    directory = Path(destination).expanduser().absolute()
+    if any(part.is_symlink() for part in (directory, *directory.parents)):
+        raise ValueError("app_transaction_path_invalid")
+    return directory.resolve()
+
+
 def _acquire_app_transaction_lock(apps_dir: Path) -> int:
     """Keep install and rollback mutually exclusive through final-path health."""
     from .state_compatibility import _private_lock_fd
 
+    apps_dir = _app_transaction_directory(apps_dir)
     apps_dir.mkdir(parents=True, exist_ok=True)
+    _app_transaction_directory(apps_dir)
     return _private_lock_fd(apps_dir / f".{APP_NAME}.app.transaction.lock")
 
 
@@ -546,7 +556,7 @@ def install_macos_bundle(
             raise ValueError("bundle_unverified")
         launcher = candidate / "Contents" / "MacOS" / "AIApplicationManager"
         native = launcher.read_text(encoding="utf-8") == _native_packaged_launcher()
-        apps = Path(destination).expanduser().absolute() if destination is not None else Path.home() / "Applications"
+        apps = _app_transaction_directory(destination if destination is not None else Path.home() / "Applications")
         if candidate.resolve() == (apps / (APP_NAME + ".app")).resolve():
             return {"ok": False, "reason": "bundle_candidate_is_active",
                     "message": "候选已是当前应用；没有启动更新或修改任务。"}
@@ -571,9 +581,9 @@ def install_macos_app(
 ) -> dict:
     if (platform or sys.platform) != "darwin":
         return _install_macos_app_unlocked(repo_root, destination=destination, platform=platform)
-    apps_dir = (Path(destination).expanduser().resolve() if destination is not None
-                else Path.home() / "Applications")
     try:
+        apps_dir = _app_transaction_directory(
+            destination if destination is not None else Path.home() / "Applications")
         lock_fd = _acquire_app_transaction_lock(apps_dir)
     except BlockingIOError:
         return {"ok": False, "reason": "update_in_progress",
@@ -867,11 +877,11 @@ def _install_macos_app_unlocked(
 
 
 def rollback_macos_app(destination: str | Path, *, task_state_root: str | Path | None = None) -> dict:
-    apps_dir = Path(destination).expanduser().resolve()
-    if not apps_dir.is_dir():
-        return {"ok": False, "reason": "rollback_unavailable",
-                "message": "回退副本不完整或路径已被占用；没有修改当前应用。"}
     try:
+        apps_dir = _app_transaction_directory(destination)
+        if not apps_dir.is_dir():
+            return {"ok": False, "reason": "rollback_unavailable",
+                    "message": "回退副本不完整或路径已被占用；没有修改当前应用。"}
         lock_fd = _acquire_app_transaction_lock(apps_dir)
     except BlockingIOError:
         return {"ok": False, "reason": "update_in_progress",

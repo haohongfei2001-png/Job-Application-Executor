@@ -1112,3 +1112,101 @@ def test_real_consumer_journal_initialization_keeps_task_authority_and_private_b
     assert repeated.active is None
     assert snapshot() == (schema, rows)
     assert private_bytes() == complete
+@pytest.mark.parametrize("alias_kind", ["leaf", "ancestor"])
+@pytest.mark.parametrize("operation", ["install", "rollback", "delivered", "lock"])
+def test_app_transaction_refuses_directory_alias_before_private_state_or_bundle_work(
+    tmp_path, monkeypatch, alias_kind, operation
+):
+    """Routing refusal, not a substitute for the actual native delivery gate."""
+    from executor.autonomy import consumer, state_compatibility
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    from executor.autonomy.worker import Worker
+    from cryptography.fernet import Fernet
+
+    state = tmp_path / "private-task-authority"
+    queue = TaskQueue(state)
+    tasks = []
+    for index in range(3):
+        task = queue.enqueue(TaskSpec(
+            company="Synthetic alias refusal " + str(index), role="Engineer",
+            target_url="https://example.invalid/jobs/alias-" + str(index),
+            profile_ref="synthetic-alias-profile-" + str(index) + ".json"))
+        tasks.append(queue.pause(task["task_id"]))
+    key = state / "task-answers.key"
+    key.write_bytes(Fernet.generate_key())
+    key.chmod(0o600)
+    assert Worker(queue, settings={}).active is None
+
+    owned = tmp_path / "owned-applications"
+    owned.mkdir()
+    for name in (consumer.APP_NAME + ".app", "." + consumer.APP_NAME + ".app.previous",
+                 "." + consumer.APP_NAME + ".app.failed"):
+        bundle = owned / name
+        bundle.mkdir()
+        (bundle / "identity").write_bytes(("PRESERVE " + name).encode())
+    alias = tmp_path / "application-alias"
+    alias.symlink_to(owned, target_is_directory=True)
+    destination = alias if alias_kind == "leaf" else alias / "missing-parent" / "Applications"
+
+    candidate = tmp_path / "delivery.app"
+    launcher = candidate / "Contents/MacOS/AIApplicationManager"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(consumer._native_packaged_launcher(), encoding="utf-8")
+    # These two finite admission stubs reach the delivered-entry destination
+    # check only. Actual source/runtime/native verification remains exercised
+    # by the unchanged full hosted-Mac delivery/update/rollback/reopen journey.
+    monkeypatch.setattr(consumer, "_trusted_bundle", lambda _path: True)
+    monkeypatch.setattr(consumer, "verify_standalone_runtime", lambda *_args: True)
+
+    def tree_bytes(root):
+        return {str(path.relative_to(root)):
+                None if path.is_dir() else path.read_bytes()
+                for path in root.rglob("*")}
+
+    before_tasks = [queue.get(task["task_id"]) for task in tasks]
+    private_before = tree_bytes(state)
+    bundles_before = tree_bytes(owned)
+    candidate_before = tree_bytes(candidate)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("aliased application authority entered locks, private state or staging")
+
+    monkeypatch.setattr(state_compatibility, "_private_lock_fd", forbidden)
+    monkeypatch.setattr(state_compatibility, "task_state_guard", forbidden)
+    monkeypatch.setattr(consumer, "_install_macos_app_unlocked", forbidden)
+    monkeypatch.setattr(consumer, "_rollback_macos_app_unlocked", forbidden)
+    monkeypatch.setattr(consumer, "_candidate_starts", forbidden)
+    monkeypatch.setattr(consumer, "_prepare_task_state_release", forbidden)
+    if operation == "lock":
+        with pytest.raises(ValueError, match="^app_transaction_path_invalid$"):
+            consumer._acquire_app_transaction_lock(destination)
+    elif operation == "rollback":
+        result = consumer.rollback_macos_app(destination, task_state_root=state)
+        assert result == {"ok": False, "reason": "update_lock_unavailable",
+                         "message": "无法安全锁定应用目录；没有修改当前应用。"}
+    elif operation == "install":
+        result = consumer.install_macos_app(tmp_path / "missing-source",
+            destination=destination, task_state_root=state, platform="darwin")
+        assert result == {"ok": False, "reason": "update_lock_unavailable",
+                         "message": "无法安全锁定应用目录；没有修改当前应用。"}
+    else:
+        monkeypatch.setattr(consumer, "install_macos_app", forbidden)
+        result = consumer.install_macos_bundle(candidate, destination=destination,
+            task_state_root=state, platform="darwin")
+        assert result == {"ok": False, "reason": "bundle_candidate_invalid",
+                         "message": "交付应用无法核对；现有应用和任务保持不变。"}
+    assert tree_bytes(state) == private_before
+    assert tree_bytes(owned) == bundles_before
+    assert tree_bytes(candidate) == candidate_before
+    assert alias.is_symlink() and alias.readlink() == owned
+    assert not (owned / "missing-parent").exists()
+    assert [queue.get(task["task_id"]) for task in tasks] == before_tasks
+    assert tree_bytes(state) == private_before
+
+
+def test_app_transaction_directory_admission_is_inert_for_ordinary_missing_path(tmp_path):
+    from executor.autonomy import consumer
+
+    destination = tmp_path / "ordinary-missing-parent" / "Applications"
+    assert consumer._app_transaction_directory(destination) == destination.resolve()
+    assert not destination.parent.exists()
