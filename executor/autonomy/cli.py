@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import signal
+import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -36,6 +38,72 @@ def request(root, port, path, data=None):
         return json.load(response)
 
 
+def _service_identity_valid(record):
+    return (type(record) is dict and set(record) == {"pid", "port", "instance"}
+            and type(record["pid"]) is int and 0 < record["pid"] <= 2147483647
+            and type(record["port"]) is int and 0 < record["port"] < 65536
+            and type(record["instance"]) is str and 32 <= len(record["instance"]) <= 128
+            and record["instance"].isascii()
+            and all(c.isalnum() or c in "_-" for c in record["instance"]))
+
+
+def _service_record(path):
+    """Read only an owned ordinary bounded registry; never follow a PID hint."""
+    path = Path(path).expanduser().absolute()
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError("service_identity_unverified")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, encoding="utf-8") as handle:
+        metadata = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077):
+            raise ValueError("service_identity_unverified")
+        raw = handle.read(65537)
+    current = path.stat(follow_symlinks=False)
+    if len(raw) > 65536 or (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino):
+        raise ValueError("service_identity_unverified")
+    record = json.loads(raw)
+    if not _service_identity_valid(record):
+        raise ValueError("service_identity_unverified")
+    return record
+
+
+def _stop_owned_service(root, port):
+    """Ask the authenticated exact service to retire; never signal a registry PID."""
+    state = Path(root).expanduser().absolute() / "service.json"
+    if type(port) is not int or not 0 < port < 65536:
+        return {"ok": False, "reason": "service_identity_unverified"}
+    try:
+        record = _service_record(state)
+        if record["port"] != port:
+            raise ValueError("service_identity_unverified")
+        observed = request(root, port, "/v1/service-identity")
+        if not _service_identity_valid(observed) or observed != record or _service_record(state) != record:
+            raise ValueError("service_identity_unverified")
+        result = request(root, port, "/v1/service-stop", record)
+        if type(result) is not dict or result.get("ok") is not True:
+            reason = result.get("reason") if type(result) is dict else None
+            return {"ok": False, "reason": reason if type(reason) is str and reason in {
+                "service_identity_changed", "update_in_progress", "worker_active",
+                "otp_in_flight", "runnable_task_pending"} else "service_stop_refused"}
+        for _ in range(100):
+            try:
+                current = _service_record(state)
+            except FileNotFoundError:
+                if not state.exists() and not state.is_symlink():
+                    return {"ok": True, "running": False}
+                raise
+            if current != record:
+                return {"ok": False, "reason": "service_identity_changed"}
+            time.sleep(.1)
+        return {"ok": False, "reason": "worker_stopping_at_safe_checkpoint"}
+    except FileNotFoundError:
+        # No registry is permission to leave it alone, not to kill/adopt a PID.
+        return {"ok": False, "reason": "service_record_missing"}
+    except (OSError, ValueError, TypeError, UnicodeError, urllib.error.URLError):
+        return {"ok": False, "reason": "service_identity_unverified"}
+
+
 def serve(root, port):
     from ..otp.bridge import OtpBridge
     from .queue import TaskQueue
@@ -45,12 +113,23 @@ def serve(root, port):
     # Global repo lock also serializes daemons using different queue directories.
     isolated = browser_mode() in {"test", "isolated", "headless"}
     with ProcessLock((Path(root) if isolated else RUNTIME) / "worker.lock"):
+        from .state_compatibility import _refuse_live_service
+        _refuse_live_service(Path(root))
         queue = TaskQueue(root)
         worker = Worker(queue, relay=None if isolated else OtpBridge())
-        server = create_server(Supervisor(queue, worker), port=port)
+        supervisor = Supervisor(queue, worker)
+        server = create_server(supervisor, port=port)
         state = private_dir(root) / "service.json"
-        state.write_text(json.dumps({"pid": os.getpid(), "port": server.server_address[1]}))
-        state.chmod(0o600)
+        record = supervisor.service_identity()
+        # Atomic private publication never opens an alias/old registry for write.
+        temporary = state.with_name(".service-" + secrets.token_hex(16) + ".tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(record, handle)
+            temporary.replace(state)
+        finally:
+            temporary.unlink(missing_ok=True)
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: worker.stop_event.set())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -60,34 +139,29 @@ def serve(root, port):
         finally:
             server.shutdown()
             server.server_close()
-            state.unlink(missing_ok=True)
+            try:
+                if _service_record(state) == record:
+                    state.unlink(missing_ok=True)
+            except (OSError, ValueError, TypeError, UnicodeError):
+                pass  # A replaced/ambiguous record belongs to no proven owner.
 
 
 def lifecycle(action, root, port):
-    state = Path(root) / "service.json"
     if action in {"health", "status"}:
         try:
             return request(root, port, "/health")
         except (OSError, urllib.error.URLError):
             return {"ok": False, "running": False}
     if action in {"stop", "restart"}:
-        if state.exists():
-            info = json.loads(state.read_text())
-            pid = int(info["pid"])
-            # Refuse stale PID reuse: exact module and runtime must be present.
-            command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
-            if "executor.autonomy.cli" in command and "serve" in command and str(Path(root).resolve()) in command:
-                os.kill(pid, signal.SIGTERM)
-                for _ in range(100):
-                    if not state.exists():
-                        break
-                    time.sleep(.1)
-                if state.exists():
-                    return {"ok": False, "reason": "worker_stopping_at_safe_checkpoint"}
-            else:
-                state.unlink(missing_ok=True)
-        if action == "stop":
-            return {"ok": True, "running": False}
+        stopped = _stop_owned_service(root, port)
+        if not stopped.get("ok"):
+            # A cold restart may start through the ordinary daemon lock, but
+            # a live service without its exact registry remains unowned.
+            if (action != "restart" or stopped.get("reason") != "service_record_missing"
+                    or lifecycle("health", root, port).get("ok")):
+                return stopped
+        elif action == "stop":
+            return stopped
     if action in {"start", "restart"}:
         try:
             return request(root, port, "/health")

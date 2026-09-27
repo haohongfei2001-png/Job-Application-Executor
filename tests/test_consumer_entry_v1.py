@@ -3647,3 +3647,437 @@ def test_release_transaction_never_certifies_payload_changed_during_final_health
         assert "PRIVATE_" not in json.dumps(result)
         assert not (state / "auth.token").exists()
         assert not (state / "service.json").exists()
+
+
+@pytest.fixture
+def retirement_private_state(tmp_path):
+    """Actual migrated WAL and typed encrypted answers; never a live account."""
+    from contextlib import closing
+    from test_task_state_compatibility_v1 import legacy_state, encrypted_answers
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    root = tmp_path / "retirement-private-authority"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        queue = TaskQueue(root)
+        for name, value in {
+            "profile.json": {"complete": "\n".join(
+                f"{i}: PRIVATE_RETIRE_PROFILE_中文_<literal>" for i in range(1000))},
+            "preferences.json": {"complete": [
+                f"{i}: PRIVATE_RETIRE_PREF_中文_<literal>" for i in range(1000)]},
+        }.items():
+            path = root / name
+            path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+            path.chmod(0o600)
+        # A real daemon must read a complete production TaskSpec even for a
+        # BLOCKED/UNKNOWN task. Preserve the legacy authority, not a malformed
+        # minimal spec that crashes the worker before the retirement handshake.
+        spec = TaskSpec(company="Synthetic retirement", role="Synthetic role",
+                        target_url="https://careers.synthetic.test/jobs/retirement",
+                        profile_ref=str(root / "profile.json"), live_authorized=False)
+        db.execute("UPDATE tasks SET spec=? WHERE task_id=?",
+                   (spec.model_dump_json(), "synthetic-task"))
+        db.execute("INSERT INTO run_attempts VALUES(?,?,?,?,?,?)",
+                   ("synthetic-unknown-attempt", "synthetic-task", "synthetic-old-owner",
+                    "UNKNOWN_OUTCOME", 1, 2))
+        db.execute("INSERT INTO field_actions VALUES(?,?,?,?,?,?)",
+                   ("synthetic-unknown-field", "synthetic-unknown-attempt", "0" * 64,
+                    "UNKNOWN_OUTCOME", 1, 2))
+        db.commit()
+        assert (root / "tasks.sqlite3-wal").stat().st_size > 0
+        yield root, queue, db, key
+
+
+def _retirement_authority(root, db):
+    from test_task_state_compatibility_v1 import authority
+    return (authority(db), db.execute("SELECT * FROM task_answer_events").fetchall(),
+            db.execute("SELECT * FROM run_attempts").fetchall(),
+            db.execute("SELECT * FROM field_actions").fetchall(),
+            tuple((name, (root / name).read_bytes(),
+                   stat.S_IMODE((root / name).stat().st_mode))
+                  for name in ("profile.json", "preferences.json", "task-answers.key")))
+
+
+def _retirement_inventory(root):
+    # Nonblocking inventory of all ordinary bytes, modes and aliases; never
+    # read a FIFO/device or follow an ambiguous registry into another root.
+    result = {}
+    for path in root.rglob("*"):
+        mode = path.lstat().st_mode
+        value = (path.readlink().as_posix() if stat.S_ISLNK(mode)
+                 else path.read_bytes() if stat.S_ISREG(mode) else None)
+        result[path.relative_to(root).as_posix()] = (mode, value)
+    return result
+
+
+def _retirement_registry(root, record=None):
+    record = record if record is not None else {
+        "pid": os.getpid(), "port": 9344, "instance": "A" * 43}
+    path = root / "service.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    path.chmod(0o600)
+    return path, record
+
+
+@pytest.mark.parametrize("defect", [
+    "legacy", "bool_pid", "float_pid", "string_port", "bool_port",
+    "extra_key", "short_instance", "unicode_instance", "invalid_instance",
+    "malformed", "list", "oversized", "public", "symlink", "hardlink",
+    "fifo", "directory", "wrong_port", "bool_requested_port",
+])
+def test_service_retirement_refuses_unowned_registry_without_pid_signals(
+    retirement_private_state, tmp_path, monkeypatch, defect
+):
+    root, queue, db, key = retirement_private_state
+    registry, record = _retirement_registry(root)
+    requested_port = 9344
+    if defect == "legacy":
+        record.pop("instance")
+    elif defect == "bool_pid":
+        record["pid"] = True
+    elif defect == "float_pid":
+        record["pid"] = float(record["pid"])
+    elif defect == "string_port":
+        record["port"] = "9344"
+    elif defect == "bool_port":
+        record["port"] = True
+    elif defect == "extra_key":
+        record["hint"] = "PRIVATE_REGISTRY_HINT"
+    elif defect == "short_instance":
+        record["instance"] = "A"
+    elif defect == "unicode_instance":
+        record["instance"] = "私" * 43
+    elif defect == "invalid_instance":
+        record["instance"] = "/" * 43
+    elif defect == "wrong_port":
+        requested_port = 9345
+    elif defect == "bool_requested_port":
+        requested_port = True
+    registry.write_text(json.dumps(record), encoding="utf-8")
+    if defect == "malformed":
+        registry.write_text("{PRIVATE_MALFORMED")
+    elif defect == "list":
+        registry.write_text(json.dumps([record]))
+    elif defect == "oversized":
+        registry.write_text(" " * 65537 + json.dumps(record))
+    elif defect == "public":
+        registry.chmod(0o644)
+    elif defect == "symlink":
+        outside = tmp_path / "outside-service.json"
+        outside.write_bytes(registry.read_bytes())
+        registry.unlink()
+        registry.symlink_to(outside)
+    elif defect == "hardlink":
+        os.link(registry, tmp_path / "outside-service.json")
+    elif defect == "fifo":
+        registry.unlink()
+        os.mkfifo(registry, 0o600)
+    elif defect == "directory":
+        registry.unlink()
+        registry.mkdir(mode=0o700)
+    before = _retirement_inventory(tmp_path)
+    authority_before = _retirement_authority(root, db)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unowned registry must neither inspect/signal a PID nor contact a service")
+    monkeypatch.setattr(cli, "request", forbidden)
+    monkeypatch.setattr(cli.os, "kill", forbidden)
+    monkeypatch.setattr(cli.subprocess, "run", forbidden)
+    result = cli.lifecycle("stop", root, requested_port)
+    assert result == {"ok": False, "reason": "service_identity_unverified"}
+    assert _retirement_inventory(tmp_path) == before
+    assert _retirement_authority(root, db) == authority_before
+    assert (root / "task-answers.key").read_bytes() == key
+    assert "PRIVATE_" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("defect", [
+    "legacy", "bool_pid", "float_pid", "string_port", "wrong_port",
+    "wrong_instance", "extra_key", "registry_replaced",
+])
+def test_service_retirement_requires_exact_typed_authenticated_readback(
+    retirement_private_state, monkeypatch, defect
+):
+    root, queue, db, key = retirement_private_state
+    registry, record = _retirement_registry(root)
+    observed = dict(record)
+    if defect == "legacy":
+        observed.pop("instance")
+    elif defect == "bool_pid":
+        observed["pid"] = True
+    elif defect == "float_pid":
+        observed["pid"] = float(record["pid"])
+    elif defect == "string_port":
+        observed["port"] = str(record["port"])
+    elif defect == "wrong_port":
+        observed["port"] += 1
+    elif defect == "wrong_instance":
+        observed["instance"] = "B" * 43
+    elif defect == "extra_key":
+        observed["private_hint"] = "PRIVATE_READBACK_HINT"
+    calls = []
+    replacement = {**record, "instance": "C" * 43}
+    def readback(_root, port, path, data=None):
+        calls.append((port, path, data))
+        assert path == "/v1/service-identity" and data is None
+        if defect == "registry_replaced":
+            _retirement_registry(root, replacement)
+        return observed
+    monkeypatch.setattr(cli, "request", readback)
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda *_: pytest.fail("readback never authorizes a PID signal"))
+    before = _retirement_authority(root, db)
+    result = cli.lifecycle("stop", root, record["port"])
+    assert result == {"ok": False, "reason": "service_identity_unverified"}
+    assert calls == [(record["port"], "/v1/service-identity", None)]
+    assert json.loads(registry.read_text()) == (
+        replacement if defect == "registry_replaced" else record)
+    assert _retirement_authority(root, db) == before
+    assert "PRIVATE_" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("reply", [
+    {"ok": True}, {"ok": "true"}, {"ok": False, "reason": "PRIVATE_UNTRUSTED"},
+    {"ok": False, "reason": ["PRIVATE_UNTRUSTED"]},
+])
+def test_service_retirement_ack_never_adopts_replacement_or_private_failure(
+    retirement_private_state, monkeypatch, reply
+):
+    root, queue, db, key = retirement_private_state
+    registry, record = _retirement_registry(root)
+    replacement = {**record, "instance": "B" * 43}
+    calls = []
+    def request(_root, port, path, data=None):
+        calls.append(path)
+        if path == "/v1/service-identity":
+            return record
+        assert path == "/v1/service-stop" and data == record
+        _retirement_registry(root, replacement)
+        return reply
+    monkeypatch.setattr(cli, "request", request)
+    monkeypatch.setattr(cli.os, "kill",
+                        lambda *_: pytest.fail("replacement must never be signalled"))
+    before = _retirement_authority(root, db)
+    result = cli.lifecycle("stop", root, record["port"])
+    assert result == {"ok": False, "reason": (
+        "service_identity_changed" if reply["ok"] is True else "service_stop_refused")}
+    assert calls == ["/v1/service-identity", "/v1/service-stop"]
+    assert json.loads(registry.read_text()) == replacement
+    assert _retirement_authority(root, db) == before
+    assert "PRIVATE_" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("fence,reason", [
+    ("active", "worker_active"), ("lease", "worker_active"),
+    ("runnable", "runnable_task_pending"), ("retry", "runnable_task_pending"),
+    ("otp_waiting", "otp_in_flight"), ("otp_ambiguous", "otp_in_flight"),
+    ("paused_otp", "otp_in_flight"), ("update", "update_in_progress"),
+])
+def test_service_retirement_preserves_existing_task_otp_and_update_fences(
+    retirement_private_state, fence, reason
+):
+    from executor.autonomy.supervisor import Supervisor, create_server
+    root, queue, db, key = retirement_private_state
+    supervisor = Supervisor(queue)
+    server = create_server(supervisor, port=0)
+    try:
+        if fence == "active":
+            supervisor.worker.active = "synthetic-task"
+        elif fence == "lease":
+            db.execute("UPDATE tasks SET owner='synthetic-owner',lease_until=?", (queue.clock() + 60,))
+        elif fence == "runnable":
+            db.execute("UPDATE tasks SET stage='DISCOVERED',blocker=NULL")
+        elif fence == "retry":
+            db.execute("UPDATE tasks SET stage='ERROR',blocker='retry_pending'")
+        elif fence.startswith("otp_"):
+            db.execute("UPDATE tasks SET stage='NEEDS_USER_ACTION',blocker=?", (fence,))
+        elif fence == "paused_otp":
+            db.execute("UPDATE tasks SET stage='BLOCKED',blocker='user_paused_from_otp_waiting'")
+        else:
+            (root / "update.json").write_text(json.dumps({"status": "updating"}))
+            supervisor.update_state = lambda: {"status": "updating"}
+        db.commit()
+        before = _retirement_authority(root, db)
+        result = supervisor.dispatch("POST", "/v1/service-stop", supervisor.service_identity())
+        assert result == {"ok": False, "reason": reason}
+        assert not supervisor.worker.stop_event.is_set()
+        assert _retirement_authority(root, db) == before
+        assert "PRIVATE_" not in json.dumps(result)
+    finally:
+        server.server_close()
+
+
+def test_exact_idle_service_retirement_fences_late_admission_and_is_idempotent(
+    retirement_private_state
+):
+    from executor.autonomy.supervisor import Supervisor, create_server
+    root, queue, db, key = retirement_private_state
+    supervisor = Supervisor(queue)
+    server = create_server(supervisor, port=0)
+    try:
+        before = _retirement_authority(root, db)
+        health = supervisor.dispatch("GET", "/health", {})
+        identity = supervisor.dispatch("GET", "/v1/service-identity", {})
+        for changed in ({**identity, "pid": True}, {**identity, "pid": float(identity["pid"])},
+                        {**identity, "port": str(identity["port"])},
+                        {**identity, "instance": "私" * 43}, {**identity, "extra": True}):
+            with pytest.raises(ValueError):
+                supervisor.dispatch("POST", "/v1/service-stop", changed)
+        assert supervisor.dispatch("POST", "/v1/service-stop", {
+            **identity, "instance": "B" * 43}) == {
+                "ok": False, "reason": "service_identity_changed"}
+        assert not supervisor.worker.stop_event.is_set()
+        expected = {"ok": True, "stopping": True}
+        assert supervisor.dispatch("POST", "/v1/service-stop", identity) == expected
+        assert supervisor.dispatch("POST", "/v1/service-stop", identity) == expected
+        assert supervisor.worker.stop_event.is_set()
+        with pytest.raises(RuntimeError, match="update in progress"):
+            supervisor.dispatch("POST", "/v1/tasks", {"private": "PRIVATE_LATE_TASK"})
+        with pytest.raises(RuntimeError, match="update in progress"):
+            supervisor.run_local_fact("synthetic-task", "family.primary.role", "PRIVATE_LATE_FACT", 1)
+        with pytest.raises(RuntimeError, match="update in progress"):
+            supervisor.run_local_command(None)
+        assert supervisor.dispatch("GET", "/health", {}) == health
+        assert identity["instance"] not in json.dumps(health)
+        assert health["final_click_actor"] == "user"
+        assert _retirement_authority(root, db) == before
+        assert (root / "task-answers.key").read_bytes() == key
+    finally:
+        server.server_close()
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_cold_restart_does_not_adopt_a_live_service_without_its_registry(
+    retirement_private_state, monkeypatch, live
+):
+    root, queue, db, key = retirement_private_state
+    calls = []
+    def request(_root, port, path, data=None):
+        calls.append(path)
+        assert path == "/health"
+        if live:
+            return {"ok": True, "final_click_actor": "user"}
+        raise urllib.error.URLError("synthetic offline")
+    def refuse_spawn(*_args, **_kwargs):
+        raise RuntimeError("synthetic cold start reached ordinary isolated launcher")
+    monkeypatch.setattr(cli, "request", request)
+    monkeypatch.setattr(cli.subprocess, "Popen", refuse_spawn)
+    before = _retirement_authority(root, db)
+    if live:
+        assert cli.lifecycle("restart", root, 9344) == {
+            "ok": False, "reason": "service_record_missing"}
+        assert calls == ["/health"]
+    else:
+        with pytest.raises(RuntimeError, match="cold start reached"):
+            cli.lifecycle("restart", root, 9344)
+        assert calls == ["/health", "/health"]
+    assert _retirement_authority(root, db) == before
+    assert not (root / "service.json").exists()
+
+
+@pytest.mark.parametrize("replace_registry", [False, True])
+def test_actual_isolated_service_retires_without_pid_signals_or_private_replay(
+    retirement_private_state, tmp_path, monkeypatch, replace_registry
+):
+    root, queue, db, key = retirement_private_state
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    env = {**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated",
+           "HOME": str(tmp_path / "synthetic-service-home")}
+    command = cli.isolated_cli_command("--runtime", str(root), "--port", str(port), "serve")
+    log = tmp_path / "isolated-service.log"
+    process = None
+    try:
+        with log.open("wb") as stream:
+            process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
+                                       stdout=stream, stderr=stream, start_new_session=True)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            assert process.poll() is None, "isolated service exited before readiness"
+            if (root / "service.json").exists():
+                try:
+                    identity = cli.request(root, port, "/v1/service-identity")
+                    health = cli.request(root, port, "/health")
+                    if health.get("ok"):
+                        break
+                except (OSError, urllib.error.URLError):
+                    pass
+            time.sleep(.05)
+        else:
+            pytest.fail("isolated service readiness handshake did not complete")
+        assert type(identity["pid"]) is int and identity["pid"] == process.pid
+        assert type(identity["port"]) is int and identity["port"] == port
+        assert json.loads((root / "service.json").read_text()) == identity
+        assert (root / "service.json").stat().st_mode & 0o077 == 0
+        assert health["final_click_actor"] == "user"
+        assert identity["instance"] not in json.dumps(health)
+        before = _retirement_authority(root, db)
+        for headers, status in [
+            ({}, 401),
+            ({"Authorization": "Bearer " + cli.local_token(root),
+              "Origin": f"http://127.0.0.1:{port}"}, 403),
+            ({"Authorization": "Bearer " + cli.local_token(root), "Host": "localhost"}, 403),
+        ]:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/service-stop",
+                data=json.dumps(identity).encode(), headers={
+                    "Content-Type": "application/json", **headers}, method="POST")
+            with pytest.raises(urllib.error.HTTPError) as refused:
+                urllib.request.urlopen(req, timeout=10)
+            assert refused.value.code == status
+        assert cli.request(root, port, "/v1/service-stop", {
+            **identity, "instance": "B" * 43}) == {
+                "ok": False, "reason": "service_identity_changed"}
+        assert cli.request(root, port, "/health")["ok"] is True
+        assert _retirement_authority(root, db) == before
+        with monkeypatch.context() as stop_context:
+            stop_context.setattr(cli.os, "kill",
+                                 lambda *_: pytest.fail("retirement must not signal a PID"))
+            stop_context.setattr(cli.subprocess, "run",
+                                 lambda *_args, **_kwargs: pytest.fail("retirement must not inspect ps"))
+            if replace_registry:
+                replacement = {**identity, "instance": "C" * 43}
+                _retirement_registry(root, replacement)
+                assert cli.request(root, port, "/v1/service-stop", identity) == {
+                    "ok": True, "stopping": True}
+            else:
+                assert cli.lifecycle("stop", root, port) == {"ok": True, "running": False}
+        assert process.wait(timeout=10) == 0
+        if replace_registry:
+            assert json.loads((root / "service.json").read_text()) == replacement
+        else:
+            assert not (root / "service.json").exists()
+        assert _retirement_authority(root, db) == before
+        assert (root / "task-answers.key").read_bytes() == key
+        assert b"PRIVATE_" not in log.read_bytes()
+        assert identity["instance"].encode() not in log.read_bytes()
+        with pytest.raises(urllib.error.URLError):
+            cli.request(root, port, "/health")
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+
+def test_service_start_refuses_live_legacy_writer_before_journal_initialization(
+    retirement_private_state, monkeypatch
+):
+    from executor.autonomy import queue as queue_module
+    from executor.autonomy.worker import ProcessLock
+    root, queue, db, key = retirement_private_state
+    registry, record = _retirement_registry(root, {"pid": os.getpid(), "port": 9344})
+    before = _retirement_authority(root, db)
+    registry_before = registry.read_bytes()
+    probes = []
+    def probe(pid, sig):
+        probes.append((pid, sig))
+        assert pid == record["pid"] and sig == 0
+    monkeypatch.setattr(cli.os, "kill", probe)
+    monkeypatch.setattr(queue_module, "TaskQueue",
+                        lambda *_: pytest.fail("live legacy writer forbids queue initialization"))
+    with pytest.raises(BlockingIOError, match="task_state_in_use"):
+        cli.serve(root, 9344)
+    assert probes == [(record["pid"], 0)]
+    assert registry.read_bytes() == registry_before
+    assert _retirement_authority(root, db) == before
+    with ProcessLock(root / "worker.lock"):
+        pass  # Failed takeover releases only its own ordinary fence.

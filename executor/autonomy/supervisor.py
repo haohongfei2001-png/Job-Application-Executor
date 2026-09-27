@@ -41,6 +41,9 @@ class Supervisor:
         self._command_lock = threading.RLock()
         self._ui_tickets: dict[str, float] = {}
         self._ui_sessions: dict[str, float] = {}
+        self._service_instance = secrets.token_urlsafe(32)
+        self._service_port = None
+        self._service_stop_requested = False
 
     def configure_profile(self, text, expected_version):
         current = select_profile(text, expected_version)
@@ -305,6 +308,38 @@ class Supervisor:
             "server_verified": submission["server_verified"],
         }
 
+    def service_identity(self):
+        if type(self._service_port) is not int or not 0 < self._service_port < 65536:
+            raise RuntimeError("service identity unavailable")
+        return {"pid": os.getpid(), "port": self._service_port,
+                "instance": self._service_instance}
+
+    def stop_service(self, data):
+        # This internal bearer-only route has no task or final-click authority.
+        if (type(data) is not dict or set(data) != {"pid", "port", "instance"}
+                or type(data["pid"]) is not int or type(data["port"]) is not int
+                or type(data["instance"]) is not str or not data["instance"].isascii()
+                or not 32 <= len(data["instance"]) <= 128
+                or not all(c.isalnum() or c in "_-" for c in data["instance"])):
+            raise ValueError("invalid service identity")
+        with self._mutation_lock:
+            with self._command_lock:
+                if (data["pid"] != os.getpid() or data["port"] != self._service_port
+                        or not hmac.compare_digest(data["instance"], self._service_instance)):
+                    return {"ok": False, "reason": "service_identity_changed"}
+                if self._service_stop_requested:
+                    return {"ok": True, "stopping": True}
+                if self.mutation_fenced():
+                    return {"ok": False, "reason": "update_in_progress"}
+                safe, reason = safe_to_update(self)
+                if not safe:
+                    return {"ok": False, "reason": reason}
+                # Serialize against all task/fact/config admission before the
+                # existing worker safe-checkpoint stop flag can be observed.
+                self._service_stop_requested = True
+                self.worker.stop_event.set()
+                return {"ok": True, "stopping": True}
+
     def update_state(self):
         return reconciled_update_state(self.queue.root)
 
@@ -316,7 +351,7 @@ class Supervisor:
         }
 
     def mutation_fenced(self) -> bool:
-        return self.update_state().get("status") in {
+        return self._service_stop_requested or self.update_state().get("status") in {
             "checking",
             "updating",
             "restarting",
@@ -394,6 +429,8 @@ class Supervisor:
     def dispatch(self, method, path, data):
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
+        if method == "POST" and parts == ["v1", "service-stop"]:
+            return self.stop_service(data)
         if method == "POST" and parts == ["v1", "commands"]:
             return self._dispatch_unlocked(method, path, data)
         if method == "POST" and parts != ["v1", "ui-ticket"]:
@@ -405,6 +442,8 @@ class Supervisor:
     def _dispatch_unlocked(self, method, path, data):
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
+        if method == "GET" and parts == ["v1", "service-identity"]:
+            return self.service_identity()
         if method == "GET" and parts == ["health"]:
             return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user",
                     "loaded_source_sha256": self.release_identity.get("source_sha256", "")
@@ -760,4 +799,5 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
 
     server = LoopbackHTTPServer((host, port), Handler)
     server.daemon_threads = True
+    supervisor._service_port = server.server_address[1]
     return server
