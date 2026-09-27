@@ -5566,3 +5566,143 @@ def test_actual_service_parent_start_health_and_authenticated_stop_keep_authorit
         # Use only the existing authenticated exact-instance retirement path.
         # No PID signalling, browser adoption or private user authority.
         cli.lifecycle("stop", root, port)
+
+
+@pytest.mark.parametrize("defect", [
+    "symlink", "hardlink", "fifo", "directory", "foreign", "replaced", "ancestor_replaced",
+])
+def test_bootstrap_log_admission_refuses_before_spawn_and_preserves_all_authority(
+        retirement_private_state, tmp_path, monkeypatch, defect):
+    from executor.autonomy import runtime_paths
+
+    root, queue, db, key = retirement_private_state
+    log = root / "bootstrap.log"
+    outside = tmp_path / "outside-recovery-log"
+    outside.write_bytes(b"PRIVATE_RECOVERY_LOG_OUTSIDE_KEEP" * 400)
+    outside.chmod(0o640)
+    if defect == "symlink":
+        log.symlink_to(outside)
+    elif defect == "hardlink":
+        os.link(outside, log)
+    elif defect == "fifo":
+        os.mkfifo(log, 0o600)
+    elif defect == "directory":
+        log.mkdir(mode=0o700)
+    else:
+        log.write_bytes(b"PRIVATE_EXISTING_RECOVERY_LOG_KEEP" * 400)
+        log.chmod(0o640)
+    # Keep the real ordinary bootstrap lease so no expected lock creation is
+    # confused with an authority mutation during negative log admission.
+    lease = root / "bootstrap-service.lock"
+    lease.write_bytes(b"")
+    lease.chmod(0o600)
+    authority = _retirement_authority(root, db)
+    before = _retirement_inventory(tmp_path)
+    actual_open, actual_fstat = os.open, os.fstat
+    descriptors, after_race = [], []
+    displaced_root = tmp_path / "displaced-recovery-authority"
+
+    def opened(path, flags, *args, **kwargs):
+        fd = actual_open(path, flags, *args, **kwargs)
+        if Path(path) == log:
+            descriptors.append(fd)
+            if defect == "replaced":
+                log.rename(root / "displaced-original-bootstrap-log")
+                log.write_bytes(b"PRIVATE_NEW_BOOTSTRAP_LOG_KEEP")
+                log.chmod(0o640)
+                after_race.append(_retirement_inventory(tmp_path))
+            elif defect == "ancestor_replaced":
+                root.rename(displaced_root)
+                root.symlink_to(displaced_root, target_is_directory=True)
+                after_race.append(_retirement_inventory(tmp_path))
+        return fd
+
+    def metadata(fd):
+        observed = actual_fstat(fd)
+        if defect == "foreign" and fd in descriptors:
+            values = list(observed)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+        return observed
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unadmitted recovery log must not start, contact or present a service")
+
+    monkeypatch.setattr(runtime_paths.os, "open", opened)
+    monkeypatch.setattr(runtime_paths.os, "fstat", metadata)
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(bootstrap.urllib.request, "build_opener", forbidden)
+    result = bootstrap.open_bootstrap(root, 9344, presenter=forbidden)
+    assert result == {"ok": False, "opened": False, "reason": "bootstrap_state_invalid"}
+    assert "PRIVATE" not in json.dumps(result)
+    for fd in descriptors:
+        with pytest.raises(OSError):
+            fcntl.fcntl(fd, fcntl.F_GETFD)
+    _assert_retirement_inventory(tmp_path, after_race[0] if after_race else before)
+    _assert_retirement_authority(
+        displaced_root if defect == "ancestor_replaced" else root, db, authority)
+    assert not (root / "bootstrap.json").exists()
+    assert outside.read_bytes() == b"PRIVATE_RECOVERY_LOG_OUTSIDE_KEEP" * 400
+
+
+@pytest.mark.parametrize("name", ["service.log", "bootstrap.log"])
+def test_fixed_private_runtime_log_preserves_actual_append_and_closes_descriptor(
+        tmp_path, name):
+    from executor.autonomy.runtime_paths import private_runtime_log
+
+    root = tmp_path / "runtime"
+    root.mkdir(mode=0o750)
+    log = root / name
+    original = b"PRIVATE_OWNED_LOG_BYTES_KEEP" * 400
+    log.write_bytes(original)
+    log.chmod(0o640)
+    identity = (log.stat().st_dev, log.stat().st_ino)
+    with private_runtime_log(root, name) as stream:
+        fd = stream.fileno()
+        assert (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == identity
+        assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        stream.write(b"\nSYNTHETIC_APPEND_ONLY\n")
+    with pytest.raises(OSError):
+        fcntl.fcntl(fd, fcntl.F_GETFD)
+    assert log.read_bytes() == original + b"\nSYNTHETIC_APPEND_ONLY\n"
+    assert (log.stat().st_dev, log.stat().st_ino) == identity
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("name", [
+    "../service.log", "/tmp/unowned.log", "unknown.log", "", None, [], "service.log/sub",
+])
+def test_private_runtime_log_names_refuse_before_any_directory_effect(
+        tmp_path, monkeypatch, name):
+    from executor.autonomy import runtime_paths
+
+    root = tmp_path / "not-created-runtime"
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"PRIVATE_NOT_A_LOG_KEEP" * 400)
+    outside.chmod(0o640)
+    before = _retirement_inventory(tmp_path)
+    monkeypatch.setattr(runtime_paths, "private_dir",
+        lambda *_args, **_kwargs: pytest.fail("unknown log name reached directory authority"))
+    with pytest.raises(ValueError, match="^private runtime unavailable$"):
+        runtime_paths.private_runtime_log(root, name)
+    assert not root.exists()
+    _assert_retirement_inventory(tmp_path, before)
+
+
+@pytest.mark.parametrize("shape", ["root", "ancestor"])
+def test_locked_bootstrap_entry_never_canonicalizes_an_unadmitted_caller_root(
+        retirement_private_state, tmp_path, monkeypatch, shape):
+    root, queue, db, key = retirement_private_state
+    alias = tmp_path / "locked-entry-alias"
+    alias.symlink_to(root if shape == "root" else tmp_path, target_is_directory=True)
+    selected = alias if shape == "root" else alias / root.name
+    authority = _retirement_authority(root, db)
+    before = _retirement_inventory(tmp_path)
+    monkeypatch.setattr(bootstrap, "LoopbackHTTPServer",
+        lambda *_args, **_kwargs: pytest.fail("caller alias reached recovery server bind"))
+    with pytest.raises(ValueError, match="^private runtime unavailable$"):
+        bootstrap._serve_bootstrap_locked(selected, 9344, "service_unavailable")
+    _assert_retirement_inventory(tmp_path, before)
+    _assert_retirement_authority(root, db, authority)
+    assert not (root / "bootstrap.json").exists()

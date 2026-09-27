@@ -93,9 +93,11 @@ def _private_regular_fd(path, flags, *, require_private=False):
         raise
 
 
-def private_service_log(root):
-    """Append only to the admitted log descriptor, never chmod a path alias."""
-    path = private_dir(root) / "service.log"
+def private_runtime_log(root, name):
+    """Append only to a fixed admitted log descriptor, never a path alias."""
+    if type(name) is not str or name not in ("service.log", "bootstrap.log"):
+        raise ValueError("private runtime unavailable")
+    path = private_dir(root) / name
     fd = _private_regular_fd(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
     try:
         os.fchmod(fd, 0o600)
@@ -104,6 +106,9 @@ def private_service_log(root):
         os.close(fd)
         raise
 
+
+def private_service_log(root):
+    return private_runtime_log(root, "service.log")
 
 def local_token(root):
     root = runtime_root(root)

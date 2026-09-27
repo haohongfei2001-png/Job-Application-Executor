@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 from .loopback_http import LoopbackHTTPServer
-from .runtime_paths import private_dir
+from .runtime_paths import private_dir, private_runtime_log
 from .process_entry import isolated_cli_command
 from .release import read_release_identity
 from .runtime_provenance import packaged_provenance, current_packaged_source
@@ -313,7 +313,7 @@ def serve_bootstrap(root: str | Path, service_port: int, initial_reason: str = "
 def _serve_bootstrap_locked(root: Path, service_port: int, initial_reason: str) -> None:
     from .cli import _start_consumer_service, request
 
-    root = Path(root).expanduser().resolve()
+    root = private_dir(root)  # Keep the admitted lexical authority; never resolve a caller alias.
     token = secrets.token_urlsafe(32)
     state = _state_path(root)
     previous = _bootstrap_record(state)
@@ -423,15 +423,7 @@ def open_bootstrap(root: str | Path, service_port: int, reason: str = "service_u
             with _bootstrap_guard(root):
                 if _bootstrap_record(state) != record:
                     raise ValueError("bootstrap_state_changed")
-            log = root / "bootstrap.log"
-            fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT
-                         | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-            with os.fdopen(fd, "ab") as stream:
-                metadata = os.fstat(stream.fileno())
-                if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
-                        or metadata.st_uid != os.geteuid()):
-                    raise ValueError("bootstrap_state_invalid")
-                os.fchmod(stream.fileno(), 0o600)
+            with private_runtime_log(root, "bootstrap.log") as stream:
                 child = subprocess.Popen(
                     isolated_cli_command("--runtime", str(root), "--port", str(service_port),
                                          "bootstrap-serve", "--reason", reason),
