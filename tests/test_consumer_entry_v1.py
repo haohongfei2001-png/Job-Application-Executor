@@ -2430,13 +2430,15 @@ def test_actual_recovery_preparation_http_auth_refresh_and_private_state_preserv
 @pytest.mark.parametrize("clipboard", ["success", "rejected", "unavailable", "late_success", "late_failure",
                                     "late_rapid_success", "late_programmatic_failure"])
 def test_recovery_preparation_browser_keeps_copy_uncertainty_and_closed_page_fenced(
-        monkeypatch, clipboard):
+        tmp_path, monkeypatch, clipboard):
     from playwright.sync_api import expect, sync_playwright
 
     monkeypatch.setattr(preflight, "collect_live_preflight", lambda **_kwargs: {
         "checks": {"profile_configured": False, "deepseek_available": False,
                    "chrome_installed": False},
         "private_exception": "PRIVATE_BROWSER_CONFIG_CANARY"})
+    candidate, _runtime, source_identity, runtime_identity = _cold_recovery_payload(tmp_path)
+    monkeypatch.setattr(bootstrap, "__file__", str(candidate / "executor" / "autonomy" / "bootstrap.py"))
     monkeypatch.setattr(bootstrap, "_version", lambda: "unknown")
     monkeypatch.setattr(bootstrap, "read_release_identity", lambda _root: {"status": "unknown"})
     page_html = bootstrap._page("service_start_failed", "PRIVATE_RECOVERY_TOKEN")
@@ -2454,6 +2456,10 @@ def test_recovery_preparation_browser_keeps_copy_uncertainty_and_closed_page_fen
                     route.fulfill(status=200, content_type="text/html", body=page_html)
             page.route("**/*", route_request)
             page.goto("http://preparation-ui.test/")
+            assert page.locator("#payload-checks li").count() == 3
+            assert page.locator("#payload-checks").inner_text().count("已核对") == 2
+            assert "当前解释器来自应用 · 未通过" in page.locator("#payload-checks").inner_text()
+            assert "不代表业务依赖已成功加载" in page.locator('section[aria-labelledby="payload-title"]').inner_text()
             assert page.locator("#preparation-checks li").count() == 8
             assert "个人资料尚未配置" in page.locator("#preparation-checks").inner_text()
             assert "PRIVATE" not in page.locator("#preparation-checks").inner_text()
@@ -2472,6 +2478,14 @@ def test_recovery_preparation_browser_keeps_copy_uncertainty_and_closed_page_fen
             }""", clipboard)
             page.get_by_text("查看安全诊断", exact=True).click()
             report = json.loads(page.locator("#safe-diagnostics").inner_text())
+            assert report["source_identity_basis"] == "current_payload_integrity"
+            assert report["packaged_release"] == {
+                "source_verified_now": True, "source_sha256": source_identity["source_sha256"],
+                "runtime_verified_now": True, "runtime_sha256": runtime_identity["runtime_sha256"],
+                "requirements_sha256": runtime_identity["requirements_sha256"],
+                "interpreter_owned": False, "verification_scope": "payload_integrity_only",
+                "signed_distribution_certified": False,
+            }
             assert report["preparation"]["ready_for_live_e2e"] is False
             assert report["submit_capability"] is False
             assert "PRIVATE" not in json.dumps(report)
@@ -3295,3 +3309,151 @@ def test_profile_setup_refuses_public_parent_without_chmod(tmp_path, monkeypatch
         setup.select_profile('{"name":"PRIVATE"}', setup.profile_setup_state()["settings_version"])
     assert settings.PATH.read_bytes() == before
     assert settings.PATH.parent.stat().st_mode & 0o777 == 0o755
+
+
+# These owning cold-entry cases copy every production Python source and the full
+# dependency lock. The runtime is deliberately never executable by diagnostics:
+# its real hashes are payload evidence, not proof that business SDKs loaded.
+def _cold_recovery_payload(tmp_path):
+    candidate = tmp_path / "Recovery Manager.app" / "Contents" / "Resources" / "release"
+    source_identity = release.copy_source_candidate(Path(cli.__file__).resolve().parents[2], candidate)
+    runtime = candidate.parent / "runtime"
+    (runtime / "bin").mkdir(parents=True)
+    (runtime / "bin" / "python").write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    (runtime / "bin" / "python").chmod(0o700)
+    (runtime / "dependency-canary.py").write_text("VALUE = 'owned synthetic payload'\n", encoding="utf-8")
+    runtime_identity = release.runtime_manifest(runtime, candidate)
+    (runtime / release.RUNTIME_MANIFEST_NAME).write_text(json.dumps(runtime_identity), encoding="utf-8")
+    return candidate, runtime, source_identity, runtime_identity
+
+
+COLD_PAYLOAD_PROBE = r"""
+import importlib.abc
+import json
+import os
+import socket
+import subprocess
+import sys
+import urllib.request
+import webbrowser
+from pathlib import Path
+candidate = Path(sys.argv[1])
+private = Path(sys.argv[2]).resolve()
+expected = json.loads(sys.argv[3])
+sys.path.insert(0, str(candidate))
+attempts = []
+blocked = ('pydantic', 'playwright', 'cryptography', 'executor.browser',
+           'executor.resolver', 'executor.settings', 'executor.profile',
+           'executor.autonomy.diagnostics', 'executor.autonomy.preflight',
+           'executor.autonomy.manager', 'executor.autonomy.queue',
+           'executor.autonomy.worker', 'executor.autonomy.supervisor')
+class RefuseBusiness(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if any(fullname == name or fullname.startswith(name + '.') for name in blocked):
+            attempts.append(fullname)
+            raise ImportError('PRIVATE_DEPENDENCY_PAYLOAD_CANARY')
+sys.meta_path.insert(0, RefuseBusiness())
+def audit(event, args):
+    if event == 'open' and isinstance(args[0], (str, bytes, os.PathLike)):
+        path = Path(os.fsdecode(args[0])).absolute()
+        assert not path.is_relative_to(private), 'recovery may not read applicant files'
+    assert event not in ('subprocess.Popen', 'os.system', 'socket.connect',
+                         'socket.bind'), 'payload diagnostics must not start external work'
+sys.addaudithook(audit)
+from executor.autonomy import bootstrap, runtime_provenance
+assert attempts == [], 'cold payload import must not require business dependencies'
+assert bootstrap.packaged_provenance is runtime_provenance.packaged_provenance
+def forbidden(*args, **kwargs):
+    raise AssertionError('payload diagnostics must never execute, browse or connect')
+subprocess.run = subprocess.Popen = os.system = forbidden
+urllib.request.urlopen = webbrowser.open = socket.getfqdn = forbidden
+version = bootstrap._version()
+report = bootstrap._safe_diagnostics('business_dependencies_unavailable', version)
+payload = report['packaged_release']
+assert payload == expected
+assert report['source_identity_basis'] == 'current_payload_integrity'
+assert report['loaded_source_verified'] is expected['source_verified_now']
+assert report['loaded_source_sha256'] == expected['source_sha256']
+assert report['loaded_version'] == (expected['source_sha256'][:12] or 'unknown')
+assert report['submit_capability'] is False and report['final_click_actor'] == 'user'
+assert report['applicant_values_in_report'] is False
+page = bootstrap._page('business_dependencies_unavailable', 'opaque-token')
+assert '应用运行环境' in page and '重试并打开面板' in page
+assert '不代表业务依赖已成功加载、服务可用或发布签名已认证' in page
+assert 'PRIVATE_' not in page and str(private) not in page and str(candidate) not in page
+assert attempts == ['executor.autonomy.preflight']
+for name in blocked:
+    assert name not in sys.modules
+assert payload['verification_scope'] == 'payload_integrity_only'
+assert payload['signed_distribution_certified'] is False
+print(json.dumps({'ok': True, 'source': payload['source_verified_now'],
+                  'runtime': payload['runtime_verified_now'], 'submit': False}))
+"""
+
+
+@pytest.mark.parametrize("damage", [
+    "none", "source_changed", "source_missing", "runtime_changed", "runtime_missing",
+    "source_fifo", "runtime_fifo", "source_directory", "runtime_directory", "runtime_alias",
+])
+def test_actual_cold_recovery_payload_survives_missing_sdks_and_rejects_drift(
+        tmp_path, damage):
+    candidate, runtime, source_identity, runtime_identity = _cold_recovery_payload(tmp_path)
+    private = tmp_path / "PRIVATE_APPLICANT_AUTHORITY"
+    private.mkdir(mode=0o700)
+    for name, text in {
+        "profile.json": json.dumps({"complete_research": "PRIVATE_FULL_资料\n" * 1000}),
+        "settings.json": json.dumps({"private_preference": "PRIVATE_FULL_偏好\n" * 1000}),
+        "tasks.json": json.dumps({"tasks": [{"task": i, "original": "PRIVATE_TASK"} for i in range(213)]}),
+        "events.json": json.dumps({"events": [{"sequence": i, "original": "PRIVATE_EVENT"} for i in range(1000)]}),
+    }.items():
+        (private / name).write_text(text, encoding="utf-8")
+        (private / name).chmod(0o600)
+    if damage == "source_changed":
+        module = candidate / "executor" / "autonomy" / "consumer_presentation.py"
+        module.write_text(module.read_text() + "\n# PRIVATE_SOURCE_DRIFT_CANARY\n", encoding="utf-8")
+    elif damage == "runtime_changed":
+        (runtime / "dependency-canary.py").write_text("PRIVATE_RUNTIME_DRIFT_CANARY", encoding="utf-8")
+    elif damage in {"source_missing", "source_fifo", "source_directory"}:
+        manifest = candidate / release.MANIFEST_NAME
+        manifest.unlink()
+        if damage == "source_fifo":
+            os.mkfifo(manifest, 0o600)
+        elif damage == "source_directory":
+            manifest.mkdir()
+    elif damage in {"runtime_missing", "runtime_fifo", "runtime_directory"}:
+        manifest = runtime / release.RUNTIME_MANIFEST_NAME
+        manifest.unlink()
+        if damage == "runtime_fifo":
+            os.mkfifo(manifest, 0o600)
+        elif damage == "runtime_directory":
+            manifest.mkdir()
+    elif damage == "runtime_alias":
+        actual = runtime.with_name("PRIVATE_RUNTIME_ALIAS")
+        runtime.rename(actual)
+        runtime.symlink_to(actual, target_is_directory=True)
+    source_ok = not damage.startswith("source_")
+    runtime_ok = damage == "none"
+    expected = {
+        "source_verified_now": source_ok,
+        "source_sha256": source_identity["source_sha256"] if source_ok else "",
+        "runtime_verified_now": runtime_ok,
+        "runtime_sha256": runtime_identity["runtime_sha256"] if runtime_ok else "",
+        "requirements_sha256": runtime_identity["requirements_sha256"] if runtime_ok else "",
+        "interpreter_owned": False, "verification_scope": "payload_integrity_only",
+        "signed_distribution_certified": False,
+    }
+    def snapshot():
+        return {str(path.relative_to(tmp_path)):
+                (path.lstat().st_mode, path.readlink().as_posix() if path.is_symlink()
+                 else path.read_bytes() if path.is_file() else None)
+                for path in tmp_path.rglob("*")}
+    before = snapshot()
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", COLD_PAYLOAD_PROBE,
+         str(candidate), str(private), json.dumps(expected)],
+        capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "ok": True, "source": source_ok, "runtime": runtime_ok, "submit": False}
+    assert "PRIVATE_" not in result.stdout
+    assert snapshot() == before

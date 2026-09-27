@@ -23,6 +23,7 @@ from .loopback_http import LoopbackHTTPServer
 from .runtime_paths import private_dir
 from .process_entry import isolated_cli_command
 from .release import read_release_identity
+from .runtime_provenance import packaged_provenance, current_packaged_source
 from .consumer_presentation import ConsumerSurface, loopback_origin, present_surface
 
 
@@ -42,15 +43,16 @@ def _reason(code: str) -> str:
 
 
 def _version(root: str | Path | None = None) -> str:
-    source = Path(root).resolve() if root is not None else Path(__file__).resolve().parents[2]
+    source = Path(root).expanduser().absolute() if root is not None else Path(__file__).resolve().parents[2]
+    # The cold page must not block opening a FIFO/directory manifest or consult
+    # host Git when an installed app has missing, damaged or aliased payloads.
+    from .release import is_packaged_source
+    if is_packaged_source(source):
+        identity = current_packaged_source(source)
+        return identity["source_sha256"][:12] if identity["status"] == "verified" else "unknown"
     identity = read_release_identity(source)
     if identity.get("status") == "verified":
         return identity["source_sha256"][:12]
-    # An installed app with a missing or damaged manifest is unverified. Never
-    # infer its identity from Git metadata on the host or invoke Git for it.
-    from .release import is_packaged_source
-    if is_packaged_source(source):
-        return "unknown"
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=source,
@@ -74,7 +76,11 @@ def _safe_diagnostics(reason: str, version: str) -> dict:
     }
     code = reason if reason in known else "service_unavailable"
     source = Path(__file__).resolve().parents[2]
-    identity = read_release_identity(source)
+    identity = current_packaged_source(source)
+    payload = packaged_provenance(source)
+    if payload is not None and (not payload["source_verified_now"]
+            or payload["source_sha256"] != identity.get("source_sha256")):
+        identity = {"status": "unverified", "source_sha256": ""}
     verified = identity.get("status") == "verified"
     digest = identity.get("source_sha256", "") if verified else ""
     return {
@@ -83,6 +89,8 @@ def _safe_diagnostics(reason: str, version: str) -> dict:
         "loaded_version": version,
         "loaded_source_verified": verified,
         "loaded_source_sha256": digest,
+        "source_identity_basis": "current_payload_integrity",
+        **({"packaged_release": payload} if payload is not None else {}),
         "reason": code,
         "recovery_action": known.get(code, "retry_service"),
         "applicant_values_in_report": False,
@@ -141,6 +149,19 @@ def _preparation_markup(snapshot: dict) -> str:
     return "".join(rows)
 
 
+def _payload_markup(report: dict) -> str:
+    payload = report.get("packaged_release") or {}
+    rows = []
+    for key, label in (
+            ("source_verified_now", "应用文件"),
+            ("runtime_verified_now", "自带运行环境文件"),
+            ("interpreter_owned", "当前解释器来自应用")):
+        observed = payload.get(key)
+        state = "已核对" if observed is True else ("未通过" if observed is False else "未核验")
+        rows.append(f"<li><strong>{label}</strong> · {state}</li>")
+    return "".join(rows)
+
+
 def _page(reason: str, token: str) -> str:
     safe_reason = html.escape(_reason(reason))
     safe_token = html.escape(token, quote=True)
@@ -149,6 +170,7 @@ def _page(reason: str, token: str) -> str:
     preparation_html = _preparation_markup(preparation)
     diagnostics = {**_safe_diagnostics(reason, version), "preparation": preparation}
     report = html.escape(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+    payload_html = _payload_markup(diagnostics)
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI 投递经理 · 恢复</title><style>
@@ -156,6 +178,9 @@ body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f6f7f9
 main{{max-width:540px;margin:10vh auto;background:white;border:1px solid #e5e7eb;border-radius:16px;padding:28px}}
 h1{{font-size:21px}}h2{{font-size:17px}}p{{line-height:1.6}}li p{{margin:4px 0 12px;font-size:13px;color:#475569}}pre,textarea{{width:100%;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:anywhere}}textarea{{min-height:180px}}button{{background:#111;color:white;border:0;border-radius:9px;padding:11px 17px;cursor:pointer}}
 </style></head><body><main><h1>AI 投递经理</h1><p>{safe_reason}</p>
+<section aria-labelledby="payload-title"><h2 id="payload-title">应用运行环境</h2>
+<ul id="payload-checks">{payload_html}</ul>
+<p>这里只核对当前应用文件；不代表业务依赖已成功加载、服务可用或发布签名已认证。不会运行候选程序，也不会下载或修复文件。</p></section>
 <section aria-labelledby="preparation-title"><h2 id="preparation-title">打开应用前的准备</h2>
 <p>本页可在投递服务不可用时查看。检查只读取现有本地配置；不保存资料、不读取任务内容、不申请权限，也不访问招聘网站。</p>
 <p>配置可用不代表可以投递：真实账号、模型连接与额度、网站兼容性尚未核验。最终提交始终由你本人点击。</p>

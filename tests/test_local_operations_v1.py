@@ -1426,7 +1426,8 @@ def test_packaged_provenance_refuses_manifest_switched_during_runtime_verificati
     from executor.autonomy import release
 
     candidate, runtime, _source, _payload = _diagnostic_packaged_fixture(tmp_path)
-    verify = diagnostics.verify_runtime_candidate
+    from executor.autonomy import runtime_provenance
+    verify = runtime_provenance.verify_runtime_candidate
     def switched(root, source):
         passed = verify(root, source)
         assert passed is True
@@ -1435,7 +1436,7 @@ def test_packaged_provenance_refuses_manifest_switched_during_runtime_verificati
         forged["runtime_sha256"] = "f" * 64
         path.write_text(json.dumps(forged))
         return passed
-    monkeypatch.setattr(diagnostics, "verify_runtime_candidate", switched)
+    monkeypatch.setattr(runtime_provenance, "verify_runtime_candidate", switched)
     _diagnostics_forbid_git_and_processes(monkeypatch)
     report = diagnostics.packaged_provenance(candidate)
     assert report["runtime_verified_now"] is False
