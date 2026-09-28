@@ -1236,3 +1236,38 @@ def test_direct_fill_admits_complete_observation_before_any_partial_native_write
         assert journal == []
         assert "PRIVATE_" not in json.dumps(result)
         assert "不要删除" not in json.dumps(result)
+
+
+def test_repeated_native_target_refuses_whole_batch_with_legacy_code_and_full_values(tmp_path):
+    full = "".join(f"第{i}段：完整保留🧭，不要删除否定词。\n" for i in range(1000))
+    retained = [full + "\nPRIVATE_FIRST", full + "\nPRIVATE_REPEAT_A", full + "\nPRIVATE_REPEAT_B"]
+    html = tmp_path / "native-repeat.html"
+    html.write_text("""<!doctype html><body>
+      <label>First<textarea id='first'></textarea></label>
+      <label>Repeated<textarea name='repeat'></textarea></label>
+      <label>Repeated<textarea name='repeat'></textarea></label>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.writes=0;window.submits=0;
+        document.addEventListener('input',()=>window.writes++);
+        document.addEventListener('change',()=>window.writes++);</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.page.locator("textarea").evaluate_all(
+            "(elements,values)=>elements.forEach((e,i)=>e.value=values[i])", retained)
+        fields = adapter.discover_fields()
+        assert len(fields) == 3
+        assert fields[1].selector == fields[2].selector
+        resolutions = [FieldResolution(field_id=field.field_id, selector=field.selector,
+            label=field.label, status=ResolutionStatus.RESOLVED, value=full + "\nPRIVATE_INTENDED")
+            for field in fields[:2]]
+        intents = []
+        adapter.field_action_begin = lambda *args, **kwargs: intents.append("UNEXPECTED_INTENT")
+        adapter.field_action_finish = lambda *args, **kwargs: intents.append("UNEXPECTED_FINISH")
+        result = adapter.apply_resolutions(resolutions)
+        assert result == [{"field_id": item.field_id, "ok": False,
+                          "reason": "ambiguous_or_missing_locator"} for item in resolutions]
+        assert adapter.page.locator("textarea").evaluate_all(
+            "elements=>elements.map(e=>e.value)") == retained
+        assert adapter.page.evaluate("[window.writes,window.submits]") == [0, 0]
+        assert intents == []
+        assert "PRIVATE_" not in json.dumps(result)
+        assert "不要删除" not in json.dumps(result)
