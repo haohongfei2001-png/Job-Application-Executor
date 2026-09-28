@@ -70,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [consumer_transactions, release_distribution]
+        suite: [consumer_transactions, recovery_transactions, release_distribution]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,6 +107,7 @@ jobs:
           full = [
               "tests/test_release_candidate_v1.py", "tests/test_task_state_compatibility_v1.py",
               "tests/test_consumer_entry_v1.py", "tests/test_standalone_runtime_v1.py",
+              "tests/test_consumer_recovery_transactions_v1.py",
               "tests/test_app_distribution_v1.py", "tests/test_macos_host_v1.py",
           ]
           previous = os.environ.get("JAE_PREVIOUS_HEAD", "")
@@ -139,11 +140,19 @@ jobs:
               "tests/test_standalone_runtime_v1.py", "tests/test_macos_host_v1.py",
           }] if affected else full
           consumer = {"tests/test_consumer_entry_v1.py", "tests/test_task_state_compatibility_v1.py"}
+          recovery = {"tests/test_consumer_recovery_transactions_v1.py"}
           suite = os.environ["JAE_PACKAGED_SUITE"]
-          if suite not in {"consumer_transactions", "release_distribution"}:
+          partitions = {
+              "consumer_transactions": [path for path in selected if path in consumer],
+              "recovery_transactions": [path for path in selected if path in recovery],
+              "release_distribution": [path for path in selected if path not in consumer | recovery],
+          }
+          covered = [path for paths in partitions.values() for path in paths]
+          if len(covered) != len(set(covered)) or set(covered) != set(selected):
+              raise ValueError("incomplete or duplicated complete-file partition")
+          if suite not in partitions:
               raise ValueError("unknown packaged suite")
-          selected = [path for path in selected
-                      if (path in consumer) == (suite == "consumer_transactions")]
+          selected = partitions[suite]
           if not selected:
               raise ValueError("empty packaged suite")
           print(json.dumps({"scope": "affected complete app transaction/release/journal/distribution files"
@@ -167,6 +176,8 @@ jobs:
         include:
           - suite: consumer_transactions
             tests: tests/test_consumer_entry_v1.py tests/test_task_state_compatibility_v1.py
+          - suite: recovery_transactions
+            tests: tests/test_consumer_recovery_transactions_v1.py
           - suite: runtime_distribution
             tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py
           - suite: native_integration
