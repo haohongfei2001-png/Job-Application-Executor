@@ -534,13 +534,15 @@ class GenericWebAdapter(SiteAdapter):
         # Native label activation can dispatch a companion control's click
         # when a non-labelable ARIA widget is nested in that label. Opening the
         # widget must not implicitly choose an option or other external action.
-        if element.evaluate("""e => {
-          for (let label = e.closest('label'); label;
-               label = label.parentElement?.closest('label')) {
-            if (label.control && label.control !== e) return true;
-          }
-          return false;
-        }"""):
+        def companion_label_activation(control):
+            return control.evaluate("""e => {
+              for (let label = e.closest('label'); label;
+                   label = label.parentElement?.closest('label')) {
+                if (label.control && label.control !== e) return true;
+              }
+              return false;
+            }""") is True
+        if companion_label_activation(element):
             return False
         listbox = self.page.locator(f'[id={json.dumps(controlled_id)}][role="listbox"]')
         if listbox.count() != 1:
@@ -550,6 +552,10 @@ class GenericWebAdapter(SiteAdapter):
             return False
         if callable(prewrite):
             prewrite()
+        # Ownership/prewrite callbacks can reactively change label.control.
+        # Recheck the actual activation shape at the primitive boundary.
+        if companion_label_activation(element):
+            return False
         element.click()
         choices = listbox.locator('[role="option"]')
         exact = [choices.nth(index) for index in range(choices.count())
@@ -565,6 +571,9 @@ class GenericWebAdapter(SiteAdapter):
             return False
         if callable(prewrite):
             prewrite()
+        if (companion_label_activation(element)
+                or companion_label_activation(exact[0])):
+            return False
         exact[0].click()
         self.await_form_render()
         selected = self._locate(selector)

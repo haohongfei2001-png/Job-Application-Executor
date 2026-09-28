@@ -897,7 +897,7 @@ def test_question_drift_at_primitive_ownership_fence_never_dispatches_target(
     }
     html = tmp_path / "primitive-question-drift.html"
     html.write_text("<!doctype html><body><label>First<input id='first'></label>"
-        "<label for='target'>Target</label>" + controls[kind]
+        "<label for='target'>Target</label>" + controls[kind] +
         "<button type='button' onclick='window.submits++'>Submit application</button>"
         "<script>window.targetWrites=0;window.submits=0;window.opens=0;</script>",
         encoding="utf-8")
@@ -1066,4 +1066,115 @@ def test_aria_open_cannot_trigger_a_companion_control_through_native_label(
             rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-label-replay").hexdigest())
     else:
         assert queue.field_actions(tid) == []
+    assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+@pytest.mark.parametrize("phase", ["open", "option"])
+def test_reactive_label_companion_at_ownership_boundary_cannot_dispatch(tmp_path, phase):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    html = tmp_path / "reactive-label-ownership.html"
+    html.write_text("""<!doctype html><body>
+      <label>First<input id='first'></label>
+      <label for='target'>Target</label>
+      <div id='target' role='combobox' aria-label='Target' aria-controls='choices' tabindex='0'
+        onclick="window.opens++;document.querySelector('#choices').hidden=false">Choose</div>
+      <div id='choices' role='listbox' hidden>
+        <div id='choice' role='option' tabindex='0'
+          onclick="window.targetWrites++;document.querySelector('#target').innerText=this.innerText">
+          Exact choice</div>
+      </div>
+      <input id='foreign' type='checkbox' onclick="window.foreignWrites++">
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.opens=0;window.targetWrites=0;window.foreignWrites=0;window.submits=0;</script>
+    """, encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    injected = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        original = {field.selector: field for field in adapter.discover_fields()}
+        def guard():
+            rows = queue.field_actions(tid)
+            if injected or len(rows) != 2 or sum(row["outcome"] == "ATTEMPTED" for row in rows) != 1:
+                return
+            opened = adapter.page.locator("#choices").is_visible()
+            if opened != (phase == "option"):
+                return
+            selector = "#target" if phase == "open" else "#choice"
+            adapter.page.locator(selector).evaluate("""e=>{
+              const label=document.createElement('label');label.htmlFor='foreign';
+              e.replaceWith(label);label.append(e);
+            }""")
+            assert adapter.page.locator(selector).evaluate(
+                "e=>e.closest('label').control.id") == "foreign"
+            injected.append(True)
+        adapter.mutation_guard = guard
+        fields = [
+            FieldResolution(field_id="first", selector="#first", label="First",
+                value="PRIVATE_REACTIVE_LABEL_CANARY", status=ResolutionStatus.RESOLVED),
+            FieldResolution(field_id="target", selector="#target", label="Target",
+                value="Exact choice", status=ResolutionStatus.RESOLVED),
+        ]
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions(fields)
+        assert injected == [True]
+        current = {field.selector: field for field in adapter.discover_fields()}
+        # The ordinary control contract is unchanged; this owns the separate
+        # native activation relation which can change after an ownership check.
+        assert current["#target"].metadata["control_contract"] == original["#target"].metadata["control_contract"]
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_REACTIVE_LABEL_CANARY"
+        assert adapter.page.locator("#target").inner_text() == "Choose"
+        assert adapter.page.locator("#foreign").is_checked() is False
+        assert adapter.page.locator("#choices").is_visible() == (phase == "option")
+        assert adapter.page.evaluate("[window.opens,window.targetWrites,window.foreignWrites,window.submits]") == [
+            1 if phase == "option" else 0, 0, 0, 0]
+        assert "PRIVATE_" not in str(caught.value)
+    actions = queue.field_actions(tid)
+    assert len(actions) == 2 and {row["outcome"] for row in actions} == {"UNKNOWN_OUTCOME"}
+    assert "PRIVATE_" not in json.dumps(actions)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-reactive-label-replay").hexdigest())
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+def test_native_input_combobox_keeps_its_own_label_activation_control(tmp_path):
+    queue, tid, owner, attempt, _clock = _owned(tmp_path)
+    html = tmp_path / "native-own-label-combobox.html"
+    html.write_text("""<!doctype html><body>
+      <label>First<input id='first'></label>
+      <label>Target<input id='target' role='combobox' aria-controls='choices'
+        onclick="window.opens++;document.querySelector('#choices').hidden=false"></label>
+      <div id='choices' role='listbox' hidden>
+        <button id='choice' type='button' role='option'
+          onclick="window.targetWrites++;document.querySelector('#target').value=this.innerText">
+          Exact choice</button>
+      </div>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.opens=0;window.targetWrites=0;window.submits=0;</script>
+    """, encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        assert adapter.page.locator("#target").evaluate("e=>e.closest('label').control===e") is True
+        actions = adapter.apply_resolutions([
+            FieldResolution(field_id="first", selector="#first", label="First",
+                value="PRIVATE_NATIVE_LABEL_CANARY", status=ResolutionStatus.RESOLVED),
+            FieldResolution(field_id="target", selector="#target", label="Target",
+                value="Exact choice", status=ResolutionStatus.RESOLVED),
+        ])
+        assert len(actions) == 2 and all(item["ok"] and item["observed"] == "DOM_READBACK" for item in actions)
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_NATIVE_LABEL_CANARY"
+        assert adapter.page.locator("#target").input_value() == "Exact choice"
+        assert adapter.page.evaluate("[window.opens,window.targetWrites,window.submits]") == [1,1,0]
+    assert {row["outcome"] for row in queue.field_actions(tid)} == {"DOM_READBACK_UNVERIFIED"}
+    queue.require_field_action_readbacks(attempt)
+    queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
     assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
