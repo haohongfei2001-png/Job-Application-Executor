@@ -298,6 +298,55 @@ def _answer_contract(db, key, secret):
             for task_id, values in sorted(latest.items())]
 
 
+
+def _journal_location_identity(root: Path):
+    """Bind compatibility to the same owned root, main journal and key inode.
+
+    WAL contents are compared through SQLite, not copied or treated as empty.
+    Volatile WAL/SHM lifetimes are not mistaken for a new task authority.
+    This is a continuity fence, not retirement proof for historical writers.
+    """
+    if any(path.is_symlink() for path in (root, *root.parents)):
+        raise ValueError("task_state_path_invalid")
+    directory = root.stat(follow_symlinks=False)
+    if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.geteuid()
+            or not _owned_journal_entries(root)):
+        raise ValueError("task_state_path_invalid")
+    database = (root / "tasks.sqlite3").stat(follow_symlinks=False)
+    key_path = root / "task-answers.key"
+    try:
+        key = key_path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        key_identity = None
+    else:
+        if (not stat.S_ISREG(key.st_mode) or key.st_nlink != 1
+                or key.st_uid != os.geteuid() or key.st_mode & 0o077):
+            raise ValueError("task_answer_key_invalid")
+        key_identity = (key.st_dev, key.st_ino)
+    return ((directory.st_dev, directory.st_ino),
+            (database.st_dev, database.st_ino), key_identity)
+
+
+def _journal_authority_unchanged(root: Path, identity, key, expected) -> bool:
+    """Reobserve complete committed authority after an isolated child yields."""
+    if _journal_location_identity(root) != identity or _answer_key(root) != key:
+        return False
+    _refuse_live_service(root)
+    # One read transaction gives all tables/constraints/history one coherent
+    # committed view, including writes by an old process ignoring our locks.
+    with closing(sqlite3.connect((root / "tasks.sqlite3").as_uri()
+                                 + "?mode=ro", uri=True)) as source:
+        source.execute("BEGIN")
+        if _journal_location_identity(root) != identity:
+            return False
+        if _snapshot(source) != expected:
+            return False
+    unchanged = (_journal_location_identity(root) == identity
+                 and _answer_key(root) == key)
+    _refuse_live_service(root)
+    return unchanged
+
+
 def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> bool:
     """Reject any candidate migration that loses or changes journal authority."""
     root = Path(root).expanduser().absolute()
@@ -319,6 +368,8 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
             return key is None and not any(p.exists() for p in _state_paths(root)[1:])
         if not database.is_file():
             return False
+        source_identity = _journal_location_identity(root)
+        _refuse_live_service(root)
         with tempfile.TemporaryDirectory(prefix="jae-state-compatibility-") as directory:
             # This newly created scratch directory is exclusively ours. macOS
             # may spell its temporary ancestor through /var -> /private/var.
@@ -327,8 +378,8 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
             directory = str(Path(directory).resolve(strict=True))
             copy = Path(directory) / "tasks.sqlite3"
             # SQLite backup includes committed WAL rows; file copying does not.
-            with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as source:
-                with sqlite3.connect(copy) as destination:
+            with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as source:
+                with closing(sqlite3.connect(copy)) as destination:
                     deadline = time.monotonic() + 10
 
                     def progress(_status, _remaining, _total):
@@ -387,7 +438,7 @@ def task_state_candidate_compatible(python: Path, release: Path, root: Path) -> 
                     if (not _schema_preserved(schema, _schema_contract(migrated, table))
                             or _digest(migrated, table, columns) != expected):
                         return False
-            return True
+            return _journal_authority_unchanged(root, source_identity, key, before)
     except (ImportError, OSError, ValueError, TypeError, sqlite3.Error, subprocess.SubprocessError):
         return False
 
