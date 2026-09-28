@@ -58,8 +58,11 @@ def _bundle_members(app: Path) -> list[Path]:
     members = [app, *sorted(app.rglob("*"))]
     for path in members:
         relative = path.relative_to(app)
-        mode = path.lstat().st_mode
-        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+        metadata = path.lstat()
+        if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+            raise ValueError("distribution_member_invalid")
+        if (stat.S_ISREG(metadata.st_mode)
+                and (metadata.st_nlink != 1 or metadata.st_uid != os.geteuid())):
             raise ValueError("distribution_member_invalid")
         name = relative.as_posix()
         if path == app:
@@ -79,7 +82,7 @@ def _archive_app(app: Path, archive: Path) -> None:
     with archive.open("xb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw,
                            compresslevel=1, mtime=0) as zipped:
-            with tarfile.open(fileobj=zipped, mode="w", dereference=True) as bundle:
+            with tarfile.open(fileobj=zipped, mode="w", dereference=False) as bundle:
                 for path in members:
                     name = app.name if path == app else (
                         app.name + "/" + path.relative_to(app).as_posix())
@@ -87,15 +90,39 @@ def _archive_app(app: Path, archive: Path) -> None:
                     info.uid = info.gid = info.mtime = 0
                     info.uname = info.gname = ""
                     info.pax_headers = {}
-                    info.mode = (0o755 if info.isdir() or path.stat().st_mode & stat.S_IXUSR
-                                 else 0o644)
                     if info.isfile():
-                        with path.open("rb") as file:
+                        # The preflight walk is advisory: bind each streamed file to
+                        # one owned, single-link inode and recheck its visible path.
+                        try:
+                            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                        except OSError:
+                            raise ValueError("distribution_member_changed") from None
+                        with os.fdopen(fd, "rb") as file:
+                            before = os.fstat(file.fileno())
+                            visible = path.lstat()
+                            identity = lambda value: (
+                                value.st_dev, value.st_ino, value.st_mode,
+                                value.st_size, value.st_mtime_ns, value.st_nlink,
+                                value.st_uid)
+                            if (not stat.S_ISREG(before.st_mode)
+                                    or before.st_nlink != 1
+                                    or before.st_uid != os.geteuid()
+                                    or identity(before) != identity(visible)
+                                    or before.st_size != info.size):
+                                raise ValueError("distribution_member_changed")
+                            info.mode = 0o755 if before.st_mode & stat.S_IXUSR else 0o644
                             bundle.addfile(info, file)
+                            if (identity(os.fstat(file.fileno()))
+                                    != identity(before)
+                                    or identity(path.lstat()) != identity(before)):
+                                raise ValueError("distribution_member_changed")
                     elif info.isdir():
+                        if not stat.S_ISDIR(path.lstat().st_mode):
+                            raise ValueError("distribution_member_changed")
+                        info.mode = 0o755
                         bundle.addfile(info)
                     else:
-                        raise ValueError("distribution_member_invalid")
+                        raise ValueError("distribution_member_changed")
         raw.flush()
         os.fsync(raw.fileno())
 

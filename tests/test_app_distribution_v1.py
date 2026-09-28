@@ -45,6 +45,67 @@ def test_archive_refuses_private_or_undeclared_payload_before_publication(tmp_pa
     assert payload.read_text() == "CANARY_PRIVATE_DISTRIBUTION"
 
 
+@pytest.mark.parametrize("name", [
+    "Contents/Resources/release/executor/module.py",
+    "Contents/Resources/runtime/lib/module.py",
+])
+def test_archive_refuses_external_hardlinked_member_before_streaming(tmp_path, name):
+    app = tmp_path / (APP_NAME + ".app")
+    member = app / name
+    member.parent.mkdir(parents=True)
+    private = tmp_path / "private-payload"
+    private.write_text("CANARY_OUTSIDE_DISTRIBUTION", encoding="utf-8")
+    os.link(private, member)
+    archive = tmp_path / ARCHIVE_NAME
+    with pytest.raises(ValueError, match="distribution_member_invalid"):
+        _archive_app(app, archive)
+    assert not archive.exists()
+    assert private.read_text(encoding="utf-8") == "CANARY_OUTSIDE_DISTRIBUTION"
+
+
+def test_archive_refuses_member_swapped_to_external_alias_after_preflight(
+    tmp_path, monkeypatch
+):
+    from executor.autonomy import app_distribution as distribution
+
+    app = tmp_path / (APP_NAME + ".app")
+    member = app / "Contents/Resources/runtime/lib/module.py"
+    member.parent.mkdir(parents=True)
+    member.write_text("ORIGINAL_BUNDLE_MEMBER", encoding="utf-8")
+    private = tmp_path / "private-payload"
+    private.write_text("CANARY_OUTSIDE_DISTRIBUTION", encoding="utf-8")
+    original_members = distribution._bundle_members
+
+    def swap_after_preflight(root):
+        members = original_members(root)
+        member.unlink()
+        member.symlink_to(private)
+        return members
+
+    monkeypatch.setattr(distribution, "_bundle_members", swap_after_preflight)
+    with pytest.raises(ValueError, match="distribution_member_changed"):
+        _archive_app(app, tmp_path / ARCHIVE_NAME)
+    assert private.read_text(encoding="utf-8") == "CANARY_OUTSIDE_DISTRIBUTION"
+
+
+def test_archive_refuses_member_changed_during_streaming(tmp_path, monkeypatch):
+    app = tmp_path / (APP_NAME + ".app")
+    member = app / "Contents/Resources/runtime/lib/module.py"
+    member.parent.mkdir(parents=True)
+    member.write_text("ORIGINAL_BUNDLE_MEMBER", encoding="utf-8")
+    original_addfile = tarfile.TarFile.addfile
+
+    def mutate_after_stream(archive, info, fileobj=None):
+        result = original_addfile(archive, info, fileobj)
+        if info.name.endswith("/runtime/lib/module.py"):
+            member.write_text("CHANGED_MEMBER_AFTER_STREAM", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(tarfile.TarFile, "addfile", mutate_after_stream)
+    with pytest.raises(ValueError, match="distribution_member_changed"):
+        _archive_app(app, tmp_path / ARCHIVE_NAME)
+
+
 def test_build_refuses_existing_output_and_alias_without_overwriting(tmp_path):
     source = Path(__file__).resolve().parents[1]
     output = tmp_path / "existing"
