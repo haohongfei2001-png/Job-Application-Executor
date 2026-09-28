@@ -1234,9 +1234,23 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
                 "reason": "rollback_recovery_required",
                 "message": "回退版本启用后无法启动；两个版本已保留，需要人工核对恢复。",
             }
-        if _bundle_transaction_identity(app) != current_identity:
-            return {"ok": False, "reason": "rollback_recovery_required",
-                    "message": "回退失败后原应用身份无法核对；两个版本保留，需要人工核对恢复。"}
+        # Returning the original directory is not proof that its final-path
+        # runtime still starts. Recheck its exact identity and isolated entry,
+        # then verify actual health at the restored path. The rejected old app
+        # is quarantined evidence: preserve its owned location, without
+        # requiring unhealthy or changed bytes to become a certified release.
+        if (_bundle_transaction_identity(app) != current_identity
+                or not _bundle_location_matches(previous, previous_identity)
+                or failed.exists() or failed.is_symlink()
+                or not _isolated_bundle_startup(app)
+                or not _candidate_starts(active_runtime / "bin" / "python", active_release)
+                or _bundle_transaction_identity(app) != current_identity
+                or not _bundle_location_matches(previous, previous_identity)
+                or failed.exists() or failed.is_symlink()):
+            return {
+                "ok": False, "reason": "rollback_recovery_required",
+                "message": "原应用已移回，但启动健康、版本身份或恢复位置无法确认；所有版本保留，需要核对恢复。",
+            }
         return {
             "ok": False,
             "reason": "rollback_post_activation_unhealthy",
