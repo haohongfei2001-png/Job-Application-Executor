@@ -1454,3 +1454,139 @@ def test_hardlinked_service_record_is_not_read_as_old_writer_proof(tmp_path, mon
             pytest.fail("hardlinked service record cannot certify a stopped writer")
     assert outside.read_bytes() == payload
     assert (outside.stat().st_dev, outside.stat().st_ino) == identity
+
+@pytest.mark.parametrize("mutation", [
+    "unchanged", "wal_append", "event_changed", "schema_changed",
+    "authority_deleted", "root_replaced", "database_replaced",
+    "same_key_new_inode", "live_service_appeared",
+])
+def test_actual_candidate_cannot_certify_changed_original_journal_authority(
+        tmp_path, monkeypatch, mutation):
+    """A real migrated scratch result cannot retire a changed old authority."""
+    import hashlib
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    release = answer_candidate(tmp_path)
+    original_run = state_compatibility.subprocess.run
+    calls = []
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        profile = json.dumps({"rows": [
+            {"id": i, "body": "PRIVATE_COMPLETE_PROFILE_" + str(i)}
+            for i in range(1000)]}, ensure_ascii=False).encode()
+        preferences = json.dumps({"rows": [
+            {"id": i, "body": "PRIVATE_COMPLETE_PREFERENCES_" + str(i)}
+            for i in range(1000)]}, ensure_ascii=False).encode()
+        for name, payload in [("profile.json", profile), ("preferences.json", preferences)]:
+            (root / name).write_bytes(payload)
+            (root / name).chmod(0o600)
+        authority_before = authority(db)
+        answers_before = db.execute("SELECT * FROM task_answer_events").fetchall()
+        schema_before = db.execute(
+            "SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+        source_before = {str(p.relative_to(release)): hashlib.sha256(p.read_bytes()).hexdigest()
+                         for p in release.rglob("*") if p.is_file()}
+        assert (root / "tasks.sqlite3-wal").stat().st_size > 0
+        observed = {}
+        retained = None
+
+        def actual_migrate_then_change(command, **options):
+            nonlocal retained
+            assert command[1:4] == ["-I", "-B", "-c"]
+            assert options["timeout"] == 10
+            assert all(options[name] == subprocess.DEVNULL
+                       for name in ["stdin", "stdout", "stderr"])
+            completed = original_run(command, **options)
+            assert completed.returncode == 0
+            scratch = Path(command[-1])
+            with closing(sqlite3.connect(scratch / "tasks.sqlite3")) as migrated:
+                assert "revision" in {row[1] for row in migrated.execute("PRAGMA table_info(tasks)")}
+                assert migrated.execute("SELECT count(*) FROM task_answer_events").fetchone() == (5,)
+            calls.append(scratch)
+            if mutation == "wal_append":
+                db.execute("INSERT INTO events(task_id,at,kind,stage) VALUES(?,?,?,?)",
+                           ("synthetic-task", 3, "PRIVATE_LATE_WAL_EVENT", "BLOCKED"))
+                db.commit()
+            elif mutation == "event_changed":
+                db.execute("UPDATE events SET kind='PRIVATE_CHANGED_EVENT'")
+                db.commit()
+            elif mutation == "schema_changed":
+                db.execute("CREATE INDEX private_changed_index ON events(task_id)")
+                db.commit()
+            elif mutation == "authority_deleted":
+                db.execute("DELETE FROM tasks")
+                db.commit()
+            elif mutation == "root_replaced":
+                retained = tmp_path / "retained-original"
+                replacement_path = tmp_path / "replacement-root-journal.sqlite3"
+                with closing(sqlite3.connect(replacement_path)) as replacement:
+                    db.backup(replacement)
+                root.rename(retained)
+                root.mkdir(mode=0o700)
+                replacement_path.rename(root / "tasks.sqlite3")
+                (root / "tasks.sqlite3").chmod(0o600)
+                (root / "task-answers.key").write_bytes(key)
+                (root / "task-answers.key").chmod(0o600)
+            elif mutation == "database_replaced":
+                retained = root / "retained-original.sqlite3"
+                replacement_path = tmp_path / "replacement-journal.sqlite3"
+                with closing(sqlite3.connect(replacement_path)) as replacement:
+                    db.backup(replacement)
+                (root / "tasks.sqlite3").rename(retained)
+                replacement_path.rename(root / "tasks.sqlite3")
+                (root / "tasks.sqlite3").chmod(0o600)
+            elif mutation == "same_key_new_inode":
+                retained = root / "retained-original.key"
+                (root / "task-answers.key").rename(retained)
+                (root / "task-answers.key").write_bytes(key)
+                (root / "task-answers.key").chmod(0o600)
+            elif mutation == "live_service_appeared":
+                (root / "service.json").write_text(json.dumps({"pid": os.getpid()}))
+                (root / "service.json").chmod(0o600)
+            observed["authority"] = authority(db)
+            observed["answers"] = db.execute("SELECT * FROM task_answer_events").fetchall()
+            observed["schema"] = db.execute(
+                "SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+            actual_root = retained if mutation == "root_replaced" else root
+            observed["private"] = {
+                name: (actual_root / name).read_bytes()
+                for name in ["profile.json", "preferences.json", "task-answers.key"]}
+            observed["files"] = {
+                str(p.relative_to(tmp_path)): (p.read_bytes(), p.stat().st_mode,
+                                              p.stat().st_dev, p.stat().st_ino)
+                for p in tmp_path.rglob("*")
+                if p.is_file() and scratch not in p.parents
+                and p.name not in {"tasks.sqlite3-shm", "tasks.sqlite3-wal"}}
+            return completed
+
+        with task_state_guard(root):
+            with monkeypatch.context() as patch:
+                patch.setattr(state_compatibility.subprocess, "run", actual_migrate_then_change)
+                assert task_state_candidate_compatible(
+                    Path(sys.executable), release, root) is (mutation == "unchanged")
+        assert len(calls) == 1 and not calls[0].exists()
+        assert authority(db) == observed["authority"]
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == observed["answers"]
+        assert db.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").fetchall() == observed["schema"]
+        assert observed["answers"] == answers_before
+        if mutation not in {"wal_append", "event_changed", "authority_deleted"}:
+            assert observed["authority"] == authority_before
+        if mutation != "schema_changed":
+            assert observed["schema"] == schema_before
+        actual_root = retained if mutation == "root_replaced" else root
+        assert {name: (actual_root / name).read_bytes() for name in observed["private"]} == observed["private"]
+        assert observed["private"] == {"profile.json": profile, "preferences.json": preferences,
+                                      "task-answers.key": key}
+        assert {str(p.relative_to(release)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in release.rglob("*") if p.is_file()} == source_before
+        assert {str(p.relative_to(tmp_path)): (p.read_bytes(), p.stat().st_mode,
+                                             p.stat().st_dev, p.stat().st_ino)
+                for p in tmp_path.rglob("*")
+                if p.is_file() and p.name not in {"tasks.sqlite3-shm", "tasks.sqlite3-wal"}} == observed["files"]
+        assert not (root / "auth.token").exists()
+        assert not (actual_root / "tasks.sqlite3.pre-jcr01.sqlite3").exists()
+        assert not list(tmp_path.glob("capsule*"))
+        assert not list(tmp_path.glob("backup*"))
+        if mutation != "live_service_appeared":
+            assert not (root / "service.json").exists()
