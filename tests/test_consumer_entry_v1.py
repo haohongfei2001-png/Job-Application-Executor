@@ -6114,3 +6114,68 @@ def test_bundle_control_hardlink_refuses_before_external_inode_read(tmp_path, mo
             assert consumer._isolated_bundle_startup(app) is False
     assert outside.read_bytes() == original
     assert target.read_bytes() == original
+
+@pytest.mark.parametrize("control", ["Info.plist", "AIApplicationManager"])
+def test_bundle_control_swap_after_precheck_never_reads_external_inode(
+    tmp_path, monkeypatch, control
+):
+    app = tmp_path / "Applications" / (consumer.APP_NAME + ".app")
+    macos = app / "Contents" / "MacOS"
+    resources = app / "Contents" / "Resources"
+    macos.mkdir(parents=True)
+    resources.mkdir()
+    info = app / "Contents" / "Info.plist"
+    with info.open("wb") as handle:
+        plistlib.dump({"CFBundleIdentifier": consumer.BUNDLE_ID,
+                       "CFBundleExecutable": "AIApplicationManager"}, handle)
+    repo = tmp_path / "Job-Application-Executor"
+    launcher = macos / "AIApplicationManager"
+    launcher.write_text(consumer._legacy_launcher(repo), encoding="utf-8")
+    launcher.chmod(0o755)
+    assert consumer._trusted_bundle(app)
+    target = info if control == "Info.plist" else launcher
+    outside = tmp_path / ("external-" + control)
+    original = target.read_bytes()
+    outside.write_bytes(original)
+    outside.chmod(stat.S_IMODE(target.stat().st_mode))
+    actual_owned = consumer._owned_bundle_file
+    actual_open, actual_text, actual_fdopen = Path.open, Path.read_text, os.fdopen
+    inspections = 0
+
+    def swap_after_owned_precheck(path):
+        nonlocal inspections
+        admitted = actual_owned(path)
+        if path == target:
+            inspections += 1
+            # Info is read after its first check. The legacy launcher has a
+            # second check inside _legacy_bundle_matches just before reading.
+            if inspections == (1 if control == "Info.plist" else 2):
+                assert admitted
+                target.unlink()
+                os.link(outside, target)
+        return admitted
+
+    def refuse_path_open(path, *args, **kwargs):
+        if path == target:
+            pytest.fail("external control inode must not be read")
+        return actual_open(path, *args, **kwargs)
+
+    def refuse_path_text(path, *args, **kwargs):
+        if path == target:
+            pytest.fail("external launcher inode must not be read")
+        return actual_text(path, *args, **kwargs)
+
+    def refuse_external_fdopen(fd, *args, **kwargs):
+        if os.fstat(fd).st_ino == outside.stat().st_ino:
+            pytest.fail("external control descriptor must not be read")
+        return actual_fdopen(fd, *args, **kwargs)
+
+    with monkeypatch.context() as guard:
+        guard.setattr(consumer, "_owned_bundle_file", swap_after_owned_precheck)
+        guard.setattr(Path, "open", refuse_path_open)
+        guard.setattr(Path, "read_text", refuse_path_text)
+        guard.setattr(os, "fdopen", refuse_external_fdopen)
+        assert consumer._trusted_bundle(app) is False
+    assert inspections >= (1 if control == "Info.plist" else 2)
+    assert outside.read_bytes() == original
+    assert target.read_bytes() == original

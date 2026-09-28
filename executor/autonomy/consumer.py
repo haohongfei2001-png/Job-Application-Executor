@@ -42,6 +42,34 @@ def _owned_bundle_file(path: Path) -> bool:
         return False
 
 
+def _owned_bundle_bytes(path: Path) -> bytes:
+    """Bind a no-follow descriptor to one owned inode through its read."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != os.geteuid()):
+            raise ValueError("bundle_file_invalid")
+        observed = path.stat(follow_symlinks=False)
+        if (observed.st_dev, observed.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("bundle_file_changed")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            content = handle.read()
+        after = os.fstat(fd)
+        current = path.stat(follow_symlinks=False)
+        if ((after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                or after.st_nlink != 1 or after.st_uid != os.geteuid()
+                or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)):
+            raise ValueError("bundle_file_changed")
+        return content
+    finally:
+        os.close(fd)
+
+
+def _owned_bundle_text(path: Path) -> str:
+    return _owned_bundle_bytes(path).decode("utf-8")
+
+
 def _legacy_launcher(repo: Path) -> str:
     repo_q = shlex.quote(str(repo))
     return f"""#!/bin/zsh
@@ -71,7 +99,7 @@ def _legacy_bundle_matches(executable: Path) -> bool:
     try:
         if not _owned_bundle_file(executable):
             return False
-        launcher = executable.read_text(encoding="utf-8")
+        launcher = _owned_bundle_text(executable)
         assignments = [line for line in launcher.splitlines()
                        if line.startswith("REPO_ROOT=")]
         if len(assignments) != 1:
@@ -204,7 +232,7 @@ def _native_bundle_matches(release: Path, directory: Path) -> bool:
         source = release / "executor" / "autonomy" / "macos_host.py"
         if not _owned_bundle_file(source):
             return False
-        module = ast.parse(source.read_text(encoding="utf-8"))
+        module = ast.parse(_owned_bundle_text(source))
         declarations = [node for node in module.body if isinstance(node, ast.Assign)
                         and any(isinstance(target, ast.Name) and target.id == "HOST_SOURCE"
                                 for target in node.targets)]
@@ -314,7 +342,7 @@ def _isolated_bundle_startup(app: Path) -> bool:
     try:
         if not _owned_bundle_file(executable):
             return False
-        launcher = executable.read_text(encoding="utf-8")
+        launcher = _owned_bundle_text(executable)
         return (runtime.is_dir() and (launcher == _packaged_launcher()
             or (launcher == _native_packaged_launcher()
                 and _native_bundle_matches(runtime.parent / "release", runtime.parent / "native-host"))))
@@ -326,7 +354,7 @@ def _packaged_bundle_matches(executable: Path, runtime: Path) -> bool:
     try:
         if not _owned_bundle_file(executable):
             return False
-        launcher = executable.read_text(encoding="utf-8")
+        launcher = _owned_bundle_text(executable)
         if runtime.exists():
             return launcher in {_packaged_launcher(), _packaged_launcher_v2(), _native_packaged_launcher()}
         assignments = [line for line in launcher.splitlines()
@@ -361,8 +389,7 @@ def _trusted_bundle(app: Path) -> bool:
             or not _owned_bundle_file(executable)):
         return False
     try:
-        with info_path.open("rb") as handle:
-            info = plistlib.load(handle)
+        info = plistlib.loads(_owned_bundle_bytes(info_path))
         return (
             isinstance(info, dict)
             and info.get("CFBundleIdentifier") == BUNDLE_ID
@@ -372,7 +399,7 @@ def _trusted_bundle(app: Path) -> bool:
                  and (verify_runtime_candidate(runtime, release) if runtime.exists() else True)
                  and _packaged_bundle_matches(executable, runtime)
                  and (_native_bundle_matches(release, resources / "native-host")
-                      if executable.read_text(encoding="utf-8") == _native_packaged_launcher()
+                      if _owned_bundle_text(executable) == _native_packaged_launcher()
                       else not ((resources / "native-host").exists() or (resources / "native-host").is_symlink()))
              if release.exists() else _legacy_bundle_matches(executable))
         )
@@ -423,7 +450,7 @@ def _bundle_transaction_identity(app: Path) -> tuple | None:
                 raise ValueError("bundle_file_invalid")
             evidence.append((path.relative_to(app).as_posix(),
                              stat.S_IMODE(entry.st_mode),
-                             hashlib.sha256(path.read_bytes()).hexdigest()))
+                             hashlib.sha256(_owned_bundle_bytes(path)).hexdigest()))
         return (metadata.st_dev, metadata.st_ino, tuple(evidence))
 
     try:
@@ -467,7 +494,7 @@ def _legacy_state_migration_needed(repo: Path, app: Path, target: Path) -> bool:
     if _owned_bundle_file(executable) and _legacy_bundle_matches(executable):
         if not _owned_bundle_file(executable):
             raise ValueError("legacy_launcher_changed")
-        launcher = executable.read_text(encoding="utf-8")
+        launcher = _owned_bundle_text(executable)
         assignments = [line for line in launcher.splitlines() if line.startswith("REPO_ROOT=")]
         if len(assignments) != 1:
             raise ValueError("legacy_launcher_changed")
@@ -662,7 +689,7 @@ def install_macos_bundle(
         launcher = candidate / "Contents" / "MacOS" / "AIApplicationManager"
         if not _owned_bundle_file(launcher):
             raise ValueError("bundle_unverified")
-        native = launcher.read_text(encoding="utf-8") == _native_packaged_launcher()
+        native = _owned_bundle_text(launcher) == _native_packaged_launcher()
         apps = _app_transaction_directory(destination if destination is not None else Path.home() / "Applications")
         if candidate.resolve() == (apps / (APP_NAME + ".app")).resolve():
             return {"ok": False, "reason": "bundle_candidate_is_active",
