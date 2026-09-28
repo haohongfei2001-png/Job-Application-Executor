@@ -23,4 +23,3 @@ Update/rollback now re-admit retained exact identity, owned quarantine location 
 Seven existing recovery cases moved byte-for-byte to a complete owning file, plus17new full private-WAL/real-release cases. All140 prior test function names retained across owning files; original fixtures/assertions preserved. Complete Ubuntu/Mac recovery shard, disjoint complete-file coverage asserted:607remaining+24recovery=631total, all614prior+17new. Existing timeouts/dependencies/foundation/native/full gates unchanged.
 
 All eight files read back byte-exact, compare parent ahead11/behind0; one non-force sole-writer publication. Exact new-head affected CI PENDING; no unchanged-head rerun. JCR08 IN_PROGRESS/NOT_CERTIFIED, DFG002/008 mitigated; private transfer/old-writer/full foreground remain engineering. Signing/live/device/private/security dependent-deferred. Final submit user-only.
-
