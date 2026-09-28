@@ -718,6 +718,8 @@ class GenericWebAdapter(SiteAdapter):
         # A changed/missing observation must not turn an earlier uncertain
         # native write into an ordinary admission refusal or a replay.
         if getattr(self, "_field_outcome_unknown", False):
+            if getattr(self, "_field_collection_limit_unknown", False):
+                raise FormObservationError("form collection limit exceeded after uncertain redraw")
             raise BrowserOwnershipError("field write outcome unknown")
         getattr(self, "mutation_guard", lambda: None)()
         resolutions = list(resolutions)
@@ -849,6 +851,8 @@ class GenericWebAdapter(SiteAdapter):
                 # A last-field redraw can exceed collection limits without
                 # a following prewrite check; no partial/ambiguous snapshot
                 # may retain the earlier batch as observed.
+                if current_form.collection_complete is not True:
+                    self._field_collection_limit_unknown = True
                 if (current_form.collection_complete is not True
                         or current_form.unsupported_component_count
                         or current_form.ambiguous_selector_count
