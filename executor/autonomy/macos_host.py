@@ -1,7 +1,7 @@
 """Compiled Cocoa/WebKit presenter for the opt-in owned app bootstrap.
 
-The host accepts in-memory ConsumerSurface routes only. This provides one window
-per presenter; cross-launch reuse/default native promotion remain separate gates.
+The host accepts in-memory ConsumerSurface routes and finite local release outcomes.
+Owned presentation and cross-launch reuse remain separate admission gates.
 No external-browser fallback or task writer.
 """
 from __future__ import annotations
@@ -74,6 +74,13 @@ static BOOL focusRequest(NSDictionary *command) {
         || [command[@"request"] longLongValue] < 1) return NO;
     return YES;
 }
+static BOOL releaseResult(NSDictionary *command) {
+    return [command isKindOfClass:[NSDictionary class]] && command.count == 2
+        && [command[@"command"] isEqual:@"release-result"]
+        && [command[@"result"] isKindOfClass:[NSString class]]
+        && ([command[@"result"] isEqual:@"not-confirmed"]
+            || [command[@"result"] isEqual:@"reopen-failed"]);
+}
 @interface JAEHost : NSObject <NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate>
 @property NSWindow *window;
 @property WKWebView *view;
@@ -85,6 +92,8 @@ static BOOL focusRequest(NSDictionary *command) {
 @property BOOL failureSmoke;
 @property BOOL focusSmoke;
 @property BOOL releaseSmoke;
+@property BOOL releaseResultMode;
+@property BOOL releaseResultSmoke;
 @property (strong) NSDictionary *releaseRequest;
 @property NSUInteger focusCount;
 @property (strong) NSDictionary *focusSnapshot;
@@ -103,6 +112,36 @@ static BOOL focusRequest(NSDictionary *command) {
 
 @implementation JAEHost
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    if (self.releaseResultMode) {
+        // A finite local result has no web view, URL, task control or installer.
+        self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 240)
+            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
+            backing:NSBackingStoreBuffered defer:NO];
+        self.window.title = @"AI 投递经理";
+        self.window.minSize = NSMakeSize(480, 220);
+        self.window.releasedWhenClosed = NO; self.window.delegate = self;
+        self.failureMessage = [NSTextField labelWithString:@""];
+        self.failureMessage.frame = NSMakeRect(24, 32, 592, 160);
+        self.failureMessage.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        self.failureMessage.font = [NSFont systemFontOfSize:16];
+        self.failureMessage.maximumNumberOfLines = 0;
+        self.failureMessage.lineBreakMode = NSLineBreakByWordWrapping;
+        [self.window.contentView addSubview:self.failureMessage];
+        [self.window center];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            char *line = NULL; size_t capacity = 0;
+            ssize_t count = getline(&line, &capacity, stdin);
+            if (count <= 0 || count > 1024) {
+                free(line); report(@{@"ok": @NO, @"reason": @"host_result_invalid"});
+                dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; }); return;
+            }
+            NSData *data = [[NSString stringWithUTF8String:line] dataUsingEncoding:NSUTF8StringEncoding];
+            NSDictionary *command = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+            free(line);
+            dispatch_async(dispatch_get_main_queue(), ^{ [self present:command]; });
+        });
+        return;
+    }
     WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
     configuration.websiteDataStore = WKWebsiteDataStore.defaultDataStore;
     self.view = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 1024, 760) configuration:configuration];
@@ -259,6 +298,25 @@ static BOOL focusRequest(NSDictionary *command) {
     }];
 }
 - (void)present:(NSDictionary *)command {
+    if (self.releaseResultMode) {
+        if (self.finished || !releaseResult(command)) {
+            report(@{@"ok": @NO, @"reason": @"host_result_invalid"}); [NSApp terminate:nil]; return;
+        }
+        NSString *message = [command[@"result"] isEqual:@"reopen-failed"]
+            ? @"应用版本已切换，但工作台未能自动打开。请关闭此窗口后重新打开应用，确认任务状态。任务没有自动重试，也不会自动提交申请。"
+            : @"应用更新或回退暂未确认完成。请关闭此窗口后重新打开应用，检查应用和任务状态。任务没有自动重试，也不会自动提交申请。";
+        self.failureMessage.stringValue = message;
+        self.failureMessage.accessibilityLabel = message;
+        [self.window makeKeyAndOrderFront:nil];
+        BOOL visible = self.window.isVisible && !self.failureMessage.hidden
+            && [self.failureMessage.accessibilityLabel isEqual:message] && self.view == nil
+            && self.activeNavigation == nil && NSApp.mainMenu == nil;
+        self.finished = YES;
+        report(@{@"ok": @(visible), @"release_result_visible": @(visible),
+                 @"window_count": @1, @"no_automatic_retry": @YES});
+        if (self.releaseResultSmoke) [NSApp terminate:nil];
+        return;
+    }
     if (focusRequest(command)) {
         BOOL focused = [self focusWindow];
         if (!focused) { report(@{@"ok": @NO, @"reason": @"host_focus_unavailable"}); return; }
@@ -368,7 +426,9 @@ int main(int argc, const char *argv[]) {
         host.failureSmoke = argc == 2 && strcmp(argv[1], "--failure-smoke") == 0;
         host.focusSmoke = argc == 2 && strcmp(argv[1], "--focus-smoke") == 0;
         host.releaseSmoke = argc == 2 && strcmp(argv[1], "--release-smoke") == 0;
-        host.smoke = host.consumerSmoke || host.failureSmoke || host.focusSmoke || host.releaseSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
+        host.releaseResultSmoke = argc == 2 && strcmp(argv[1], "--release-result-smoke") == 0;
+        host.releaseResultMode = host.releaseResultSmoke || (argc == 2 && strcmp(argv[1], "--release-result") == 0);
+        host.smoke = host.consumerSmoke || host.failureSmoke || host.focusSmoke || host.releaseSmoke || host.releaseResultSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
         [NSApplication sharedApplication];
         NSApp.delegate = host;
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -646,3 +706,48 @@ class NativePresenter:
             for stream in (process.stdin, process.stdout):
                 if stream is not None:
                     stream.close()
+
+
+def present_native_release_result(directory: str | Path, result: str, *,
+                                  ownership_fd: int | None = None,
+                                  smoke: bool = False) -> bool:
+    """Verified fixed local result only; no route, service or retry authority."""
+    if (type(result) is not str or result not in {"not-confirmed", "reopen-failed"}
+            or type(smoke) is not bool
+            or ownership_fd is not None and (type(ownership_fd) is not int or ownership_fd < 0)):
+        return False
+    try:
+        root = Path(directory).absolute()
+        if sys.platform != "darwin" or not verify_native_host(root):
+            return False
+        presenter = NativePresenter(root, ownership_fd=ownership_fd)
+        try:
+            presenter.process = subprocess.Popen(
+                [str(root / "AIApplicationWindow"),
+                 "--release-result-smoke" if smoke else "--release-result"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                pass_fds=(() if ownership_fd is None else (ownership_fd,)))
+            process = presenter.process
+            process.stdin.write(json.dumps({"command": "release-result", "result": result}) + "\n")
+            process.stdin.flush()
+            ready, _, _ = select.select([process.stdout], [], [], 5)
+            if not ready:
+                return False
+            reply = json.loads(process.stdout.readline(4096))
+            expected = {"ok": True, "release_result_visible": True,
+                        "window_count": 1, "no_automatic_retry": True}
+            if (type(reply) is not dict or reply != expected
+                    or reply.get("ok") is not True
+                    or reply.get("release_result_visible") is not True
+                    or reply.get("no_automatic_retry") is not True
+                    or type(reply.get("window_count")) is not int):
+                return False
+            # Normal lifetime follows the explicit human window close. The
+            # cloud-only oracle has a finite deadline and emits no private data.
+            closed = process.wait(timeout=20) == 0 if smoke else process.wait() == 0
+            return closed and process.stdout.read(4097) == ""
+        finally:
+            presenter.close()
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+        return False
