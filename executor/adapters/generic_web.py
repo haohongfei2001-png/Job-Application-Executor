@@ -724,7 +724,17 @@ class GenericWebAdapter(SiteAdapter):
         # Explicit site dependency metadata permits a bounded parent-first
         # order. The child locator is resolved after the parent's redraw.
         # Missing or cyclic dependencies are unsupported, never guessed.
-        observed_by_selector = {item.selector: item for item in self.discover_fields()}
+        observed_fields = tuple(self.discover_fields())
+        # Admission must retain the complete current observation before a dict
+        # projection can collapse it or a later missing target can partially
+        # fill earlier controls. Direct callers receive the same finite floor.
+        if not unique_fill_identity(observed_fields):
+            return [{"field_id": item.field_id, "ok": False,
+                     "reason": "ambiguous_fill_plan_identity"} for item in resolutions]
+        observed_by_selector = {item.selector: item for item in observed_fields}
+        if any(item.selector not in observed_by_selector for item in resolutions):
+            return [{"field_id": item.field_id, "ok": False,
+                     "reason": "unobserved_fill_plan_field"} for item in resolutions]
         by_selector = {item.selector: item for item in resolutions}
         ordered: list[FieldResolution] = []
         pending = list(resolutions)
