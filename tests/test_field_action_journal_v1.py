@@ -1568,3 +1568,264 @@ def test_native_select_enforces_complete_option_bound_before_prewrite(tmp_path, 
         assert element.input_value() == ("intended" if count == 200 else "")
         assert adapter.page.evaluate("[window.writes,window.submits]") == [1 if count == 200 else 0, 0]
         assert adapter.page.locator("#final").is_enabled() is True
+
+
+# Admission changes must refuse before a browser primitive can wait or dispatch.
+# Complete journal/actual-DOM oracles retain the earlier value and user boundary.
+@pytest.mark.parametrize("restriction", [
+    "readonly", "aria_readonly", "inert", "aria_hidden",
+    "hidden", "opacity", "content_visibility",
+])
+def test_field_admission_change_after_intent_refuses_before_native_fill(tmp_path, restriction):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    html = tmp_path / "field-admission-prewrite.html"
+    html.write_text("""<!doctype html><body><form>
+      <label>First<input id='first'></label>
+      <div id='scope'><label>Target<input id='target' oninput="window.targetWrites++"></label></div>
+      <label>Last<input id='last'></label><button id='final' type='submit'>Submit application</button>
+      </form><script>window.targetWrites=0;window.submits=0;
+      document.addEventListener('submit',e=>{window.submits++;e.preventDefault();});</script>
+    """, encoding="utf-8")
+    mutations = {
+        "readonly": "document.querySelector('#target').readOnly=true;",
+        "aria_readonly": "document.querySelector('#scope').setAttribute('aria-readonly','true');",
+        "inert": "document.querySelector('#scope').inert=true;",
+        "aria_hidden": "document.querySelector('#scope').setAttribute('aria-hidden','true');",
+        "hidden": "document.querySelector('#scope').hidden=true;",
+        "opacity": "document.querySelector('#scope').style.opacity='0';",
+        "content_visibility": "document.querySelector('#scope').style.contentVisibility='hidden';",
+    }
+    audit = _audit(queue, tid, owner, attempt)
+    dispatched = []
+    injected = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        def begin(field_id, selector, *, document_epoch):
+            action = audit.begin_field_action(field_id, selector, document_epoch=document_epoch)
+            if selector == "#target":
+                adapter.page.evaluate(mutations[restriction])
+                injected.append(True)
+            return action
+        adapter.field_action_begin = begin
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        locate = adapter._locate
+        def tracked(selector, label=""):
+            element = locate(selector, label)
+            if selector == "#target":
+                fill = element.fill
+                def primitive(*args, **kwargs):
+                    dispatched.append(True)
+                    return fill(*args, **kwargs)
+                element.fill = primitive
+            return element
+        adapter._locate = tracked
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions([
+                FieldResolution(field_id=key, selector="#" + key, label=key,
+                    value="PRIVATE_ADMISSION_CANARY", status=ResolutionStatus.RESOLVED)
+                for key in ("first", "target", "last")
+            ])
+        assert injected == [True] and dispatched == []
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_ADMISSION_CANARY"
+        assert adapter.page.locator("#target").input_value() == ""
+        assert adapter.page.locator("#last").input_value() == ""
+        assert adapter.page.evaluate("[window.targetWrites,window.submits]") == [0,0]
+        assert adapter.page.locator("#final").is_enabled() is True
+        assert "PRIVATE_" not in str(caught.value)
+    actions = queue.field_actions(tid)
+    assert len(actions) == 2 and {row["outcome"] for row in actions} == {"UNKNOWN_OUTCOME"}
+    assert "PRIVATE_" not in json.dumps(actions)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-admission-replay").hexdigest())
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+@pytest.mark.parametrize("component,restriction", [
+    ("select", "inert"), ("select", "aria_hidden"), ("select", "aria_readonly"),
+    ("aria", "inert"), ("aria", "aria_hidden"), ("aria", "opacity"),
+])
+def test_choice_ancestor_admission_after_prewrite_refuses_before_choice_primitive(
+        tmp_path, component, restriction):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    target = (
+        """<div id='scope'><label for='target'>Target</label>
+        <select id='target' onchange="window.targetWrites++">
+          <option value=''>Choose</option><option value='intended'>Exact choice</option>
+        </select></div>"""
+        if component == "select" else
+        """<label for='target'>Target</label>
+        <button id='target' type='button' role='combobox' aria-label='Target' aria-controls='choices'
+          onclick="window.opens++;document.querySelector('#choices').hidden=false">Choose</button>
+        <div id='scope'><div id='choices' role='listbox' hidden>
+          <button id='choice' type='button' role='option' data-value='intended'
+            onclick="window.targetWrites++;document.querySelector('#target').value=this.innerText">
+            Exact choice</button>
+        </div></div>"""
+    )
+    html = tmp_path / "choice-ancestor-admission.html"
+    html.write_text("""<!doctype html><body><form>
+      <label>First<input id='first'></label>""" + target + """
+      <label>Last<input id='last'></label><button id='final' type='submit'>Submit application</button>
+      </form><script>window.opens=0;window.targetWrites=0;window.submits=0;
+      document.addEventListener('submit',e=>{window.submits++;e.preventDefault();});</script>
+    """, encoding="utf-8")
+    mutation = {
+        "inert": "e=>e.inert=true",
+        "aria_hidden": "e=>e.setAttribute('aria-hidden','true')",
+        "aria_readonly": "e=>e.setAttribute('aria-readonly','true')",
+        "opacity": "e=>e.style.opacity='0'",
+    }[restriction]
+    audit = _audit(queue, tid, owner, attempt)
+    callbacks = []
+    injected = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        fill = adapter._fill_select if component == "select" else adapter._fill_combobox
+        def callback(prewrite):
+            assert callable(prewrite)
+            prewrite()
+            callbacks.append(True)
+            if len(callbacks) == (1 if component == "select" else 2):
+                adapter.page.locator("#scope").evaluate(mutation)
+                injected.append(True)
+        if component == "select":
+            def fenced(element, value, *, prewrite=None):
+                return fill(element, value, prewrite=lambda: callback(prewrite))
+            adapter._fill_select = fenced
+        else:
+            def fenced(element, selector, value, *, prewrite=None):
+                return fill(element, selector, value, prewrite=lambda: callback(prewrite))
+            adapter._fill_combobox = fenced
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions([
+                FieldResolution(field_id=key, selector="#" + key, label=key,
+                    value="Exact choice" if key == "target" else "PRIVATE_CHOICE_ADMISSION_CANARY",
+                    status=ResolutionStatus.RESOLVED)
+                for key in ("first", "target", "last")
+            ])
+        assert injected == [True]
+        assert len(callbacks) == (1 if component == "select" else 2)
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_CHOICE_ADMISSION_CANARY"
+        assert adapter.page.locator("#last").input_value() == ""
+        if component == "select":
+            assert adapter.page.locator("#target").input_value() == ""
+        else:
+            assert adapter.page.locator("#target").inner_text() == "Choose"
+        assert adapter.page.evaluate("[window.opens,window.targetWrites,window.submits]") == [
+            0 if component == "select" else 1, 0, 0]
+        assert adapter.page.locator("#final").is_enabled() is True
+        assert "PRIVATE_" not in str(caught.value)
+    actions = queue.field_actions(tid)
+    assert len(actions) == 2 and {row["outcome"] for row in actions} == {"UNKNOWN_OUTCOME"}
+    assert "PRIVATE_" not in json.dumps(actions)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-choice-admission-replay").hexdigest())
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+@pytest.mark.parametrize("restriction", ["readonly", "inert", "aria_hidden", "opacity"])
+def test_unchanged_retained_value_with_revoked_admission_cannot_authorize_next_write(
+        tmp_path, restriction):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    mutation = {
+        "readonly": "document.querySelector('#first').readOnly=true",
+        "inert": "document.querySelector('#scope').inert=true",
+        "aria_hidden": "document.querySelector('#scope').setAttribute('aria-hidden','true')",
+        "opacity": "document.querySelector('#scope').style.opacity='0'",
+    }[restriction]
+    html = tmp_path / "retained-admission-revoked.html"
+    html.write_text("""<!doctype html><body><form>
+      <div id='scope'><label>First<input id='first'></label></div>
+      <label>Target<input id='target' oninput="window.targetWrites++;""" + mutation + """"></label>
+      <label>Last<input id='last' oninput="window.lastWrites++"></label>
+      <button id='final' type='submit'>Submit application</button></form>
+      <script>window.targetWrites=0;window.lastWrites=0;window.submits=0;
+      document.addEventListener('submit',e=>{window.submits++;e.preventDefault();});</script>
+    """, encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions([
+                FieldResolution(field_id=key, selector="#" + key, label=key,
+                    value="PRIVATE_RETAINED_ADMISSION_CANARY", status=ResolutionStatus.RESOLVED)
+                for key in ("first", "target", "last")
+            ])
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_RETAINED_ADMISSION_CANARY"
+        assert adapter.page.locator("#target").input_value() == "PRIVATE_RETAINED_ADMISSION_CANARY"
+        assert adapter.page.locator("#last").input_value() == ""
+        assert adapter.page.evaluate("[window.targetWrites,window.lastWrites,window.submits]") == [1,0,0]
+        assert adapter.page.locator("#final").is_enabled() is True
+        assert "PRIVATE_" not in str(caught.value)
+    actions = queue.field_actions(tid)
+    assert len(actions) == 2 and {row["outcome"] for row in actions} == {"UNKNOWN_OUTCOME"}
+    assert "PRIVATE_" not in json.dumps(actions)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-retained-admission-replay").hexdigest())
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+def test_mutable_native_and_aria_controls_keep_complete_positive_batch(tmp_path):
+    queue, tid, owner, attempt, _clock = _owned(tmp_path)
+    html = tmp_path / "mutable-complete-batch.html"
+    html.write_text("""<!doctype html><body><form>
+      <div><label>First<input id='first'></label>
+      <label for='native'>Native</label><select id='native' onchange="window.nativeWrites++">
+        <option value=''>Choose</option><option value='intended'>Exact choice</option>
+      </select><label for='aria'>ARIA</label>
+      <button id='aria' type='button' role='combobox' aria-label='ARIA' aria-controls='choices'
+        onclick="window.opens++;document.querySelector('#choices').hidden=false">Choose</button>
+      <div role='listbox' id='choices' hidden>
+        <button type='button' role='option' data-value='intended'
+          onclick="window.ariaWrites++;document.querySelector('#aria').value=this.innerText">Exact choice</button>
+      </div><label>Last<textarea id='last'></textarea></label></div>
+      <button id='final' type='submit'>Submit application</button></form>
+      <script>window.nativeWrites=0;window.opens=0;window.ariaWrites=0;window.submits=0;
+      document.addEventListener('submit',e=>{window.submits++;e.preventDefault();});</script>
+    """, encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        actions = adapter.apply_resolutions([
+            FieldResolution(field_id=key, selector="#" + key, label=key,
+                value="Exact choice" if key in {"native", "aria"} else "PRIVATE_MUTABLE_BATCH_CANARY",
+                status=ResolutionStatus.RESOLVED)
+            for key in ("first", "native", "aria", "last")
+        ])
+        assert len(actions) == 4 and all(row["ok"] and row["observed"] == "DOM_READBACK" for row in actions)
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_MUTABLE_BATCH_CANARY"
+        assert adapter.page.locator("#native").input_value() == "intended"
+        assert adapter.page.locator("#aria").evaluate("e=>e.value") == "Exact choice"
+        assert adapter.page.locator("#last").input_value() == "PRIVATE_MUTABLE_BATCH_CANARY"
+        assert adapter.page.evaluate("[window.nativeWrites,window.opens,window.ariaWrites,window.submits]") == [1,1,1,0]
+        assert adapter.page.locator("#final").is_enabled() is True
+    assert len(queue.field_actions(tid)) == 4
+    assert {row["outcome"] for row in queue.field_actions(tid)} == {"DOM_READBACK_UNVERIFIED"}
+    assert "PRIVATE_" not in json.dumps(queue.field_actions(tid))
+    queue.require_field_action_readbacks(attempt)
+    queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
