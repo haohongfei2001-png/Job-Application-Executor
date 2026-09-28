@@ -531,6 +531,17 @@ class GenericWebAdapter(SiteAdapter):
         controlled_id = element.get_attribute("aria-controls")
         if not controlled_id:
             return False
+        # Native label activation can dispatch a companion control's click
+        # when a non-labelable ARIA widget is nested in that label. Opening the
+        # widget must not implicitly choose an option or other external action.
+        if element.evaluate("""e => {
+          for (let label = e.closest('label'); label;
+               label = label.parentElement?.closest('label')) {
+            if (label.control && label.control !== e) return true;
+          }
+          return false;
+        }"""):
+            return False
         listbox = self.page.locator(f'[id={json.dumps(controlled_id)}][role="listbox"]')
         if listbox.count() != 1:
             return False
