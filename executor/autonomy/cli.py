@@ -534,6 +534,39 @@ def handoff_installed_consumer(root, port, release_request):
         return {"ok": False, "reason": "native_release_unconfirmed", **boundary}
 
 
+def show_native_release_result(root, result, *, smoke=False):
+    """Admit a verified, lease-owned static result after an explicit handoff."""
+    from .consumer import _native_packaged_launcher, _trusted_bundle
+    from .macos_host import present_native_release_result
+    from .runtime_paths import default_runtime
+    from .state_compatibility import native_window_guard
+
+    if type(result) is not dict or result.get("reopen_requested") is True:
+        return False
+    source = Path(__file__).absolute().parents[2]
+    app = source.parent.parent.parent
+    executable = app / "Contents" / "MacOS" / "AIApplicationManager"
+    try:
+        authority = Path(root).expanduser().absolute()
+        if (type(smoke) is not bool or sys.platform != "darwin"
+                or authority != Path(default_runtime(source)).expanduser().absolute()
+                or any(path.is_symlink() for path in (source, *source.parents,
+                                                     authority, *authority.parents))
+                or not _trusted_bundle(app)
+                or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
+            return False
+        completed = result.get("ok") is True and (
+            result.get("updated") is True or result.get("restored") is True)
+        kind = "reopen-failed" if completed else "not-confirmed"
+        # A release transaction and a result window may not overlap. Refuse a
+        # contended or unverified image without service startup or fallback.
+        with native_window_guard(authority) as fd:
+            return present_native_release_result(source.parent / "native-host",
+                kind, ownership_fd=fd, smoke=smoke)
+    except (OSError, ValueError):
+        return False
+
+
 def launch_native_consumer(root, port, *, smoke=False):
     """Run the owned installed app through one verified native presenter."""
     from .consumer import _native_packaged_launcher, _trusted_bundle
@@ -579,7 +612,13 @@ def launch_native_consumer(root, port, *, smoke=False):
     except (OSError, ValueError):
         return {"ok": False, "opened": False, "reason": "native_window_state_invalid"}
     if release_request is not None:
-        return handoff_installed_consumer(root, port, release_request)
+        outcome = handoff_installed_consumer(root, port, release_request)
+        if outcome.get("reopen_requested") is not True:
+            # A Finder launcher redirects JSON to a private log. Give the
+            # human a finite native result instead of silently disappearing.
+            visible = show_native_release_result(root, outcome)
+            return {**outcome, "release_result_visible": visible}
+        return outcome
     return result
 
 
