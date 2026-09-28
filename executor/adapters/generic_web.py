@@ -649,7 +649,14 @@ class GenericWebAdapter(SiteAdapter):
             # DOM readback. No next write or returned batch may inherit that proof.
             try:
                 current_form = self.observe_form()
-                if current_form.unsupported_component_count:
+                # Reuse the complete/unique structural floor of FillPlan.
+                # A last-field redraw can exceed collection limits without
+                # a following prewrite check; no partial/ambiguous snapshot
+                # may retain the earlier batch as observed.
+                if (current_form.collection_complete is not True
+                        or current_form.unsupported_component_count
+                        or current_form.ambiguous_selector_count
+                        or current_form.ambiguous_row_count):
                     raise FormObservationError("unsupported redraw")
             except Exception:
                 invalidate = getattr(self, "field_readbacks_invalidate", None)

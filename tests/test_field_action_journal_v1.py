@@ -731,3 +731,79 @@ def test_final_reactive_opaque_form_revokes_last_dom_readback_before_return(
     assert actions[0]["outcome"] == "UNKNOWN_OUTCOME"
     with pytest.raises(RuntimeError, match="reconciliation"):
         queue.require_field_action_readbacks(attempt)
+
+@pytest.mark.parametrize("redraw", [
+    "control_limit", "option_limit", "ambiguous_selector", "ambiguous_row",
+])
+@pytest.mark.parametrize("following", [False, True])
+def test_reactive_incomplete_or_ambiguous_form_revokes_complete_batch(
+        tmp_path, redraw, following):
+    queue, tid, owner, attempt, _clock = _owned(tmp_path)
+    html = tmp_path / "reactive-structural-floor.html"
+    html.write_text("""<!doctype html><meta charset='utf-8'><body>
+      <label>First<input id='first'></label>
+      <label>Second<input id='second'></label>
+      <button type='button' onclick='window.submits=(window.submits||0)+1'>Submit application</button>
+      <script>
+        document.getElementById('first').addEventListener('input', () => {
+          const redraw = '__REDRAW__';
+          if (redraw === 'control_limit') {
+            for (let i=0; i<351; i++) {
+              const input=document.createElement('input');
+              input.id='extra-'+i; document.body.append(input);
+            }
+          } else if (redraw === 'option_limit') {
+            const select=document.createElement('select'); select.id='extra-select';
+            for (let i=0; i<201; i++) select.add(new Option('Choice '+i, String(i)));
+            document.body.append(select);
+          } else if (redraw === 'ambiguous_selector') {
+            for (let i=0; i<2; i++) {
+              const input=document.createElement('input');
+              input.id='duplicate-extra'; document.body.append(input);
+            }
+          } else {
+            for (let i=0; i<2; i++) {
+              const row=document.createElement('div'); row.dataset.rowId='same-row';
+              const input=document.createElement('input'); input.id='row-extra-'+i;
+              row.append(input); document.body.append(row);
+            }
+          }
+        }, {once:true});
+      </script>
+    """.replace("__REDRAW__", redraw), encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        fields = [FieldResolution(
+            field_id=name, selector="#" + name, label=name,
+            value="PRIVATE_VALUE_CANARY", status=ResolutionStatus.RESOLVED)
+            for name in (("first", "second") if following else ("first",))]
+        with pytest.raises(BrowserOwnershipError, match="form structure outcome unknown"):
+            adapter.apply_resolutions(fields)
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_VALUE_CANARY"
+        assert adapter.page.locator("#second").input_value() == ""
+        observed = adapter.observe_form()
+        if redraw.endswith("limit"):
+            assert observed.collection_complete is False
+            if redraw == "control_limit":
+                assert adapter.page.locator("input").count() == 353
+            else:
+                assert adapter.page.locator("#extra-select option").count() == 201
+        elif redraw == "ambiguous_selector":
+            assert observed.ambiguous_selector_count == 1
+        else:
+            assert observed.ambiguous_row_count == 1
+        assert adapter.page.evaluate("window.submits||0") == 0
+    actions = queue.field_actions(tid)
+    assert len(actions) == 1 and actions[0]["outcome"] == "UNKNOWN_OUTCOME"
+    rebuilt = TaskQueue(queue.root, clock=lambda: _clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"another-write").hexdigest())
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
