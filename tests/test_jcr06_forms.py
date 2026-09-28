@@ -1146,8 +1146,15 @@ def test_real_executor_ambiguous_resolution_batch_blocks_before_initial_or_react
         });</script>"""
     runner, html = _runner(tmp_path, monkeypatch, body)
     observed_exit = {}
+    applied_batches = []
 
     class ObservedExit(GenericWebAdapter):
+        def apply_resolutions(self, resolutions):
+            # Observe admission without replacing any native write or readback.
+            batch = list(resolutions)
+            applied_batches.append([item.selector for item in batch])
+            return super().apply_resolutions(batch)
+
         def __exit__(self, exc_type, exc_value, traceback):
             observed_exit.update(self.page.evaluate("""() => ({
               writes:window.writes,childWrites:window.childWrites,submits:window.submits,
@@ -1170,9 +1177,13 @@ def test_real_executor_ambiguous_resolution_batch_blocks_before_initial_or_react
     assert observed_exit["submits"] == 0
     assert observed_exit["childWrites"] == 0
     if reactive:
-        assert observed_exit["writes"] == 1
+        assert applied_batches == [["#first"]]
+        # The complete 1,000-line native textarea insertion emits 2,000 input
+        # events. Admission is one parent batch; no child batch may execute.
+        assert observed_exit["writes"] == 2000
         assert observed_exit["values"] == [full, "", ""]
     else:
+        assert applied_batches == []
         assert observed_exit["writes"] == 0
         assert observed_exit["values"] == ["", ""]
     assert plan.submit_authorized is False
