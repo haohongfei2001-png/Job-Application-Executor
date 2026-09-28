@@ -14,11 +14,12 @@ import urllib.request
 import pytest
 
 from executor.autonomy import diagnostics, updater
+import historical_updater_fixture as historical_updater
 
 # The canonical consumer contract retires public Git mutation entrypoints.
 # Historical engine cases below still exercise every existing safety failure,
-# timeout, restart, provenance and concurrency assertion through private retained
-# engine functions; no production consumer/CLI may dispatch those functions.
+# timeout, restart, provenance and concurrency assertion through a test-only
+# fixture. The packaged runtime has no Git update engine.
 from executor.autonomy.manager import ManagerController, ManagerTurn
 from executor.autonomy.queue import TaskQueue, TaskSpec
 from executor.autonomy.supervisor import Supervisor, create_server
@@ -313,12 +314,12 @@ def test_update_state_is_written_with_atomic_replace(tmp_path, monkeypatch):
 
 def test_update_lock_serializes_concurrent_launches(tmp_path):
     runtime = tmp_path / "runtime"
-    first = updater.acquire_update_lock(runtime)
+    first = historical_updater.acquire_update_lock(runtime)
     assert first is not None
     try:
-        second = updater.acquire_update_lock(runtime)
+        second = historical_updater.acquire_update_lock(runtime)
         assert second is None
-        denied = updater._legacy_spawn_update(
+        denied = historical_updater._legacy_spawn_update(
             repo_root=tmp_path / "repo",
             runtime=runtime,
             port=9344,
@@ -331,7 +332,7 @@ def test_update_lock_serializes_concurrent_launches(tmp_path):
     finally:
         os.close(first)
 
-    third = updater.acquire_update_lock(runtime)
+    third = historical_updater.acquire_update_lock(runtime)
     assert third is not None
     os.close(third)
 
@@ -514,7 +515,7 @@ def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
         else (_ for _ in ()).throw(AssertionError(args)),
     )
 
-    rc = updater._legacy_perform_update(
+    rc = historical_updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -522,7 +523,7 @@ def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
 
     assert rc == 1
     assert ["git", "merge", "--ff-only", "origin/main"] not in git_calls
-    state = updater.read_update_state(tmp_path / "runtime")
+    state = historical_updater.read_update_state(tmp_path / "runtime")
     assert state["status"] == "failed"
     assert state["reason"] == "tracked_changes_present"
 
@@ -533,7 +534,7 @@ def test_spawn_update_preserves_restart_retry_intent(tmp_path, monkeypatch):
     old = "a" * 40
     captured = []
 
-    updater.write_update_state(
+    historical_updater.write_update_state(
         runtime,
         "restart_required",
         old_version=old,
@@ -550,9 +551,9 @@ def test_spawn_update_preserves_restart_retry_intent(tmp_path, monkeypatch):
         def __init__(self, args, **kwargs):
             captured.append((args, kwargs))
 
-    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(historical_updater.subprocess, "Popen", FakePopen)
 
-    result = updater._legacy_spawn_update(
+    result = historical_updater._legacy_spawn_update(
         repo_root=repo,
         runtime=runtime,
         port=9344,
@@ -564,7 +565,7 @@ def test_spawn_update_preserves_restart_retry_intent(tmp_path, monkeypatch):
     assert "--restart-only" in args
     assert "--lock-fd" in args
     assert kwargs["pass_fds"]
-    state = updater.read_update_state(runtime)
+    state = historical_updater.read_update_state(runtime)
     assert state["status"] == "restarting"
 
 
@@ -573,14 +574,14 @@ def test_restart_required_can_be_retried_when_code_is_already_current(
 ):
     old = "a" * 40
     runtime = tmp_path / "runtime"
-    updater.write_update_state(
+    historical_updater.write_update_state(
         runtime,
         "restart_required",
         old_version=old,
         new_version=old,
         reason="service_stop_failed",
     )
-    assert updater.read_update_state(runtime)["reason"] == "service_stop_failed"
+    assert historical_updater.read_update_state(runtime)["reason"] == "service_stop_failed"
 
     monkeypatch.setattr(
         updater,
@@ -615,10 +616,10 @@ def test_restart_required_can_be_retried_when_code_is_already_current(
         def __init__(self, args, **kwargs):
             service_calls.append(args[-1])
 
-    monkeypatch.setattr(updater.subprocess, "run", fake_service)
-    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(historical_updater.subprocess, "run", fake_service)
+    monkeypatch.setattr(historical_updater.subprocess, "Popen", FakePopen)
 
-    rc = updater._legacy_perform_update(
+    rc = historical_updater._legacy_perform_update(
         tmp_path / "repo",
         runtime,
         9344,
@@ -628,7 +629,7 @@ def test_restart_required_can_be_retried_when_code_is_already_current(
 
     assert rc == 0
     assert service_calls == ["stop", "start", "ui"]
-    state = updater.read_update_state(runtime)
+    state = historical_updater.read_update_state(runtime)
     assert state["status"] == "success"
 
 
@@ -661,9 +662,9 @@ def test_restart_only_bypasses_git_and_timeout_keeps_restart_fence(
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(updater, "_run", forbidden_git)
-    monkeypatch.setattr(updater.subprocess, "run", fake_service)
+    monkeypatch.setattr(historical_updater.subprocess, "run", fake_service)
 
-    rc = updater._legacy_perform_update(
+    rc = historical_updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -674,7 +675,7 @@ def test_restart_only_bypasses_git_and_timeout_keeps_restart_fence(
     assert service_calls == (
         ["stop"] if timeout_on == "stop" else ["stop", "start"]
     )
-    state = updater.read_update_state(tmp_path / "runtime")
+    state = historical_updater.read_update_state(tmp_path / "runtime")
     assert state["status"] == "restart_required"
     assert state["reason"] == "service_restart_timeout"
 
@@ -718,14 +719,14 @@ def test_failure_after_git_mutation_stays_restart_required(
     monkeypatch.setattr(updater, "_git", fake_git)
     monkeypatch.setattr(updater, "_run", fake_run)
 
-    rc = updater._legacy_perform_update(
+    rc = historical_updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
     )
 
     assert rc == 1
-    state = updater.read_update_state(tmp_path / "runtime")
+    state = historical_updater.read_update_state(tmp_path / "runtime")
     assert state["status"] == "restart_required"
     assert state["reason"] == "update_timeout"
 
@@ -738,9 +739,9 @@ def test_restart_failure_persists_restart_required_state(tmp_path, monkeypatch):
         calls.append(args[-1])
         return subprocess.CompletedProcess(args, 1 if args[-1] == "stop" else 0, "", "")
 
-    monkeypatch.setattr(updater.subprocess, "run", fake_service)
+    monkeypatch.setattr(historical_updater.subprocess, "run", fake_service)
 
-    rc = updater._restart_service(
+    rc = historical_updater._restart_service(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -751,7 +752,7 @@ def test_restart_failure_persists_restart_required_state(tmp_path, monkeypatch):
 
     assert rc == 1
     assert calls == ["stop"]
-    state = updater.read_update_state(tmp_path / "runtime")
+    state = historical_updater.read_update_state(tmp_path / "runtime")
     assert state["status"] == "restart_required"
     assert state["reason"] == "service_stop_failed"
 
@@ -779,7 +780,7 @@ def test_update_check_uses_http11_and_leaves_code_unchanged_when_current(
     monkeypatch.setattr(updater, "_run", fake_run)
     monkeypatch.setattr(updater, "_git", fake_git)
 
-    rc = updater._legacy_perform_update(
+    rc = historical_updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -795,7 +796,7 @@ def test_update_check_uses_http11_and_leaves_code_unchanged_when_current(
         "origin",
         "main",
     ]]
-    state = updater.read_update_state(tmp_path / "runtime")
+    state = historical_updater.read_update_state(tmp_path / "runtime")
     assert state["status"] == "up_to_date"
     assert state["old_version"] == old[:12]
     assert state["new_version"] == old[:12]
@@ -837,10 +838,10 @@ def test_fast_forward_update_restarts_service_and_records_success(
 
     monkeypatch.setattr(updater, "_run", fake_run)
     monkeypatch.setattr(updater, "_git", fake_git)
-    monkeypatch.setattr(updater.subprocess, "run", fake_subprocess_run)
-    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(historical_updater.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(historical_updater.subprocess, "Popen", FakePopen)
 
-    rc = updater._legacy_perform_update(
+    rc = historical_updater._legacy_perform_update(
         tmp_path / "repo",
         tmp_path / "runtime",
         9344,
@@ -852,7 +853,7 @@ def test_fast_forward_update_restarts_service_and_records_success(
     assert ["git", "merge", "--ff-only", "origin/main"] in git_calls
     assert service_calls == ["stop", "start"]
     assert ui_calls == ["ui"]
-    state = updater.read_update_state(tmp_path / "runtime")
+    state = historical_updater.read_update_state(tmp_path / "runtime")
     assert state["status"] == "success"
     assert state["old_version"] == old[:12]
     assert state["new_version"] == new[:12]
@@ -1189,6 +1190,8 @@ def test_retired_public_updater_entries_are_readonly(
         return sorted((str(p.relative_to(root)), p.read_bytes(), p.stat().st_mode)
                       for p in root.rglob("*") if p.is_file()) if root.exists() else None
     before_code, before_state = inventory(repo), inventory(runtime)
+    assert not any(hasattr(updater, name) for name in
+                   ("_legacy_spawn_update", "_legacy_perform_update", "_restart_service"))
     monkeypatch.setattr(updater, "is_packaged_source", lambda _: packaged)
     def forbidden(*args, **kwargs):
         pytest.fail("retired entrypoint must not call the legacy writer or read state")
@@ -1250,7 +1253,9 @@ def test_retired_module_cli_refuses_before_runtime_or_inherited_lock_io(
 def test_retired_cli_never_touches_supplied_lock_or_restart_flags(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("CLI retirement happens before lock or restart I/O")
-    for name in ["acquire_update_lock", "_legacy_perform_update", "perform_update",
+    assert not any(hasattr(updater, name) for name in
+                   ("_legacy_spawn_update", "_legacy_perform_update", "_restart_service"))
+    for name in ["acquire_update_lock", "perform_update",
                  "runtime_safe_to_update", "_git", "_run", "write_update_state"]:
         monkeypatch.setattr(updater, name, forbidden)
     monkeypatch.setattr(updater.time, "sleep", forbidden)
