@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.cookiejar
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -2185,3 +2186,53 @@ def test_provider_refresh_observation_cannot_replace_newly_loaded_client(tmp_pat
         supervisor.refresh_configured_provider(observed["configuration_version"], observed["refresh_revision"])
     assert loads == ["load"] and supervisor.manager._provider is current
     assert supervisor.provider_refresh_state()["refresh_revision"] == 1
+
+
+def test_update_state_write_refuses_invalid_status_and_aliased_authority(tmp_path):
+    absent = tmp_path / "not-created"
+    with pytest.raises(ValueError, match="invalid update status"):
+        updater.write_update_state(absent, "unknown")
+    assert not absent.exists()
+
+    outside = tmp_path / "private-applicant"
+    outside.mkdir(mode=0o700)
+    canary = outside / "applicant.txt"
+    canary.write_text("CANARY_PRIVATE_APPLICANT_VALUE", encoding="utf-8")
+    alias = tmp_path / "runtime-alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="state_invalid"):
+        updater.write_update_state(alias, "checking", old_version="a" * 40)
+    assert canary.read_text(encoding="utf-8") == "CANARY_PRIVATE_APPLICANT_VALUE"
+    assert not (outside / "update-state.json").exists()
+    assert alias.is_symlink()
+
+    public = tmp_path / "public-runtime"
+    public.mkdir(mode=0o755)
+    public.chmod(0o755)
+    with pytest.raises(ValueError, match="state_invalid"):
+        updater.write_update_state(public, "checking", old_version="a" * 40)
+    assert stat.S_IMODE(public.stat().st_mode) == 0o755
+    assert not (public / "update-state.json").exists()
+
+
+def test_update_state_write_never_chmods_swapped_publication(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    outside = tmp_path / "private-applicant.txt"
+    outside.write_text("CANARY_PRIVATE_APPLICANT_VALUE", encoding="utf-8")
+    outside.chmod(0o640)
+    original_replace = updater.os.replace
+    path = runtime / "update-state.json"
+
+    def replace_then_swap(src, dst):
+        original_replace(src, dst)
+        if Path(dst) == path:
+            path.unlink()
+            path.symlink_to(outside)
+
+    monkeypatch.setattr(updater.os, "replace", replace_then_swap)
+    updater.write_update_state(runtime, "checking", old_version="a" * 40)
+    assert path.is_symlink()
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o640
+    assert outside.read_text(encoding="utf-8") == "CANARY_PRIVATE_APPLICANT_VALUE"
+    assert updater.read_update_state(runtime)["reason"] == "state_invalid"
+    assert not list(runtime.glob(".update-state-*.tmp"))

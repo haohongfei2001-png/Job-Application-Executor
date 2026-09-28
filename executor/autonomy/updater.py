@@ -25,9 +25,6 @@ def write_update_state(
     new_version: str = "",
     reason: str = "",
 ) -> None:
-    root = Path(runtime).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    root.chmod(0o700)
     allowed = {
         "idle",
         "checking",
@@ -40,6 +37,17 @@ def write_update_state(
     }
     if status not in allowed:
         raise ValueError("invalid update status")
+    root = Path(runtime).expanduser().absolute()
+    if any(part.is_symlink() for part in (root, *root.parents)):
+        raise ValueError("state_invalid")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if any(part.is_symlink() for part in (root, *root.parents)):
+        raise ValueError("state_invalid")
+    root_info = root.stat(follow_symlinks=False)
+    if (not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid != os.geteuid()
+            or root_info.st_mode & 0o077):
+        raise ValueError("state_invalid")
     safe_reason = reason if re.fullmatch(r"[a-z_]{0,80}", reason or "") else "update_failed"
     payload = {
         "status": status,
@@ -59,12 +67,11 @@ def write_update_state(
             delete=False,
         ) as handle:
             temp_path = Path(handle.name)
-            os.chmod(temp_path, 0o600)
+            os.fchmod(handle.fileno(), 0o600)
             json.dump(payload, handle, ensure_ascii=False)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
-        path.chmod(0o600)
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink(missing_ok=True)
