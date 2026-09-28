@@ -1829,3 +1829,68 @@ def test_mutable_native_and_aria_controls_keep_complete_positive_batch(tmp_path)
     queue.require_field_action_readbacks(attempt)
     queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
     assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+@pytest.mark.parametrize("later_plan", ["missing_target", "duplicate_identity", "empty"])
+def test_unknown_native_write_stays_blocked_before_later_admission(tmp_path, monkeypatch, later_plan):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    full = "".join(f"第{i}段：完整正文🧭，不要删除否定词。\n" for i in range(1000))
+    retained = [full + "\nPRIVATE_RETAINED_FIRST", full + "\nPRIVATE_RETAINED_SECOND"]
+    intended = full + "\nPRIVATE_INTENDED_FIRST"
+    html = tmp_path / "unknown-admission.html"
+    html.write_text("""<!doctype html><body>
+      <label>First<textarea id='first' oninput="this.value=''"></textarea></label>
+      <label>Later<textarea id='later'></textarea></label>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.writes=0;window.submits=0;
+        document.addEventListener('input',()=>window.writes++);
+        document.addEventListener('change',()=>window.writes++);</script>""", encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.page.locator("textarea").evaluate_all(
+            "(elements,values)=>elements.forEach((e,i)=>e.value=values[i])", retained)
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        fields = adapter.discover_fields()
+        resolutions = [FieldResolution(field_id=field.field_id, selector=field.selector,
+            label=field.label, status=ResolutionStatus.RESOLVED,
+            value=intended if i == 0 else full + "\nPRIVATE_INTENDED_SECOND")
+            for i, field in enumerate(fields)]
+        with pytest.raises(BrowserOwnershipError, match="outcome unknown"):
+            adapter.apply_resolutions(resolutions)
+        assert adapter.page.locator("#first").input_value() == ""
+        assert adapter.page.locator("#later").input_value() == retained[1]
+        writes = adapter.page.evaluate("window.writes")
+        assert writes > 0
+        assert adapter.page.evaluate("window.submits") == 0
+        before = queue.field_actions(tid)
+        assert len(before) == 1
+        assert before[0]["outcome"] == "UNKNOWN_OUTCOME"
+        if later_plan == "missing_target":
+            adapter.page.locator("#first").evaluate("e=>e.remove()")
+        elif later_plan == "duplicate_identity":
+            resolutions[1].field_id = resolutions[0].field_id
+        else:
+            resolutions = []
+        discovery = []
+        def forbidden_discovery():
+            discovery.append("UNEXPECTED_DISCOVERY")
+            raise AssertionError("unknown write must stop before a new observation")
+        monkeypatch.setattr(adapter, "discover_fields", forbidden_discovery)
+        with pytest.raises(BrowserOwnershipError, match="outcome unknown"):
+            adapter.apply_resolutions(resolutions)
+        assert discovery == []
+        assert adapter.page.locator("#later").input_value() == retained[1]
+        assert adapter.page.evaluate("[window.writes,window.submits]") == [writes, 0]
+        assert queue.field_actions(tid) == before
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == before
+    with pytest.raises(RuntimeError):
+        rebuilt.require_field_action_readbacks(attempt)
+    for path in queue.root.rglob("*"):
+        if path.is_file():
+            payload = path.read_bytes()
+            for canary in (b"PRIVATE_RETAINED", b"PRIVATE_INTENDED"):
+                assert canary not in payload
+            assert "不要删除".encode("utf-8") not in payload
