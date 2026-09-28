@@ -599,3 +599,11 @@ PAIA fresh main261e094e703ddea913d03db513f088c5898ec1a4; sole product Draft88 he
 ## Cloud writer checkpoint r75 — private-authority hardlink refusal
 
 Cloud writer checkpoint r75: exact r74 head2242cf9502cd6c92a970545c4bb7069e05dd7b91 Actions36355960448 SUCCESS (Mac/Ubuntu consumer593PASS each; original full Draft job skipped). Bounded private-authority alias batch rejects hardlinked journal main/WAL/SHM before lock admission and direct candidate snapshot, hardlinked answer key before read, and hardlinked service record before parse; five owning regression cases preserve external inode/private bytes and all original tests. Static review only until next-head CI. JCR08 IN_PROGRESS/NOT_CERTIFIED; legacy writer retirement and genuine transfer, foreground two-version transaction recovery, DFG002/008 remain open; final submit user-only.
+
+## Cloud writer checkpoint r86 — refuse external links before package provenance reads (2026-09-28)
+
+Exact previous head `0049354917f2dff71853f30af9c5087e1b665264` Actions [36369392047](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36369392047) passed all five affected hosted Ubuntu/Mac/foundation shards; full Draft certification remained skipped. The shipped checkout Git updater commands are absent.
+
+Bounded source review found read-before-ownership checks for a hardlinked source manifest, runtime payload/manifest and standalone marker. Require regular single-link metadata before reading those paths; packaged provenance now refuses a linked runtime manifest before parsing. Synthetic regressions put each alias on an external inode, prohibit the aliased read, preserve external bytes and verify the original candidate after removing the alias. Existing source/runtime identity, dependency lock, real standalone installer and Mac transaction tests remain. This is payload ownership only; it does not certify signing, actual device/live behavior, old-writer state transfer or final consumer readiness. New-head affected CI is pending, no full/unchanged rerun.
+
+JCR-08 remains IN_PROGRESS/NOT_CERTIFIED, DFG-002/008 and real legacy transfer remain engineering-open, and final submission stays user-only.

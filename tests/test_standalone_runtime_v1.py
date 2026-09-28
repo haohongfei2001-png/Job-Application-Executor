@@ -440,3 +440,25 @@ def test_standalone_snapshot_allows_only_internal_hardlinks_through_preflight(tm
         copy_standalone_runtime_candidate(source, candidate, repo)
     assert not candidate.exists()
     assert (source / "bin" / "python").stat().st_nlink == 2
+
+def test_standalone_marker_hardlink_refuses_before_read(tmp_path, monkeypatch):
+    from executor.autonomy.standalone_runtime import STANDALONE_MARKER
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    marker = runtime / STANDALONE_MARKER
+    marker.write_text('{"format":"jae-standalone-runtime-v1"}\n', encoding="utf-8")
+    external = tmp_path / "external-marker"
+    os.link(marker, external)
+    original = external.read_bytes()
+    read_text = Path.read_text
+
+    def no_external_marker_read(path, *args, **kwargs):
+        if path == marker:
+            pytest.fail("hardlinked standalone marker must not be read")
+        return read_text(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", no_external_marker_read)
+        assert not verify_standalone_runtime(runtime, tmp_path / "release")
+    assert external.read_bytes() == original

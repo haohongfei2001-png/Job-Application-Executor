@@ -70,9 +70,10 @@ def verify_source_candidate(root: str | Path) -> bool:
         return False
     root = supplied.resolve()
     manifest_file = root / MANIFEST_NAME
-    if manifest_file.is_symlink():
-        return False
     try:
+        metadata = manifest_file.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            return False
         saved = json.loads(manifest_file.read_text(encoding="utf-8"))
         if saved != source_manifest(root):
             return False
@@ -127,7 +128,8 @@ def runtime_manifest(root: str | Path, release: str | Path) -> dict:
             raise ValueError("release_runtime_symlink")
         if path.is_dir():
             continue
-        if not path.is_file():
+        metadata = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ValueError("release_runtime_invalid")
         relative = path.relative_to(root).as_posix()
         if relative == RUNTIME_MANIFEST_NAME:
@@ -137,7 +139,7 @@ def runtime_manifest(root: str | Path, release: str | Path) -> dict:
             "path": relative,
             "bytes": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
-            "executable": bool(path.stat().st_mode & stat.S_IXUSR),
+            "executable": bool(metadata.st_mode & stat.S_IXUSR),
         })
     encoded = json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {
@@ -151,9 +153,10 @@ def runtime_manifest(root: str | Path, release: str | Path) -> dict:
 def verify_runtime_candidate(root: str | Path, release: str | Path) -> bool:
     root = Path(root).expanduser()
     manifest_file = root / RUNTIME_MANIFEST_NAME
-    if manifest_file.is_symlink():
-        return False
     try:
+        metadata = manifest_file.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            return False
         saved = json.loads(manifest_file.read_text(encoding="utf-8"))
         return saved == runtime_manifest(root, release)
     except (OSError, UnicodeError, ValueError, TypeError):
@@ -311,7 +314,11 @@ def read_release_identity(root: str | Path) -> dict:
     if not verify_source_candidate(root):
         return {"status": "unverified", "source_sha256": ""}
     try:
-        manifest = json.loads((root / MANIFEST_NAME).read_text(encoding="utf-8"))
+        manifest_file = root / MANIFEST_NAME
+        metadata = manifest_file.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            return {"status": "unverified", "source_sha256": ""}
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
         return {"status": "verified", "source_sha256": manifest["source_sha256"]}
     except (OSError, UnicodeError, ValueError, KeyError, TypeError):
         return {"status": "unverified", "source_sha256": ""}

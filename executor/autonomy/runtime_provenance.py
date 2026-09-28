@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -68,7 +69,10 @@ def packaged_provenance(repo_root: str | Path) -> dict | None:
     runtime = supplied.parent / "runtime"
     try:
         manifest_file = runtime / RUNTIME_MANIFEST_NAME
-        if runtime.is_symlink() or manifest_file.is_symlink() or not manifest_file.is_file():
+        if runtime.is_symlink():
+            return report
+        metadata = manifest_file.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             return report
         manifest_text = manifest_file.read_text(encoding="utf-8")
         if not verify_runtime_candidate(runtime, supplied):

@@ -556,3 +556,88 @@ def test_source_snapshot_refuses_external_hardlink_before_copy(tmp_path, relativ
     assert not candidate.exists()
     assert private.read_bytes() == before
     assert linked.stat().st_ino == private.stat().st_ino
+
+def test_source_manifest_hardlink_refuses_before_read(tmp_path, monkeypatch):
+    repo = _source(tmp_path)
+    release = tmp_path / "release"
+    copy_source_candidate(repo, release)
+    manifest = release / MANIFEST_NAME
+    external = tmp_path / "external-source-manifest"
+    os.link(manifest, external)
+    original = external.read_bytes()
+    read_text = Path.read_text
+
+    def no_external_read(path, *args, **kwargs):
+        if path == manifest:
+            pytest.fail("hardlinked source manifest must not be read")
+        return read_text(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", no_external_read)
+        assert not verify_source_candidate(release)
+        assert read_release_identity(release) == {
+            "status": "unverified", "source_sha256": "",
+        }
+    assert external.read_bytes() == original
+    external.unlink()
+    assert verify_source_candidate(release)
+
+
+def test_runtime_payload_and_manifest_hardlinks_refuse_before_read(tmp_path, monkeypatch):
+    from executor.autonomy.runtime_provenance import packaged_provenance
+    from executor.autonomy.release import RUNTIME_MANIFEST_NAME
+
+    repo = _source(tmp_path)
+    release = tmp_path / "AI Manager.app" / "Contents" / "Resources" / "release"
+    release.parent.mkdir(parents=True)
+    copy_source_candidate(repo, release)
+    venv_root = tmp_path / "venv"
+    (venv_root / "bin").mkdir(parents=True)
+    (venv_root / "bin" / "python").symlink_to(sys.executable)
+    (venv_root / "lib").mkdir()
+    (venv_root / "lib" / "owned.txt").write_bytes(b"OWNED_RUNTIME_CANARY")
+    runtime = release.parent / "runtime"
+    copy_runtime_candidate(venv_root, runtime, release)
+    assert verify_runtime_candidate(runtime, release)
+
+    payload = runtime / "lib" / "owned.txt"
+    external_payload = tmp_path / "external-runtime-payload"
+    os.link(payload, external_payload)
+    original_payload = external_payload.read_bytes()
+    read_bytes = Path.read_bytes
+
+    def no_external_payload_read(path, *args, **kwargs):
+        if path == payload:
+            pytest.fail("hardlinked runtime payload must not be read")
+        return read_bytes(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", no_external_payload_read)
+        assert not verify_runtime_candidate(runtime, release)
+        report = packaged_provenance(release)
+        assert report["source_verified_now"] is True
+        assert report["runtime_verified_now"] is False
+    assert external_payload.read_bytes() == original_payload
+    external_payload.unlink()
+    assert verify_runtime_candidate(runtime, release)
+
+    manifest = runtime / RUNTIME_MANIFEST_NAME
+    external_manifest = tmp_path / "external-runtime-manifest"
+    os.link(manifest, external_manifest)
+    original_manifest = external_manifest.read_bytes()
+    read_text = Path.read_text
+
+    def no_external_manifest_read(path, *args, **kwargs):
+        if path == manifest:
+            pytest.fail("hardlinked runtime manifest must not be read")
+        return read_text(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", no_external_manifest_read)
+        assert not verify_runtime_candidate(runtime, release)
+        report = packaged_provenance(release)
+        assert report["source_verified_now"] is True
+        assert report["runtime_verified_now"] is False
+    assert external_manifest.read_bytes() == original_manifest
+    external_manifest.unlink()
+    assert verify_runtime_candidate(runtime, release)

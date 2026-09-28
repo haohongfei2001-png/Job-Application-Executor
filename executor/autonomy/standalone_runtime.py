@@ -94,7 +94,9 @@ def verify_standalone_runtime(root: str | Path, release: str | Path) -> bool:
     root, release = Path(root), Path(release)
     marker = root / STANDALONE_MARKER
     try:
-        if (marker.is_symlink() or json.loads(marker.read_text()) !=
+        metadata = marker.stat(follow_symlinks=False)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or json.loads(marker.read_text()) !=
                 {"format": "jae-standalone-runtime-v1"}):
             return False
     except (OSError, UnicodeError, ValueError):
