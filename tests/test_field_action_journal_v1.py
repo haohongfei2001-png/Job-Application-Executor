@@ -1867,6 +1867,12 @@ def test_unknown_native_write_stays_blocked_before_later_admission(tmp_path, mon
         before = queue.field_actions(tid)
         assert len(before) == 1
         assert before[0]["outcome"] == "UNKNOWN_OUTCOME"
+        # Blurring/removing the deliberately changed native textarea commits
+        # one browser change event. Account for that fixture action before
+        # measuring the prohibited later adapter call, without resetting counters.
+        adapter.page.locator("#first").evaluate("e=>e.blur()")
+        fixture_writes = adapter.page.evaluate("window.writes")
+        assert fixture_writes == writes + 1
         if later_plan == "missing_target":
             adapter.page.locator("#first").evaluate("e=>e.remove()")
         elif later_plan == "duplicate_identity":
@@ -1882,7 +1888,7 @@ def test_unknown_native_write_stays_blocked_before_later_admission(tmp_path, mon
             adapter.apply_resolutions(resolutions)
         assert discovery == []
         assert adapter.page.locator("#later").input_value() == retained[1]
-        assert adapter.page.evaluate("[window.writes,window.submits]") == [writes, 0]
+        assert adapter.page.evaluate("[window.writes,window.submits]") == [fixture_writes, 0]
         assert queue.field_actions(tid) == before
     rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
     assert rebuilt.field_actions(tid) == before
