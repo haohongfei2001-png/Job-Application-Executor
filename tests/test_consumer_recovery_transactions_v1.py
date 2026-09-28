@@ -1,8 +1,9 @@
-"""Complete new recovery cases; original consumer suite stays byte-identical.
+"""Complete recovery cases, including seven retained cases moved verbatim.
 
-Each case uses the existing real packaged-release/private-WAL fixture and its
-original autouse isolated-home fixture. This complete file is a separate
-Ubuntu/Mac CI shard; no fixture, case, assertion or timeout is reduced.
+All seven prior restored-health cases and their assertions are copied exactly
+from the original consumer suite. Seventeen new cases use its real packaged
+release/private-WAL fixture and autouse isolated-home fixture. Both owning
+files run completely on Ubuntu/Mac; no case, fixture or timeout is reduced.
 """
 from __future__ import annotations
 
@@ -21,6 +22,110 @@ from test_consumer_entry_v1 import (
     _retirement_inventory,
     _assert_retirement_inventory,
 )
+
+
+@pytest.mark.parametrize("recovery_fault", [
+    "none", "unhealthy", "current_resealed", "current_replaced",
+    "quarantine_replaced", "failed_occupied", "failed_alias",
+])
+def test_rollback_recovery_requires_restored_final_path_health_and_owned_slots(
+    tmp_path, monkeypatch, recovery_fault
+):
+    """Real packaged releases, complete private WAL, and no recovery replay."""
+    import shutil
+    from contextlib import closing
+    from test_task_state_compatibility_v1 import authority
+    from executor.autonomy.state_compatibility import verify_task_state_backup
+    from executor.autonomy.worker import ProcessLock
+
+    repo, apps, state, db, key = _identity_transaction_fixture(tmp_path, rollback=True)
+    app = apps / (consumer.APP_NAME + ".app")
+    previous = apps / ("." + consumer.APP_NAME + ".app.previous")
+    failed = apps / ("." + consumer.APP_NAME + ".app.failed")
+    current_inode = app.stat().st_ino
+    previous_inode = previous.stat().st_ino
+    current_before = _identity_file_inventory(app)
+    previous_before = _identity_file_inventory(previous)
+    actual_start = consumer._candidate_starts
+    starts = []
+    after_health = {}
+    after_inodes = {}
+
+    def inode_inventory():
+        return {path.relative_to(apps).as_posix():
+                (path.lstat().st_dev, path.lstat().st_ino)
+                for path in apps.rglob("*")}
+
+    def start(python, source):
+        # Every observed health invocation reaches the real packaged runtime;
+        # the second response simulates final-path failure of the old release.
+        healthy = actual_start(python, source)
+        assert healthy
+        starts.append((python, source))
+        if len(starts) == 2:
+            assert source == app / "Contents" / "Resources" / "release"
+            return False
+        if len(starts) == 3:
+            assert app.stat().st_ino == current_inode
+            assert previous.stat().st_ino == previous_inode
+            assert _identity_file_inventory(app) == current_before
+            assert _identity_file_inventory(previous) == previous_before
+            assert not failed.exists() and not failed.is_symlink()
+            if recovery_fault == "current_resealed":
+                _reseal_changed_source(app)
+            elif recovery_fault in {"current_replaced", "quarantine_replaced"}:
+                target = app if recovery_fault == "current_replaced" else previous
+                preserved = apps / ("preserved-current" if target == app else "preserved-quarantine")
+                target.rename(preserved)
+                shutil.copytree(preserved, target, symlinks=True)
+                assert target.stat().st_ino != preserved.stat().st_ino
+                assert consumer._trusted_bundle(target)
+            elif recovery_fault == "failed_occupied":
+                failed.mkdir()
+                (failed / "foreign-evidence.txt").write_text("PRIVATE_FOREIGN_RECOVERY_EVIDENCE")
+            elif recovery_fault == "failed_alias":
+                failed.symlink_to(apps / "missing-foreign-slot", target_is_directory=True)
+                assert failed.is_symlink() and not failed.exists()
+            after_health.update(_retirement_inventory(apps))
+            after_inodes.update(inode_inventory())
+            return recovery_fault != "unhealthy"
+        return healthy
+
+    with closing(db):
+        expected_authority = authority(db)
+        expected_answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        private_before = _identity_file_inventory(state)
+        monkeypatch.setattr(consumer, "_candidate_starts", start)
+        result = rollback_macos_app(apps, task_state_root=state)
+
+        assert result["ok"] is False
+        assert result["reason"] == (
+            "rollback_post_activation_unhealthy" if recovery_fault == "none"
+            else "rollback_recovery_required")
+        assert len(starts) == 3
+        assert [source for _, source in starts] == [
+            previous / "Contents" / "Resources" / "release",
+            app / "Contents" / "Resources" / "release",
+            app / "Contents" / "Resources" / "release",
+        ]
+        assert all(python == source.parent / "runtime" / "bin" / "python"
+                   for python, source in starts)
+        # No later rename, deletion, cleanup, retry, or speculative activation
+        # may erase the exact post-health bytes, aliases, modes, or inodes.
+        _assert_retirement_inventory(apps, after_health)
+        assert inode_inventory() == after_inodes
+        assert _identity_file_inventory(state) == private_before
+        assert authority(db) == expected_authority
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == expected_answers
+        assert (state / "task-answers.key").read_bytes() == key
+        backup = result["task_state_backup"]
+        assert verify_task_state_backup(Path(backup["path"]), backup["receipt"])
+        assert backup["receipt"]["activation"] == "NOT_AUTHORIZED"
+        assert "PRIVATE_" not in json.dumps(result)
+        assert not (state / "auth.token").exists()
+        assert not (state / "service.json").exists()
+    with ProcessLock(state / "worker.lock"):
+        pass
 
 
 @pytest.mark.parametrize("action", ["install"])
