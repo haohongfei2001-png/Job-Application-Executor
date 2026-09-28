@@ -12,6 +12,17 @@ class FormObservationError(RuntimeError):
     """The page structure could not be read; no empty form may be inferred."""
 
 
+def unique_fill_identity(items: Iterable[WebField | FieldResolution]) -> bool:
+    """One action per complete field identity; no private values in errors."""
+    selected = tuple(items)
+    selectors = [item.selector for item in selected]
+    identities = [item.field_id for item in selected]
+    return (all(isinstance(value, str) and value.strip()
+                for value in selectors + identities)
+            and len(set(selectors)) == len(selectors)
+            and len(set(identities)) == len(identities))
+
+
 @dataclass(frozen=True)
 class ObservedRow:
     section: str
@@ -102,6 +113,9 @@ class FillPlan:
     def bind(cls, observation: FormObservation,
              actions: Iterable[FieldResolution]) -> "FillPlan":
         selected = tuple(actions)
+        if (not unique_fill_identity(observation.fields)
+                or not unique_fill_identity(selected)):
+            raise ValueError("fill plan requires unique field identity")
         observed = {item.selector for item in observation.fields}
         if any(action.selector not in observed for action in selected):
             raise ValueError("fill plan references unobserved field")
