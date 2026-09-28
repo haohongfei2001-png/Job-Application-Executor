@@ -1666,3 +1666,197 @@ finally:
     assert (delivery_after.st_ino, delivery_after.st_size, delivery_after.st_mtime_ns) == (
         delivery_before.st_ino, delivery_before.st_size, delivery_before.st_mtime_ns)
     assert not list(source.rglob("__pycache__"))
+
+
+@pytest.mark.parametrize("value", [None, True, 1, "", "PRIVATE_REASON", {}, [],
+                                    "https://example.invalid", {"result": "not-confirmed"}])
+def test_native_release_result_refuses_nonfinite_input_without_launch(tmp_path, monkeypatch, value):
+    from executor.autonomy import macos_host
+    monkeypatch.setattr(macos_host.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_host.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("nonfinite result launched a child"))
+    assert macos_host.present_native_release_result(tmp_path, value) is False
+
+
+def test_native_release_result_refuses_unverified_or_aliased_host_without_fallback(tmp_path, monkeypatch):
+    from executor.autonomy import macos_host
+    monkeypatch.setattr(macos_host.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_host.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("unverified result host executed"))
+    monkeypatch.setattr("webbrowser.open", lambda *a, **k: pytest.fail("browser fallback"))
+    assert macos_host.present_native_release_result(tmp_path / "missing", "not-confirmed") is False
+    root = _candidate(tmp_path)
+    alias = tmp_path / "result-alias"
+    alias.symlink_to(root, target_is_directory=True)
+    assert macos_host.present_native_release_result(alias, "not-confirmed") is False
+    (root / "AIApplicationWindow").write_bytes(b"PRIVATE_CHANGED_RESULT_BINARY")
+    assert macos_host.present_native_release_result(root, "reopen-failed") is False
+
+
+@pytest.mark.parametrize("kind", ["not-confirmed", "reopen-failed"])
+def test_hosted_mac_actual_release_result_is_visible_accessible_without_web_or_task_surface(compiled_host, kind):
+    from executor.autonomy.macos_host import present_native_release_result
+    # Actual compiled Cocoa, no localhost server/ticket/browser/task writer.
+    assert present_native_release_result(compiled_host, kind, smoke=True) is True
+
+
+def test_hosted_mac_installed_release_result_uses_owned_runtime_lease_and_keeps_full_private_authority(
+    native_installed_app, tmp_path
+):
+    import os
+    import sqlite3
+    from contextlib import closing
+    from pathlib import Path
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    from executor.autonomy.state_compatibility import _snapshot
+    from test_task_state_compatibility_v1 import encrypted_answers
+
+    f = native_installed_app
+    queue = TaskQueue(f["state"])
+    task = queue.pause(queue.enqueue(TaskSpec(company="Synthetic result",
+        role="Synthetic", target_url="https://example.invalid/result",
+        profile_ref="synthetic-result-profile.json"))["task_id"])
+    with closing(sqlite3.connect(f["state"] / "tasks.sqlite3")) as db:
+        key = encrypted_answers(f["state"], db)
+        db.commit()
+        before = _snapshot(db)
+    private = f["state"] / "profile.json"
+    private.write_text("\n".join(f"{i}: PRIVATE_RESULT_中文_<literal>" for i in range(1000)), encoding="utf-8")
+    private.chmod(0o600)
+    files_before = {name: ((f["state"] / name).read_bytes(),
+                           (f["state"] / name).stat().st_mode,
+                           (f["state"] / name).stat().st_dev,
+                           (f["state"] / name).stat().st_ino)
+                    for name in ("profile.json", "task-answers.key")}
+    assert files_before["task-answers.key"][0] == key
+    f["repo"].rename(tmp_path / "result-checkout-removed")
+    source = f["app"] / "Contents/Resources/release"
+    runtime = f["app"] / "Contents/Resources/runtime"
+    poison = tmp_path / "result-ambient"
+    poison.mkdir()
+    (poison / "sitecustomize.py").write_text("raise RuntimeError('PRIVATE_RESULT_AMBIENT')")
+    env = {**os.environ, "HOME": str(f["home"]), "PYTHONHOME": str(poison),
+           "PYTHONPATH": str(poison), "BROWSER": "/usr/bin/false"}
+    script = r"""
+import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from executor.autonomy import cli
+root=Path(sys.argv[2])
+def forbidden(*args,**kwargs):
+    raise AssertionError("result cannot start/stop/retry a service or task")
+cli.launch_consumer=cli.lifecycle=cli.request=cli._stop_owned_service=forbidden
+outcomes=[{"ok":False,"reason":"PRIVATE_RESULT_PATH"},
+          {"ok":True,"updated":True,"reopen_requested":False}]
+for outcome in outcomes:
+    assert cli.show_native_release_result(root,outcome,smoke=True) is True
+assert not (root/"service.json").exists()
+print(json.dumps({"release_results_visible":2,"no_service_started":True}))
+"""
+    result = subprocess.run([str(runtime / "bin/python"), "-I", "-B", "-c", script,
+        str(source), str(f["state"])], cwd=poison, env=env, text=True,
+        capture_output=True, timeout=55)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {"release_results_visible": 2, "no_service_started": True}
+    assert "PRIVATE_" not in result.stdout + result.stderr
+    assert "ticket=" not in result.stdout + result.stderr and "Bearer " not in result.stdout + result.stderr
+    assert str(f["state"]) not in result.stdout and not (f["state"] / "service.json").exists()
+    with closing(sqlite3.connect(f["state"] / "tasks.sqlite3")) as db:
+        assert _snapshot(db) == before
+    assert queue.get(task["task_id"]) == task
+    for name, previous in files_before.items():
+        path = f["state"] / name
+        assert (path.read_bytes(), path.stat().st_mode, path.stat().st_dev, path.stat().st_ino) == previous
+    assert not list(source.rglob("__pycache__"))
+
+
+@pytest.mark.parametrize("reason", ["worker_active", "otp_in_flight", "service_identity_changed",
+                                    "rollback_state_incompatible", "native_release_unconfirmed"])
+def test_foreground_release_refusal_yields_fixed_result_under_real_new_window_lease(
+    tmp_path, monkeypatch, reason
+):
+    from types import SimpleNamespace
+    from executor.autonomy import cli, macos_host, native_reopen, state_compatibility
+    from test_consumer_entry_v1 import _native_handoff_entry
+
+    app, source, executable, root, canary = _native_handoff_entry(tmp_path, monkeypatch)
+    before = canary.read_bytes()
+    actual_guard = state_compatibility.native_window_guard
+    calls = []
+    class Presenter:
+        def __init__(self, directory, **kwargs):
+            assert directory == source.parent / "native-host"
+            assert type(kwargs["ownership_fd"]) is int
+        def focus(self):
+            pytest.fail("failure cannot focus/replay the dashboard")
+        def wait_for_close(self):
+            return True
+        def take_release_request(self):
+            return {"action": "restore"}
+        def close(self):
+            pass
+    class Reopen:
+        def start(self):
+            pass
+        def close(self):
+            pass
+    monkeypatch.setattr(macos_host, "NativePresenter", Presenter)
+    monkeypatch.setattr(native_reopen, "create_owned_reopen_server", lambda *a: Reopen())
+    monkeypatch.setattr(cli, "launch_consumer", lambda *a, **k: {"ok": True, "opened": True})
+    def handoff(authority, port, intent):
+        assert authority == root and port == 9344 and intent == {"action": "restore"}
+        with actual_guard(root):
+            pass
+        calls.append("one_handoff")
+        return {"ok": False, "reason": reason, "final_click_actor": "user", "submit_capability": False}
+    monkeypatch.setattr(cli, "handoff_installed_consumer", handoff)
+    def visible(directory, kind, *, ownership_fd, smoke):
+        assert directory == source.parent / "native-host" and kind == "not-confirmed"
+        assert type(ownership_fd) is int and smoke is False
+        with pytest.raises(BlockingIOError):
+            with actual_guard(root):
+                pytest.fail("result window did not own the actual kernel lease")
+        calls.append("one_fixed_result")
+        return True
+    monkeypatch.setattr(macos_host, "present_native_release_result", visible)
+    monkeypatch.setattr(cli, "subprocess",
+        SimpleNamespace(Popen=lambda *a, **k: pytest.fail("failure reopened an app"), DEVNULL=-3))
+    monkeypatch.setattr(cli, "_stop_owned_service", lambda *a: pytest.fail("result repeated service stop"))
+    result = cli.launch_native_consumer(root, 9344)
+    assert calls == ["one_handoff", "one_fixed_result"]
+    assert result == {"ok": False, "reason": reason, "final_click_actor": "user",
+                      "submit_capability": False, "release_result_visible": True}
+    with actual_guard(root):
+        pass
+    assert canary.read_bytes() == before and not (root / "tasks.sqlite3").exists()
+    assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("fault", ["foreign_root", "image_changed", "alias", "lease_busy", "already_reopened"])
+def test_release_result_refuses_unadmitted_or_contended_authority_without_any_effect(
+    tmp_path, monkeypatch, fault
+):
+    from executor.autonomy import cli, macos_host, state_compatibility
+    from test_consumer_entry_v1 import _native_handoff_entry
+
+    app, source, executable, root, canary = _native_handoff_entry(tmp_path, monkeypatch)
+    before = canary.read_bytes()
+    supplied = root
+    outcome = {"ok": False, "reason": "PRIVATE_RESULT_CANARY"}
+    if fault == "foreign_root":
+        supplied = tmp_path / "foreign"
+    elif fault == "image_changed":
+        executable.write_text("unverified result launcher")
+    elif fault == "alias":
+        supplied = tmp_path / "authority-alias"
+        supplied.symlink_to(root, target_is_directory=True)
+    elif fault == "already_reopened":
+        outcome = {"ok": True, "restored": True, "reopen_requested": True}
+    monkeypatch.setattr(macos_host, "present_native_release_result",
+                        lambda *a, **k: pytest.fail("unadmitted result was presented"))
+    if fault == "lease_busy":
+        with state_compatibility.native_window_guard(root):
+            assert cli.show_native_release_result(supplied, outcome) is False
+    else:
+        assert cli.show_native_release_result(supplied, outcome) is False
+    assert canary.read_bytes() == before and not (root / "tasks.sqlite3").exists()
