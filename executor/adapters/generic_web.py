@@ -13,6 +13,7 @@ from .base import SiteAdapter
 from ..browser import BrowserOwnershipError, connect, owned_page_after_action, page_document_epoch, page_target_id
 from ..field_classifier import is_final_submit, is_initial_apply, is_next
 from ..forms import FormObservation, FormObservationError, ObservedRow
+from ..forms.observation import unique_fill_identity
 from ..models import (
     ApplicationPlan,
     FieldResolution,
@@ -715,6 +716,11 @@ class GenericWebAdapter(SiteAdapter):
 
     def apply_resolutions(self, resolutions: Iterable[FieldResolution]) -> list[dict]:
         resolutions = list(resolutions)
+        # Reject the whole ambiguous batch before discovery, write intent or
+        # input/change dispatch. Never deduplicate to silently choose a value.
+        if not unique_fill_identity(resolutions):
+            return [{"field_id": item.field_id, "ok": False,
+                     "reason": "ambiguous_fill_plan_identity"} for item in resolutions]
         # Explicit site dependency metadata permits a bounded parent-first
         # order. The child locator is resolved after the parent's redraw.
         # Missing or cyclic dependencies are unsupported, never guessed.
