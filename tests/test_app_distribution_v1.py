@@ -800,6 +800,53 @@ def test_distribution_intake_refuses_receipt_drift_before_candidate_or_state(
     assert json.loads((directory / RECEIPT_NAME).read_text()) == receipt
 
 
+@pytest.mark.parametrize("control", ["runtime_manifest", "launcher"])
+def test_distribution_intake_refuses_control_alias_swapped_after_payload_verification(
+    tmp_path, monkeypatch, control
+):
+    from executor.autonomy import app_distribution as module
+
+    root = APP_NAME + ".app"
+    manifest = root + "/Contents/Resources/runtime/release-runtime-manifest.json"
+    launcher = root + "/Contents/MacOS/AIApplicationManager"
+    members = [
+        (root, "directory", ""),
+        (root + "/Contents", "directory", ""),
+        (root + "/Contents/MacOS", "directory", ""),
+        (launcher, "file", "web-launcher"),
+        (root + "/Contents/Resources", "directory", ""),
+        (root + "/Contents/Resources/release", "directory", ""),
+        (root + "/Contents/Resources/runtime", "directory", ""),
+        (manifest, "file", json.dumps({
+            "runtime_sha256": "0" * 64, "requirements_sha256": "0" * 64,
+        })),
+    ]
+    directory, receipt = _intake_artifact(tmp_path, members)
+    private = tmp_path / "private-control"
+    private.write_text(members[-1][2] if control == "runtime_manifest"
+                       else "web-launcher")
+    target_name = manifest if control == "runtime_manifest" else launcher
+
+    monkeypatch.setattr(module, "_trusted_bundle", lambda *_args: True)
+    monkeypatch.setattr(module, "verify_source_candidate", lambda *_args: True)
+    monkeypatch.setattr(module, "source_manifest",
+                        lambda *_args: {"source_sha256": "0" * 64})
+    def swap_after_verification(runtime, _release):
+        target = runtime.parents[1] / "MacOS/AIApplicationManager" if (
+            control == "launcher") else runtime / "release-runtime-manifest.json"
+        assert target == runtime.parents[2] / target_name.removeprefix(root + "/")
+        target.unlink()
+        target.symlink_to(private)
+        return True
+    monkeypatch.setattr(module, "verify_runtime_candidate", swap_after_verification)
+    with pytest.raises(ValueError, match="distribution_intake_refused:(identity|presentation)"):
+        with module.stage_macos_distribution(directory):
+            pytest.fail("control alias after verification yielded a candidate")
+    assert private.read_text() == (members[-1][2] if control == "runtime_manifest"
+                                   else "web-launcher")
+    assert json.loads((directory / RECEIPT_NAME).read_text()) == receipt
+
+
 def test_distribution_intake_refuses_duplicate_receipt_keys_and_aliases(tmp_path):
     from executor.autonomy.app_distribution import stage_macos_distribution
     directory, receipt = _intake_artifact(tmp_path, [(APP_NAME + ".app", "directory", "")])

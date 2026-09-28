@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from .consumer import APP_NAME, _trusted_bundle, install_macos_app
+from .consumer import APP_NAME, _owned_bundle_text, _trusted_bundle, install_macos_app
 from .release import (RUNTIME_MANIFEST_NAME, source_manifest,
                       verify_runtime_candidate, verify_source_candidate)
 from .standalone_runtime import verify_standalone_runtime
@@ -184,7 +184,7 @@ def build_macos_distribution(repo_root: str | Path, *,
                         and verify_runtime_candidate(owned_runtime, release))
             if not verified() or not verify_standalone_runtime(owned_runtime, release):
                 raise ValueError("distribution_candidate_invalid")
-            identity = json.loads((owned_runtime / RUNTIME_MANIFEST_NAME).read_text())
+            identity = json.loads(_owned_bundle_text(owned_runtime / RUNTIME_MANIFEST_NAME))
             members = _bundle_members(app)
             archive = work / ARCHIVE_NAME
             _archive_app(app, archive)
@@ -418,13 +418,13 @@ def stage_macos_distribution(distribution: str | Path):
                     or source_manifest(release)["source_sha256"] != receipt["source_sha256"]):
                 raise ValueError("distribution_payload_invalid")
             phase = "identity"
-            identity = json.loads((runtime / RUNTIME_MANIFEST_NAME).read_text())
+            identity = json.loads(_owned_bundle_text(runtime / RUNTIME_MANIFEST_NAME))
             if any(identity[key] != receipt[key]
                    for key in ("runtime_sha256", "requirements_sha256")):
                 raise ValueError("distribution_payload_identity")
             phase = "presentation"
             from .consumer import _native_packaged_launcher
-            native = (app / "Contents/MacOS/AIApplicationManager").read_text() == _native_packaged_launcher()
+            native = _owned_bundle_text(app / "Contents/MacOS/AIApplicationManager") == _native_packaged_launcher()
             if native != (receipt.get("presentation") == "native"):
                 raise ValueError("distribution_presentation_mismatch")
             expanded.unlink()
