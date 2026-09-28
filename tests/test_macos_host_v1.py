@@ -1401,3 +1401,268 @@ def test_hosted_mac_actual_menu_handoff_exits_one_window_without_service_or_task
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+def test_hosted_mac_two_version_foreground_handoff_uses_actual_runtime_window_service_and_current_journal(
+    native_installed_app, tmp_path, monkeypatch
+):
+    """Whole installed handoff boundary; native picker/device certification stays separate."""
+    import os
+    import sqlite3
+    from contextlib import closing
+    from pathlib import Path
+    from executor.autonomy import consumer
+    from executor.autonomy.app_distribution import ARCHIVE_NAME, RECEIPT_NAME, _archive_app
+    from executor.autonomy.queue import TaskQueue, TaskSpec
+    from executor.autonomy.release import copy_source_candidate, source_manifest
+    from executor.autonomy.state_compatibility import _snapshot, verify_task_state_backup
+    from executor.autonomy.worker import Worker
+    from test_task_state_compatibility_v1 import encrypted_answers
+
+    f = native_installed_app
+    current, state = f["app"], f["state"]
+    source = current / "Contents/Resources/release"
+    original = source_manifest(source)["source_sha256"]
+    queue = TaskQueue(state)
+    tasks = []
+    for index in range(3):
+        task = queue.enqueue(TaskSpec(company="Synthetic foreground " + str(index),
+            role="Synthetic role", target_url="https://jobs.example.test/foreground/" + str(index),
+            profile_ref=str(state / "profile.json"), live_authorized=False))
+        tasks.append(queue.pause(task["task_id"]))
+    with closing(sqlite3.connect(state / "tasks.sqlite3")) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        key = encrypted_answers(state, db)
+        db.execute("UPDATE task_answer_events SET task_id=? WHERE task_id='synthetic-task'",
+                   (tasks[0]["task_id"],))
+        db.commit()
+    assert Worker(queue, settings={}).active is None
+    view = queue.remember_task_view(tasks[1]["task_id"], expected_revision=0)
+    for name, value in {
+        "profile.json": {"complete": "\n".join(
+            f"{i}: PRIVATE_FOREGROUND_PROFILE_中文_<literal>" for i in range(1000))},
+        "preferences.json": {"complete": [
+            f"{i}: PRIVATE_FOREGROUND_PREF_中文_<literal>" for i in range(1000)]},
+    }.items():
+        path = state / name
+        path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        path.chmod(0o600)
+    def authority():
+        with closing(sqlite3.connect(state / "tasks.sqlite3")) as db:
+            db.execute("BEGIN")
+            return _snapshot(db)
+    def private_files():
+        return {name: ((state / name).read_bytes(), (state / name).stat().st_mode,
+                       (state / name).stat().st_dev, (state / name).stat().st_ino)
+                for name in ("profile.json", "preferences.json", "task-answers.key")}
+    before, files_before = authority(), private_files()
+    assert files_before["task-answers.key"][0] == key
+    assert len(queue.tasks()) == 3 and queue.task_view_context() == view
+
+    # A complete genuine second version, using the already compiled exact
+    # native contract and standalone runtime. No Xcode or ambient checkout at
+    # the installed user's update boundary.
+    replacement = tmp_path / "second-version-source"
+    copy_source_candidate(source, replacement)
+    initializer = replacement / "executor/__init__.py"
+    initializer.write_text(initializer.read_text() + "\n# complete foreground second source version\n")
+    monkeypatch.setattr(consumer, "_stage_native_host",
+        lambda *_args: pytest.fail("prebuilt foreground transaction compiled a host"))
+    second_apps = tmp_path / "second-version-apps"
+    built = consumer.install_macos_app(replacement, destination=second_apps,
+        standalone_runtime=current / "Contents/Resources/runtime",
+        native_presentation=True, native_host=current / "Contents/Resources/native-host",
+        task_state_root=tmp_path / "second-build-empty-state")
+    assert built["ok"] is True
+    second_app = second_apps / (consumer.APP_NAME + ".app")
+    expected = source_manifest(second_app / "Contents/Resources/release")["source_sha256"]
+    assert expected != original
+    delivery = tmp_path / "Complete Foreground Delivery"
+    delivery.mkdir()
+    archive = delivery / ARCHIVE_NAME
+    _archive_app(second_app, archive)
+    with archive.open("rb") as handle:
+        archive_sha = hashlib.file_digest(handle, "sha256").hexdigest()
+    runtime_receipt = json.loads(
+        (second_app / "Contents/Resources/runtime/release-runtime-manifest.json").read_text())
+    receipt = {
+        "format": "jae-macos-distribution-v1", "archive": ARCHIVE_NAME,
+        "archive_sha256": archive_sha, "app_name": consumer.APP_NAME + ".app",
+        "source_sha256": expected, "runtime_sha256": runtime_receipt["runtime_sha256"],
+        "requirements_sha256": runtime_receipt["requirements_sha256"],
+        "signing": "unsigned", "certification": "NOT_CERTIFIED",
+        "final_click_actor": "user", "task_state": "excluded",
+        "build_host_metadata": "excluded", "presentation": "native",
+    }
+    (delivery / RECEIPT_NAME).write_text(json.dumps(receipt), encoding="utf-8")
+    delivery_before = archive.stat()
+    # Remove the assembly checkouts. Both foreground phases execute the actual
+    # installed source with its own -I Python; neither can use a repository venv.
+    f["repo"].rename(tmp_path / "first-checkout-removed")
+    replacement.rename(tmp_path / "second-checkout-removed")
+    poison = tmp_path / "ambient"
+    poison.mkdir()
+    (poison / "sitecustomize.py").write_text("raise RuntimeError('PRIVATE_AMBIENT_STARTUP')")
+    env = {**os.environ, "HOME": str(f["home"]), "PYTHONHOME": str(poison),
+           "PYTHONPATH": str(poison), "BROWSER": "/usr/bin/false",
+           "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"}
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        port = reserved.getsockname()[1]
+
+    # The explicitly selected synthetic release intent starts after a complete
+    # real WebKit dashboard presentation closes and releases its actual kernel
+    # lease. This does not automate or certify the human NSOpenPanel selection.
+    # Reopen Popen is observed and passed through unchanged, not mocked.
+    script = r"""
+import json,os,signal,subprocess,sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from executor.autonomy import cli
+from executor.autonomy.macos_host import NativePresenter
+from executor.autonomy.native_reopen import request_owned_focus
+from executor.autonomy.state_compatibility import native_window_guard
+root,port,intent,expected=Path(sys.argv[2]),int(sys.argv[3]),json.loads(sys.argv[4]),sys.argv[5]
+source=Path(sys.argv[1])
+before=cli._consumer_release_identity()
+assert before["packaged"] and before["expected"]
+with native_window_guard(root) as fd:
+    presenter=NativePresenter(source.parent/"native-host",consumer_smoke=True,ownership_fd=fd)
+    try:
+        opened=cli.launch_consumer(root,port,presenter=presenter)
+        assert opened["ok"] is True and opened["opened"] is True
+        old=cli._service_record(root/"service.json")
+        old_health=cli.request(root,port,"/health")
+        assert old_health["ok"] is True and old_health["loaded_source_sha256"]==before["expected"]
+        assert presenter.wait_for_close() is True
+    finally:
+        presenter.close()
+with native_window_guard(root):
+    pass
+real_subprocess=cli.subprocess
+children=[]
+class ObservedSubprocess:
+    def __getattr__(self,name):
+        return getattr(real_subprocess,name)
+    def Popen(self,args,**kwargs):
+        child=real_subprocess.Popen(args,**kwargs)
+        if args[-1]=="native-launch":
+            assert args[0]==str(source.parent/"runtime/bin/python")
+            assert args[1:3]==["-I","-B"] and kwargs["start_new_session"] is True
+            assert kwargs["stdin"]==kwargs["stdout"]==kwargs["stderr"]==subprocess.DEVNULL
+            children.append(child)
+        return child
+cli.subprocess=ObservedSubprocess()
+try:
+    result=cli.handoff_installed_consumer(root,port,intent)
+    completed="updated" if intent["action"]=="update" else "restored"
+    assert result=={"ok":True,completed:True,"reopen_requested":True,
+                   "final_click_actor":"user","submit_capability":False}
+    assert len(children)==1 and children[0].poll() is None
+    deadline=time.monotonic()+25
+    observed=None
+    while time.monotonic()<deadline:
+        assert children[0].poll() is None
+        try:
+            observed=cli.request(root,port,"/health")
+            if (observed.get("ok") is True and observed.get("loaded_source_sha256")==expected
+                    and request_owned_focus(root)):
+                break
+        except (OSError,ValueError):
+            pass
+        time.sleep(.1)
+    else:
+        raise AssertionError("actual activated service/window did not become ready")
+    fresh=cli._service_record(root/"service.json")
+    assert fresh["instance"]!=old["instance"] and fresh["pid"]!=old["pid"]
+    assert observed["worker_active"] is None and observed["final_click_actor"]=="user"
+    with_exception=False
+    try:
+        with native_window_guard(root):
+            raise AssertionError("second actual window admitted")
+    except BlockingIOError:
+        with_exception=True
+    assert with_exception
+    print(json.dumps({"handoff":result,"new_service_identity":True,
+                     "actual_focus_ack":True,"actual_release_sha":expected,
+                     "single_window_lease":True}))
+finally:
+    cli.subprocess=real_subprocess
+    for child in children:
+        # Only this test's newly created, proven separate process group. The
+        # user has no device/process involved; hosted synthetic UI teardown.
+        if child.poll() is None:
+            assert os.getpgid(child.pid)==child.pid
+            os.killpg(child.pid,signal.SIGTERM)
+        child.wait(timeout=10)
+    stopped=cli._stop_owned_service(root,port)
+    assert stopped.get("ok") is True or stopped.get("reason")=="service_record_missing"
+    deadline=time.monotonic()+10
+    while True:
+        try:
+            with native_window_guard(root):
+                break
+        except BlockingIOError:
+            if time.monotonic()>deadline:
+                raise AssertionError("actual window lease remained after hosted teardown")
+            time.sleep(.1)
+"""
+    def phase(intent, expected_sha):
+        result = subprocess.run([str(current / "Contents/Resources/runtime/bin/python"),
+            "-I", "-B", "-c", script, str(source), str(state), str(port),
+            json.dumps(intent), expected_sha], cwd=poison, env=env,
+            capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stdout + result.stderr
+        observed = json.loads(result.stdout)
+        assert observed == {"handoff": {"ok": True,
+            "updated" if intent["action"] == "update" else "restored": True,
+            "reopen_requested": True, "final_click_actor": "user", "submit_capability": False},
+            "new_service_identity": True, "actual_focus_ack": True,
+            "actual_release_sha": expected_sha, "single_window_lease": True}
+        assert "PRIVATE_" not in result.stdout + result.stderr
+        assert "ticket=" not in result.stdout + result.stderr
+        assert "Bearer " not in result.stdout + result.stderr
+        assert str(state) not in result.stdout
+        assert not (state / "service.json").exists()
+        assert consumer._trusted_bundle(current)
+        assert source_manifest(source)["source_sha256"] == expected_sha
+        assert private_files() == files_before
+        return observed
+
+    phase({"action": "update", "distribution": str(delivery)}, expected)
+    assert authority() == before
+    assert [queue.get(task["task_id"]) for task in tasks] == tasks
+    assert queue.task_view_context() == view
+    # Saved view and typed encrypted history changed AFTER update are current
+    # authority. Returning the app version must never activate an older backup.
+    queue.remember_task_view(tasks[2]["task_id"], expected_revision=view["revision"])
+    from cryptography.fernet import Fernet
+    with closing(sqlite3.connect(state / "tasks.sqlite3")) as db:
+        db.execute("""INSERT INTO task_answer_events
+            (task_id,field_key,ciphertext,answer_version,source,task_revision,created)
+            VALUES(?,?,?,?,?,?,?)""", (tasks[0]["task_id"], "family.primary.role",
+            Fernet(key).encrypt(json.dumps("PRIVATE_CURRENT_AFTER_UPDATE").encode()),
+            3, "user_explicit_task", 1, 3))
+        db.commit()
+    current_authority, current_view = authority(), queue.task_view_context()
+    assert current_authority != before
+    phase({"action": "restore"}, original)
+    assert authority() == current_authority
+    assert queue.task_view_context() == current_view
+    assert [queue.get(task["task_id"]) for task in tasks] == tasks
+    failed = f["apps"] / ("." + consumer.APP_NAME + ".app.failed")
+    assert consumer._trusted_bundle(failed)
+    assert source_manifest(failed / "Contents/Resources/release")["source_sha256"] == expected
+    capsules = list(f["apps"].glob(".jae-task-state-backup-*"))
+    assert len(capsules) == 2
+    for capsule in capsules:
+        manifest = json.loads((capsule / "backup-manifest.json").read_text())
+        assert manifest["activation"] == "NOT_AUTHORIZED"
+        assert verify_task_state_backup(capsule, manifest)
+    assert json.loads((delivery / RECEIPT_NAME).read_text()) == receipt
+    with archive.open("rb") as handle:
+        assert hashlib.file_digest(handle, "sha256").hexdigest() == archive_sha
+    delivery_after = archive.stat()
+    assert (delivery_after.st_ino, delivery_after.st_size, delivery_after.st_mtime_ns) == (
+        delivery_before.st_ino, delivery_before.st_size, delivery_before.st_mtime_ns)
+    assert not list(source.rglob("__pycache__"))
