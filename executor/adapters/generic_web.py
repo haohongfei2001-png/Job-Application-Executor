@@ -95,6 +95,23 @@ FIELD_CONTRACT_SCRIPT = r"""e => {
 }"""
 
 
+# Mutation admission is separate from question identity and applicant values.
+# Native options do not have their own rendered box; their select ancestry does.
+CONTROL_ADMISSION_SCRIPT = r"""e => {
+  if (!e.isConnected || e.ownerDocument !== document || e.matches(':disabled')
+      || e.readOnly || e.closest('[aria-disabled="true"],[aria-readonly="true"]'))
+    return false;
+  for (let node = e; node; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (node.hidden || node.inert || node.getAttribute('aria-hidden') === 'true'
+        || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
+        || Number(style.opacity) === 0 || style.contentVisibility === 'hidden')
+      return false;
+  }
+  return true;
+}"""
+
+
 def _control_contract_digest(contract) -> str:
     if not isinstance(contract, list):
         return ""
@@ -177,7 +194,8 @@ class GenericWebAdapter(SiteAdapter):
     @staticmethod
     def _visible(locator) -> bool:
         try:
-            return locator.is_visible() and locator.is_enabled()
+            return (locator.is_visible() and locator.is_enabled()
+                    and locator.evaluate(CONTROL_ADMISSION_SCRIPT) is True)
         except Exception:
             return False
 
@@ -470,11 +488,10 @@ class GenericWebAdapter(SiteAdapter):
 
     @staticmethod
     def _choice_enabled(element) -> bool:
-        """Check current native and inherited ARIA admission, never infer from a label."""
+        """Read native and inherited admission again at each mutation boundary."""
         try:
-            return element.is_enabled() and element.evaluate(
-                """e => !e.matches(':disabled') &&
-                    !e.closest('[aria-disabled="true"]')""") is True
+            return (element.is_enabled()
+                    and element.evaluate(CONTROL_ADMISSION_SCRIPT) is True)
         except Exception:
             return False
 
@@ -530,9 +547,9 @@ class GenericWebAdapter(SiteAdapter):
             prewrite()
         # Read the whole bounded option contract atomically after the callback
         # and before change/input dispatch, including effective disabled groups.
-        allowed = element.evaluate("""(e, expected) => {
-          if (e.matches(':disabled') || e.closest('[aria-disabled="true"]')
-              || e.options.length > 200) return false;
+        allowed = element.evaluate(r"""(e, expected) => {
+          const admitted = __CONTROL_ADMISSION_SCRIPT__;
+          if (!admitted(e) || e.options.length > 200) return false;
           const current = [...e.options].map(o => [
             o.value, o.label, o.textContent, !!o.disabled,
             o.parentElement?.tagName.toLowerCase() === 'optgroup' && !!o.parentElement.disabled,
@@ -540,12 +557,12 @@ class GenericWebAdapter(SiteAdapter):
           ]);
           if (JSON.stringify(current) !== JSON.stringify(expected.options)) return false;
           const choice = e.options[expected.index];
-          return !!choice && !choice.disabled
+          return !!choice && admitted(choice)
             && !(choice.parentElement?.tagName.toLowerCase() === 'optgroup' && choice.parentElement.disabled)
-            && !choice.closest('[aria-disabled="true"]')
             && choice.value === expected.value
             && (choice.innerText || choice.textContent || '').trim() === expected.label;
-        }""", {"options": option_contract, "index": expected[1],
+        }""".replace("__CONTROL_ADMISSION_SCRIPT__", CONTROL_ADMISSION_SCRIPT),
+           {"options": option_contract, "index": expected[1],
                 "value": expected[0], "label": expected_label})
         if allowed is not True:
             return None
@@ -617,8 +634,9 @@ class GenericWebAdapter(SiteAdapter):
         # callbacks. Freeze observable option effect data before that callback,
         # then recheck the complete bounded live list immediately before click.
         option_effect_script = r"""o => {
+          const admitted = __CONTROL_ADMISSION_SCRIPT__;
           const style = getComputedStyle(o), rect = o.getBoundingClientRect();
-          return [o.tagName.toLowerCase(), o.id, o.getAttribute('role'),
+          return [admitted(o), o.tagName.toLowerCase(), o.id, o.getAttribute('role'),
             o.getAttribute('type'), o.getAttribute('aria-label'),
             (o.innerText || '').trim(), o.textContent, o.value ?? null,
             o.getAttribute('data-value'), o.form?.id || '',
@@ -626,6 +644,8 @@ class GenericWebAdapter(SiteAdapter):
             !!o.closest('[aria-disabled="true"]'), style.display, style.visibility,
             rect.width > 0 && rect.height > 0];
         }"""
+        option_effect_script = option_effect_script.replace(
+            "__CONTROL_ADMISSION_SCRIPT__", CONTROL_ADMISSION_SCRIPT)
         option_contract = listbox.evaluate(r"""e => {
           const optionEffect = __ARIA_OPTION_EFFECT__;
           const options = [...e.querySelectorAll('[role="option"]')];
@@ -641,6 +661,7 @@ class GenericWebAdapter(SiteAdapter):
                 or companion_label_activation(exact[0]) or native_click_effect(exact[0])):
             return False
         allowed = exact[0].evaluate(r"""(e, expected) => {
+          const admitted = __CONTROL_ADMISSION_SCRIPT__;
           const optionEffect = __ARIA_OPTION_EFFECT__;
           const boxes = [...document.querySelectorAll(
             '[id=' + JSON.stringify(expected.id) + '][role="listbox"]')];
@@ -656,10 +677,10 @@ class GenericWebAdapter(SiteAdapter):
               && rect.width > 0 && rect.height > 0
               && (o.getAttribute('aria-label') || o.innerText || '').trim() === expected.target;
           });
-          return exact.length === 1 && exact[0] === e && !e.matches(':disabled')
-            && !e.closest('[aria-disabled="true"]');
+          return exact.length === 1 && exact[0] === e && admitted(e);
         }""".replace(
-            "__ARIA_OPTION_EFFECT__", option_effect_script),
+            "__ARIA_OPTION_EFFECT__", option_effect_script).replace(
+            "__CONTROL_ADMISSION_SCRIPT__", CONTROL_ADMISSION_SCRIPT),
             {"id": controlled_id, "target": target, "options": option_contract})
         if allowed is not True:
             return False
@@ -753,6 +774,7 @@ class GenericWebAdapter(SiteAdapter):
                 kept = self.page.evaluate(r"""({epoch, controls, selector}) => {
                   if (String(performance.timeOrigin) !== epoch) return false;
                   const controlContract = __FIELD_CONTRACT_SCRIPT__;
+                  const admitted = __CONTROL_ADMISSION_SCRIPT__;
                   const ordinal = [...document.querySelectorAll(selector)];
                   for (const [path, identity, kind, expected] of controls) {
                     let matches;
@@ -765,10 +787,8 @@ class GenericWebAdapter(SiteAdapter):
                       catch (_) { return false; }
                     }
                     if (matches.length !== 1) return false;
-                    const e = matches[0], style = getComputedStyle(e), rect = e.getBoundingClientRect();
-                    if (style.display === 'none' || ['hidden','collapse'].includes(style.visibility)
-                        || !(rect.width > 0 && rect.height > 0) || e.matches(':disabled')
-                        || e.closest('[aria-disabled="true"]')) return false;
+                    const e = matches[0], rect = e.getBoundingClientRect();
+                    if (!admitted(e) || !(rect.width > 0 && rect.height > 0)) return false;
                     const signature = controlContract(e);
                     if (JSON.stringify(signature) !== JSON.stringify(identity)) return false;
                     const actual = kind === 'checked' ? e.checked
@@ -778,7 +798,8 @@ class GenericWebAdapter(SiteAdapter):
                     if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
                   }
                   return true;
-                }""".replace("__FIELD_CONTRACT_SCRIPT__", FIELD_CONTRACT_SCRIPT),
+                }""".replace("__FIELD_CONTRACT_SCRIPT__", FIELD_CONTRACT_SCRIPT).replace(
+                    "__CONTROL_ADMISSION_SCRIPT__", CONTROL_ADMISSION_SCRIPT),
                    {"epoch": document_epoch, "controls": retained,
                        "selector": VISIBLE_FIELD_SELECTOR})
                 if kept is not True:
