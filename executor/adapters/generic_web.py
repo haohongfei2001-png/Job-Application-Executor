@@ -542,7 +542,16 @@ class GenericWebAdapter(SiteAdapter):
               }
               return false;
             }""") is True
-        if companion_label_activation(element):
+        def native_click_effect(control):
+            # ARIA roles do not remove native submit/reset/navigation defaults.
+            # Read effective DOM properties, including an external form owner.
+            return control.evaluate("""e => {
+              const tag = e.tagName.toLowerCase(), type = (e.type || '').toLowerCase();
+              if (tag === 'button') return !!e.form && type !== 'button';
+              if (tag === 'input') return ['submit', 'image', 'reset'].includes(type);
+              return (tag === 'a' || tag === 'area') && e.hasAttribute('href');
+            }""") is True
+        if companion_label_activation(element) or native_click_effect(element):
             return False
         listbox = self.page.locator(f'[id={json.dumps(controlled_id)}][role="listbox"]')
         if listbox.count() != 1:
@@ -554,7 +563,7 @@ class GenericWebAdapter(SiteAdapter):
             prewrite()
         # Ownership/prewrite callbacks can reactively change label.control.
         # Recheck the actual activation shape at the primitive boundary.
-        if companion_label_activation(element):
+        if companion_label_activation(element) or native_click_effect(element):
             return False
         element.click()
         choices = listbox.locator('[role="option"]')
@@ -571,8 +580,8 @@ class GenericWebAdapter(SiteAdapter):
             return False
         if callable(prewrite):
             prewrite()
-        if (companion_label_activation(element)
-                or companion_label_activation(exact[0])):
+        if (companion_label_activation(element) or native_click_effect(element)
+                or companion_label_activation(exact[0]) or native_click_effect(exact[0])):
             return False
         exact[0].click()
         self.await_form_render()

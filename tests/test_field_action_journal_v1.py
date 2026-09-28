@@ -1178,3 +1178,129 @@ def test_native_input_combobox_keeps_its_own_label_activation_control(tmp_path):
     queue.require_field_action_readbacks(attempt)
     queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
     assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+@pytest.mark.parametrize("fault", [
+    "widget_default_submit", "widget_reset", "option_default_submit",
+    "option_external_form", "option_reset", "reactive_option_submit",
+])
+def test_aria_choice_never_dispatches_native_submit_or_reset(tmp_path, fault):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    widget_type = "" if fault == "widget_default_submit" else (
+        "type='reset'" if fault == "widget_reset" else "type='button'")
+    option_type = "" if fault in {"option_default_submit", "option_external_form"} else (
+        "type='reset'" if fault == "option_reset" else "type='button'")
+    option_form = "form='external'" if fault == "option_external_form" else ""
+    html = tmp_path / "aria-native-default-actions.html"
+    html.write_text("""<!doctype html><body>
+      <form id='app'>
+        <label>First<input id='first'></label>
+        <label for='target'>Target</label>
+        <button id='target' role='combobox' aria-label='Target' aria-controls='choices'
+          __WIDGET_TYPE__
+          onclick="window.opens++;document.querySelector('#choices').hidden=false">Choose</button>
+        <div id='choices' role='listbox' hidden>
+          <button id='choice' role='option' __OPTION_TYPE__ __OPTION_FORM__
+            onclick="window.targetWrites++;document.querySelector('#target').innerText=this.innerText">
+            Exact choice</button>
+        </div>
+        <button id='final' type='submit'>Submit application</button>
+      </form>
+      <form id='external'></form>
+      <script>
+        window.opens=0;window.targetWrites=0;window.submits=0;window.resets=0;
+        document.addEventListener('submit',event=>{window.submits++;event.preventDefault();});
+        document.addEventListener('reset',event=>{window.resets++;event.preventDefault();});
+      </script>
+    """.replace("__WIDGET_TYPE__", widget_type).replace("__OPTION_TYPE__", option_type)
+        .replace("__OPTION_FORM__", option_form), encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    injected = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        if fault == "reactive_option_submit":
+            def guard():
+                rows = queue.field_actions(tid)
+                if (not injected and len(rows) == 2
+                        and sum(row["outcome"] == "ATTEMPTED" for row in rows) == 1
+                        and adapter.page.locator("#choices").is_visible()):
+                    adapter.page.locator("#choice").evaluate("e=>e.removeAttribute('type')")
+                    assert adapter.page.locator("#choice").evaluate("e=>[e.type,e.form.id]") == [
+                        "submit", "app"]
+                    injected.append(True)
+            adapter.mutation_guard = guard
+        dangerous = "#target" if fault.startswith("widget_") else "#choice"
+        if fault != "reactive_option_submit":
+            effective = adapter.page.locator(dangerous).evaluate("e=>[e.type,e.form.id]")
+            assert effective == ["reset" if fault.endswith("reset") else "submit",
+                                 "external" if fault == "option_external_form" else "app"]
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions([
+                FieldResolution(field_id="first", selector="#first", label="First",
+                    value="PRIVATE_NATIVE_EFFECT_CANARY", status=ResolutionStatus.RESOLVED),
+                FieldResolution(field_id="target", selector="#target", label="Target",
+                    value="Exact choice", status=ResolutionStatus.RESOLVED),
+            ])
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_NATIVE_EFFECT_CANARY"
+        assert adapter.page.locator("#target").inner_text() == "Choose"
+        opened = not fault.startswith("widget_")
+        assert adapter.page.locator("#choices").is_visible() == opened
+        assert adapter.page.evaluate("[window.opens,window.targetWrites,window.submits,window.resets]") == [
+            1 if opened else 0, 0, 0, 0]
+        assert adapter.page.locator("#final").is_enabled() is True
+        assert injected == ([True] if fault == "reactive_option_submit" else [])
+        assert "PRIVATE_" not in str(caught.value)
+    actions = queue.field_actions(tid)
+    assert len(actions) == 2 and {row["outcome"] for row in actions} == {"UNKNOWN_OUTCOME"}
+    assert "PRIVATE_" not in json.dumps(actions)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-native-effect-replay").hexdigest())
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+def test_explicit_button_aria_choices_inside_form_preserve_user_submit_boundary(tmp_path):
+    queue, tid, owner, attempt, _clock = _owned(tmp_path)
+    html = tmp_path / "aria-explicit-button-form.html"
+    html.write_text("""<!doctype html><body><form id='app'>
+      <label>First<input id='first'></label><label for='target'>Target</label>
+      <button id='target' type='button' role='combobox' aria-label='Target' aria-controls='choices'
+        onclick="window.opens++;document.querySelector('#choices').hidden=false">Choose</button>
+      <div id='choices' role='listbox' hidden>
+        <button id='choice' type='button' role='option'
+          onclick="window.targetWrites++;document.querySelector('#target').innerText=this.innerText;document.querySelector('#target').value=this.innerText">
+          Exact choice</button>
+      </div>
+      <button id='final' type='submit'>Submit application</button>
+      </form><script>
+        window.opens=0;window.targetWrites=0;window.submits=0;window.resets=0;
+        document.addEventListener('submit',event=>{window.submits++;event.preventDefault();});
+        document.addEventListener('reset',event=>{window.resets++;event.preventDefault();});
+      </script>
+    """, encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        actions = adapter.apply_resolutions([
+            FieldResolution(field_id="first", selector="#first", label="First",
+                value="PRIVATE_EXPLICIT_BUTTON_CANARY", status=ResolutionStatus.RESOLVED),
+            FieldResolution(field_id="target", selector="#target", label="Target",
+                value="Exact choice", status=ResolutionStatus.RESOLVED),
+        ])
+        assert len(actions) == 2 and all(item["ok"] and item["observed"] == "DOM_READBACK" for item in actions)
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_EXPLICIT_BUTTON_CANARY"
+        assert adapter.page.locator("#target").inner_text() == "Exact choice"
+        assert adapter.page.evaluate("[window.opens,window.targetWrites,window.submits,window.resets]") == [1,1,0,0]
+        assert adapter.page.locator("#final").is_enabled() is True
+    assert {row["outcome"] for row in queue.field_actions(tid)} == {"DOM_READBACK_UNVERIFIED"}
+    queue.require_field_action_readbacks(attempt)
+    queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
