@@ -1029,6 +1029,18 @@ def _install_macos_app_unlocked(
             }
         try:
             app.rename(failed)
+            # The first recovery rename can yield to another actor. Re-admit
+            # both owned roles and the empty activation slot before moving
+            # the retained release; preserve evidence on any disagreement.
+            if (app.exists() or app.is_symlink()
+                    or not _bundle_location_matches(failed, candidate_identity)
+                    or (replaced and _bundle_transaction_identity(rollback) != current_identity)
+                    or (not replaced and (rollback.exists() or rollback.is_symlink()))):
+                return {
+                    "ok": False,
+                    "reason": "post_activation_recovery_required",
+                    "message": "恢复移动期间版本身份或目标位置发生变化；所有版本保留当前位置，需要核对恢复。",
+                }
             if replaced:
                 rollback.rename(app)
         except OSError:
@@ -1048,10 +1060,14 @@ def _install_macos_app_unlocked(
             restored_release = app / "Contents" / "Resources" / "release"
             restored_runtime = app / "Contents" / "Resources" / "runtime"
             if (_bundle_transaction_identity(app) != current_identity
+                    or not _bundle_location_matches(failed, candidate_identity)
+                    or rollback.exists() or rollback.is_symlink()
                     or not _isolated_bundle_startup(app)
                     or (restored_runtime.exists() and not _candidate_starts(
                         restored_runtime / "bin" / "python", restored_release))
-                    or _bundle_transaction_identity(app) != current_identity):
+                    or _bundle_transaction_identity(app) != current_identity
+                    or not _bundle_location_matches(failed, candidate_identity)
+                    or rollback.exists() or rollback.is_symlink()):
                 return {
                     "ok": False,
                     "reason": "post_activation_recovery_required",
@@ -1227,6 +1243,14 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
             }
         try:
             app.rename(previous)
+            if (app.exists() or app.is_symlink()
+                    or not _bundle_location_matches(previous, previous_identity)
+                    or _bundle_transaction_identity(failed) != current_identity):
+                return {
+                    "ok": False,
+                    "reason": "rollback_recovery_required",
+                    "message": "恢复移动期间版本身份或目标位置发生变化；所有版本保留当前位置，需要核对恢复。",
+                }
             failed.rename(app)
         except OSError:
             return {
