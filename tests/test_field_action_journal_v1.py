@@ -1304,3 +1304,118 @@ def test_explicit_button_aria_choices_inside_form_preserve_user_submit_boundary(
     queue.require_field_action_readbacks(attempt)
     queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
     assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+@pytest.mark.parametrize("drift", [
+    "value", "text", "label", "disabled", "optgroup", "duplicate", "prepend",
+    "oversized", "select_disabled",
+])
+def test_native_select_option_change_at_prewrite_cannot_dispatch_a_different_intent(tmp_path, drift):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    html = tmp_path / "native-option-prewrite.html"
+    html.write_text("""<!doctype html><body><form id='app'>
+      <label>First<input id='first'></label><label for='target'>Target</label>
+      <select id='target' onchange="window.targetWrites++;window.observedValue=this.value">
+        <option value=''>Choose</option>
+        <optgroup id='group' label='Choices'><option id='choice' value='intended'>Exact choice</option></optgroup>
+      </select>
+      <button id='final' type='submit'>Submit application</button></form>
+      <script>window.targetWrites=0;window.observedValue=null;window.submits=0;
+      document.addEventListener('submit',event=>{window.submits++;event.preventDefault();});</script>
+    """, encoding="utf-8")
+    mutations = {
+        "value": "document.querySelector('#choice').value='PRIVATE_FOREIGN_CHOICE';",
+        "text": "document.querySelector('#choice').textContent='A different choice';",
+        "label": "document.querySelector('#choice').label='A different displayed choice';",
+        "disabled": "document.querySelector('#choice').disabled=true;",
+        "optgroup": "document.querySelector('#group').disabled=true;",
+        "duplicate": "document.querySelector('#target').append(document.querySelector('#choice').cloneNode(true));",
+        "prepend": "document.querySelector('#target').prepend(new Option('Other', 'other'));",
+        "oversized": "for(let i=0;i<199;i++)document.querySelector('#target').append(new Option('Other '+i,'other-'+i));",
+        "select_disabled": "document.querySelector('#target').disabled=true;",
+    }
+    audit = _audit(queue, tid, owner, attempt)
+    injected = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        original = {f.selector: f for f in adapter.discover_fields()}
+        fill = adapter._fill_select
+        def fenced(element, value, *, prewrite=None):
+            def callback():
+                assert callable(prewrite)
+                prewrite()
+                adapter.page.evaluate(mutations[drift])
+                injected.append(True)
+            return fill(element, value, prewrite=callback)
+        adapter._fill_select = fenced
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions([
+                FieldResolution(field_id="first", selector="#first", label="First",
+                    value="PRIVATE_SELECT_INTENT_CANARY", status=ResolutionStatus.RESOLVED),
+                FieldResolution(field_id="target", selector="#target", label="Target",
+                    value="Exact choice", status=ResolutionStatus.RESOLVED),
+            ])
+        assert injected == [True]
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_SELECT_INTENT_CANARY"
+        assert adapter.page.locator("#target").input_value() == ""
+        assert adapter.page.evaluate("[window.targetWrites,window.observedValue,window.submits]") == [0,None,0]
+        assert adapter.page.locator("#final").is_enabled() is True
+        if drift != "oversized":
+            current = {f.selector: f for f in adapter.discover_fields()}
+            if "#target" in current:
+                assert current["#target"].metadata["control_contract"] == original["#target"].metadata["control_contract"]
+        else:
+            assert adapter.page.locator("#target").evaluate("e=>e.options.length") == 201
+        assert "PRIVATE_" not in str(caught.value)
+    actions = queue.field_actions(tid)
+    assert len(actions) == 2 and {r["outcome"] for r in actions} == {"UNKNOWN_OUTCOME"}
+    assert "PRIVATE_" not in json.dumps(actions)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-option-prewrite-replay").hexdigest())
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+def test_native_select_same_option_contract_replacement_at_prewrite_keeps_exact_intent(tmp_path):
+    queue, tid, owner, attempt, _clock = _owned(tmp_path)
+    html = tmp_path / "native-option-equivalent-replacement.html"
+    html.write_text("""<!doctype html><body><form>
+      <label>First<input id='first'></label><label for='target'>Target</label>
+      <select id='target' onchange="window.targetWrites++">
+        <option value=''>Choose</option><option id='choice' value='intended'>Exact choice</option>
+      </select><button id='final' type='submit'>Submit application</button>
+      </form><script>window.targetWrites=0;window.submits=0;
+      document.addEventListener('submit',event=>{window.submits++;event.preventDefault();});</script>
+    """, encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        fill = adapter._fill_select
+        def fenced(element, value, *, prewrite=None):
+            def callback():
+                prewrite()
+                adapter.page.locator("#choice").evaluate("e=>e.replaceWith(e.cloneNode(true))")
+            return fill(element, value, prewrite=callback)
+        adapter._fill_select = fenced
+        actions = adapter.apply_resolutions([
+            FieldResolution(field_id="first", selector="#first", label="First",
+                value="PRIVATE_EQUIVALENT_OPTION_CANARY", status=ResolutionStatus.RESOLVED),
+            FieldResolution(field_id="target", selector="#target", label="Target",
+                value="Exact choice", status=ResolutionStatus.RESOLVED),
+        ])
+        assert len(actions) == 2 and all(item["ok"] and item["observed"] == "DOM_READBACK" for item in actions)
+        assert adapter.page.locator("#target").input_value() == "intended"
+        assert adapter.page.evaluate("[window.targetWrites,window.submits]") == [1,0]
+        assert adapter.page.locator("#final").is_enabled() is True
+    queue.require_field_action_readbacks(attempt)
+    queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    assert {r["outcome"] for r in queue.field_actions(tid)} == {"DOM_READBACK_UNVERIFIED"}
+    assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"

@@ -510,6 +510,14 @@ class GenericWebAdapter(SiteAdapter):
         choice = opts.nth(matches[0])
         expected = (choice.evaluate("e => e.value"), matches[0])
         expected_label = (choice.inner_text() or "").strip()
+        # Freeze the native option effect separately from the question contract.
+        # Parent redraws before this primitive remain supported; changes during
+        # the ownership callback cannot redefine an already selected intention.
+        option_contract_script = """e => [...e.options].map(o => [
+          o.value, o.label, o.textContent, !!o.disabled,
+          o.parentElement?.tagName.toLowerCase() === 'optgroup' && !!o.parentElement.disabled
+        ])"""
+        option_contract = element.evaluate(option_contract_script)
         getattr(self, "mutation_guard", lambda: None)()
         if (not self._choice_enabled(element) or not self._choice_enabled(choice)
                 or choice.evaluate("e => e.value") != expected[0]
@@ -517,6 +525,26 @@ class GenericWebAdapter(SiteAdapter):
             return None
         if callable(prewrite):
             prewrite()
+        # Read the whole bounded option contract atomically after the callback
+        # and before change/input dispatch, including effective disabled groups.
+        allowed = element.evaluate("""(e, expected) => {
+          if (e.matches(':disabled') || e.closest('[aria-disabled="true"]')
+              || e.options.length > 200) return false;
+          const current = [...e.options].map(o => [
+            o.value, o.label, o.textContent, !!o.disabled,
+            o.parentElement?.tagName.toLowerCase() === 'optgroup' && !!o.parentElement.disabled
+          ]);
+          if (JSON.stringify(current) !== JSON.stringify(expected.options)) return false;
+          const choice = e.options[expected.index];
+          return !!choice && !choice.disabled
+            && !(choice.parentElement?.tagName.toLowerCase() === 'optgroup' && choice.parentElement.disabled)
+            && choice.getAttribute('aria-disabled') !== 'true'
+            && choice.value === expected.value
+            && (choice.innerText || choice.textContent || '').trim() === expected.label;
+        }""", {"options": option_contract, "index": expected[1],
+                "value": expected[0], "label": expected_label})
+        if allowed is not True:
+            return None
         element.select_option(index=matches[0])
         if not element.evaluate("(e, index) => e.selectedIndex === index", matches[0]):
             raise BrowserOwnershipError("select choice outcome unknown")
