@@ -120,19 +120,21 @@ def test_form_observation_error_after_write_never_reaches_ready(tmp_path, monkey
 
     class FailsAfterWrite(GenericWebAdapter):
         observations = 0
+        written_value = None
 
         def observe_form(self):
             self.observations += 1
             if self.observations > 1:
+                type(self).written_value = self.page.locator("#name").input_value()
                 raise FormObservationError("synthetic redraw evaluate failed")
             return super().observe_form()
 
     monkeypatch.setattr("executor.application.adapter_for_url",
                         lambda url: FailsAfterWrite(url))
-    plan = runner.run(max_pages=1)
-    assert plan.stage == ApplicationStage.BLOCKED
-    assert plan.metadata["form_observation"] == "ERROR"
-    assert outcome(plan) == ("BLOCKED", "form_observation_unavailable")
+    from executor.browser import BrowserOwnershipError
+    with pytest.raises(BrowserOwnershipError, match="form structure outcome unknown"):
+        runner.run(max_pages=1)
+    assert FailsAfterWrite.written_value == "Synthetic Person"
 
 
 @pytest.mark.parametrize("blocker", [

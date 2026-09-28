@@ -64,6 +64,11 @@ iframe or open-shadow form, its readback is revoked to UNKNOWN_OUTCOME and
 replay remains blocked; a missing second field no longer skips this check.
 Two isolated browser/private-journal cases retain the full prior suite and
 prove the written first value, opaque structure, zero submit, unknown journal
-and refused replay. New exact-head targeted CI is PENDING. This is an
-internal DFG-008 mitigation, not general ATS support or a server draft
-receipt.
+and refused replay.
+
+First exact-head targeted CI 36377064532 passed four packaged/Mac jobs; foundation
+passed 248 cases and found one retained direct-run assertion expecting a returned
+BLOCKED plan where the stronger post-write fence now raises ownership uncertainty.
+The original test now requires that fail-closed exception and proves the first
+synthetic value was written; corrected exact-head CI is PENDING. This remains
+an internal DFG-008 mitigation, not general ATS support or a server draft receipt.
