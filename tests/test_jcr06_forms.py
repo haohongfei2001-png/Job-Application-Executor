@@ -854,10 +854,23 @@ def test_redraw_exceeding_collection_limit_stops_remaining_writes(tmp_path):
                             status=ResolutionStatus.RESOLVED, value=value)
             for key, value in [("first", "Synthetic"), ("later", "NEVER_WRITTEN")]
         ]
-        actions = adapter.apply_resolutions(resolutions)
-        assert actions[0]["ok"] is True
-        assert actions[1]["ok"] is False
-        assert actions[1]["reason"] == "form_collection_limit_exceeded"
+        from executor.browser import BrowserOwnershipError
+
+        evidence = []
+        adapter.field_action_begin = lambda field_id, selector, **kwargs: (
+            evidence.append((field_id, "INTENT_RECORDED")) or field_id)
+        adapter.field_action_finish = lambda action_id, status: evidence.append(
+            (action_id, status))
+        adapter.field_readbacks_invalidate = lambda: evidence.append(
+            ("batch", "READBACKS_REVOKED"))
+        with pytest.raises(BrowserOwnershipError, match="form structure outcome unknown"):
+            adapter.apply_resolutions(resolutions)
+        # The first real write/readback happened before the incomplete redraw;
+        # its evidence is revoked rather than returning a partially proven batch.
+        assert evidence == [("first", "INTENT_RECORDED"),
+                            ("first", "DOM_READBACK_UNVERIFIED"),
+                            ("batch", "READBACKS_REVOKED")]
+        assert adapter.page.locator("#first").input_value() == "Synthetic"
         assert adapter.page.locator("input").count() == 351
         assert adapter.page.locator("#later").input_value() == ""
         assert adapter.page.evaluate("[window.laterWrites,window.submits]") == [0, 0]
