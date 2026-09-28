@@ -491,6 +491,8 @@ class GenericWebAdapter(SiteAdapter):
             else:
                 expanded.append(candidate)
         opts = element.locator("option")
+        if opts.count() > 200:
+            return None
         normalized = [str(x).strip().casefold().removesuffix("市") for x in expanded]
         if not normalized or any(not target for target in normalized):
             return None
@@ -515,7 +517,8 @@ class GenericWebAdapter(SiteAdapter):
         # the ownership callback cannot redefine an already selected intention.
         option_contract_script = """e => [...e.options].map(o => [
           o.value, o.label, o.textContent, !!o.disabled,
-          o.parentElement?.tagName.toLowerCase() === 'optgroup' && !!o.parentElement.disabled
+          o.parentElement?.tagName.toLowerCase() === 'optgroup' && !!o.parentElement.disabled,
+          !!o.closest('[aria-disabled="true"]')
         ])"""
         option_contract = element.evaluate(option_contract_script)
         getattr(self, "mutation_guard", lambda: None)()
@@ -532,13 +535,14 @@ class GenericWebAdapter(SiteAdapter):
               || e.options.length > 200) return false;
           const current = [...e.options].map(o => [
             o.value, o.label, o.textContent, !!o.disabled,
-            o.parentElement?.tagName.toLowerCase() === 'optgroup' && !!o.parentElement.disabled
+            o.parentElement?.tagName.toLowerCase() === 'optgroup' && !!o.parentElement.disabled,
+          !!o.closest('[aria-disabled="true"]')
           ]);
           if (JSON.stringify(current) !== JSON.stringify(expected.options)) return false;
           const choice = e.options[expected.index];
           return !!choice && !choice.disabled
             && !(choice.parentElement?.tagName.toLowerCase() === 'optgroup' && choice.parentElement.disabled)
-            && choice.getAttribute('aria-disabled') !== 'true'
+            && !choice.closest('[aria-disabled="true"]')
             && choice.value === expected.value
             && (choice.innerText || choice.textContent || '').trim() === expected.label;
         }""", {"options": option_contract, "index": expected[1],

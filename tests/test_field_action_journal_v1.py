@@ -1307,7 +1307,7 @@ def test_explicit_button_aria_choices_inside_form_preserve_user_submit_boundary(
 
 @pytest.mark.parametrize("drift", [
     "value", "text", "label", "disabled", "optgroup", "duplicate", "prepend",
-    "oversized", "select_disabled",
+    "oversized", "select_disabled", "aria_optgroup",
 ])
 def test_native_select_option_change_at_prewrite_cannot_dispatch_a_different_intent(tmp_path, drift):
     queue, tid, owner, attempt, clock = _owned(tmp_path)
@@ -1328,6 +1328,7 @@ def test_native_select_option_change_at_prewrite_cannot_dispatch_a_different_int
         "label": "document.querySelector('#choice').label='A different displayed choice';",
         "disabled": "document.querySelector('#choice').disabled=true;",
         "optgroup": "document.querySelector('#group').disabled=true;",
+        "aria_optgroup": "document.querySelector('#group').setAttribute('aria-disabled','true');",
         "duplicate": "document.querySelector('#target').append(document.querySelector('#choice').cloneNode(true));",
         "prepend": "document.querySelector('#target').prepend(new Option('Other', 'other'));",
         "oversized": "for(let i=0;i<199;i++)document.querySelector('#target').append(new Option('Other '+i,'other-'+i));",
@@ -1545,3 +1546,25 @@ def test_aria_same_option_effect_replacement_at_prewrite_keeps_exact_choice_once
     queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
     assert {row["outcome"] for row in queue.field_actions(tid)} == {"DOM_READBACK_UNVERIFIED"}
     assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+@pytest.mark.parametrize("count", [200, 201])
+def test_native_select_enforces_complete_option_bound_before_prewrite(tmp_path, count):
+    html = tmp_path / "native-option-primitive-bound.html"
+    options = "<option value=''>Choose</option><option value='intended'>Exact choice</option>"
+    options += "".join(f"<option value='other-{i}'>Other {i}</option>" for i in range(count - 2))
+    html.write_text("""<!doctype html><body><form>
+      <label for='target'>Target</label><select id='target' onchange="window.writes++">"""
+      + options + """</select><button id='final' type='submit'>Submit application</button>
+      </form><script>window.writes=0;window.submits=0;
+      document.addEventListener('submit',e=>{window.submits++;e.preventDefault();});</script>
+    """, encoding="utf-8")
+    callbacks = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        element = adapter.page.locator("#target")
+        result = adapter._fill_select(element, "Exact choice", prewrite=lambda: callbacks.append(True))
+        assert element.evaluate("e=>e.options.length") == count
+        assert callbacks == ([True] if count == 200 else [])
+        assert result == (("intended", 1) if count == 200 else None)
+        assert element.input_value() == ("intended" if count == 200 else "")
+        assert adapter.page.evaluate("[window.writes,window.submits]") == [1 if count == 200 else 0, 0]
+        assert adapter.page.locator("#final").is_enabled() is True
