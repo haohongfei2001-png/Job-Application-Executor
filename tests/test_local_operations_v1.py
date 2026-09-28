@@ -218,10 +218,11 @@ def test_direct_legacy_updater_refuses_packaged_source_before_git_or_runtime_wri
     def forbidden_git(*_args, **_kwargs):
         pytest.fail("packaged release must never reach Git")
 
-    monkeypatch.setattr(updater, "_git", forbidden_git)
-    monkeypatch.setattr(updater, "_run", forbidden_git)
-    monkeypatch.setattr(updater.subprocess, "Popen", forbidden_git)
-    assert updater.repository_update_preconditions(release) == {
+    assert not any(hasattr(updater, name) for name in
+                   ("_git", "_run", "repository_update_preconditions"))
+    monkeypatch.setattr(subprocess, "run", forbidden_git)
+    monkeypatch.setattr(subprocess, "Popen", forbidden_git)
+    assert historical_updater.repository_update_preconditions(release) == {
         "ok": False, "reason": "packaged_update_not_ready"
     }
     assert updater.spawn_update(repo_root=release, runtime=runtime, port=9344) == {
@@ -233,7 +234,7 @@ def test_direct_legacy_updater_refuses_packaged_source_before_git_or_runtime_wri
     # The bundle-layout fence survives a missing source manifest. A fake Git
     # checkout cannot turn an installed app back into an in-place update target.
     (release / ".git").mkdir()
-    assert updater.repository_update_preconditions(release)["reason"] == "packaged_update_not_ready"
+    assert historical_updater.repository_update_preconditions(release)["reason"] == "packaged_update_not_ready"
     assert updater.perform_update(release, runtime, 9344, restart_only=True) == 1
     assert not runtime.exists()
 
@@ -242,16 +243,16 @@ def test_updater_requires_clean_main_and_expected_origin(tmp_path):
     repo = tmp_path / "repo"
     tracked = _init_git_repo(repo)
 
-    ready = updater.repository_update_preconditions(repo)
+    ready = historical_updater.repository_update_preconditions(repo)
     assert ready["ok"] is True
 
     tracked.write_text("changed")
-    dirty = updater.repository_update_preconditions(repo)
+    dirty = historical_updater.repository_update_preconditions(repo)
     assert dirty == {"ok": False, "reason": "tracked_changes_present"}
 
     subprocess.run(["git", "checkout", "--", "tracked.txt"], cwd=repo, check=True)
     subprocess.run(["git", "checkout", "-b", "feature"], cwd=repo, check=True, capture_output=True)
-    wrong_branch = updater.repository_update_preconditions(repo)
+    wrong_branch = historical_updater.repository_update_preconditions(repo)
     assert wrong_branch == {"ok": False, "reason": "not_on_main"}
 
 
@@ -1097,7 +1098,7 @@ def test_consumer_retired_update_admission_never_spawns_checkout_writer(
         "executor.autonomy.supervisor.spawn_update",
         lambda **_: pytest.fail("consumer must never admit the retired Git writer"),
     )
-    monkeypatch.setattr(updater, "_run", lambda *a, **k: pytest.fail("no Git process"))
+    assert not hasattr(updater, "_run")
     if task_gate == "worker":
         worker.active = "synthetic-active"
     elif task_gate != "empty":
@@ -1191,7 +1192,8 @@ def test_retired_public_updater_entries_are_readonly(
                       for p in root.rglob("*") if p.is_file()) if root.exists() else None
     before_code, before_state = inventory(repo), inventory(runtime)
     assert not any(hasattr(updater, name) for name in
-                   ("_legacy_spawn_update", "_legacy_perform_update", "_restart_service"))
+                   ("_legacy_spawn_update", "_legacy_perform_update", "_restart_service",
+                     "_git", "_run", "repository_update_preconditions"))
     monkeypatch.setattr(updater, "is_packaged_source", lambda _: packaged)
     def forbidden(*args, **kwargs):
         pytest.fail("retired entrypoint must not call the legacy writer or read state")
@@ -1201,7 +1203,7 @@ def test_retired_public_updater_entries_are_readonly(
                  "_git", "_run", "_stop_service", "_start_service"]:
         if hasattr(updater, name):
             monkeypatch.setattr(updater, name, forbidden)
-    monkeypatch.setattr(updater.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
     for _ in range(2):
         assert updater.spawn_update(repo_root=repo, runtime=runtime, port=9344) == {
             "ok": False, "status": "denied",
@@ -1254,11 +1256,12 @@ def test_retired_cli_never_touches_supplied_lock_or_restart_flags(tmp_path, monk
     def forbidden(*args, **kwargs):
         pytest.fail("CLI retirement happens before lock or restart I/O")
     assert not any(hasattr(updater, name) for name in
-                   ("_legacy_spawn_update", "_legacy_perform_update", "_restart_service"))
+                   ("_legacy_spawn_update", "_legacy_perform_update", "_restart_service",
+                     "_git", "_run", "repository_update_preconditions"))
     for name in ["acquire_update_lock", "perform_update",
-                 "runtime_safe_to_update", "_git", "_run", "write_update_state"]:
+                 "runtime_safe_to_update", "write_update_state"]:
         monkeypatch.setattr(updater, name, forbidden)
-    monkeypatch.setattr(updater.time, "sleep", forbidden)
+    monkeypatch.setattr(time, "sleep", forbidden)
     assert updater.main([
         "--repo", str(tmp_path / "nonexistent-code"),
         "--runtime", str(tmp_path / "nonexistent-state"),

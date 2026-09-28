@@ -5,44 +5,11 @@ import fcntl
 import json
 import os
 import re
-import subprocess
-import sys
 import tempfile
-import time
 from pathlib import Path
 
 from .queue import TaskQueue
 from .release import is_packaged_source
-
-
-EXPECTED_REMOTE = re.compile(
-    r"^(?:https://github\.com/|git@github\.com:)"
-    r"haohongfei2001-png/Job-Application-Executor(?:\.git)?$"
-)
-
-
-def _run(
-    repo: Path,
-    args: list[str],
-    *,
-    timeout: int = 120,
-    check: bool = True,
-) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    return subprocess.run(
-        args,
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=check,
-        env=env,
-    )
-
-
-def _git(repo: Path, *args: str, timeout: int = 20) -> str:
-    return _run(repo, ["git", *args], timeout=timeout).stdout.strip()
 
 
 def _state_path(runtime: Path) -> Path:
@@ -135,31 +102,6 @@ def read_update_state(runtime: str | Path) -> dict:
         "new_version": new_version if isinstance(new_version, str) and re.fullmatch(r"[0-9a-fA-F]{1,12}", new_version) else "",
         "reason": reason if isinstance(reason, str) and re.fullmatch(r"[a-z_]{0,80}", reason) else "state_invalid",
     }
-
-
-def repository_update_preconditions(repo_root: str | Path) -> dict:
-    # A packaged app is never a writable Git checkout, even if its release
-    # manifest has been removed or somebody placed a .git directory beside it.
-    if is_packaged_source(repo_root):
-        return {"ok": False, "reason": "packaged_update_not_ready"}
-    repo = Path(repo_root).expanduser().resolve()
-    try:
-        branch = _git(repo, "branch", "--show-current")
-        dirty = _git(repo, "status", "--porcelain", "--untracked-files=no")
-        remote = _git(repo, "remote", "get-url", "origin")
-        head = _git(repo, "rev-parse", "HEAD")
-    except Exception:
-        return {"ok": False, "reason": "git_state_unavailable"}
-
-    if branch != "main":
-        return {"ok": False, "reason": "not_on_main"}
-    if dirty:
-        return {"ok": False, "reason": "tracked_changes_present"}
-    if not EXPECTED_REMOTE.fullmatch(remote):
-        return {"ok": False, "reason": "unexpected_origin"}
-    if not re.fullmatch(r"[0-9a-fA-F]{40}", head):
-        return {"ok": False, "reason": "invalid_head"}
-    return {"ok": True, "head": head}
 
 
 def _tasks_safe_for_update(tasks: list[dict], *, now: float | None = None) -> tuple[bool, str]:
