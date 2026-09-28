@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 
@@ -69,28 +70,72 @@ def write_update_state(
             temp_path.unlink(missing_ok=True)
 
 
-def read_update_state(runtime: str | Path) -> dict:
-    path = _state_path(Path(runtime).expanduser().resolve())
-    if path.is_symlink():
-        return {"status": "failed", "old_version": "", "new_version": "", "reason": "state_invalid"}
-    if not path.is_file():
-        return {"status": "idle", "old_version": "", "new_version": "", "reason": ""}
+def _read_update_state_bytes(runtime: str | Path) -> bytes | None:
+    """Pin the legacy status authority without following a private path alias."""
+    root = Path(runtime).expanduser().absolute()
+    if any(part.is_symlink() for part in (root, *root.parents)):
+        raise ValueError("state_invalid")
     try:
-        data = json.loads(path.read_text())
-    except Exception:
-        return {"status": "failed", "old_version": "", "new_version": "", "reason": "state_invalid"}
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    try:
+        directory_info = os.fstat(directory)
+        if (not stat.S_ISDIR(directory_info.st_mode)
+                or directory_info.st_uid != os.geteuid()):
+            raise ValueError("state_invalid")
+        try:
+            descriptor = os.open("update-state.json",
+                                 os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 dir_fd=directory)
+        except FileNotFoundError:
+            descriptor = None
+        if descriptor is None:
+            data = None
+        else:
+            with os.fdopen(descriptor, "rb") as handle:
+                before = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                        or before.st_uid != os.geteuid() or before.st_size > 8192):
+                    raise ValueError("state_invalid")
+                data = handle.read(8193)
+                after = os.fstat(handle.fileno())
+                visible = os.stat("update-state.json", dir_fd=directory,
+                                  follow_symlinks=False)
+                if (len(data) > 8192 or (before.st_dev, before.st_ino)
+                        != (after.st_dev, after.st_ino)
+                        or (before.st_dev, before.st_ino)
+                        != (visible.st_dev, visible.st_ino)
+                        or after.st_size != before.st_size):
+                    raise ValueError("state_invalid")
+        if any(part.is_symlink() for part in (root, *root.parents)):
+            raise ValueError("state_invalid")
+        visible_root = root.stat(follow_symlinks=False)
+        if ((visible_root.st_dev, visible_root.st_ino)
+                != (directory_info.st_dev, directory_info.st_ino)):
+            raise ValueError("state_invalid")
+        return data
+    finally:
+        os.close(directory)
+
+
+def read_update_state(runtime: str | Path) -> dict:
+    invalid = {"status": "failed", "old_version": "", "new_version": "",
+               "reason": "state_invalid"}
+    idle = {"status": "idle", "old_version": "", "new_version": "", "reason": ""}
+    try:
+        raw = _read_update_state_bytes(runtime)
+        if raw is None:
+            return idle
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return invalid
     if not isinstance(data, dict):
-        return {"status": "failed", "old_version": "", "new_version": "", "reason": "state_invalid"}
+        return invalid
     status = str(data.get("status") or "")
     if status not in {
-        "idle",
-        "checking",
-        "up_to_date",
-        "updating",
-        "restarting",
-        "restart_required",
-        "success",
-        "failed",
+        "idle", "checking", "up_to_date", "updating", "restarting",
+        "restart_required", "success", "failed",
     }:
         status = "failed"
     old_version = data.get("old_version")
