@@ -715,6 +715,11 @@ class GenericWebAdapter(SiteAdapter):
             raise FormObservationError("form collection bounds unavailable") from None
 
     def apply_resolutions(self, resolutions: Iterable[FieldResolution]) -> list[dict]:
+        # A changed/missing observation must not turn an earlier uncertain
+        # native write into an ordinary admission refusal or a replay.
+        if getattr(self, "_field_outcome_unknown", False):
+            raise BrowserOwnershipError("field write outcome unknown")
+        getattr(self, "mutation_guard", lambda: None)()
         resolutions = list(resolutions)
         # Reject the whole ambiguous batch before discovery, write intent or
         # input/change dispatch. Never deduplicate to silently choose a value.
@@ -729,8 +734,14 @@ class GenericWebAdapter(SiteAdapter):
         # projection can collapse it or a later missing target can partially
         # fill earlier controls. Direct callers receive the same finite floor.
         if not unique_fill_identity(observed_fields):
+            # Preserve the established native-locator refusal for repeated
+            # controls. Pure metadata identity collisions retain the plan code.
+            reason = "ambiguous_fill_plan_identity"
+            if any(self._locate(item.selector, item.label).count() != 1
+                   for item in resolutions):
+                reason = "ambiguous_or_missing_locator"
             return [{"field_id": item.field_id, "ok": False,
-                     "reason": "ambiguous_fill_plan_identity"} for item in resolutions]
+                     "reason": reason} for item in resolutions]
         observed_by_selector = {item.selector: item for item in observed_fields}
         if any(item.selector not in observed_by_selector for item in resolutions):
             return [{"field_id": item.field_id, "ok": False,
@@ -821,6 +832,7 @@ class GenericWebAdapter(SiteAdapter):
                 if kept is not True:
                     raise BrowserOwnershipError("retained field readback changed")
             except Exception:
+                self._field_outcome_unknown = True
                 invalidate = getattr(self, "field_readbacks_invalidate", None)
                 if callable(invalidate):
                     invalidate()
@@ -843,6 +855,7 @@ class GenericWebAdapter(SiteAdapter):
                         or current_form.ambiguous_row_count):
                     raise FormObservationError("unsupported redraw")
             except Exception:
+                self._field_outcome_unknown = True
                 invalidate = getattr(self, "field_readbacks_invalidate", None)
                 if callable(invalidate):
                     invalidate()
@@ -890,6 +903,7 @@ class GenericWebAdapter(SiteAdapter):
                         raise BrowserOwnershipError("field contract changed")
                 except Exception:
                     if retained:
+                        self._field_outcome_unknown = True
                         invalidate = getattr(self, "field_readbacks_invalidate", None)
                         if callable(invalidate):
                             invalidate()
@@ -982,6 +996,7 @@ class GenericWebAdapter(SiteAdapter):
                 actions.append({"field_id": resolution.field_id, "ok": True,
                                 "source": resolution.source, "observed": "DOM_READBACK"})
             except Exception:
+                self._field_outcome_unknown = True
                 # Failure to observe this write also prevents retaining the
                 # earlier batch as verified DOM state. Revoke evidence only;
                 # the coarse run and unknown intents still forbid replay.
