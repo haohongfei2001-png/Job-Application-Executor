@@ -78,4 +78,3 @@ All previous native cases/complete fixtures stay a byte-exact prefix, including 
 One coherent host/CLI/full-owning-native/STATUS/protocol/ledger/immutable-pass-receipt batch via high-level Contents on the existing no-PR assembly ref, then one non-force sole writer20 publication. Static source review only; exact new-head actual native/runtime/all affected CI PENDING. No local Python or user device execution, unchanged-head rerun, permission/paid/account/action expansion.
 
 JCR08 remains IN_PROGRESS/NOT_CERTIFIED; DFG002/008 MITIGATED_FOR_ENGINEERING. Human native-picker/physical device, legacy private transfer/old-writer retirement and final signing/live/security evidence remain OPEN or dependent-deferred. Only their dependency paths pause. Final submit permanently user-only.
-
