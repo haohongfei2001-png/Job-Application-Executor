@@ -492,12 +492,12 @@ def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
     git_calls = []
 
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "runtime_safe_to_update",
         lambda runtime: (True, ""),
     )
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "repository_update_preconditions",
         lambda repo: preconditions.pop(0),
     )
@@ -506,9 +506,9 @@ def test_repo_is_revalidated_after_fetch_and_immediately_before_merge(
         git_calls.append(args)
         return subprocess.CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr(updater, "_run", fake_run)
+    monkeypatch.setattr(historical_updater, "_run", fake_run)
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "_git",
         lambda repo, *args, **kwargs: new
         if args == ("rev-parse", "origin/main")
@@ -542,7 +542,7 @@ def test_spawn_update_preserves_restart_retry_intent(tmp_path, monkeypatch):
         reason="service_start_failed",
     )
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "repository_update_preconditions",
         lambda path: {"ok": True, "head": old},
     )
@@ -584,22 +584,22 @@ def test_restart_required_can_be_retried_when_code_is_already_current(
     assert historical_updater.read_update_state(runtime)["reason"] == "service_stop_failed"
 
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "runtime_safe_to_update",
         lambda runtime: (True, ""),
     )
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "repository_update_preconditions",
         lambda repo: {"ok": True, "head": old},
     )
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "_run",
         lambda repo, args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
     )
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "_git",
         lambda repo, *args, **kwargs: old
         if args == ("rev-parse", "origin/main")
@@ -639,12 +639,12 @@ def test_restart_only_bypasses_git_and_timeout_keeps_restart_fence(
 ):
     old = "a" * 40
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "runtime_safe_to_update",
         lambda runtime: (True, ""),
     )
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "repository_update_preconditions",
         lambda repo: {"ok": True, "head": old},
     )
@@ -661,7 +661,7 @@ def test_restart_only_bypasses_git_and_timeout_keeps_restart_fence(
             raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 20))
         return subprocess.CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr(updater, "_run", forbidden_git)
+    monkeypatch.setattr(historical_updater, "_run", forbidden_git)
     monkeypatch.setattr(historical_updater.subprocess, "run", fake_service)
 
     rc = historical_updater._legacy_perform_update(
@@ -692,12 +692,12 @@ def test_failure_after_git_mutation_stays_restart_required(
     ]
 
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "runtime_safe_to_update",
         lambda runtime: (True, ""),
     )
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "repository_update_preconditions",
         lambda repo: preconditions.pop(0),
     )
@@ -716,8 +716,8 @@ def test_failure_after_git_mutation_stays_restart_required(
             raise subprocess.TimeoutExpired(args, 60)
         raise AssertionError(args)
 
-    monkeypatch.setattr(updater, "_git", fake_git)
-    monkeypatch.setattr(updater, "_run", fake_run)
+    monkeypatch.setattr(historical_updater, "_git", fake_git)
+    monkeypatch.setattr(historical_updater, "_run", fake_run)
 
     rc = historical_updater._legacy_perform_update(
         tmp_path / "repo",
@@ -764,7 +764,7 @@ def test_update_check_uses_http11_and_leaves_code_unchanged_when_current(
     calls = []
 
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "repository_update_preconditions",
         lambda repo: {"ok": True, "head": old},
     )
@@ -777,8 +777,8 @@ def test_update_check_uses_http11_and_leaves_code_unchanged_when_current(
         assert args == ("rev-parse", "origin/main")
         return old
 
-    monkeypatch.setattr(updater, "_run", fake_run)
-    monkeypatch.setattr(updater, "_git", fake_git)
+    monkeypatch.setattr(historical_updater, "_run", fake_run)
+    monkeypatch.setattr(historical_updater, "_git", fake_git)
 
     rc = historical_updater._legacy_perform_update(
         tmp_path / "repo",
@@ -812,7 +812,7 @@ def test_fast_forward_update_restarts_service_and_records_success(
     ui_calls = []
 
     monkeypatch.setattr(
-        updater,
+        historical_updater,
         "repository_update_preconditions",
         lambda repo: {"ok": True, "head": old},
     )
@@ -836,8 +836,8 @@ def test_fast_forward_update_restarts_service_and_records_success(
         def __init__(self, args, **kwargs):
             ui_calls.append(args[-1])
 
-    monkeypatch.setattr(updater, "_run", fake_run)
-    monkeypatch.setattr(updater, "_git", fake_git)
+    monkeypatch.setattr(historical_updater, "_run", fake_run)
+    monkeypatch.setattr(historical_updater, "_git", fake_git)
     monkeypatch.setattr(historical_updater.subprocess, "run", fake_subprocess_run)
     monkeypatch.setattr(historical_updater.subprocess, "Popen", FakePopen)
 

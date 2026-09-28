@@ -14,10 +14,15 @@ from pathlib import Path
 
 from executor.autonomy.release import is_packaged_source
 from executor.autonomy.updater import (
-    _git, _run, acquire_update_lock, read_update_state,
+    _run, acquire_update_lock, read_update_state,
     repository_update_preconditions, runtime_safe_to_update,
     write_update_state,
 )
+
+def _git(repo: Path, *args: str, timeout: int = 20) -> str:
+    return _run(repo, ["git", *args], timeout=timeout).stdout.strip()
+
+
 
 def _legacy_spawn_update(
     *,
