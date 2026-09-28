@@ -6058,3 +6058,59 @@ def test_native_handoff_never_claims_completion_after_activated_slot_loses_autho
                       "final_click_actor": "user", "submit_capability": False}
     assert canary.read_bytes() == before
     assert "PRIVATE_" not in json.dumps(result) and str(tmp_path) not in json.dumps(result)
+
+@pytest.mark.parametrize("control", ["Info.plist", "AIApplicationManager"])
+def test_bundle_control_hardlink_refuses_before_external_inode_read(tmp_path, monkeypatch, control):
+    app = tmp_path / "Applications" / (consumer.APP_NAME + ".app")
+    macos = app / "Contents" / "MacOS"
+    resources = app / "Contents" / "Resources"
+    macos.mkdir(parents=True)
+    resources.mkdir()
+    info = app / "Contents" / "Info.plist"
+    with info.open("wb") as handle:
+        plistlib.dump({"CFBundleIdentifier": consumer.BUNDLE_ID,
+                       "CFBundleExecutable": "AIApplicationManager"}, handle)
+    repo = tmp_path / "Job-Application-Executor"
+    launcher = macos / "AIApplicationManager"
+    launcher.write_text(consumer._legacy_launcher(repo), encoding="utf-8")
+    launcher.chmod(0o755)
+    assert consumer._trusted_bundle(app)
+    assert consumer._bundle_transaction_identity(app) is not None
+
+    target = info if control == "Info.plist" else launcher
+    outside = tmp_path / ("outside-" + control)
+    original = target.read_bytes()
+    outside.write_bytes(original)
+    outside.chmod(stat.S_IMODE(target.stat().st_mode))
+    target.unlink()
+    os.link(outside, target)
+    assert target.stat().st_nlink == 2
+    original_open, original_text, original_bytes = Path.open, Path.read_text, Path.read_bytes
+
+    def no_external_open(path, *args, **kwargs):
+        if path == target:
+            pytest.fail("bundle must refuse an external inode before open")
+        return original_open(path, *args, **kwargs)
+
+    def no_external_text(path, *args, **kwargs):
+        if path == target:
+            pytest.fail("bundle must refuse an external inode before text read")
+        return original_text(path, *args, **kwargs)
+
+    def no_external_bytes(path, *args, **kwargs):
+        if path == target:
+            pytest.fail("bundle must refuse an external inode before bytes read")
+        return original_bytes(path, *args, **kwargs)
+
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "open", no_external_open)
+        guard.setattr(Path, "read_text", no_external_text)
+        guard.setattr(Path, "read_bytes", no_external_bytes)
+        assert consumer._trusted_bundle(app) is False
+        assert consumer._bundle_transaction_identity(app) is None
+        if control == "AIApplicationManager":
+            assert consumer._legacy_bundle_matches(launcher) is False
+            assert consumer._packaged_bundle_matches(launcher, resources / "runtime") is False
+            assert consumer._isolated_bundle_startup(app) is False
+    assert outside.read_bytes() == original
+    assert target.read_bytes() == original

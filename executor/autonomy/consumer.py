@@ -31,6 +31,17 @@ from .process_entry import CLI_ENTRY_SCRIPT
 APP_NAME = "AI 投递经理"
 BUNDLE_ID = "com.local.job-application-executor.ai-application-manager"
 
+
+def _owned_bundle_file(path: Path) -> bool:
+    """Refuse aliases before reading an installed bundle control file."""
+    try:
+        entry = path.stat(follow_symlinks=False)
+        return (stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1
+                and entry.st_uid == os.geteuid())
+    except OSError:
+        return False
+
+
 def _legacy_launcher(repo: Path) -> str:
     repo_q = shlex.quote(str(repo))
     return f"""#!/bin/zsh
@@ -58,6 +69,8 @@ exit $STATUS
 
 def _legacy_bundle_matches(executable: Path) -> bool:
     try:
+        if not _owned_bundle_file(executable):
+            return False
         launcher = executable.read_text(encoding="utf-8")
         assignments = [line for line in launcher.splitlines()
                        if line.startswith("REPO_ROOT=")]
@@ -189,7 +202,7 @@ def _native_bundle_matches(release: Path, directory: Path) -> bool:
         if not verify_source_candidate(release):
             return False
         source = release / "executor" / "autonomy" / "macos_host.py"
-        if source.is_symlink() or not source.is_file():
+        if not _owned_bundle_file(source):
             return False
         module = ast.parse(source.read_text(encoding="utf-8"))
         declarations = [node for node in module.body if isinstance(node, ast.Assign)
@@ -299,6 +312,8 @@ def _isolated_bundle_startup(app: Path) -> bool:
     executable = app / "Contents" / "MacOS" / "AIApplicationManager"
     runtime = app / "Contents" / "Resources" / "runtime"
     try:
+        if not _owned_bundle_file(executable):
+            return False
         launcher = executable.read_text(encoding="utf-8")
         return (runtime.is_dir() and (launcher == _packaged_launcher()
             or (launcher == _native_packaged_launcher()
@@ -309,6 +324,8 @@ def _isolated_bundle_startup(app: Path) -> bool:
 
 def _packaged_bundle_matches(executable: Path, runtime: Path) -> bool:
     try:
+        if not _owned_bundle_file(executable):
+            return False
         launcher = executable.read_text(encoding="utf-8")
         if runtime.exists():
             return launcher in {_packaged_launcher(), _packaged_launcher_v2(), _native_packaged_launcher()}
@@ -340,8 +357,8 @@ def _trusted_bundle(app: Path) -> bool:
     info_path = contents / "Info.plist"
     executable = macos / "AIApplicationManager"
     if (any(path.is_symlink() for path in (contents, macos, resources, release, runtime))
-            or info_path.is_symlink() or executable.is_symlink()
-            or not executable.is_file()):
+            or not _owned_bundle_file(info_path)
+            or not _owned_bundle_file(executable)):
         return False
     try:
         with info_path.open("rb") as handle:
@@ -401,7 +418,8 @@ def _bundle_transaction_identity(app: Path) -> tuple | None:
         evidence = []
         for path in paths:
             entry = path.stat(follow_symlinks=False)
-            if not stat.S_ISREG(entry.st_mode):
+            if (not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1
+                    or entry.st_uid != os.geteuid()):
                 raise ValueError("bundle_file_invalid")
             evidence.append((path.relative_to(app).as_posix(),
                              stat.S_IMODE(entry.st_mode),
@@ -446,7 +464,9 @@ def _legacy_state_migration_needed(repo: Path, app: Path, target: Path) -> bool:
     """
     roots = [(repo, repo / "runtime" / "autonomy")]
     executable = app / "Contents" / "MacOS" / "AIApplicationManager"
-    if executable.is_file() and _legacy_bundle_matches(executable):
+    if _owned_bundle_file(executable) and _legacy_bundle_matches(executable):
+        if not _owned_bundle_file(executable):
+            raise ValueError("legacy_launcher_changed")
         launcher = executable.read_text(encoding="utf-8")
         assignments = [line for line in launcher.splitlines() if line.startswith("REPO_ROOT=")]
         if len(assignments) != 1:
@@ -640,6 +660,8 @@ def install_macos_bundle(
         if not _trusted_bundle(candidate) or not verify_standalone_runtime(runtime, release):
             raise ValueError("bundle_unverified")
         launcher = candidate / "Contents" / "MacOS" / "AIApplicationManager"
+        if not _owned_bundle_file(launcher):
+            raise ValueError("bundle_unverified")
         native = launcher.read_text(encoding="utf-8") == _native_packaged_launcher()
         apps = _app_transaction_directory(destination if destination is not None else Path.home() / "Applications")
         if candidate.resolve() == (apps / (APP_NAME + ".app")).resolve():
