@@ -591,10 +591,13 @@ class GenericWebAdapter(SiteAdapter):
             prewrite()
         # Ownership/prewrite callbacks can reactively change label.control.
         # Recheck the actual activation shape at the primitive boundary.
-        if companion_label_activation(element) or native_click_effect(element):
+        if (not self._choice_enabled(element) or companion_label_activation(element)
+                or native_click_effect(element)):
             return False
         element.click()
         choices = listbox.locator('[role="option"]')
+        if choices.count() > 200:
+            return False
         exact = [choices.nth(index) for index in range(choices.count())
                  if choices.nth(index).is_visible()
                  and (choices.nth(index).get_attribute("aria-label") or
@@ -606,10 +609,55 @@ class GenericWebAdapter(SiteAdapter):
                 or (exact[0].get_attribute("aria-label") or
                     exact[0].inner_text()).strip() != target):
             return False
+        # An option locator's ordinal and text are not stable across ownership
+        # callbacks. Freeze observable option effect data before that callback,
+        # then recheck the complete bounded live list immediately before click.
+        option_effect_script = r"""o => {
+          const style = getComputedStyle(o), rect = o.getBoundingClientRect();
+          return [o.tagName.toLowerCase(), o.id, o.getAttribute('role'),
+            o.getAttribute('type'), o.getAttribute('aria-label'),
+            (o.innerText || '').trim(), o.textContent, o.value ?? null,
+            o.getAttribute('data-value'), o.form?.id || '',
+            !!o.disabled || o.matches(':disabled'),
+            !!o.closest('[aria-disabled="true"]'), style.display, style.visibility,
+            rect.width > 0 && rect.height > 0];
+        }"""
+        option_contract = listbox.evaluate(r"""e => {
+          const optionEffect = __ARIA_OPTION_EFFECT__;
+          const options = [...e.querySelectorAll('[role="option"]')];
+          return options.length <= 200 ? options.map(optionEffect) : null;
+        }""".replace(
+            "__ARIA_OPTION_EFFECT__", option_effect_script))
+        if option_contract is None:
+            return False
         if callable(prewrite):
             prewrite()
-        if (companion_label_activation(element) or native_click_effect(element)
+        if (not self._choice_enabled(element) or companion_label_activation(element)
+                or native_click_effect(element)
                 or companion_label_activation(exact[0]) or native_click_effect(exact[0])):
+            return False
+        allowed = exact[0].evaluate(r"""(e, expected) => {
+          const optionEffect = __ARIA_OPTION_EFFECT__;
+          const boxes = [...document.querySelectorAll(
+            '[id=' + JSON.stringify(expected.id) + '][role="listbox"]')];
+          if (boxes.length !== 1 || !boxes[0].contains(e)
+              || e.closest('[role="listbox"]') !== boxes[0]) return false;
+          const box = boxes[0], options = [...box.querySelectorAll('[role="option"]')];
+          if (options.length > 200
+              || JSON.stringify(options.map(optionEffect)) !== JSON.stringify(expected.options))
+            return false;
+          const exact = options.filter(o => {
+            const style = getComputedStyle(o), rect = o.getBoundingClientRect();
+            return style.display !== 'none' && !['hidden','collapse'].includes(style.visibility)
+              && rect.width > 0 && rect.height > 0
+              && (o.getAttribute('aria-label') || o.innerText || '').trim() === expected.target;
+          });
+          return exact.length === 1 && exact[0] === e && !e.matches(':disabled')
+            && !e.closest('[aria-disabled="true"]');
+        }""".replace(
+            "__ARIA_OPTION_EFFECT__", option_effect_script),
+            {"id": controlled_id, "target": target, "options": option_contract})
+        if allowed is not True:
             return False
         exact[0].click()
         self.await_form_render()

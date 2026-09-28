@@ -1419,3 +1419,129 @@ def test_native_select_same_option_contract_replacement_at_prewrite_keeps_exact_
     queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
     assert {r["outcome"] for r in queue.field_actions(tid)} == {"DOM_READBACK_UNVERIFIED"}
     assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+@pytest.mark.parametrize("drift", [
+    "label", "text", "aria_disabled", "hidden", "prepend", "duplicate",
+    "listbox_role", "data_value", "open_disabled", "oversized",
+])
+def test_aria_option_effect_change_at_prewrite_refuses_before_click_and_never_replays(tmp_path, drift):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    html = tmp_path / "aria-option-prewrite-effect.html"
+    html.write_text("""<!doctype html><body><form id='app'>
+      <label>First<input id='first'></label><label for='target'>Target</label>
+      <button id='target' type='button' role='combobox' aria-label='Target' aria-controls='choices'
+        onclick="window.opens++;document.querySelector('#choices').hidden=false">Choose</button>
+      <div id='choices' role='listbox' hidden>
+        <button id='choice' type='button' role='option' data-value='intended'
+          onclick="window.targetWrites++;window.observedChoice=this.dataset.value;document.querySelector('#target').value=this.getAttribute('aria-label')||this.innerText">
+          Exact choice</button>
+      </div><button id='final' type='submit'>Submit application</button></form>
+      <script>window.opens=0;window.targetWrites=0;window.observedChoice=null;window.submits=0;
+      document.addEventListener('submit',event=>{window.submits++;event.preventDefault();});</script>
+    """, encoding="utf-8")
+    mutations = {
+        "label": "document.querySelector('#choice').setAttribute('aria-label','PRIVATE_DIFFERENT_CHOICE');",
+        "text": "document.querySelector('#choice').textContent='PRIVATE_DIFFERENT_CHOICE';",
+        "aria_disabled": "document.querySelector('#choice').setAttribute('aria-disabled','true');",
+        "hidden": "document.querySelector('#choice').hidden=true;",
+        "prepend": "const other=document.createElement('button');other.type='button';other.setAttribute('role','option');other.textContent='Other choice';document.querySelector('#choices').prepend(other);",
+        "duplicate": "document.querySelector('#choices').append(document.querySelector('#choice').cloneNode(true));",
+        "listbox_role": "document.querySelector('#choices').setAttribute('role','group');",
+        "data_value": "document.querySelector('#choice').dataset.value='PRIVATE_FOREIGN_CHOICE';",
+        "oversized": "for(let i=0;i<200;i++){const o=document.createElement(\'button\');o.type=\'button\';o.setAttribute(\'role\',\'option\');o.textContent=\'Other \'+i;document.querySelector(\'#choices\').append(o);}",
+        "open_disabled": "document.querySelector('#target').setAttribute('aria-disabled','true');",
+    }
+    audit = _audit(queue, tid, owner, attempt)
+    injected = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        fill = adapter._fill_combobox
+        def fenced(element, selector, value, *, prewrite=None):
+            callbacks = []
+            def callback():
+                assert callable(prewrite)
+                prewrite()
+                callbacks.append(True)
+                if len(callbacks) == (1 if drift == "open_disabled" else 2):
+                    adapter.page.evaluate(mutations[drift])
+                    injected.append(True)
+            return fill(element, selector, value, prewrite=callback)
+        adapter._fill_combobox = fenced
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions([
+                FieldResolution(field_id="first", selector="#first", label="First",
+                    value="PRIVATE_ARIA_OPTION_CANARY", status=ResolutionStatus.RESOLVED),
+                FieldResolution(field_id="target", selector="#target", label="Target",
+                    value="Exact choice", status=ResolutionStatus.RESOLVED),
+            ])
+        assert injected == [True]
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_ARIA_OPTION_CANARY"
+        assert adapter.page.locator("#target").inner_text() == "Choose"
+        assert adapter.page.evaluate("[window.opens,window.targetWrites,window.observedChoice,window.submits]") == [
+            0 if drift == "open_disabled" else 1, 0, None, 0]
+        assert adapter.page.locator("#final").is_enabled() is True
+        assert "PRIVATE_" not in str(caught.value)
+    actions = queue.field_actions(tid)
+    assert len(actions) == 2 and {row["outcome"] for row in actions} == {"UNKNOWN_OUTCOME"}
+    assert "PRIVATE_" not in json.dumps(actions)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-aria-option-prewrite-replay").hexdigest())
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+def test_aria_same_option_effect_replacement_at_prewrite_keeps_exact_choice_once(tmp_path):
+    queue, tid, owner, attempt, _clock = _owned(tmp_path)
+    html = tmp_path / "aria-option-equivalent-effect.html"
+    html.write_text("""<!doctype html><body><form id='app'>
+      <label>First<input id='first'></label><label for='target'>Target</label>
+      <button id='target' type='button' role='combobox' aria-label='Target' aria-controls='choices'
+        onclick="window.opens++;document.querySelector('#choices').hidden=false">Choose</button>
+      <div id='choices' role='listbox' hidden>
+        <button id='choice' type='button' role='option' data-value='intended'
+          onclick="window.targetWrites++;window.observedChoice=this.dataset.value;document.querySelector('#target').value=this.innerText">
+          Exact choice</button>
+      </div><button id='final' type='submit'>Submit application</button></form>
+      <script>window.opens=0;window.targetWrites=0;window.observedChoice=null;window.submits=0;
+      document.addEventListener('submit',event=>{window.submits++;event.preventDefault();});</script>
+    """, encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    injected = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        fill = adapter._fill_combobox
+        def fenced(element, selector, value, *, prewrite=None):
+            callbacks = []
+            def callback():
+                prewrite()
+                callbacks.append(True)
+                if len(callbacks) == 2:
+                    adapter.page.locator("#choice").evaluate("e=>e.replaceWith(e.cloneNode(true))")
+                    injected.append(True)
+            return fill(element, selector, value, prewrite=callback)
+        adapter._fill_combobox = fenced
+        actions = adapter.apply_resolutions([
+            FieldResolution(field_id="first", selector="#first", label="First",
+                value="PRIVATE_ARIA_EQUIVALENT_CANARY", status=ResolutionStatus.RESOLVED),
+            FieldResolution(field_id="target", selector="#target", label="Target",
+                value="Exact choice", status=ResolutionStatus.RESOLVED),
+        ])
+        assert injected == [True]
+        assert len(actions) == 2 and all(item["ok"] and item["observed"] == "DOM_READBACK" for item in actions)
+        assert adapter.page.locator("#target").evaluate("e=>e.value") == "Exact choice"
+        assert adapter.page.evaluate("[window.opens,window.targetWrites,window.observedChoice,window.submits]") == [
+            1, 1, "intended", 0]
+        assert adapter.page.locator("#final").is_enabled() is True
+    queue.require_field_action_readbacks(attempt)
+    queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    assert {row["outcome"] for row in queue.field_actions(tid)} == {"DOM_READBACK_UNVERIFIED"}
+    assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
