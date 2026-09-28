@@ -993,7 +993,23 @@ def _install_macos_app_unlocked(
         if moved:
             try:
                 rollback.rename(app)
-                restored = _bundle_transaction_identity(app) == current_identity
+                # A successful restore rename is not final-path health proof.
+                # Candidate/current code can change owned slots during health;
+                # keep the complete staging evidence unless all roles remain.
+                restored = (
+                    _bundle_transaction_identity(app) == current_identity
+                    and _bundle_transaction_identity(staging) == candidate_identity
+                    and not rollback.exists() and not rollback.is_symlink()
+                    and not failed.exists() and not failed.is_symlink()
+                    and _isolated_bundle_startup(app)
+                    and _candidate_starts(
+                        app / "Contents" / "Resources" / "runtime" / "bin" / "python",
+                        app / "Contents" / "Resources" / "release")
+                    and _bundle_transaction_identity(app) == current_identity
+                    and _bundle_transaction_identity(staging) == candidate_identity
+                    and not rollback.exists() and not rollback.is_symlink()
+                    and not failed.exists() and not failed.is_symlink()
+                )
             except OSError:
                 restored = False
         # Recovery failure preserves the candidate for diagnosis as well.
@@ -1218,8 +1234,19 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
             }
         try:
             failed.rename(app)
-            if _bundle_transaction_identity(app) != current_identity:
-                raise OSError("recovery_identity_changed")
+            # Restore only means usable after isolated actual final-path health,
+            # with both retained identities and the recovery slot unchanged.
+            if (_bundle_transaction_identity(app) != current_identity
+                    or _bundle_transaction_identity(previous) != previous_identity
+                    or failed.exists() or failed.is_symlink()
+                    or not _isolated_bundle_startup(app)
+                    or not _candidate_starts(
+                        app / "Contents" / "Resources" / "runtime" / "bin" / "python",
+                        app / "Contents" / "Resources" / "release")
+                    or _bundle_transaction_identity(app) != current_identity
+                    or _bundle_transaction_identity(previous) != previous_identity
+                    or failed.exists() or failed.is_symlink()):
+                raise OSError("recovery_health_or_identity_unverified")
             reason = "rollback_activation_failed"
             message = "旧版没有启用，当前版本已恢复。"
         except OSError:
