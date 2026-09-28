@@ -1015,3 +1015,166 @@ def test_disabled_duplicate_label_does_not_disambiguate_a_choice(tmp_path, compo
         else:
             assert adapter.page.locator("#city").inner_text() == "Choose"
         assert adapter.page.evaluate("window.choices") == 0
+
+
+@pytest.mark.parametrize("collision", ["selector", "field_id", "mixed_status", "empty_selector", "empty_id"])
+def test_fill_plan_refuses_ambiguous_complete_action_identity_without_private_error(collision):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    observed = FormObservation.from_fields("https://synthetic.example.test/form", "epoch", [
+        WebField(field_id="first", selector="#first", current_value=full),
+        WebField(field_id="later", selector="#later", current_value=full + "PRIVATE_SECOND"),
+    ])
+    actions = [
+        FieldResolution(field_id="first", selector="#first", label="PRIVATE_LABEL",
+                        status=ResolutionStatus.RESOLVED, value=full),
+        FieldResolution(field_id="later", selector="#later", label="PRIVATE_LABEL",
+                        status=ResolutionStatus.RESOLVED, value=full + "PRIVATE_SECOND"),
+    ]
+    if collision in {"selector", "mixed_status"}:
+        actions[1].selector = actions[0].selector
+    if collision == "field_id":
+        actions[1].field_id = actions[0].field_id
+    if collision == "mixed_status":
+        actions[1].status = ResolutionStatus.UNRESOLVED
+    if collision == "empty_selector":
+        actions[1].selector = ""
+    if collision == "empty_id":
+        actions[1].field_id = ""
+    with pytest.raises(ValueError) as refused:
+        FillPlan.bind(observed, actions)
+    assert str(refused.value) == "fill plan requires unique field identity"
+    assert full == actions[0].value
+    assert actions[1].value == full + "PRIVATE_SECOND"
+    assert "PRIVATE_" not in str(refused.value)
+    assert "不要删除" not in str(refused.value)
+
+
+@pytest.mark.parametrize("collision", ["selector", "field_id"])
+def test_fill_plan_refuses_duplicate_observed_identity_even_for_one_selected_action(collision):
+    fields = [WebField(field_id="first", selector="#first"),
+              WebField(field_id="later", selector="#later")]
+    setattr(fields[1], collision, getattr(fields[0], collision))
+    observed = FormObservation.from_fields("https://synthetic.example.test/form", "epoch", fields)
+    action = FieldResolution(field_id="first", selector="#first", label="Name",
+                             status=ResolutionStatus.RESOLVED, value="Synthetic")
+    with pytest.raises(ValueError, match="^fill plan requires unique field identity$"):
+        FillPlan.bind(observed, [action])
+
+
+@pytest.mark.parametrize("collision", ["selector", "field_id", "mixed_status"])
+def test_actual_browser_duplicate_fill_batch_dispatches_no_write_or_journal_intent(tmp_path, collision):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    html = tmp_path / "duplicate-plan.html"
+    html.write_text("""<!doctype html><body>
+      <label>First<textarea id='first'></textarea></label>
+      <label>Later<textarea id='later'></textarea></label>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.writes=0;window.submits=0;
+        document.addEventListener('input',()=>window.writes++);
+        document.addEventListener('change',()=>window.writes++);</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        fields = adapter.discover_fields()
+        assert len(fields) == 2
+        actions = [FieldResolution(field_id=field.field_id, selector=field.selector, label=field.label,
+                    status=ResolutionStatus.RESOLVED, value=full + "\nPRIVATE_" + str(i))
+                   for i, field in enumerate(fields)]
+        if collision in {"selector", "mixed_status"}:
+            actions[1].selector = actions[0].selector
+        else:
+            actions[1].field_id = actions[0].field_id
+        if collision == "mixed_status":
+            actions[1].status = ResolutionStatus.UNRESOLVED
+        journal = []
+        adapter.field_action_begin = lambda *args, **kwargs: journal.append("UNEXPECTED_INTENT")
+        result = adapter.apply_resolutions(actions)
+        assert result == [{"field_id": item.field_id, "ok": False,
+                           "reason": "ambiguous_fill_plan_identity"} for item in actions]
+        assert all(len(item.value) > len(full) for item in actions)
+        assert adapter.page.locator("#first").input_value() == ""
+        assert adapter.page.locator("#later").input_value() == ""
+        assert adapter.page.evaluate("window.writes") == 0
+        assert adapter.page.evaluate("window.submits") == 0
+        assert journal == []
+        assert "PRIVATE_" not in json.dumps(result)
+        assert "不要删除" not in json.dumps(result)
+
+
+def test_actual_browser_unique_full_fill_plan_preserves_both_complete_control_values(tmp_path):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    html = tmp_path / "unique-plan.html"
+    html.write_text("""<!doctype html><body>
+      <textarea id='first' aria-label='First'></textarea>
+      <textarea id='later' aria-label='Later'></textarea>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.submits=0;</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        observed = adapter.observe_form()
+        values = [full + "\nPRIVATE_FIRST", full + "\nPRIVATE_SECOND"]
+        actions = [FieldResolution(field_id=field.field_id, selector=field.selector, label=field.label,
+                    status=ResolutionStatus.RESOLVED, value=values[i])
+                   for i, field in enumerate(observed.fields)]
+        assert FillPlan.bind(observed, actions).actions == tuple(actions)
+        results = adapter.apply_resolutions(actions)
+        assert len(results) == 2
+        assert all(item["ok"] is True and item["observed"] == "DOM_READBACK" for item in results)
+        assert adapter.page.locator("#first").input_value() == values[0]
+        assert adapter.page.locator("#later").input_value() == values[1]
+        assert adapter.page.evaluate("window.submits") == 0
+        assert "PRIVATE_" not in json.dumps(results)
+
+
+@pytest.mark.parametrize("reactive", [False, True])
+def test_real_executor_ambiguous_resolution_batch_blocks_before_initial_or_reactive_child_writes(
+        tmp_path, monkeypatch, reactive):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    body = "<label>First<textarea id='first'></textarea></label>"
+    if not reactive:
+        body += "<label>Later<textarea id='later'></textarea></label>"
+    body += "<button type='button' onclick='window.submits++'>Submit application</button>"
+    body += """<script>window.writes=0;window.childWrites=0;window.submits=0;
+      document.addEventListener('input',event=>{
+        window.writes++;if(event.target.id!=='first')window.childWrites++;
+      });</script>"""
+    if reactive:
+        body += """<script>document.querySelector('#first').addEventListener('input',()=>{
+          if(document.querySelector('#later'))return;
+          for(const id of ['later','last']){
+            const label=document.createElement('label');label.textContent=id;
+            const field=document.createElement('textarea');field.id=id;
+            label.append(field);document.body.append(label);
+          }
+        });</script>"""
+    runner, html = _runner(tmp_path, monkeypatch, body)
+    observed_exit = {}
+
+    class ObservedExit(GenericWebAdapter):
+        def __exit__(self, exc_type, exc_value, traceback):
+            observed_exit.update(self.page.evaluate("""() => ({
+              writes:window.writes,childWrites:window.childWrites,submits:window.submits,
+              values:[...document.querySelectorAll('textarea')].map(node=>node.value)
+            })"""))
+            return super().__exit__(exc_type, exc_value, traceback)
+
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda url: ObservedExit(url))
+
+    def resolve(field):
+        collision = not reactive or field.selector != "#first"
+        return FieldResolution(field_id="duplicate" if collision else field.field_id,
+                               selector=field.selector, label=field.label,
+                               status=ResolutionStatus.RESOLVED, value=full)
+    monkeypatch.setattr(runner.resolver, "resolve", resolve)
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "fill plan identity unverified"
+    assert plan.metadata["capability_limitations"] == ["ambiguous_fill_plan_identity"]
+    assert observed_exit["submits"] == 0
+    assert observed_exit["childWrites"] == 0
+    if reactive:
+        assert observed_exit["writes"] == 1
+        assert observed_exit["values"] == [full, "", ""]
+    else:
+        assert observed_exit["writes"] == 0
+        assert observed_exit["values"] == ["", ""]
+    assert plan.submit_authorized is False
+    assert "PRIVATE_" not in json.dumps(plan.metadata)
+    assert "不要删除" not in json.dumps(plan.metadata)
