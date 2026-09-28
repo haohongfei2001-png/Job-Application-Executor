@@ -4545,7 +4545,11 @@ def test_activation_rename_error_rechecks_recovery_authority_before_restore_or_c
         result = (rollback_macos_app(apps, task_state_root=state) if action == "rollback"
                   else install_macos_app(repo, destination=apps, platform="darwin",
                                          task_state_root=state))
-        assert len(starts) == 1, "actual candidate health still runs before rename fault"
+        assert len(starts) == (2 if scenario == "unchanged" else 1)
+        assert starts[0] == candidate / "Contents" / "Resources" / "release"
+        if scenario == "unchanged":
+            assert starts[1] == app / "Contents" / "Resources" / "release", (
+                "restored original must pass actual final-path health before recovery")
         assert result["ok"] is False
         if scenario == "unchanged":
             assert result["reason"] == ("rollback_activation_failed" if action == "rollback"
