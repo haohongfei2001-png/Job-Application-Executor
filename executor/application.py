@@ -789,7 +789,14 @@ class ApplicationExecutor:
                     self.audit.save_plan(self.plan)
                     return self.plan
                 if observation:
-                    FillPlan.bind(observation, resolutions)
+                    try:
+                        FillPlan.bind(observation, resolutions)
+                    except ValueError:
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "fill plan identity unverified"
+                        self.plan.metadata["capability_limitations"] = ["ambiguous_fill_plan_identity"]
+                        self.audit.save_plan(self.plan)
+                        return self.plan
                 self.plan.metadata["current_page_selectors"] = [item.selector for item in resolutions]
                 self.plan.fields.extend(resolutions)
                 self.plan.unresolved_fields.extend([
@@ -832,7 +839,14 @@ class ApplicationExecutor:
                         if not added:
                             break
                         new_resolutions = self._resolve_page(added)
-                        FillPlan.bind(updated, new_resolutions)
+                        try:
+                            FillPlan.bind(updated, new_resolutions)
+                        except ValueError:
+                            self.plan.stage = ApplicationStage.BLOCKED
+                            self.plan.metadata["block_reason"] = "fill plan identity unverified"
+                            self.plan.metadata["capability_limitations"] = ["ambiguous_fill_plan_identity"]
+                            self.audit.save_plan(self.plan)
+                            return self.plan
                         self.plan.fields.extend(new_resolutions)
                         self.plan.unresolved_fields.extend(item for item in new_resolutions
                             if item.status in {ResolutionStatus.UNRESOLVED,
