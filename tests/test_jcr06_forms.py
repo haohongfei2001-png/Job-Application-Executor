@@ -1189,3 +1189,50 @@ def test_real_executor_ambiguous_resolution_batch_blocks_before_initial_or_react
     assert plan.submit_authorized is False
     assert "PRIVATE_" not in json.dumps(plan.metadata)
     assert "不要删除" not in json.dumps(plan.metadata)
+
+
+@pytest.mark.parametrize("gap", ["observed_selector", "observed_field_id", "missing_target", "missing_unresolved"])
+def test_direct_fill_admits_complete_observation_before_any_partial_native_write(tmp_path, monkeypatch, gap):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    retained = [full + "\nPRIVATE_RETAINED_FIRST", full + "\nPRIVATE_RETAINED_SECOND"]
+    intended = [full + "\nPRIVATE_INTENDED_FIRST", full + "\nPRIVATE_INTENDED_SECOND"]
+    html = tmp_path / "complete-observation.html"
+    html.write_text("""<!doctype html><body>
+      <label>First<textarea id='first'></textarea></label>
+      <label>Later<textarea id='later'></textarea></label>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.writes=0;window.submits=0;
+        document.addEventListener('input',()=>window.writes++);
+        document.addEventListener('change',()=>window.writes++);</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.page.evaluate("""values => {
+          document.querySelector('#first').value=values[0];
+          document.querySelector('#later').value=values[1];
+        }""", retained)
+        fields = adapter.discover_fields()
+        assert len(fields) == 2
+        resolutions = [FieldResolution(field_id=field.field_id, selector=field.selector, label=field.label,
+            status=ResolutionStatus.RESOLVED, value=intended[i]) for i, field in enumerate(fields)]
+        if gap.startswith("observed_"):
+            attribute = gap.removeprefix("observed_")
+            setattr(fields[1], attribute, getattr(fields[0], attribute))
+            monkeypatch.setattr(adapter, "discover_fields", lambda: fields)
+            reason = "ambiguous_fill_plan_identity"
+        else:
+            resolutions[1].selector = "#missing-current-target"
+            if gap == "missing_unresolved":
+                resolutions[1].status = ResolutionStatus.UNRESOLVED
+            reason = "unobserved_fill_plan_field"
+        journal = []
+        adapter.field_action_begin = lambda *args, **kwargs: journal.append("UNEXPECTED_INTENT")
+        result = adapter.apply_resolutions(resolutions)
+        assert result == [{"field_id": item.field_id, "ok": False, "reason": reason}
+                          for item in resolutions]
+        assert [item.value for item in resolutions] == intended
+        assert adapter.page.locator("#first").input_value() == retained[0]
+        assert adapter.page.locator("#later").input_value() == retained[1]
+        assert adapter.page.evaluate("window.writes") == 0
+        assert adapter.page.evaluate("window.submits") == 0
+        assert journal == []
+        assert "PRIVATE_" not in json.dumps(result)
+        assert "不要删除" not in json.dumps(result)
