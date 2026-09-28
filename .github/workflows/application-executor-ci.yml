@@ -66,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     # Preserve all owning files once across independent complete-suite shards.
-    # The foundation safety/browser checks and both hosted-Mac shards remain.
+    # The foundation safety/browser checks and all hosted-Mac shards remain.
     strategy:
       fail-fast: false
       matrix:
@@ -134,7 +134,7 @@ jobs:
           affected = ({"executor/autonomy/consumer.py", "tests/test_consumer_entry_v1.py"}
                       <= set(changed) and set(changed) <= allowed)
           # Complete owning files, never name-filtered cases or smaller fixtures.
-          # Both full hosted-Mac shards and the final complete test gate remain.
+          # All complete hosted-Mac shards and the final complete test gate remain.
           selected = [path for path in full if path not in {
               "tests/test_standalone_runtime_v1.py", "tests/test_macos_host_v1.py",
           }] if affected else full
@@ -159,7 +159,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 12
     # Every original hosted-Mac file still runs exactly once. Independent
-    # transaction and native integration suites keep their complete fixtures
+    # transaction, runtime/distribution and native UI suites keep complete fixtures
     # within the existing job budget; one shard failure cannot skip the other.
     strategy:
       fail-fast: false
@@ -167,8 +167,10 @@ jobs:
         include:
           - suite: consumer_transactions
             tests: tests/test_consumer_entry_v1.py tests/test_task_state_compatibility_v1.py
+          - suite: runtime_distribution
+            tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py
           - suite: native_integration
-            tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py tests/test_macos_host_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py
+            tests: tests/test_macos_host_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
