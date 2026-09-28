@@ -1640,6 +1640,40 @@ def test_legacy_path_alias_refuses_without_following_or_copying_private_state(tm
     assert not (apps / (consumer.APP_NAME + ".app")).exists()
 
 
+def test_historical_launcher_parent_alias_cannot_certify_empty_legacy_authority(tmp_path, monkeypatch):
+    repo = tmp_path / "candidate" / "Job-Application-Executor"
+    python = repo / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(repo)
+    real_parent = tmp_path / "real-historical"
+    legacy_root = real_parent / "Job-Application-Executor" / "runtime" / "autonomy"
+    legacy_root.mkdir(parents=True)
+    (legacy_root / "worker.lock").touch()
+    canary = real_parent / "private-canary"
+    canary.write_bytes(b"synthetic-unrelated-private-bytes")
+    alias_parent = tmp_path / "historical-alias"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+    old_repo = alias_parent / "Job-Application-Executor"
+    apps = tmp_path / "Applications"
+    app = apps / (consumer.APP_NAME + ".app")
+    launcher = _legacy_app(app, old_repo)
+    original_launcher = launcher.read_bytes()
+    with pytest.raises(ValueError, match="legacy_state_path_invalid"):
+        consumer._legacy_state_migration_needed(repo, app, tmp_path / "selected-state")
+    monkeypatch.setattr(consumer, "_candidate_starts",
+                        lambda *_: pytest.fail("ambiguous old authority must refuse before startup"))
+    result = install_macos_app(repo, destination=apps, platform="darwin",
+                               task_state_root=tmp_path / "selected-state")
+    assert result["reason"] == "legacy_state_unavailable"
+    assert canary.read_bytes() == b"synthetic-unrelated-private-bytes"
+    assert launcher.read_bytes() == original_launcher
+    assert (legacy_root / "worker.lock").is_file()
+    assert not (apps / ("." + consumer.APP_NAME + ".app.installing")).exists()
+    assert not (apps / ("." + consumer.APP_NAME + ".app.previous")).exists()
+    assert "private-canary" not in json.dumps(result)
+
+
 def test_legacy_state_detection_accepts_explicit_same_authority_and_empty_locks(tmp_path):
     repo = tmp_path / "Job-Application-Executor"
     state = repo / "runtime" / "autonomy"

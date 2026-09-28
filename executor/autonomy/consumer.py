@@ -468,7 +468,10 @@ def _legacy_state_migration_needed(repo: Path, app: Path, target: Path) -> bool:
         while parent != base:
             parent = parent.parent
             components.append(parent)
-        if any(parent.is_symlink() for parent in components):
+        # The historical launcher supplies base; an alias above it can move
+        # the entire old authority even when runtime/autonomy itself is plain.
+        # Refuse before resolve() or scanning lock-only state as empty.
+        if any(parent.is_symlink() for parent in (*components, *base.parents)):
             raise ValueError("legacy_state_path_invalid")
         if root.resolve() == target.resolve():
             continue
