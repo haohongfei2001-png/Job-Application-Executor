@@ -646,8 +646,8 @@ def test_select_expected_target_is_frozen_before_delayed_page_rejection(
     with GenericWebAdapter(html.as_uri()) as adapter:
         select = adapter._fill_select
 
-        def reject_after_primitive(element, value):
-            target = select(element, value)
+        def reject_after_primitive(element, value, *, prewrite=None):
+            target = select(element, value, prewrite=prewrite)
             # Force the precise interleaving from the hosted browser failure:
             # selection returns, then the page rejects it before outer readback.
             adapter.page.evaluate("kind => window.rejectChoice(kind)", rejection)

@@ -70,6 +70,38 @@ ACCOUNT_OR_DESTRUCTIVE_RE = re.compile(
 )
 
 
+# Question/row identity excludes current values and option lists: an explicitly
+# declared parent may redraw child choices without changing the child question.
+FIELD_CONTRACT_SCRIPT = r"""e => {
+  const clean = text => (text || '').replace(/\s+/g, ' ').trim();
+  const prompt = node => {
+    if (!node || node.matches('input, textarea, select, [role="combobox"], [role="listbox"], [role="option"]'))
+      return '';
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll('input, textarea, select, [role="combobox"], [role="listbox"], [role="option"]')
+      .forEach(control => control.remove());
+    return clean(clone.textContent);
+  };
+  const labelledBy = clean(e.getAttribute('aria-labelledby')).split(' ').filter(Boolean);
+  const row = e.closest('[data-record-id], [data-row-id]');
+  const rowAttribute = row?.hasAttribute('data-record-id') ? 'data-record-id' : 'data-row-id';
+  return [e.tagName.toLowerCase(), e.getAttribute('type'), e.id,
+    e.getAttribute('name'), e.getAttribute('role'), e.getAttribute('aria-label'),
+    e.getAttribute('placeholder'), [...(e.labels || [])].map(prompt),
+    labelledBy.map(id => [id, prompt(document.getElementById(id))]),
+    !!e.required || e.getAttribute('aria-required') === 'true', !!e.multiple,
+    e.getAttribute('data-depends-on') || '', e.getAttribute('aria-controls') || '',
+    row ? [rowAttribute, row.getAttribute(rowAttribute) || ''] : []];
+}"""
+
+
+def _control_contract_digest(contract) -> str:
+    if not isinstance(contract, list):
+        return ""
+    return hashlib.sha256(json.dumps(
+        contract, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 class GenericWebAdapter(SiteAdapter):
     site_id = "generic_web"
     safe_advance_certified = False
@@ -221,6 +253,7 @@ class GenericWebAdapter(SiteAdapter):
             return '';
           };
 
+          const controlContract = __FIELD_CONTRACT_SCRIPT__;
           const controls = [...document.querySelectorAll(selector)];
           // Limits bound metadata cost, never certify a silently partial form.
           // Count before visibility filtering because ordinal locators use that order.
@@ -258,6 +291,7 @@ class GenericWebAdapter(SiteAdapter):
               tag,
               inputType,
               label: hint(e),
+              contract: controlContract(e),
               required: !!e.required || e.getAttribute('aria-required') === 'true',
               current,
               options,
@@ -275,7 +309,7 @@ class GenericWebAdapter(SiteAdapter):
             };
           }).filter(x => x.visible);
           return {fields, complete};
-        }"""
+        }""".replace("__FIELD_CONTRACT_SCRIPT__", FIELD_CONTRACT_SCRIPT)
         try:
             result = self.page.evaluate(script)
             if (not isinstance(result, dict) or not isinstance(result.get("fields"), list)
@@ -309,6 +343,7 @@ class GenericWebAdapter(SiteAdapter):
                          str(item.get("rowToken") or "")).encode()).hexdigest()[:20]
                         if item.get("rowToken") else "",
                     "row_identity_proven": bool(item.get("rowUnique")),
+                    "control_contract": _control_contract_digest(item.get("contract")),
                 },
             )
             for item in snapshot
@@ -443,7 +478,7 @@ class GenericWebAdapter(SiteAdapter):
         except Exception:
             return False
 
-    def _fill_select(self, element, value) -> tuple[str, int] | None:
+    def _fill_select(self, element, value, *, prewrite=None) -> tuple[str, int] | None:
         if element.get_attribute("multiple") is not None:
             return None
         candidates = value if isinstance(value, list) else [value]
@@ -480,12 +515,14 @@ class GenericWebAdapter(SiteAdapter):
                 or choice.evaluate("e => e.value") != expected[0]
                 or (choice.inner_text() or "").strip() != expected_label):
             return None
+        if callable(prewrite):
+            prewrite()
         element.select_option(index=matches[0])
         if not element.evaluate("(e, index) => e.selectedIndex === index", matches[0]):
             raise BrowserOwnershipError("select choice outcome unknown")
         return expected
 
-    def _fill_combobox(self, element, selector: str, value) -> bool:
+    def _fill_combobox(self, element, selector: str, value, *, prewrite=None) -> bool:
         if not isinstance(value, (str, int, float)):
             return False
         target = str(value).strip()
@@ -500,6 +537,8 @@ class GenericWebAdapter(SiteAdapter):
         getattr(self, "mutation_guard", lambda: None)()
         if not self._choice_enabled(element):
             return False
+        if callable(prewrite):
+            prewrite()
         element.click()
         choices = listbox.locator('[role="option"]')
         exact = [choices.nth(index) for index in range(choices.count())
@@ -513,6 +552,8 @@ class GenericWebAdapter(SiteAdapter):
                 or (exact[0].get_attribute("aria-label") or
                     exact[0].inner_text()).strip() != target):
             return False
+        if callable(prewrite):
+            prewrite()
         exact[0].click()
         self.await_form_render()
         selected = self._locate(selector)
@@ -579,10 +620,7 @@ class GenericWebAdapter(SiteAdapter):
         # Keep complete successful control readbacks in memory for this one
         # document/batch. Later reactive writes must not silently invalidate
         # earlier evidence. Values never enter the operational journal.
-        signature = """e => [e.tagName.toLowerCase(), e.getAttribute('type'),
-                    e.id, e.getAttribute('name'), e.getAttribute('role'),
-                    e.getAttribute('aria-label'),
-                    [...(e.labels || [])].map(label => label.textContent.trim())]"""
+        signature = FIELD_CONTRACT_SCRIPT
         document_epoch = page_document_epoch(self.page)
         retained = []
 
@@ -605,6 +643,7 @@ class GenericWebAdapter(SiteAdapter):
                 # round-trip, avoiding quadratic CDP traffic on large forms.
                 kept = self.page.evaluate(r"""({epoch, controls, selector}) => {
                   if (String(performance.timeOrigin) !== epoch) return false;
+                  const controlContract = __FIELD_CONTRACT_SCRIPT__;
                   const ordinal = [...document.querySelectorAll(selector)];
                   for (const [path, identity, kind, expected] of controls) {
                     let matches;
@@ -621,9 +660,7 @@ class GenericWebAdapter(SiteAdapter):
                     if (style.display === 'none' || ['hidden','collapse'].includes(style.visibility)
                         || !(rect.width > 0 && rect.height > 0) || e.matches(':disabled')
                         || e.closest('[aria-disabled="true"]')) return false;
-                    const signature = [e.tagName.toLowerCase(), e.getAttribute('type'),
-                      e.id, e.getAttribute('name'), e.getAttribute('role'), e.getAttribute('aria-label'),
-                      [...(e.labels || [])].map(label => label.textContent.trim())];
+                    const signature = controlContract(e);
                     if (JSON.stringify(signature) !== JSON.stringify(identity)) return false;
                     const actual = kind === 'checked' ? e.checked
                       : kind === 'combobox' ? String(e.value ?? e.getAttribute('aria-valuetext')
@@ -632,7 +669,8 @@ class GenericWebAdapter(SiteAdapter):
                     if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
                   }
                   return true;
-                }""", {"epoch": document_epoch, "controls": retained,
+                }""".replace("__FIELD_CONTRACT_SCRIPT__", FIELD_CONTRACT_SCRIPT),
+                   {"epoch": document_epoch, "controls": retained,
                        "selector": VISIBLE_FIELD_SELECTOR})
                 if kept is not True:
                     raise BrowserOwnershipError("retained field readback changed")
@@ -692,6 +730,26 @@ class GenericWebAdapter(SiteAdapter):
             if not self._visible(element):
                 actions.append({"field_id": resolution.field_id, "ok": False, "reason": "not visible"})
                 continue
+            def verify_target_contract():
+                # Bind to the initial batch observation, before any intent and
+                # again at each primitive after ownership/journal callbacks.
+                # Same selector alone does not preserve question/row meaning.
+                try:
+                    expected = observed.metadata.get("control_contract") if observed else ""
+                    current = self._locate(resolution.selector)
+                    if (not expected or page_document_epoch(self.page) != document_epoch
+                            or current.count() != 1 or not self._visible(current)
+                            or _control_contract_digest(
+                                current.evaluate(FIELD_CONTRACT_SCRIPT)) != expected):
+                        raise BrowserOwnershipError("field contract changed")
+                except Exception:
+                    if retained:
+                        invalidate = getattr(self, "field_readbacks_invalidate", None)
+                        if callable(invalidate):
+                            invalidate()
+                    raise BrowserOwnershipError("field contract outcome unknown") from None
+
+            verify_target_contract()
             action_id = None
             try:
                 input_type = (element.get_attribute("type") or element.evaluate("e=>e.tagName.toLowerCase()")).lower()
@@ -723,8 +781,10 @@ class GenericWebAdapter(SiteAdapter):
                     if callable(begin):
                         action_id = begin(resolution.field_id, resolution.selector,
                                           document_epoch=page_document_epoch(self.page))
+                verify_target_contract()
                 if input_type == "combobox" or element.get_attribute("role") == "combobox":
-                    if not self._fill_combobox(element, resolution.selector, value):
+                    if not self._fill_combobox(element, resolution.selector, value,
+                                               prewrite=verify_target_contract):
                         if action_id is not None:
                             raise BrowserOwnershipError("combobox outcome unknown")
                         actions.append({"field_id": resolution.field_id, "ok": False,
@@ -733,7 +793,8 @@ class GenericWebAdapter(SiteAdapter):
                     expected_readback = ("combobox", str(value).strip())
                 elif tag == "select":
                     getattr(self, "mutation_guard", lambda: None)()
-                    selected_target = self._fill_select(element, value)
+                    selected_target = self._fill_select(element, value,
+                                                        prewrite=verify_target_contract)
                     if selected_target is None:
                         if action_id is not None:
                             raise BrowserOwnershipError("select outcome unknown")
@@ -745,6 +806,7 @@ class GenericWebAdapter(SiteAdapter):
                     expected_readback = ("checked", desired)
                     if element.is_checked() != desired:
                         getattr(self, "mutation_guard", lambda: None)()
+                        verify_target_contract()
                         element.click()
                 else:
                     desired = self._control_text(value, input_type, resolution.label)
@@ -752,6 +814,7 @@ class GenericWebAdapter(SiteAdapter):
                     expected_readback = ("value", desired)
                     if current != desired:
                         getattr(self, "mutation_guard", lambda: None)()
+                        verify_target_contract()
                         element.fill(desired)
                 # A primitive returning does not prove that the page kept its
                 # value. Observe the newly rendered control before another field

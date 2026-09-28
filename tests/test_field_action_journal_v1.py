@@ -807,3 +807,200 @@ def test_reactive_incomplete_or_ambiguous_form_revokes_complete_batch(
     with pytest.raises(RuntimeError, match="reconciliation"):
         rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
     assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+@pytest.mark.parametrize("drift", [
+    "label", "labelledby", "aria_label", "placeholder", "name",
+    "type", "required", "dependency", "row",
+])
+def test_reactive_next_question_drift_revokes_prior_proof_before_next_intent(
+        tmp_path, drift):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    private_value = "PRIVATE_CONTRACT_VALUE_" + "招聘🔒" * 256
+    mutations = {
+        "label": "document.querySelector('#target-label-text').textContent='Different question'",
+        "labelledby": "document.querySelector('#linked-prompt').textContent='Different linked question'",
+        "aria_label": "e.setAttribute('aria-label','Different question')",
+        "placeholder": "e.setAttribute('placeholder','Different question')",
+        "name": "e.setAttribute('name','different_question')",
+        "type": "e.setAttribute('type','password')",
+        "required": "e.required=true",
+        "dependency": "e.setAttribute('data-depends-on','#first')",
+        "row": "e.closest('[data-row-id]').dataset.rowId='different-record'",
+    }
+    html = tmp_path / "reactive-question-drift.html"
+    html.write_text("""<!doctype html><meta charset='utf-8'><body>
+      <label>First<input id='first'></label>
+      <div data-row-id='PRIVATE_ROW_CONTRACT_CANARY'>
+        <label><span id='target-label-text'>Original question</span>
+          <input id='target' name='original_question' placeholder='Original placeholder'
+                 aria-labelledby='linked-prompt'></label>
+      </div>
+      <span id='linked-prompt'>Original linked question</span>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.targetWrites=0;window.submits=0;
+        document.querySelector('#target').oninput=()=>window.targetWrites++;
+        document.querySelector('#first').addEventListener('input',()=>{
+          const e=document.querySelector('#target'); __MUTATION__;
+        },{once:true});
+      </script>
+    """.replace("__MUTATION__", mutations[drift]), encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        before = {field.selector: field for field in adapter.discover_fields()}
+        digest = before["#target"].metadata["control_contract"]
+        assert len(digest) == 64 and set(digest) <= set("0123456789abcdef")
+        assert "PRIVATE_ROW_CONTRACT_CANARY" not in json.dumps(before["#target"].metadata)
+        fields = [FieldResolution(field_id=key, selector="#" + key,
+            label="Original question", value=private_value,
+            status=ResolutionStatus.RESOLVED) for key in ("first", "target")]
+        with pytest.raises(BrowserOwnershipError, match="field contract outcome unknown") as caught:
+            adapter.apply_resolutions(fields)
+        after = {field.selector: field for field in adapter.discover_fields()}
+        assert after["#target"].metadata["control_contract"] != digest
+        assert adapter.page.locator("#first").input_value() == private_value
+        assert adapter.page.locator("#target").input_value() == ""
+        assert adapter.page.evaluate("[window.targetWrites, window.submits]") == [0, 0]
+        assert "PRIVATE_" not in str(caught.value)
+    actions = queue.field_actions(tid)
+    assert len(actions) == 1 and actions[0]["outcome"] == "UNKNOWN_OUTCOME"
+    assert private_value not in json.dumps(actions)
+    assert "PRIVATE_ROW_CONTRACT_CANARY" not in json.dumps(actions)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-next").hexdigest())
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+@pytest.mark.parametrize("kind", ["text", "checked", "select", "aria"])
+def test_question_drift_at_primitive_ownership_fence_never_dispatches_target(
+        tmp_path, kind):
+    queue, tid, owner, attempt, clock = _owned(tmp_path)
+    controls = {
+        "text": "<input id='target' oninput='window.targetWrites++'>",
+        "checked": "<input id='target' type='checkbox' onclick='window.targetWrites++'>",
+        "select": ("<select id='target' onchange='window.targetWrites++'>"
+                   "<option value=''>Choose</option><option value='choice'>Exact choice</option></select>"),
+        "aria": ("<div id='target' role='combobox' aria-controls='choices' tabindex='0' "
+                 "onclick=\"window.opens++;document.querySelector('#choices').hidden=false\">Choose</div>"
+                 "<div id='choices' role='listbox' hidden><button id='choice' type='button' role='option' "
+                 "onclick=\"window.targetWrites++;document.querySelector('#target').innerText=this.innerText\">"
+                 "Exact choice</button></div>"),
+    }
+    html = tmp_path / "primitive-question-drift.html"
+    html.write_text("<!doctype html><body><label>First<input id='first'></label>"
+        "<label>Target" + controls[kind] + "</label>"
+        "<button type='button' onclick='window.submits++'>Submit application</button>"
+        "<script>window.targetWrites=0;window.submits=0;window.opens=0;</script>",
+        encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    guards_after_intent = []
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        def guard():
+            rows = queue.field_actions(tid)
+            if len(rows) != 2 or rows[-1]["outcome"] != "ATTEMPTED":
+                return
+            guards_after_intent.append(True)
+            # Native select has an outer guard then the exact option guard.
+            # ARIA must open its known list before the option guard changes it.
+            if kind == "select" and len(guards_after_intent) < 2:
+                return
+            if kind == "aria" and not adapter.page.locator("#choices").is_visible():
+                return
+            adapter.page.locator("#target").evaluate(
+                "e=>e.setAttribute('name','PRIVATE_CHANGED_QUESTION_CANARY')")
+        adapter.mutation_guard = guard
+        value = True if kind == "checked" else ("Exact choice" if kind in {"select", "aria"}
+                                                else "PRIVATE_CONTRACT_VALUE_CANARY")
+        fields = [
+            FieldResolution(field_id="first", selector="#first", label="First",
+                value="PRIVATE_FIRST_VALUE_CANARY", status=ResolutionStatus.RESOLVED),
+            FieldResolution(field_id="target", selector="#target", label="Target",
+                value=value, status=ResolutionStatus.RESOLVED),
+        ]
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions(fields)
+        assert adapter.page.locator("#first").input_value() == "PRIVATE_FIRST_VALUE_CANARY"
+        assert adapter.page.locator("#target").get_attribute("name") == "PRIVATE_CHANGED_QUESTION_CANARY"
+        assert len(guards_after_intent) == (2 if kind in {"select", "aria"} else 1)
+        if kind == "checked":
+            assert adapter.page.locator("#target").is_checked() is False
+        elif kind == "aria":
+            assert adapter.page.locator("#target").inner_text() == "Choose"
+            assert adapter.page.evaluate("window.opens") == 1
+        else:
+            assert adapter.page.locator("#target").input_value() == ""
+        assert adapter.page.evaluate("[window.targetWrites,window.submits]") == [0, 0]
+        assert "PRIVATE_" not in str(caught.value)
+    actions = queue.field_actions(tid)
+    assert len(actions) == 2 and {row["outcome"] for row in actions} == {"UNKNOWN_OUTCOME"}
+    assert "PRIVATE_" not in json.dumps(actions)
+    rebuilt = TaskQueue(queue.root, clock=lambda: clock[0])
+    assert rebuilt.field_actions(tid) == actions
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.require_field_action_readbacks(attempt)
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        rebuilt.begin_field_action(attempt, hashlib.sha256(b"refused-next").hexdigest())
+    assert rebuilt.get(tid)["stage"] != "READY_TO_SUBMIT"
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_parent_choice_redraw_retains_original_child_question_contract(
+        tmp_path, replacement):
+    queue, tid, owner, attempt, _clock = _owned(tmp_path)
+    html = tmp_path / "parent-choice-contract.html"
+    html.write_text("""<!doctype html><body>
+      <label>Child question<select id='child' data-depends-on='#parent' required>
+        <option value=''>Choose</option></select></label>
+      <label>Parent question<select id='parent' required>
+        <option value=''>Choose</option><option value='parent'>Parent choice</option></select></label>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.submits=0;window.targetWrites=0;
+        document.addEventListener('change',event=>{
+          if(event.target.id==='child')window.targetWrites++;
+        });
+        document.querySelector('#parent').onchange=()=>{
+          let child=document.querySelector('#child');
+          if(__REPLACEMENT__){const clone=child.cloneNode(true);child.replaceWith(clone);child=clone;}
+          child.innerHTML='<option value="">Choose</option><option value="child">Child choice</option>';
+        };
+      </script>
+    """.replace("__REPLACEMENT__", "true" if replacement else "false"), encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        before = {field.selector: field for field in adapter.discover_fields()}
+        fields = [
+            FieldResolution(field_id="child", selector="#child", label="Child question",
+                value="Child choice", status=ResolutionStatus.RESOLVED),
+            FieldResolution(field_id="parent", selector="#parent", label="Parent question",
+                value="Parent choice", status=ResolutionStatus.RESOLVED),
+        ]
+        actions = adapter.apply_resolutions(fields)
+        after = {field.selector: field for field in adapter.discover_fields()}
+        assert before["#child"].options != after["#child"].options
+        assert before["#child"].metadata["control_contract"] == after["#child"].metadata["control_contract"]
+        assert [item["field_id"] for item in actions] == ["parent", "child"]
+        assert all(item["ok"] and item["observed"] == "DOM_READBACK" for item in actions)
+        assert adapter.page.locator("#parent").input_value() == "parent"
+        assert adapter.page.locator("#child").input_value() == "child"
+        assert adapter.page.evaluate("[window.targetWrites,window.submits]") == [1, 0]
+    assert [row["outcome"] for row in queue.field_actions(tid)] == ["DOM_READBACK_UNVERIFIED"] * 2
+    queue.require_field_action_readbacks(attempt)
+    queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+    assert queue.get(tid)["stage"] != "READY_TO_SUBMIT"
