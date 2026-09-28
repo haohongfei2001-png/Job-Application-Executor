@@ -648,3 +648,44 @@ def test_final_batch_observation_cannot_return_stale_last_control_proof(tmp_path
     assert queue.field_actions(tid)[0]["outcome"] == "UNKNOWN_OUTCOME"
     with pytest.raises(RuntimeError, match="reconciliation"):
         queue.finish_run_attempt(attempt, "RETURNED_UNVERIFIED")
+
+@pytest.mark.parametrize("component", ["iframe", "shadow"])
+def test_reactive_opaque_form_stops_next_write_and_revokes_prior_dom_readback(
+        tmp_path, component):
+    queue, tid, owner, attempt, _clock = _owned(tmp_path)
+    html = tmp_path / "reactive-opaque.html"
+    html.write_text("""<!doctype html><meta charset='utf-8'><body>
+      <label>First<input id='first'></label><label>Second<input id='second'></label>
+      <button type='button' onclick='window.submits=(window.submits||0)+1'>Submit application</button>
+      <script>
+        document.getElementById('first').addEventListener('input', () => {
+          if (document.getElementById('opaque')) return;
+          const kind = '__COMPONENT__';
+          const host = document.createElement(kind === 'iframe' ? 'iframe' : 'opaque-form');
+          host.id = 'opaque';
+          if (kind === 'iframe') host.srcdoc = '<input required aria-label="Nested form">';
+          else host.attachShadow({mode:'open'}).innerHTML =
+            '<input required aria-label="Shadow form">';
+          document.body.append(host);
+        }, {once:true});
+      </script>
+    """.replace("__COMPONENT__", component), encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        fields = [FieldResolution(
+            field_id=name, selector="#" + name, label=name,
+            value="Synthetic value", status=ResolutionStatus.RESOLVED)
+            for name in ("first", "second")]
+        with pytest.raises(BrowserOwnershipError, match="form structure outcome unknown"):
+            adapter.apply_resolutions(fields)
+        assert adapter.page.locator("#first").input_value() == "Synthetic value"
+        assert adapter.page.locator("#second").input_value() == ""
+        assert adapter.page.evaluate("window.submits||0") == 0
+    actions = queue.field_actions(tid)
+    assert len(actions) == 1
+    assert actions[0]["outcome"] == "UNKNOWN_OUTCOME"
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        queue.require_field_action_readbacks(attempt)

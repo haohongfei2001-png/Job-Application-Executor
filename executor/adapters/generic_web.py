@@ -661,6 +661,20 @@ class GenericWebAdapter(SiteAdapter):
                 actions.append({"field_id": resolution.field_id, "ok": False,
                                 "reason": "form_collection_limit_exceeded"})
                 break
+            if retained:
+                # A prior control can render an iframe, shadow form or opaque
+                # widget after its own DOM readback. Stop before the next
+                # external write; older DOM proof cannot authorize continuation
+                # through an unknown component.
+                try:
+                    current_form = self.observe_form()
+                    if current_form.unsupported_component_count:
+                        raise FormObservationError("unsupported redraw")
+                except Exception:
+                    invalidate = getattr(self, "field_readbacks_invalidate", None)
+                    if callable(invalidate):
+                        invalidate()
+                    raise BrowserOwnershipError("form structure outcome unknown") from None
             element = self._locate(resolution.selector, resolution.label)
             if element.count() != 1:
                 actions.append({"field_id": resolution.field_id, "ok": False,

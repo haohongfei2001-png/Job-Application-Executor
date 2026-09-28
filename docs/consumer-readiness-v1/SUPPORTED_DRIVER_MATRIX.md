@@ -43,3 +43,15 @@ Ten actual isolated-browser cases and two private field-journal cases accompany
 this batch. Their new exact-head cloud result is NOT_RUN. Existing enabled choice,
 dependency redraw, DOM readback, independent server receipt and final-submit
 user-only boundaries remain. This is DFG008 mitigation, not certification or closure.
+
+## Reactive opaque-form redraw fence
+
+After one generic field has a local DOM readback, a controlled redraw may add an
+iframe, open shadow form or opaque custom element before the next field write.
+The active adapter now reobserves that structure at this boundary. An unsupported
+component or failed structural observation revokes the earlier journaled DOM
+readback to UNKNOWN_OUTCOME and stops before the next control. Two isolated
+browser/private-journal cases cover iframe and shadow insertion, untouched second
+control, no submit and blocked replay. Exact new-head CI is PENDING. This is a
+DFG-008 mitigation only; it does not certify an external ATS driver, server
+persistence, DFG-002 continuation or final submission.
