@@ -642,6 +642,21 @@ class GenericWebAdapter(SiteAdapter):
                     invalidate()
                 raise BrowserOwnershipError("retained field outcome unknown") from None
 
+        def verify_form_structure():
+            if not retained:
+                return
+            # Reactive controls may expose an opaque form after a successful
+            # DOM readback. No next write or returned batch may inherit that proof.
+            try:
+                current_form = self.observe_form()
+                if current_form.unsupported_component_count:
+                    raise FormObservationError("unsupported redraw")
+            except Exception:
+                invalidate = getattr(self, "field_readbacks_invalidate", None)
+                if callable(invalidate):
+                    invalidate()
+                raise BrowserOwnershipError("form structure outcome unknown") from None
+
         for resolution in ordered:
             getattr(self, "mutation_guard", lambda: None)()
             if resolution.status != ResolutionStatus.RESOLVED:
@@ -661,20 +676,7 @@ class GenericWebAdapter(SiteAdapter):
                 actions.append({"field_id": resolution.field_id, "ok": False,
                                 "reason": "form_collection_limit_exceeded"})
                 break
-            if retained:
-                # A prior control can render an iframe, shadow form or opaque
-                # widget after its own DOM readback. Stop before the next
-                # external write; older DOM proof cannot authorize continuation
-                # through an unknown component.
-                try:
-                    current_form = self.observe_form()
-                    if current_form.unsupported_component_count:
-                        raise FormObservationError("unsupported redraw")
-                except Exception:
-                    invalidate = getattr(self, "field_readbacks_invalidate", None)
-                    if callable(invalidate):
-                        invalidate()
-                    raise BrowserOwnershipError("form structure outcome unknown") from None
+            verify_form_structure()
             element = self._locate(resolution.selector, resolution.label)
             if element.count() != 1:
                 actions.append({"field_id": resolution.field_id, "ok": False,
@@ -777,6 +779,7 @@ class GenericWebAdapter(SiteAdapter):
                 # reported failure. Do not turn that uncertainty into a retry.
                 raise BrowserOwnershipError("field write outcome unknown") from None
         verify_retained()
+        verify_form_structure()
         return actions
 
     def validate(self, plan: ApplicationPlan) -> ValidationResult:

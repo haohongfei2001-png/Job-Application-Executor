@@ -689,3 +689,45 @@ def test_reactive_opaque_form_stops_next_write_and_revokes_prior_dom_readback(
     assert actions[0]["outcome"] == "UNKNOWN_OUTCOME"
     with pytest.raises(RuntimeError, match="reconciliation"):
         queue.require_field_action_readbacks(attempt)
+
+@pytest.mark.parametrize("component", ["iframe", "shadow"])
+def test_final_reactive_opaque_form_revokes_last_dom_readback_before_return(
+        tmp_path, component):
+    queue, tid, owner, attempt, _clock = _owned(tmp_path)
+    html = tmp_path / "final-reactive-opaque.html"
+    html.write_text("""<!doctype html><meta charset='utf-8'><body>
+      <label>Only field<input id='only'></label>
+      <button type='button' onclick='window.submits=(window.submits||0)+1'>Submit application</button>
+      <script>
+        document.getElementById('only').addEventListener('input', () => {
+          const kind = '__COMPONENT__';
+          const host = document.createElement(kind === 'iframe' ? 'iframe' : 'opaque-form');
+          host.id = 'opaque';
+          if (kind === 'iframe') host.srcdoc = '<input required aria-label="Nested form">';
+          else host.attachShadow({mode:'open'}).innerHTML =
+            '<input required aria-label="Shadow form">';
+          document.body.append(host);
+        }, {once:true});
+      </script>
+    """.replace("__COMPONENT__", component), encoding="utf-8")
+    audit = _audit(queue, tid, owner, attempt)
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.field_action_begin = audit.begin_field_action
+        adapter.field_action_finish = audit.finish_field_action
+        adapter.field_readbacks_invalidate = audit.invalidate_field_readbacks
+        field = FieldResolution(
+            field_id="only", selector="#only", label="Only field",
+            value="Synthetic value", status=ResolutionStatus.RESOLVED)
+        with pytest.raises(BrowserOwnershipError, match="form structure outcome unknown"):
+            adapter.apply_resolutions([field])
+        assert adapter.page.locator("#only").input_value() == "Synthetic value"
+        assert adapter.page.locator("#opaque").count() == 1
+        assert adapter.page.evaluate("window.submits||0") == 0
+        with pytest.raises(BrowserOwnershipError):
+            adapter.apply_resolutions([field])
+        assert adapter.page.evaluate("window.submits||0") == 0
+    actions = queue.field_actions(tid)
+    assert len(actions) == 1
+    assert actions[0]["outcome"] == "UNKNOWN_OUTCOME"
+    with pytest.raises(RuntimeError, match="reconciliation"):
+        queue.require_field_action_readbacks(attempt)

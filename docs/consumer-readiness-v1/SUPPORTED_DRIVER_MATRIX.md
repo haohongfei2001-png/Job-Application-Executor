@@ -55,3 +55,15 @@ browser/private-journal cases cover iframe and shadow insertion, untouched secon
 control, no submit and blocked replay. Exact new-head CI is PENDING. This is a
 DFG-008 mitigation only; it does not certify an external ATS driver, server
 persistence, DFG-002 continuation or final submission.
+
+## Final action opaque-form fence
+
+The same complete form observation now runs after the final retained DOM
+readback, before an apply batch may return. If that last write exposes an
+iframe or open-shadow form, its readback is revoked to UNKNOWN_OUTCOME and
+replay remains blocked; a missing second field no longer skips this check.
+Two isolated browser/private-journal cases retain the full prior suite and
+prove the written first value, opaque structure, zero submit, unknown journal
+and refused replay. New exact-head targeted CI is PENDING. This is an
+internal DFG-008 mitigation, not general ATS support or a server draft
+receipt.
