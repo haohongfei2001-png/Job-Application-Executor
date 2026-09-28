@@ -47,6 +47,9 @@ def source_manifest(root: str | Path) -> dict:
     for path in paths:
         if not path.is_file() or path.is_symlink():
             raise ValueError("release_source_invalid")
+        metadata = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("release_source_invalid")
         data = path.read_bytes()
         files.append({
             "path": path.relative_to(root).as_posix(),

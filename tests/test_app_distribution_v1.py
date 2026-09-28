@@ -985,3 +985,22 @@ def test_distribution_cli_reports_fixed_refusal_once_without_private_exception(
         lambda path, **options: calls.append(path) or result)
     assert cli.main(["install-distribution", "--distribution", str(tmp_path / "CANARY_PRIVATE")]) == 1
     assert len(calls) == 1 and json.loads(capsys.readouterr().out) == result
+
+
+@pytest.mark.parametrize("name", [RECEIPT_NAME, ARCHIVE_NAME])
+def test_distribution_intake_refuses_external_hardlinked_input_before_staging(
+    tmp_path, name
+):
+    from executor.autonomy.app_distribution import stage_macos_distribution
+    directory, _receipt = _intake_artifact(tmp_path, [(APP_NAME + ".app", "directory", "")])
+    supplied = directory / name
+    before = supplied.read_bytes()
+    supplied.unlink()
+    private = tmp_path / ("private-" + name)
+    private.write_bytes(before)
+    os.link(private, supplied)
+    with pytest.raises(ValueError, match="distribution_intake_refused"):
+        with stage_macos_distribution(directory):
+            pytest.fail("external hardlink yielded an installed candidate")
+    assert supplied.stat().st_ino == private.stat().st_ino
+    assert private.read_bytes() == before

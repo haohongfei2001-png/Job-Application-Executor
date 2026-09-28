@@ -535,3 +535,24 @@ def test_intact_wheel_with_wrong_distribution_name_is_not_a_locked_dependency(
     index = next(i for i, entry in enumerate(distribution.files) if str(entry) == name)
     distribution.files[index] = type(distribution.files[index])(name, data)
     assert not installed_dependencies_match(release)
+
+
+@pytest.mark.parametrize("relative", ["requirements.txt", "executor/extra.py"])
+def test_source_snapshot_refuses_external_hardlink_before_copy(tmp_path, relative):
+    repo = tmp_path / "checkout"
+    (repo / "executor").mkdir(parents=True)
+    (repo / "executor" / "__init__.py").write_text("# source fixture\n")
+    (repo / "requirements.txt").write_text("# declared dependencies\n")
+    private = tmp_path / "private-source-canary"
+    before = b"PRIVATE_EXTERNAL_SOURCE_ALIAS" * 200
+    private.write_bytes(before)
+    linked = repo / relative
+    if linked.exists():
+        linked.unlink()
+    os.link(private, linked)
+    candidate = tmp_path / "candidate"
+    with pytest.raises(ValueError, match="release_source_invalid"):
+        copy_source_candidate(repo, candidate)
+    assert not candidate.exists()
+    assert private.read_bytes() == before
+    assert linked.stat().st_ino == private.stat().st_ino

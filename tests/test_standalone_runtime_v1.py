@@ -408,3 +408,35 @@ def test_module_origin_contract_checks_advertised_and_loader_metadata_independen
     if defect in {"foreign_origin", "missing_file_foreign_origin", "foreign_spec_namespace"}:
         assert any(isinstance(value, str) and "PRIVATE_FOREIGN" in value for value in observations)
     assert list(foreign.iterdir()) == []
+
+
+def test_standalone_snapshot_refuses_external_hardlink_before_copy(tmp_path):
+    repo = release(tmp_path)
+    source = tmp_path / "runtime-source"
+    (source / "bin").mkdir(parents=True)
+    shutil.copy2(sys.executable, source / "bin" / "python")
+    private = tmp_path / "private-runtime-canary"
+    before = b"PRIVATE_EXTERNAL_RUNTIME_ALIAS" * 200
+    private.write_bytes(before)
+    os.link(private, source / "private-payload")
+    candidate = tmp_path / "candidate"
+    with pytest.raises(ValueError, match="standalone_runtime_alias_invalid"):
+        copy_standalone_runtime_candidate(source, candidate, repo)
+    assert not candidate.exists()
+    assert private.read_bytes() == before
+    assert (source / "private-payload").stat().st_ino == private.stat().st_ino
+
+
+def test_standalone_snapshot_allows_only_internal_hardlinks_through_preflight(tmp_path):
+    repo = release(tmp_path)
+    source = tmp_path / "runtime-source"
+    (source / "bin").mkdir(parents=True)
+    shutil.copy2(sys.executable, source / "bin" / "python")
+    os.link(source / "bin" / "python", source / "bin" / "python-internal-copy")
+    candidate = tmp_path / "candidate"
+    # This deliberately incomplete host interpreter reaches the real runtime
+    # probe, then fails standalone provenance; internal links are not aliases.
+    with pytest.raises(ValueError, match="standalone_runtime_provenance_failed"):
+        copy_standalone_runtime_candidate(source, candidate, repo)
+    assert not candidate.exists()
+    assert (source / "bin" / "python").stat().st_nlink == 2

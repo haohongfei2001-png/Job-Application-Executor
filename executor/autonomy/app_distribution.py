@@ -224,7 +224,8 @@ def _read_distribution_receipt(path: Path) -> tuple[dict, bytes]:
     _no_alias_path(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as file:
-        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+        metadata = os.fstat(file.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ValueError("distribution_receipt_invalid")
         encoded = file.read(16 * 1024 + 1)
     if len(encoded) > 16 * 1024:
@@ -280,8 +281,10 @@ def stage_macos_distribution(distribution: str | Path):
         receipt, receipt_bytes = _read_distribution_receipt(receipt_path)
         archive_path = supplied / ARCHIVE_NAME
         _no_alias_path(archive_path)
-        if (not archive_path.is_file()
-                or not 0 < archive_path.stat().st_size <= MAX_DISTRIBUTION_BYTES):
+        archive_metadata = archive_path.stat(follow_symlinks=False)
+        if (not stat.S_ISREG(archive_metadata.st_mode)
+                or archive_metadata.st_nlink != 1
+                or not 0 < archive_metadata.st_size <= MAX_DISTRIBUTION_BYTES):
             raise ValueError("distribution_archive_invalid")
     except (OSError, ValueError, TypeError, UnicodeError):
         raise ValueError("distribution_intake_refused") from None
@@ -301,7 +304,7 @@ def stage_macos_distribution(distribution: str | Path):
             fd = os.open(archive_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(fd, "rb") as raw:
                 original = os.fstat(raw.fileno())
-                if (not stat.S_ISREG(original.st_mode)
+                if (not stat.S_ISREG(original.st_mode) or original.st_nlink != 1
                         or not 0 < original.st_size <= MAX_DISTRIBUTION_BYTES):
                     raise ValueError("distribution_archive_invalid")
                 def digest():
@@ -372,7 +375,7 @@ def stage_macos_distribution(distribution: str | Path):
                 _no_alias_path(archive_path)
                 current = archive_path.stat(follow_symlinks=False)
                 if (current.st_dev != original.st_dev or current.st_ino != original.st_ino
-                        or current.st_size != original.st_size
+                        or current.st_nlink != 1 or current.st_size != original.st_size
                         or digest() != receipt["archive_sha256"]):
                     raise ValueError("distribution_archive_changed")
             phase = "receipt_recheck"

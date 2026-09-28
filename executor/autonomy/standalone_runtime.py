@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -118,6 +119,7 @@ def copy_standalone_runtime_candidate(source: str | Path, target: str | Path,
         raise ValueError("standalone_runtime_destination_invalid") from None
     # Directory aliases are refused: no recursion through an unreviewed tree.
     try:
+        owned_links = {}
         for path in source.rglob("*"):
             if path.is_symlink() and (
                     not path.resolve().is_relative_to(root)
@@ -125,6 +127,19 @@ def copy_standalone_runtime_candidate(source: str | Path, target: str | Path,
                 raise ValueError("standalone_runtime_alias_invalid")
             if not path.is_file() and not path.is_dir():
                 raise ValueError("standalone_runtime_file_invalid")
+            if not path.is_symlink() and path.is_file():
+                metadata = path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise ValueError("standalone_runtime_file_invalid")
+                key = (metadata.st_dev, metadata.st_ino)
+                count, links = owned_links.get(key, (0, metadata.st_nlink))
+                if metadata.st_nlink != links:
+                    raise ValueError("standalone_runtime_alias_invalid")
+                owned_links[key] = (count + 1, links)
+        # Internal hardlinks are complete only when every inode link is inside
+        # this runtime. Refuse an external file alias before copying bytes.
+        if any(count != links for count, links in owned_links.values()):
+            raise ValueError("standalone_runtime_alias_invalid")
     except (OSError, RuntimeError):
         raise ValueError("standalone_runtime_alias_invalid") from None
     python = source / "bin" / "python"
