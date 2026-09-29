@@ -20,6 +20,7 @@ def test_one_thousand_independent_control_sequences_keep_human_submit_boundary(t
     refused = 0
     replayed = 0
     stale = 0
+    restart_replays = 0
     persisted = {}
 
     for seed in range(1000):
@@ -65,6 +66,12 @@ def test_one_thousand_independent_control_sequences_keep_human_submit_boundary(t
                     "status": "accepted", "revision": expected_revision,
                     "stage": expected_stage,
                 }
+                if step == 0 and seed % 20 == 0:
+                    # Simulate a committed control whose response was lost before
+                    # a service restart. The stale retry must recover its durable
+                    # receipt without creating another transition.
+                    queue = TaskQueue(root)
+                    restart_replays += 1
                 assert queue.command_receipt(command_id) == receipt
                 assert queue.control(action, task_id, command_id=command_id,
                                      expected_revision=original["revision"]) == receipt
@@ -97,6 +104,7 @@ def test_one_thousand_independent_control_sequences_keep_human_submit_boundary(t
     assert accepted + refused == 6000
     assert replayed == accepted
     assert stale > 0
+    assert restart_replays == 50
     with sqlite3.connect(queue.path) as db:
         assert db.execute("SELECT COUNT(*) FROM tasks").fetchone() == (1000,)
         assert db.execute(
