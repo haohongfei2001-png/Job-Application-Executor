@@ -358,6 +358,118 @@ def test_one_hundred_golden_ui_to_browser_tasks_have_independent_server_drafts(
         ats.server_close()
 
 
+
+def test_two_queued_ui_tasks_keep_their_original_profiles_after_manager_changes(
+    tmp_path, monkeypatch
+):
+    """A later UI choice cannot retarget an already queued applicant."""
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
+    ats.draft, ats.submit_count, ats.revision = {}, 0, 0
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        first_target = f"http://127.0.0.1:{ats.server_port}/apply?postId=queued-000"
+        expected_by_target = {}
+
+        class QueuedAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                expected = expected_by_target[plan.target_url]
+                if actual["draft"] != expected or actual["revision"] < 2:
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "revision": actual["revision"]}
+
+            def observe_review_draft(self, plan):
+                account = expected_by_target[plan.target_url]["email"]
+                return _review_snapshot(self, plan, ats, account=account)
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: QueuedAdapter(url))
+        proposal = Proposal(first_target)
+        queue = TaskQueue(tmp_path / "queued-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(tmp_path / "not-yet-selected.json")},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+
+        task_targets = {}
+        for seed in range(2):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                      f"?postId=queued-{seed:03d}")
+            profile = tmp_path / f"queued-profile-{seed:03d}.json"
+            expected_by_target[target] = {
+                "full_name": f"Queued Applicant {seed:03d}",
+                "email": f"queued{seed:03d}@example.test",
+            }
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {
+                    "value": expected_by_target[target]["full_name"],
+                    "confidence": 1.0},
+                "identity.email": {
+                    "value": expected_by_target[target]["email"],
+                    "confidence": 1.0},
+            }}), encoding="utf-8")
+            manager.settings["profile_path"] = str(profile)
+            proposal.target_url = target
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert task_id not in task_targets
+            task = queue.get(task_id)
+            assert task["spec"]["target_url"] == target
+            assert task["spec"]["profile_ref"] == str(profile)
+            task_targets[task_id] = target
+
+        # The manager's mutable current choice is deliberately invalid by the
+        # time either queued task runs; each worker must use its task snapshot.
+        manager.settings["profile_path"] = str(tmp_path / "missing-profile.json")
+        remaining = set(task_targets)
+        for _ in range(2):
+            ats.draft, ats.revision = {}, 0
+            assert worker.run_once()
+            newly_ready = [
+                task_id for task_id in remaining
+                if queue.get(task_id)["stage"] == "READY_TO_SUBMIT"
+            ]
+            assert len(newly_ready) == 1
+            task_id = newly_ready[0]
+            target = task_targets[task_id]
+            actual = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert actual["draft"] == expected_by_target[target]
+            assert actual["revision"] >= 2
+            assert actual["submit_count"] == 0
+            remaining.remove(task_id)
+
+        assert not remaining
+        reopened = TaskQueue(tmp_path / "queued-runtime")
+        for task_id, target in task_targets.items():
+            task = reopened.get(task_id)
+            assert task["stage"] == "READY_TO_SUBMIT"
+            assert task["spec"]["target_url"] == target
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
+
+
 def test_repeated_server_draft_corruption_blocks_twenty_ui_tasks(
     tmp_path, monkeypatch
 ):
