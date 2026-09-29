@@ -1658,3 +1658,43 @@ def test_backup_refuses_committed_source_change_after_complete_wal_snapshot(
                               ).fetchone() == ("private_backup_index",)
         else:
             assert db.execute("SELECT count(*) FROM tasks").fetchone() == (0,)
+
+def test_backup_receipt_publication_rechecks_late_wal_commit_and_cleans_only_stage(
+        tmp_path, monkeypatch):
+    """A complete manifest cannot survive a source commit during publication."""
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    destination = tmp_path / "private-backup"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        profile = json.dumps({"rows": [
+            {"id": index, "body": "PRIVATE_PROFILE_" + str(index)}
+            for index in range(1000)]}, ensure_ascii=False).encode()
+        (root / "profile.json").write_bytes(profile)
+        (root / "profile.json").chmod(0o600)
+        original_link = state_compatibility.os.link
+        observed = []
+
+        def publish_then_commit(source, target, *args, **kwargs):
+            assert Path(source).name == ".backup-manifest.tmp"
+            assert Path(target).name == "backup-manifest.json"
+            original_link(source, target, *args, **kwargs)
+            observed.append(True)
+            db.execute("INSERT INTO events(task_id,at,kind,stage) VALUES(?,?,?,?)",
+                       ("synthetic-task", 4, "PRIVATE_AFTER_MANIFEST", "BLOCKED"))
+            db.commit()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(state_compatibility.os, "link", publish_then_commit)
+            with pytest.raises(ValueError, match="task_backup_source_changed"):
+                stage_task_state_backup(root, destination)
+        assert observed == [True]
+        assert not destination.exists()
+        assert db.execute("SELECT kind FROM events ORDER BY seq DESC LIMIT 1").fetchone() == (
+            "PRIVATE_AFTER_MANIFEST",)
+        assert db.execute("SELECT count(*) FROM task_answer_events").fetchone() == (5,)
+        assert (root / "task-answers.key").read_bytes() == key
+        assert (root / "profile.json").read_bytes() == profile
+        assert not (root / "service.json").exists()
+        assert not (root / "auth.token").exists()
