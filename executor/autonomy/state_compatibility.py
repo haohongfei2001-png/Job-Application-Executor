@@ -504,6 +504,7 @@ def _stage_task_state_backup_locked(root: Path, destination: Path) -> dict:
             if not stat.S_ISREG(key_info.st_mode) or key_info.st_nlink != 1:
                 raise ValueError("task_backup_key_invalid")
         key = _answer_key(root)
+        source_identity = _journal_location_identity(root)
         destination.mkdir(mode=0o700, exist_ok=False)
         try:
             copy = destination / "tasks.sqlite3"
@@ -541,7 +542,12 @@ def _stage_task_state_backup_locked(root: Path, destination: Path) -> dict:
             if ((current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)
                     or _answer_key(root) != key):
                 raise ValueError("task_backup_source_changed")
-            _refuse_live_service(root)
+            # A pre-lock historical writer may commit through WAL while the
+            # disposable backup is being assembled. The source inode and key
+            # alone cannot prove that the published capsule reflects the full
+            # current journal; compare one committed, complete source snapshot.
+            if not _journal_authority_unchanged(root, source_identity, key, before):
+                raise ValueError("task_backup_source_changed")
             # Receipt appears last, atomically, after the complete payload
             # is flushed. Its absence means an incomplete backup.
             receipt = {
