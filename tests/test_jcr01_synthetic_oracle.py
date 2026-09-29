@@ -265,3 +265,91 @@ def test_multipage_navigation_requires_independent_draft_readback(tmp_path, monk
     finally:
         ats.shutdown()
         ats.server_close()
+
+
+def test_one_hundred_golden_ui_to_browser_tasks_have_independent_server_drafts(
+    tmp_path, monkeypatch
+):
+    """Run the real local UI, queue and browser path for 100 distinct jobs."""
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
+    ats.draft, ats.submit_count, ats.revision = {}, 0, 0
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        profile = tmp_path / "golden-profile.json"
+        expected = {}
+        target = f"http://127.0.0.1:{ats.server_port}/apply?postId=golden-000"
+
+        class GoldenAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                if (plan.target_url != target or actual["draft"] != expected
+                        or actual["revision"] < 2):
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "revision": actual["revision"]}
+
+            def observe_review_draft(self, plan):
+                return _review_snapshot(self, plan, ats, account=expected["email"])
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: GoldenAdapter(url))
+        proposal = Proposal(target)
+        queue = TaskQueue(tmp_path / "golden-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(profile)},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+        results = {}
+        for seed in range(100):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                      f"?postId=golden-{seed:03d}")
+            proposal.target_url = target
+            expected = {
+                "full_name": f"Synthetic Applicant {seed:03d}",
+                "email": f"applicant{seed:03d}@example.test",
+            }
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {"value": expected["full_name"],
+                                       "confidence": 1.0},
+                "identity.email": {"value": expected["email"],
+                                   "confidence": 1.0},
+            }}), encoding="utf-8")
+            ats.draft, ats.revision = {}, 0
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert task_id not in results
+            assert worker.run_once(), seed
+            actual = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert actual["draft"] == expected, seed
+            assert actual["revision"] >= 2, seed
+            assert actual["submit_count"] == 0, seed
+            task = queue.get(task_id)
+            assert task["stage"] == "READY_TO_SUBMIT", seed
+            assert task["spec"]["target_url"] == target, seed
+            results[task_id] = (target, dict(actual["draft"]))
+        assert len(results) == 100
+        assert len({item[0] for item in results.values()}) == 100
+        assert len({item[1]["email"] for item in results.values()}) == 100
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
