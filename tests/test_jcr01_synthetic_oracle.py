@@ -314,6 +314,8 @@ def test_one_hundred_golden_ui_to_browser_tasks_have_independent_server_drafts(
             target = (f"http://127.0.0.1:{ats.server_port}/apply"
                       f"?postId=golden-{seed:03d}")
             proposal.target_url = target
+            profile = tmp_path / f"golden-profile-{seed:03d}.json"
+            manager.settings["profile_path"] = str(profile)
             expected = {
                 "full_name": f"Synthetic Applicant {seed:03d}",
                 "email": f"applicant{seed:03d}@example.test",
