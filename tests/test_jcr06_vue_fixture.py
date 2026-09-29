@@ -343,28 +343,32 @@ def test_twenty_vue_controlled_ui_acknowledged_unsaved_drafts_block(
                     "confidence": 1.0},
             }}), encoding="utf-8")
             ats.draft, ats.revision, ats.draft_attempts = {}, 0, 0
-            request = urllib.request.Request(
-                base + "/ui/api/chat",
-                data=json.dumps({"message": "请申请 " + target}).encode(),
-                headers={"Content-Type": "application/json"}, method="POST")
-            response = json.loads(browser.open(request).read())
-            assert response["actions"][0]["status"] == "accepted", seed
-            task_id = response["actions"][0]["task_id"]
-            assert worker.run_once(), seed
+            # Two distinct queued attempts per target: neither a 204 nor a retry
+            # may create a server draft, READY task or final submission.
+            for attempt in range(2):
+                request = urllib.request.Request(
+                    base + "/ui/api/chat",
+                    data=json.dumps({"message": "请申请 " + target}).encode(),
+                    headers={"Content-Type": "application/json"}, method="POST")
+                response = json.loads(browser.open(request).read())
+                assert response["actions"][0]["status"] == "accepted", (seed, attempt)
+                task_id = response["actions"][0]["task_id"]
+                assert worker.run_once(), (seed, attempt)
+                observed = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                assert observed["draft"] == {}, (seed, attempt)
+                assert observed["revision"] == 0, (seed, attempt)
+                assert observed["submit_count"] == 0, (seed, attempt)
+                task = queue.get(task_id)
+                assert task["stage"] == "BLOCKED", (seed, attempt)
+                assert task["blocker"] == "draft_persistence_unverified", (seed, attempt)
+                assert task["spec"]["target_url"] == target, (seed, attempt)
+                blocked[task_id] = target
             assert target in checked, seed
             assert ats.draft_attempts >= 2, seed
-            observed = json.load(urllib.request.urlopen(
-                f"http://127.0.0.1:{ats.server_port}/oracle"))
-            assert observed["draft"] == {}, seed
-            assert observed["revision"] == 0, seed
-            assert observed["submit_count"] == 0, seed
-            task = queue.get(task_id)
-            assert task["stage"] == "BLOCKED", seed
-            assert task["blocker"] == "draft_persistence_unverified", seed
-            assert task["spec"]["target_url"] == target, seed
-            blocked[task_id] = target
 
-        assert len(blocked) == len(checked) == 20
+        assert len(blocked) == 40
+        assert len(checked) == 20
         reopened = TaskQueue(runtime)
         for task_id, original_target in blocked.items():
             task = reopened.get(task_id)
