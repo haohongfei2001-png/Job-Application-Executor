@@ -437,6 +437,10 @@ def test_two_queued_ui_tasks_keep_their_original_profiles_after_manager_changes(
         # The manager's mutable current choice is deliberately invalid by the
         # time either queued task runs; each worker must use its task snapshot.
         manager.settings["profile_path"] = str(tmp_path / "missing-profile.json")
+        # Restart the durable service before any queued browser work begins.
+        # The old manager choice must not become the new worker's applicant.
+        queue = TaskQueue(tmp_path / "queued-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
         remaining = set(task_targets)
         for _ in range(2):
             ats.draft, ats.revision = {}, 0
@@ -658,7 +662,7 @@ def test_repeated_acknowledged_but_unsaved_drafts_block_twenty_ui_tasks(
         ats.server_close()
 
 
-def test_twenty_distinct_multipage_ui_tasks_require_each_server_draft_receipt(
+def test_one_hundred_distinct_multipage_ui_tasks_require_each_server_draft_receipt(
     tmp_path, monkeypatch
 ):
     """Second synthetic form mechanism: page advance and final draft readback."""
@@ -707,7 +711,7 @@ def test_twenty_distinct_multipage_ui_tasks_require_each_server_draft_receipt(
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
         browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
         ready = {}
-        for seed in range(20):
+        for seed in range(100):
             target = (f"http://127.0.0.1:{ats.server_port}/apply-multipage"
                       f"?postId=multi-{seed:03d}")
             proposal.target_url = target
@@ -742,7 +746,7 @@ def test_twenty_distinct_multipage_ui_tasks_require_each_server_draft_receipt(
             assert task["stage"] == "READY_TO_SUBMIT", seed
             assert task["spec"]["target_url"] == target, seed
             ready[task_id] = target
-        assert len(ready) == 20
+        assert len(ready) == 100
         # An independent browser draft must not overwrite the durable task
         # identity or READY state of any earlier applicant in the batch.
         reopened = TaskQueue(tmp_path / "multipage-runtime")
