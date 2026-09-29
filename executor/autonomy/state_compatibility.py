@@ -579,6 +579,11 @@ def _stage_task_state_backup_locked(root: Path, destination: Path) -> dict:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+            # Receipt publication and directory fsync are also observable
+            # intervals for pre-lock writers. Never leave a stale capsule with
+            # an apparently complete manifest after a late committed change.
+            if not _journal_authority_unchanged(root, source_identity, key, before):
+                raise ValueError("task_backup_source_changed")
             return receipt
         except BaseException:
             # Remove only our own known artifacts. Preserve any unexpected
