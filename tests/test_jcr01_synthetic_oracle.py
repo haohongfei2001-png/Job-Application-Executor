@@ -594,7 +594,7 @@ def test_twenty_distinct_multipage_ui_tasks_require_each_server_draft_receipt(
         browser = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
         browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
-        ready = set()
+        ready = {}
         for seed in range(20):
             target = (f"http://127.0.0.1:{ats.server_port}/apply-multipage"
                       f"?postId=multi-{seed:03d}")
@@ -629,8 +629,15 @@ def test_twenty_distinct_multipage_ui_tasks_require_each_server_draft_receipt(
             task = queue.get(task_id)
             assert task["stage"] == "READY_TO_SUBMIT", seed
             assert task["spec"]["target_url"] == target, seed
-            ready.add(task_id)
+            ready[task_id] = target
         assert len(ready) == 20
+        # An independent browser draft must not overwrite the durable task
+        # identity or READY state of any earlier applicant in the batch.
+        reopened = TaskQueue(tmp_path / "multipage-runtime")
+        for task_id, original_target in ready.items():
+            retained = reopened.get(task_id)
+            assert retained["stage"] == "READY_TO_SUBMIT", task_id
+            assert retained["spec"]["target_url"] == original_target, task_id
         assert ats.submit_count == 0
     finally:
         if local is not None:
