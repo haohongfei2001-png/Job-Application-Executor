@@ -347,6 +347,9 @@ def test_twenty_react_controlled_ui_acknowledged_unsaved_drafts_block(
             # Two distinct queued attempts per target: neither a 204 nor a retry
             # may create a server draft, READY task or final submission.
             for attempt in range(2):
+                target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                          f"?postId=react-loss-{seed:03d}-{attempt}")
+                proposal.target_url = target
                 request = urllib.request.Request(
                     base + "/ui/api/chat",
                     data=json.dumps({"message": "请申请 " + target}).encode(),
