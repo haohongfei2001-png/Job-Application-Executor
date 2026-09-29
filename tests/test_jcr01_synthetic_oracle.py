@@ -544,3 +544,97 @@ def test_repeated_acknowledged_but_unsaved_drafts_block_twenty_ui_tasks(
             local.server_close()
         ats.shutdown()
         ats.server_close()
+
+
+def test_twenty_distinct_multipage_ui_tasks_require_each_server_draft_receipt(
+    tmp_path, monkeypatch
+):
+    """Second synthetic form mechanism: page advance and final draft readback."""
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
+    ats.draft, ats.submit_count, ats.revision, ats.page_two_reads = {}, 0, 0, 0
+    ats.accept_draft = True
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        profile = tmp_path / "multipage-profile.json"
+        expected = {}
+        target = f"http://127.0.0.1:{ats.server_port}/apply-multipage?postId=multi-000"
+
+        class MultiPageGoldenAdapter(GenericWebAdapter):
+            safe_advance_certified = True
+
+            def verify_draft_persistence(self, plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                page_draft = {"full_name": expected["full_name"]}
+                if self.page.url.endswith("/apply-second"):
+                    page_draft["email"] = expected["email"]
+                if (actual["draft"] != page_draft
+                        or actual["revision"] < len(page_draft)):
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "revision": actual["revision"]}
+
+            def observe_review_draft(self, plan):
+                return _review_snapshot(self, plan, ats, account=expected["email"])
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: MultiPageGoldenAdapter(url))
+        proposal = Proposal(target)
+        queue = TaskQueue(tmp_path / "multipage-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(profile)},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+        ready = set()
+        for seed in range(20):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply-multipage"
+                      f"?postId=multi-{seed:03d}")
+            proposal.target_url = target
+            profile = tmp_path / f"multipage-profile-{seed:03d}.json"
+            manager.settings["profile_path"] = str(profile)
+            expected = {
+                "full_name": f"Synthetic Multipage Applicant {seed:03d}",
+                "email": f"multi{seed:03d}@example.test",
+            }
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {"value": expected["full_name"],
+                                       "confidence": 1.0},
+                "identity.email": {"value": expected["email"],
+                                   "confidence": 1.0},
+            }}), encoding="utf-8")
+            ats.draft, ats.revision, ats.page_two_reads = {}, 0, 0
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert worker.run_once(), seed
+            actual = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert actual["draft"] == expected, seed
+            assert actual["revision"] >= 2, seed
+            assert ats.page_two_reads >= 1, seed
+            assert actual["submit_count"] == 0, seed
+            task = queue.get(task_id)
+            assert task["stage"] == "READY_TO_SUBMIT", seed
+            assert task["spec"]["target_url"] == target, seed
+            ready.add(task_id)
+        assert len(ready) == 20
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
