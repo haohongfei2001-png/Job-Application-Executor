@@ -265,3 +265,116 @@ def test_twenty_vue_controlled_ui_tasks_keep_independent_server_drafts(
             local.server_close()
         ats.shutdown()
         ats.server_close()
+
+def test_twenty_vue_controlled_ui_acknowledged_unsaved_drafts_block(
+    tmp_path, monkeypatch
+):
+    """A controlled UI's HTTP acknowledgement cannot substitute for a server draft."""
+    class AckLossFixture(VueFixture):
+        def do_POST(self):
+            if self.path == "/draft":
+                self.server.draft_attempts += 1
+            return super().do_POST()
+
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), AckLossFixture)
+    ats.draft, ats.revision, ats.submit_count = {}, 0, 0
+    ats.drop_draft, ats.draft_attempts = True, 0
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        target = f"http://127.0.0.1:{ats.server_port}/apply?postId=vue-loss-000"
+        checked = set()
+
+        class AckLossAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, plan):
+                observed = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                if (plan.target_url == target and observed["draft"] == {}
+                        and observed["revision"] == 0
+                        and ats.draft_attempts >= 2):
+                    checked.add(target)
+                return None
+
+            def observe_review_draft(self, plan):
+                raise AssertionError("uncommitted controlled draft reached review")
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: AckLossAdapter(url))
+
+        class Proposal:
+            available = True
+
+            def __init__(self, target_url):
+                self.target_url = target_url
+
+            def decide(self, *_):
+                return ManagerTurn(reply="准备合成岗位", decisions=[
+                    ManagerDecision(action=ManagerAction.CREATE_TASK,
+                                    company="Synthetic VueFixture ATS", role="Engineer",
+                                    target_url=self.target_url)
+                ])
+
+        proposal = Proposal(target)
+        runtime = tmp_path / "vue-loss-runtime"
+        queue = TaskQueue(runtime)
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(tmp_path / "vue-loss-profile.json")},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+
+        blocked = {}
+        for seed in range(20):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                      f"?postId=vue-loss-{seed:03d}")
+            proposal.target_url = target
+            profile = tmp_path / f"vue-loss-profile-{seed:03d}.json"
+            manager.settings["profile_path"] = str(profile)
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {
+                    "value": f"Synthetic VueFixture Unsaved Applicant {seed:03d}",
+                    "confidence": 1.0},
+            }}), encoding="utf-8")
+            ats.draft, ats.revision, ats.draft_attempts = {}, 0, 0
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert worker.run_once(), seed
+            assert target in checked, seed
+            assert ats.draft_attempts >= 2, seed
+            observed = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert observed["draft"] == {}, seed
+            assert observed["revision"] == 0, seed
+            assert observed["submit_count"] == 0, seed
+            task = queue.get(task_id)
+            assert task["stage"] == "BLOCKED", seed
+            assert task["blocker"] == "draft_persistence_unverified", seed
+            assert task["spec"]["target_url"] == target, seed
+            blocked[task_id] = target
+
+        assert len(blocked) == len(checked) == 20
+        reopened = TaskQueue(runtime)
+        for task_id, original_target in blocked.items():
+            task = reopened.get(task_id)
+            assert task["stage"] == "BLOCKED", task_id
+            assert task["blocker"] == "draft_persistence_unverified", task_id
+            assert task["spec"]["target_url"] == original_target, task_id
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
