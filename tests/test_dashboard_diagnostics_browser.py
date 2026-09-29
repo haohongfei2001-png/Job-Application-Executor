@@ -63,7 +63,7 @@ def test_bootstrap_diagnostics_are_explicit_and_copy_safe(monkeypatch):
     token = "sensitive-bootstrap-token"
     monkeypatch.setattr(bootstrap, "_version", lambda: "verified-v1")
     monkeypatch.setattr(
-        bootstrap, "read_release_identity",
+        bootstrap, "current_packaged_source",
         lambda _root: {"status": "verified", "source_sha256": digest},
     )
     page_html = bootstrap._page("service_start_failed", token)
