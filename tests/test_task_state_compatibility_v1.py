@@ -1590,3 +1590,71 @@ def test_actual_candidate_cannot_certify_changed_original_journal_authority(
         assert not list(tmp_path.glob("backup*"))
         if mutation != "live_service_appeared":
             assert not (root / "service.json").exists()
+
+@pytest.mark.parametrize("mutation", [
+    "wal_append", "event_changed", "schema_changed", "task_deleted",
+])
+def test_backup_refuses_committed_source_change_after_complete_wal_snapshot(
+        tmp_path, monkeypatch, mutation):
+    """A staged capsule cannot claim source continuity after an old writer commits."""
+    from executor.autonomy import state_compatibility
+
+    root = tmp_path / "state"
+    destination = tmp_path / "private-backup"
+    with closing(legacy_state(root)) as db:
+        key = encrypted_answers(root, db)
+        private = {
+            "profile.json": json.dumps({"rows": [
+                {"id": index, "body": "PRIVATE_PROFILE_" + str(index)}
+                for index in range(1000)]}, ensure_ascii=False).encode(),
+            "preferences.json": json.dumps({"rows": [
+                {"id": index, "body": "PRIVATE_PREFERENCES_" + str(index)}
+                for index in range(1000)]}, ensure_ascii=False).encode(),
+        }
+        for name, payload in private.items():
+            (root / name).write_bytes(payload)
+            (root / name).chmod(0o600)
+        source_events = db.execute("SELECT * FROM task_answer_events").fetchall()
+        assert (root / "tasks.sqlite3-wal").stat().st_size > 0
+        original_contract = state_compatibility._answer_contract
+        calls = []
+
+        def commit_after_backup_snapshot(backup, answer_key, secret):
+            result = original_contract(backup, answer_key, secret)
+            calls.append(True)
+            assert len(calls) == 1
+            assert answer_key == key
+            if mutation == "wal_append":
+                db.execute("INSERT INTO events(task_id,at,kind,stage) VALUES(?,?,?,?)",
+                           ("synthetic-task", 3, "PRIVATE_LATE_BACKUP_EVENT", "BLOCKED"))
+            elif mutation == "event_changed":
+                db.execute("UPDATE events SET kind='PRIVATE_CHANGED_BACKUP_EVENT'")
+            elif mutation == "schema_changed":
+                db.execute("CREATE INDEX private_backup_index ON events(task_id)")
+            else:
+                db.execute("DELETE FROM tasks")
+            db.commit()
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(state_compatibility, "_answer_contract", commit_after_backup_snapshot)
+            with pytest.raises(ValueError, match="task_backup_source_changed"):
+                stage_task_state_backup(root, destination)
+        assert calls == [True]
+        assert not destination.exists()
+        assert db.execute("SELECT * FROM task_answer_events").fetchall() == source_events
+        assert (root / "task-answers.key").read_bytes() == key
+        assert {name: (root / name).read_bytes() for name in private} == private
+        assert not (root / "service.json").exists()
+        assert not (root / "auth.token").exists()
+        if mutation == "wal_append":
+            assert db.execute("SELECT kind FROM events ORDER BY seq DESC LIMIT 1").fetchone() == (
+                "PRIVATE_LATE_BACKUP_EVENT",)
+        elif mutation == "event_changed":
+            assert db.execute("SELECT DISTINCT kind FROM events").fetchall() == [
+                ("PRIVATE_CHANGED_BACKUP_EVENT",)]
+        elif mutation == "schema_changed":
+            assert db.execute("SELECT name FROM sqlite_master WHERE name='private_backup_index'"
+                              ).fetchone() == ("private_backup_index",)
+        else:
+            assert db.execute("SELECT count(*) FROM tasks").fetchone() == (0,)
