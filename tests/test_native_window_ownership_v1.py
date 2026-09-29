@@ -269,7 +269,10 @@ def test_reopen_rejects_every_non_focus_packet_without_echo_or_callback(short_re
                 connection.settimeout(2)
                 connection.connect(str(short_reopen_root / "native-focus.sock"))
                 connection.sendall(packet)
-                connection.shutdown(socket.SHUT_WR)
+                # The bounded reader can reject an oversized packet without EOF.
+                # Darwin may close that refused peer before a client half-close.
+                if len(packet) <= 64:
+                    connection.shutdown(socket.SHUT_WR)
                 reply = connection.recv(128)
             assert reply == b'{"ok":false,"focus_only":false}\n'
             assert calls == [] and b"PRIVATE_" not in reply
