@@ -20,6 +20,7 @@ def test_one_thousand_independent_control_sequences_keep_human_submit_boundary(t
     refused = 0
     replayed = 0
     stale = 0
+    persisted = {}
 
     for seed in range(1000):
         original = queue.enqueue(TaskSpec(
@@ -80,11 +81,18 @@ def test_one_thousand_independent_control_sequences_keep_human_submit_boundary(t
             }[expected_stage]
             assert observed["stage"] not in {"READY_TO_SUBMIT", "SUBMITTED", "VERIFIED"}
 
+        persisted[task_id] = (expected_stage, expected_revision)
         if seed % 100 == 99:
             queue = TaskQueue(root)
-            reopened = queue.get(task_id)
-            assert (reopened["stage"], reopened["revision"]) == (
-                expected_stage, expected_revision)
+            # Reopening must preserve every earlier task, not only the last task
+            # in this batch. A migration or replay can otherwise silently lose
+            # older durable control state while the newest task still looks safe.
+            assert len(persisted) == seed + 1
+            for previous_id, expected in persisted.items():
+                reopened = queue.get(previous_id)
+                assert (reopened["stage"], reopened["revision"]) == expected
+                assert reopened["stage"] not in {
+                    "READY_TO_SUBMIT", "SUBMITTED", "VERIFIED"}
 
     assert accepted + refused == 6000
     assert replayed == accepted
