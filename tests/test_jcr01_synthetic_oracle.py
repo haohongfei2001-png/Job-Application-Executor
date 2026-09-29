@@ -448,3 +448,98 @@ def test_repeated_server_draft_corruption_blocks_twenty_ui_tasks(
             local.server_close()
         ats.shutdown()
         ats.server_close()
+
+
+def test_repeated_acknowledged_but_unsaved_drafts_block_twenty_ui_tasks(
+    tmp_path, monkeypatch
+):
+    """An HTTP 204 acknowledgement without a committed draft is never READY."""
+    class SilentLossATS(SyntheticATS):
+        def do_POST(self):
+            if self.path == "/draft":
+                self.server.draft_attempts += 1
+            return super().do_POST()
+
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SilentLossATS)
+    ats.draft, ats.submit_count, ats.revision = {}, 0, 0
+    ats.accept_draft, ats.draft_attempts = False, 0
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        profile = tmp_path / "silent-loss-profile.json"
+        target = f"http://127.0.0.1:{ats.server_port}/apply?postId=loss-000"
+        checked = set()
+
+        class SilentLossAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                if (plan.target_url == target and actual["draft"] == {}
+                        and actual["revision"] == 0
+                        and ats.draft_attempts >= 2):
+                    checked.add(target)
+                return None
+
+            def observe_review_draft(self, plan):
+                raise AssertionError("uncommitted server draft must not reach READY review")
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: SilentLossAdapter(url))
+        proposal = Proposal(target)
+        queue = TaskQueue(tmp_path / "silent-loss-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(profile)},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+        blocked = set()
+        for seed in range(20):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                      f"?postId=loss-{seed:03d}")
+            proposal.target_url = target
+            profile = tmp_path / f"silent-loss-profile-{seed:03d}.json"
+            manager.settings["profile_path"] = str(profile)
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {
+                    "value": f"Synthetic Unsaved Applicant {seed:03d}",
+                    "confidence": 1.0},
+                "identity.email": {
+                    "value": f"unsaved{seed:03d}@example.test",
+                    "confidence": 1.0},
+            }}), encoding="utf-8")
+            ats.draft, ats.revision, ats.draft_attempts = {}, 0, 0
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert worker.run_once(), seed
+            assert target in checked, seed
+            assert ats.draft_attempts >= 2, seed
+            actual = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert actual["draft"] == {}, seed
+            assert actual["revision"] == 0, seed
+            assert actual["submit_count"] == 0, seed
+            task = queue.get(task_id)
+            assert task["stage"] == "BLOCKED", seed
+            assert task["blocker"] == "draft_persistence_unverified", seed
+            blocked.add(task_id)
+        assert len(blocked) == 20
+        assert len(checked) == 20
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
