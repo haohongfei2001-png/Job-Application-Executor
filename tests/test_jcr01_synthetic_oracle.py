@@ -59,8 +59,9 @@ class SyntheticATS(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/apply-multipage" or self.path == "/apply-second":
-            second = self.path == "/apply-second"
+        route = self.path.split("?", 1)[0]
+        if route == "/apply-multipage" or route == "/apply-second":
+            second = route == "/apply-second"
             if second:
                 self.server.page_two_reads += 1
             field = "email" if second else "full_name"
@@ -85,7 +86,7 @@ class SyntheticATS(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path.startswith("/apply"):
+        if route.startswith("/apply"):
             body = b'''<!doctype html><meta charset="utf-8"><body>
               <label>Full name <input id="name" name="full_name" required></label>
               <label>Email <input id="email" name="email" type="email" required></label>
