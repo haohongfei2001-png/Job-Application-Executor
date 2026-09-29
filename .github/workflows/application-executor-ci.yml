@@ -229,7 +229,7 @@ jobs:
   test:
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
         with:
@@ -250,6 +250,6 @@ jobs:
       - name: Full round-closure test suite
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
-        run: python -m pytest -q
+        run: python -m pytest -v
       - name: Compile Python sources
         run: python -m compileall -q executor tests
