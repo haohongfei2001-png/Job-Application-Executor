@@ -113,3 +113,87 @@ def test_one_thousand_independent_control_sequences_keep_human_submit_boundary(t
         assert db.execute(
             "SELECT COUNT(*) FROM events WHERE kind IN ('submitted','verified')"
         ).fetchone() == (0,)
+
+def test_interleaved_controls_preserve_one_hundred_task_receipts_across_restarts(tmp_path):
+    """Cross-task command replay must not change another queued application."""
+    root = tmp_path / "interleaved-runtime"
+    queue = TaskQueue(root)
+    tasks = {}
+    for seed in range(100):
+        row = queue.enqueue(TaskSpec(
+            company="Synthetic", role="Engineer",
+            target_url=f"https://jobs.example.test/apply?postId=interleaved-{seed:04d}",
+            profile_ref=str(tmp_path / "synthetic-profile.json"),
+        ))
+        tasks[row["task_id"]] = (seed, row["revision"])
+    assert len(tasks) == 100
+
+    rng = random.Random(0x4A43523039)
+    order = list(tasks)
+    rng.shuffle(order)
+    receipts = {}
+    for offset, task_id in enumerate(order):
+        seed, initial_revision = tasks[task_id]
+        command_id = f"jcr09-interleave-pause-{seed:04d}"
+        receipt = queue.control("PAUSE", task_id, command_id=command_id,
+                                expected_revision=initial_revision)
+        assert receipt == {
+            "command_id": command_id, "task_id": task_id, "action": "PAUSE",
+            "status": "accepted", "revision": initial_revision + 1,
+            "stage": "BLOCKED",
+        }
+        receipts[task_id] = receipt
+        if offset % 17 == 16:
+            queue = TaskQueue(root)
+
+    rng.shuffle(order)
+    final = {}
+    for offset, task_id in enumerate(order):
+        seed, initial_revision = tasks[task_id]
+        action = "RESUME" if seed % 2 else "CANCEL"
+        stage = "DISCOVERED" if action == "RESUME" else "CANCELLED"
+        command_id = f"jcr09-interleave-final-{seed:04d}"
+        receipt = queue.control(action, task_id, command_id=command_id,
+                                expected_revision=initial_revision + 1)
+        assert receipt == {
+            "command_id": command_id, "task_id": task_id, "action": action,
+            "status": "accepted", "revision": initial_revision + 2,
+            "stage": stage,
+        }
+        final[task_id] = receipt
+        if offset % 19 == 18:
+            queue = TaskQueue(root)
+
+    queue = TaskQueue(root)
+    first, second = order[:2]
+    first_seed, first_revision = tasks[first]
+    old_command = f"jcr09-interleave-pause-{first_seed:04d}"
+    assert queue.control("PAUSE", first, command_id=old_command,
+                         expected_revision=first_revision) == receipts[first]
+    for wrong_action, wrong_task in (("CANCEL", first), ("PAUSE", second)):
+        with pytest.raises(ValueError, match="command ID reused"):
+            queue.control(wrong_action, wrong_task, command_id=old_command,
+                          expected_revision=first_revision)
+    with pytest.raises(RuntimeError, match="stale"):
+        queue.control("PAUSE", first, command_id="jcr09-interleave-stale",
+                      expected_revision=first_revision)
+    with pytest.raises(KeyError, match="command not found"):
+        queue.command_receipt("jcr09-interleave-stale")
+
+    for task_id, (seed, initial_revision) in tasks.items():
+        current = queue.get(task_id)
+        expected = final[task_id]
+        assert (current["stage"], current["revision"]) == (
+            expected["stage"], initial_revision + 2)
+        assert current["spec"]["target_url"].endswith(
+            f"postId=interleaved-{seed:04d}")
+        assert queue.command_receipt(receipts[task_id]["command_id"]) == receipts[task_id]
+        assert queue.command_receipt(expected["command_id"]) == expected
+        assert current["stage"] not in {
+            "READY_TO_SUBMIT", "SUBMITTED", "VERIFIED"}
+    with sqlite3.connect(queue.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM tasks").fetchone() == (100,)
+        assert db.execute("SELECT COUNT(*) FROM commands").fetchone() == (200,)
+        assert db.execute(
+            "SELECT COUNT(*) FROM events WHERE kind IN ('submitted','verified')"
+        ).fetchone() == (0,)
