@@ -385,3 +385,118 @@ def test_twenty_vue_controlled_ui_acknowledged_unsaved_drafts_block(
             local.server_close()
         ats.shutdown()
         ats.server_close()
+
+def test_ten_vue_controlled_ui_acknowledged_divergent_drafts_block(
+    tmp_path, monkeypatch
+):
+    """A 204 with a different persisted value must never yield READY."""
+    class DivergentFixture(VueFixture):
+        def do_POST(self):
+            if self.path != "/draft":
+                self.send_error(404)
+                return
+            data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            self.server.draft_attempts += 1
+            if data.get("field") == "full_name" and isinstance(data.get("value"), str):
+                self.server.draft["full_name"] = data["value"] + " / server-diverged"
+                self.server.revision += 1
+            self.send_response(204)
+            self.end_headers()
+
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), DivergentFixture)
+    ats.draft, ats.revision, ats.submit_count, ats.draft_attempts = {}, 0, 0, 0
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        class DivergentAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, plan):
+                observed = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                if observed["draft"].get("full_name") == expected_name:
+                    raise AssertionError("divergent server draft was accepted")
+                return None
+
+            def observe_review_draft(self, plan):
+                raise AssertionError("divergent server draft reached review")
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: DivergentAdapter(url))
+
+        class Proposal:
+            available = True
+
+            def __init__(self):
+                self.target_url = None
+
+            def decide(self, *_):
+                return ManagerTurn(reply="准备合成岗位", decisions=[
+                    ManagerDecision(action=ManagerAction.CREATE_TASK,
+                                    company="Synthetic VueFixture ATS", role="Engineer",
+                                    target_url=self.target_url)
+                ])
+
+        proposal = Proposal()
+        runtime = tmp_path / "vue-divergent-runtime"
+        queue = TaskQueue(runtime)
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(tmp_path / "vue-divergent-profile.json")},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+
+        blocked = {}
+        for seed in range(10):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                      f"?postId=vue-divergent-{seed:03d}")
+            expected_name = f"Synthetic VueFixture Divergent Applicant {seed:03d}"
+            proposal.target_url = target
+            profile = tmp_path / f"vue-divergent-profile-{seed:03d}.json"
+            manager.settings["profile_path"] = str(profile)
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {
+                    "value": expected_name,
+                    "confidence": 1.0},
+            }}), encoding="utf-8")
+            ats.draft, ats.revision, ats.draft_attempts = {}, 0, 0
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert worker.run_once(), seed
+            observed = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert observed["draft"] == {
+                "full_name": expected_name + " / server-diverged"}, seed
+            assert observed["revision"] >= 1, seed
+            assert ats.draft_attempts >= 1, seed
+            assert observed["submit_count"] == 0, seed
+            task = queue.get(task_id)
+            assert task["stage"] == "BLOCKED", seed
+            assert task["blocker"] == "draft_persistence_unverified", seed
+            assert task["spec"]["target_url"] == target, seed
+            blocked[task_id] = target
+
+        assert len(blocked) == 10
+        reopened = TaskQueue(runtime)
+        for task_id, original_target in blocked.items():
+            task = reopened.get(task_id)
+            assert task["stage"] == "BLOCKED", task_id
+            assert task["blocker"] == "draft_persistence_unverified", task_id
+            assert task["spec"]["target_url"] == original_target, task_id
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
