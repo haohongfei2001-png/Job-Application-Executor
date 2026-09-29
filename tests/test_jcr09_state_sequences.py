@@ -42,14 +42,16 @@ def test_one_thousand_independent_control_sequences_keep_human_submit_boundary(t
                 unchanged = queue.get(task_id)
                 assert (unchanged["stage"], unchanged["revision"]) == (
                     expected_stage, expected_revision)
-                assert queue.command_receipt(f"{command_id}-stale") is None
+                with pytest.raises(KeyError, match="command not found"):
+                    queue.command_receipt(f"{command_id}-stale")
                 stale += 1
 
             if expected_stage == "CANCELLED" and action != "CANCEL":
                 with pytest.raises(ValueError, match="immutable"):
                     queue.control(action, task_id, command_id=command_id,
                                   expected_revision=expected_revision)
-                assert queue.command_receipt(command_id) is None
+                with pytest.raises(KeyError, match="command not found"):
+                    queue.command_receipt(command_id)
                 refused += 1
             else:
                 receipt = queue.control(action, task_id, command_id=command_id,
