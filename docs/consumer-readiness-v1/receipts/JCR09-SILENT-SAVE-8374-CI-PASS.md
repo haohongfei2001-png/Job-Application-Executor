@@ -1,0 +1,10 @@
+# JCR09 silent-save loss refusal: 8374c1ee CI PASS
+
+- Sole Draft writer: PR #20, `feat/jcr08-consumer-app`
+- Exact tested head: `8374c1ee3553a38610e873240165fff7b73a9057`
+- Application Executor CI: https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36565323356
+- Result: COMPLETED / SUCCESS
+
+Draft foundation passed 350 complete forms/review/browser cases in 422.09 seconds. The new repeated fault case ran 20 distinct tasks through authenticated local UI, manager, durable queue, worker and isolated Chromium. For every task, the browser made at least two draft POST attempts and received 204, while the synthetic server committed no draft fields or revision. Independent readback refused READY as `draft_persistence_unverified`; all tasks ended BLOCKED and submit count stayed zero. The prior 100 positive same-mechanism synthetic tasks, 20 conflicting-server-draft tasks, 1000 state sequences and 50 lost-response restarts remained selected and passed. Foundation also passed 25 privacy cases (one existing deselection), 163 local operations, 55 workspace cases (two existing deselections), syntax and whitespace. All selected Linux packaged and hosted Mac jobs succeeded; full Linux was skipped by the declared Draft condition.
+
+The 100 positive tasks are distinct targets and profiles on one synthetic form mechanism. They do not alone satisfy acceptance case Z-02's frozen, diverse 100 complete tasks across supported mechanisms. This receipt covers only the exact-head repeated silent-save fault class and preserved automatic regressions. Z-02 diversity, other Z-03 faults/platform repeats, Z-04 24-hour multi-task soak, public drift, full matrix, private/live/device/security/signing acceptance and final human submit remain open, deferred or prohibited as applicable. JCR08/JCR09 are not certified.
