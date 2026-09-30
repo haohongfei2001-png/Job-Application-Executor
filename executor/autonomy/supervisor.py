@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .. import browser, settings
 from .profile_setup import profile_setup_state, select_profile
+from . import profile_editor
 from .task_preparation import parse_preparation_query, prepare_task
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
@@ -54,6 +55,42 @@ class Supervisor:
         self.worker.settings = current
         return {"settings_version": settings.settings_version(current),
                 "profile_selected": True, "submit_capability": False}
+
+    def profile_editor_state(self):
+        _current, view = profile_editor.editor_state()
+        return {**view, "admission_status": "reconciliation_required" if getattr(
+            self.manager, "_profile_selection_uncertain", False) else "ready"}
+
+    def configure_profile_editor(self, metadata, resume):
+        with self._command_lock:
+            if getattr(self.manager, "_profile_selection_uncertain", False):
+                raise profile_editor.EditorConflict()
+            try:
+                current, view = profile_editor.save_profile(metadata, resume)
+            except profile_editor.PublicationUncertain as failure:
+                # A settings directory fsync failure is not a rollback. Only a
+                # proven selection can replace the in-memory FUTURE-task binding.
+                self.manager._profile_selection_uncertain = failure.current is None
+                if failure.current is not None:
+                    self.manager.settings = failure.current
+                    self.worker.settings = failure.current
+                raise
+            self.manager.settings = current
+            self.worker.settings = current
+            self.manager._profile_selection_uncertain = False
+            return {**view, "save_status": "saved", "admission_status": "ready"}
+
+    def reconcile_profile_editor(self):
+        with self._command_lock:
+            try:
+                current, view = profile_editor.editor_state()
+            except Exception:
+                self.manager._profile_selection_uncertain = True
+                raise profile_editor.EditorConflict() from None
+            self.manager.settings = current
+            self.worker.settings = current
+            self.manager._profile_selection_uncertain = False
+            return {**view, "reconciliation_status": "reconciled", "admission_status": "ready"}
 
     def load_configured_provider(self):
         """Explicit credential initialization, no model call or task mutation.
@@ -679,6 +716,29 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         task_id, revision = parse_preparation_query(parsed.query)
                         self._send_json(200, prepare_task(supervisor.queue, task_id, revision))
                         return
+                    if parsed.path in {"/ui/api/profile-editor", "/ui/api/profile-editor/reconcile"}:
+                        if parsed.query or parsed.fragment:
+                            raise profile_editor.EditorInvalid()
+                        if self.command == "GET" and parsed.path == "/ui/api/profile-editor":
+                            self._send_json(200, supervisor.profile_editor_state())
+                            return
+                        if self.command == "POST":
+                            if origin != expected_origin:
+                                self._send_json(403, {"error": "local_origin_required"})
+                                return
+                            if parsed.path.endswith("/reconcile"):
+                                profile_editor.read_reconcile_request(self.headers, self.rfile)
+                                try:
+                                    result = supervisor.run_mutation(supervisor.reconcile_profile_editor)
+                                except profile_editor.EditorConflict:
+                                    self._send_json(409, {"error": "reconciliation_required",
+                                                         "submit_capability": False})
+                                    return
+                            else:
+                                metadata, resume = profile_editor.read_save_request(self.headers, self.rfile)
+                                result = supervisor.run_mutation(lambda: supervisor.configure_profile_editor(metadata, resume))
+                            self._send_json(200, result)
+                            return
                     if self.command == "GET" and parsed.path == "/ui/api/profile-setup":
                         self._send_json(200, profile_setup_state())
                         return
@@ -841,6 +901,10 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         self._send_json(200, result)
                         return
                     self._send_json(404, {"error": "not_found"})
+                except profile_editor.PublicationUncertain as failure:
+                    self._send_json(409, {"error": "publication_uncertain",
+                                         "reconciliation_status": "reconciled" if failure.current is not None else "required",
+                                         "submit_capability": False})
                 except (ValueError, TypeError, UnicodeError, RecursionError):
                     self._send_json(400, {"error": "invalid_request"})
                 except RuntimeError:

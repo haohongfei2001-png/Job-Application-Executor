@@ -2029,3 +2029,449 @@ def test_task_workspace_exact_binding_success_does_not_claim_a_new_duplicate(pre
     assert "已添加" not in page.locator('#toast').inner_text()
     assert len(submissions) == 1
     assert observed["external"] == [] and observed["errors"] == []
+
+
+# Synthetic private-editor payloads never leave the loopback/routed test origin.
+def _editor_payload():
+    from executor.autonomy.task_preparation import CHECKLIST_FIELDS
+    return {"schema_version": 1, "settings_version": "a" * 64, "profile_version": "b" * 64,
+            "mode": "canonical", "future_tasks_only": True, "submit_capability": False,
+            "admission_status": "ready", "resume": {"status": "missing", "kind": None},
+            "fields": [{"key": key, "label": "UNTRUSTED_LABEL", "type":
+                        "text_list" if key == "preferences.preferred_cities" else
+                        "text_or_number" if key == "language.cet6.score" else "text",
+                        "status": "missing", "editable": True, "value": None}
+                       for key, _ in CHECKLIST_FIELDS]}
+
+
+@pytest.fixture
+def profile_editor_ui():
+    import copy
+    observed = {"payload": _editor_payload(), "status": 200, "requests": [], "pending": [],
+                "hold": False, "expired": False, "save_status": 200, "save_payload": None,
+                "reconcile_status": 200, "errors": [], "external": []}
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 600, "height": 800})
+        page.on("pageerror", lambda error: observed["errors"].append(str(error)))
+        def route_request(route):
+            request = route.request
+            if not request.url.startswith("http://profile-editor.test/"):
+                observed["external"].append(request.url)
+                route.abort()
+                return
+            path = request.url.split("profile-editor.test", 1)[1]
+            observed["requests"].append((request.method, path, request.post_data_buffer))
+            if path == "/":
+                route.fulfill(content_type="text/html; charset=utf-8", body=DASHBOARD_HTML)
+                return
+            if observed["expired"]:
+                route.fulfill(status=401, content_type="application/json", body='{}')
+                return
+            if path == "/ui/api/profile-setup":
+                payload = {"settings_version": "a" * 64, "profile_selected": True, "submit_capability": False}
+            elif path == "/ui/api/profile-editor":
+                if request.method == "POST":
+                    payload = observed["save_payload"] or {**copy.deepcopy(observed["payload"]), "save_status": "saved"}
+                    route.fulfill(status=observed["save_status"], content_type="application/json", body=json.dumps(payload))
+                    return
+                if observed["hold"]:
+                    observed["pending"].append((route, copy.deepcopy(observed["payload"])))
+                    page.evaluate("count => window.__editorHeldReads=count", len(observed["pending"]))
+                    return
+                route.fulfill(status=observed["status"], content_type="application/json", body=json.dumps(observed["payload"]))
+                return
+            elif path == "/ui/api/profile-editor/reconcile":
+                payload = {**observed["payload"], "reconciliation_status": "reconciled"}
+                route.fulfill(status=observed["reconcile_status"], content_type="application/json", body=json.dumps(payload))
+                return
+            elif path == "/ui/api/readiness":
+                payload = {"ready_for_live_e2e": False, "submit_capability": False}
+            else:
+                payload = {"tasks": []}
+            route.fulfill(content_type="application/json", body=json.dumps(payload))
+        page.route("**/*", route_request)
+        page.goto("http://profile-editor.test/")
+        try:
+            yield page, observed
+        finally:
+            assert observed["errors"] == []
+            assert observed["external"] == []
+            browser.close()
+
+
+def _open_editor(page):
+    page.locator("#profile-setup").click()
+    expect(page.locator("#profile-editor-open")).to_be_enabled()
+    page.locator("#profile-editor-open").click()
+    expect(page.locator("#profile-editor-dialog")).to_be_visible()
+
+
+def _editor_posts(observed):
+    return [(path, body) for method, path, body in observed["requests"] if method == "POST"]
+
+
+def test_task_workspace_profile_editor_explicit_private_projection_narrow_and_safe_screenshot(profile_editor_ui):
+    import os
+    from pathlib import Path
+    page, observed = profile_editor_ui
+    observed["payload"]["unknown"] = {"identity.id_number": "PRIVATE_HIDDEN_ID", "path": "/private/PRIVATE_PATH"}
+    observed["payload"]["fields"][0].update(value="示例姓名", status="supported")
+    observed["payload"]["fields"][4].update(value=None, status="unsupported", editable=False)
+    page.locator("#message").fill("UNSENT_EDITOR_CHAT")
+    assert not any(path == "/ui/api/profile-editor" for _, path, _ in observed["requests"])
+    _open_editor(page)
+    dialog = page.locator("#profile-editor-dialog")
+    expect(page.locator("#profile-editor-field-0")).to_have_value("示例姓名")
+    expect(page.locator("#profile-editor-field-4")).to_be_disabled()
+    expect(page.locator("#profile-editor-close")).to_be_focused()
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    assert page.locator("#profile-editor-fields input, #profile-editor-fields textarea").count() == 12
+    assert "仅用于以后新任务，已有任务仍使用原资料" in dialog.inner_text()
+    assert "已记录在本机" in dialog.inner_text() and "缺少记录" in dialog.inner_text()
+    private_surface = dialog.evaluate("node => node.outerHTML + [...node.querySelectorAll(\"input,textarea\")].map(item => item.value).join(\"|\")")
+    for forbidden in ("PRIVATE_HIDDEN_ID", "PRIVATE_PATH", "UNTRUSTED_LABEL"):
+        assert forbidden not in private_surface
+    assert not page.locator("#profile-editor-version-details").get_attribute("open")
+    assert dialog.evaluate("node => node.scrollWidth <= node.clientWidth")
+    assert all(page.locator(selector).bounding_box()["height"] >= 44 for selector in (
+        "#profile-editor-close", "#profile-editor-save", "#profile-editor-clear-resume"))
+    screenshot_dir = os.environ.get("JAE_UI_SCREENSHOT_DIR")
+    if screenshot_dir:
+        destination = Path(screenshot_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        dialog.screenshot(path=str(destination / "profile-editor-dialog.png"), animations="disabled")
+    page.locator("#profile-editor-close").click()
+    expect(dialog).not_to_be_visible()
+    expect(page.locator("#profile-setup")).to_be_focused()
+    assert page.locator("#profile-editor-fields").inner_text() == ""
+    assert page.locator("#profile-editor-version").inner_text() == ""
+    assert page.locator("#profile-editor-resume").input_value() == ""
+    assert page.locator("#message").input_value() == "UNSENT_EDITOR_CHAT"
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    assert _editor_posts(observed) == []
+
+
+@pytest.mark.parametrize("failure", ["legacy", "capability", "wrong_keys", "malformed", "http", "unsupported_value"])
+def test_task_workspace_profile_editor_uneditable_or_malformed_state_fails_closed(profile_editor_ui, failure):
+    page, observed = profile_editor_ui
+    if failure == "legacy":
+        observed["payload"].update(mode="legacy", fields=[])
+    elif failure == "capability":
+        observed["payload"]["submit_capability"] = True
+    elif failure == "wrong_keys":
+        observed["payload"]["fields"][0]["key"] = "identity.id_number"
+    elif failure == "malformed":
+        observed["payload"] = {"message": "PRIVATE_ERROR"}
+    elif failure == "http":
+        observed["status"] = 500
+    else:
+        observed["payload"]["fields"][0]["value"] = {"secret": "PRIVATE_ERROR"}
+    _open_editor(page)
+    expect(page.locator("#profile-editor-status")).to_contain_text("旧版资料格式" if failure == "legacy" else "无法读取资料")
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    expect(page.locator("#profile-editor-resume")).to_be_disabled()
+    assert page.locator("#profile-editor-fields").inner_text() == ""
+    assert "PRIVATE_ERROR" not in page.locator("#profile-editor-dialog").inner_text()
+    assert _editor_posts(observed) == []
+
+
+@pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
+def test_task_workspace_profile_editor_late_get_does_not_revive_private_values(profile_editor_ui, interruption):
+    page, observed = profile_editor_ui
+    observed["payload"]["fields"][0].update(value="PRIVATE_LATE", status="supported")
+    observed["hold"] = True
+    _open_editor(page)
+    page.wait_for_function("document.querySelector('#profile-editor-status').textContent.includes('正在读取')")
+    page.wait_for_function("window.__editorHeldReads === 1")
+    assert len(observed["pending"]) == 1
+    if interruption == "close":
+        page.locator("#profile-editor-close").click()
+    elif interruption == "escape":
+        page.locator("#profile-editor-dialog").press("Escape")
+    else:
+        observed["expired"] = True
+        page.evaluate("state()")
+        expect(page.locator("#session-expired")).to_be_visible()
+    route, payload = observed["pending"][0]
+    with page.expect_response("**/ui/api/profile-editor"):
+        route.fulfill(content_type="application/json", body=json.dumps(payload))
+    page.evaluate("async () => {await Promise.resolve()}")
+    expect(page.locator("#profile-editor-dialog")).not_to_be_visible()
+    assert page.locator("#profile-editor-fields").inner_text() == ""
+    assert page.locator("#profile-editor-version").inner_text() == ""
+    assert "PRIVATE_LATE" not in page.locator("body").inner_text()
+    assert _editor_posts(observed) == []
+
+
+def test_task_workspace_profile_editor_old_get_cannot_replace_reopened_editor(profile_editor_ui):
+    page, observed = profile_editor_ui
+    observed["hold"] = True
+    _open_editor(page)
+    page.wait_for_function("window.__editorHeldReads === 1")
+    assert len(observed["pending"]) == 1
+    page.locator("#profile-editor-close").click()
+    observed["hold"] = False
+    observed["payload"]["fields"][0].update(value="NEW_LOCAL_VALUE", status="supported")
+    _open_editor(page)
+    expect(page.locator("#profile-editor-field-0")).to_have_value("NEW_LOCAL_VALUE")
+    route, payload = observed["pending"][0]
+    with page.expect_response("**/ui/api/profile-editor"):
+        route.fulfill(content_type="application/json", body=json.dumps(payload))
+    page.evaluate("async () => {await Promise.resolve()}")
+    expect(page.locator("#profile-editor-field-0")).to_have_value("NEW_LOCAL_VALUE")
+    assert _editor_posts(observed) == []
+
+
+@pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
+def test_task_workspace_profile_editor_delayed_serialization_never_posts_after_interruption(profile_editor_ui, interruption):
+    page, observed = profile_editor_ui
+    _open_editor(page)
+    page.locator("#profile-editor-field-0").fill("PRIVATE_UNSENT")
+    page.evaluate("""() => {
+      const original = Response.prototype.arrayBuffer;
+      Response.prototype.arrayBuffer = function() {
+        return new Promise(resolve => {window.__finishEditorBody = async () => resolve(await original.call(this));});
+      };
+    }""")
+    page.locator("#profile-editor-save").click()
+    page.wait_for_function("typeof window.__finishEditorBody === 'function'")
+    page.evaluate("document.querySelector('#profile-editor-save').dispatchEvent(new MouseEvent('click'))")
+    if interruption == "close":
+        page.locator("#profile-editor-close").click()
+    elif interruption == "escape":
+        page.locator("#profile-editor-dialog").press("Escape")
+    else:
+        observed["expired"] = True
+        page.evaluate("state()")
+        expect(page.locator("#session-expired")).to_be_visible()
+    page.evaluate("window.__finishEditorBody()")
+    page.evaluate("async () => {await Promise.resolve()}")
+    assert _editor_posts(observed) == []
+    assert page.locator("#profile-editor-fields").inner_text() == ""
+    expect(page.locator("#profile-editor-dialog")).not_to_be_visible()
+
+
+@pytest.mark.parametrize("failure", ["conflict", "uncertain", "readback", "network"])
+def test_task_workspace_profile_editor_unconfirmed_save_needs_explicit_reconcile_without_replay(profile_editor_ui, failure):
+    page, observed = profile_editor_ui
+    _open_editor(page)
+    page.locator("#profile-editor-field-0").fill("PRIVATE_MODIFIED")
+    if failure in {"conflict", "uncertain"}:
+        observed["save_status"] = 409
+        observed["save_payload"] = {"error": "publication_uncertain" if failure == "uncertain" else "state_conflict",
+                                    "reconciliation_status": "required", "message": "PRIVATE_ERROR"}
+    elif failure == "readback":
+        observed["save_payload"] = {**observed["payload"], "settings_version": "c" * 64, "save_status": "saved"}
+    else:
+        def broken(route):
+            if route.request.method == "POST":
+                observed["requests"].append(("POST", "/ui/api/profile-editor", route.request.post_data_buffer))
+                route.abort()
+            else:
+                route.fallback()
+        page.route("**/ui/api/profile-editor", broken)
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("本次保存因资料版本变化" if failure == "conflict" else "保存尚未确认")
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    expect(page.locator("#profile-editor-reconcile")).to_be_enabled()
+    assert len(_editor_posts(observed)) == 1
+    assert "PRIVATE_ERROR" not in page.locator("#profile-editor-dialog").inner_text()
+    page.evaluate("document.querySelector('#profile-editor-save').dispatchEvent(new MouseEvent('click'))")
+    assert len(_editor_posts(observed)) == 1
+    page.locator("#profile-editor-reconcile").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("已重新读取本机当前记录")
+    expect(page.locator("#profile-editor-field-0")).to_have_value("")
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    assert [path for path, _ in _editor_posts(observed)] == ["/ui/api/profile-editor", "/ui/api/profile-editor/reconcile"]
+
+
+def test_task_workspace_profile_editor_json_selection_blocks_switch_and_resume_can_be_withdrawn(profile_editor_ui):
+    page, observed = profile_editor_ui
+    page.locator("#profile-setup").click()
+    expect(page.locator("#profile-file")).to_be_enabled()
+    page.locator("#profile-file").set_input_files({"name": "profile.json", "mimeType": "application/json", "buffer": b'{}'})
+    expect(page.locator("#profile-editor-open")).to_be_disabled()
+    page.locator("#profile-file").set_input_files([])
+    page.locator("#profile-editor-open").click()
+    expect(page.locator("#profile-editor-resume")).to_be_enabled()
+    page.locator("#profile-editor-resume").set_input_files({"name": "unsafe.html", "mimeType": "text/html", "buffer": b'<script>1</script>'})
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("请选择非空")
+    assert _editor_posts(observed) == []
+    page.locator("#profile-editor-clear-resume").click()
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    assert page.locator("#profile-editor-resume").input_value() == ""
+    assert _editor_posts(observed) == []
+
+
+def test_task_workspace_profile_editor_actual_save_resume_cas_and_restart_binding(profile_setup_service):
+    import hashlib
+    from pathlib import Path
+    from executor.autonomy.queue import TaskSpec
+    settings, queue, supervisor, base, tid, calls = profile_setup_service
+    old_task = queue.get(tid)
+    old = Path(old_task["spec"]["profile_ref"])
+    profile = json.loads(old.read_text())
+    profile["fields"]["identity.id_number"] = {"value": "PRIVATE_HIDDEN_ID"}
+    profile["fields"]["language.cet6.score"] = {"value": 550, "note": "PRESERVED"}
+    profile["unknown_extension"] = {"full": "PRIVATE_PRESERVED"}
+    old.write_text(json.dumps(profile))
+    old_bytes = old.read_bytes()
+    writes, errors = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 600, "height": 800})
+        try:
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("request", lambda request: writes.append(request.url) if request.method == "POST" else None)
+            page.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            _open_editor(page)
+            expect(page.locator("#profile-editor-field-0")).to_have_value("PRIVATE_OLD")
+            expect(page.locator("#profile-editor-field-10")).to_have_value("550")
+            assert "PRIVATE_HIDDEN_ID" not in page.locator("body").inner_text()
+            assert "PRIVATE_PRESERVED" not in page.locator("body").inner_text()
+            visible_private_values = page.locator("#profile-editor-dialog").evaluate("node => node.outerHTML + [...node.querySelectorAll(\"input,textarea\")].map(item => item.value).join(\"|\")")
+            assert "PRIVATE_HIDDEN_ID" not in visible_private_values and "PRIVATE_PRESERVED" not in visible_private_values
+            page.locator("#profile-editor-field-0").fill("PRIVATE_NEW")
+            page.locator("#profile-editor-field-2").fill("synthetic@example.test")
+            page.locator("#profile-editor-field-11").fill("武汉\n北京")
+            resume = b'%PDF-1.4\nsynthetic opaque resume\n%%EOF'
+            page.locator("#profile-editor-resume").set_input_files({"name": "PRIVATE_FILENAME.pdf", "mimeType": "application/pdf", "buffer": resume})
+            assert writes == [] and old.read_bytes() == old_bytes
+            page.locator("#profile-editor-save").click()
+            expect(page.locator("#profile-editor-status")).to_contain_text("已保存在本机并重新读取确认")
+            new = Path(settings.load_settings()["profile_path"])
+            updated = json.loads(new.read_text())
+            assert new != old and old.read_bytes() == old_bytes and queue.get(tid) == old_task
+            assert updated["fields"]["identity.full_name"]["value"] == "PRIVATE_NEW"
+            assert updated["fields"]["preferences.preferred_cities"]["value"] == ["武汉", "北京"]
+            assert updated["fields"]["language.cet6.score"] == profile["fields"]["language.cet6.score"]
+            assert updated["fields"]["identity.id_number"] == profile["fields"]["identity.id_number"]
+            assert updated["unknown_extension"] == profile["unknown_extension"]
+            asset = updated["assets"]["resume"]
+            assert Path(asset["path"]).read_bytes() == resume
+            assert asset["sha256"] == hashlib.sha256(resume).hexdigest()
+            assert "PRIVATE_FILENAME" not in asset["path"]
+            assert new.stat().st_mode & 0o777 == 0o600
+            assert Path(asset["path"]).stat().st_mode & 0o777 == 0o600
+            assert supervisor.manager._profile_ref() == str(new)
+            assert supervisor.worker.settings["profile_path"] == str(new)
+            assert writes == [base + "/ui/api/profile-editor"] and calls == []
+            assert page.locator("#profile-editor-resume").input_value() == ""
+            page.locator("#profile-editor-close").click()
+            page.reload()
+            expect(page.locator("#profile-setup")).to_be_visible()
+            assert page.locator("#profile-editor-fields").inner_text() == ""
+            _open_editor(page)
+            expect(page.locator("#profile-editor-field-0")).to_have_value("PRIVATE_NEW")
+            expect(page.locator("#profile-editor-resume-status")).to_contain_text("本机已记录 PDF")
+            assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+            # Reconstructed manager/worker use persisted future selection; old task remains exact.
+            from executor.autonomy.worker import Worker
+            from executor.autonomy.manager import ManagerController
+            restarted_worker = Worker(queue, settings=settings.load_settings())
+            restarted_manager = ManagerController(queue, restarted_worker, provider=supervisor.manager.provider,
+                                                  settings=settings.load_settings())
+            assert restarted_manager._profile_ref() == str(new)
+            future = queue.enqueue(TaskSpec(company="Future Synthetic Co", role="Engineer", job_id="future-editor",
+                                            target_url="https://synthetic.example.test/future",
+                                            profile_ref=restarted_manager._profile_ref(), live_authorized=False))
+            assert future["spec"]["profile_ref"] == str(new)
+            assert future["spec"]["live_authorized"] is False
+            assert queue.get(tid) == old_task and old.read_bytes() == old_bytes
+            assert errors == [] and calls == []
+        finally:
+            browser.close()
+
+
+def test_task_workspace_profile_editor_oversize_metadata_and_city_rows_block_before_post(profile_editor_ui):
+    page, observed = profile_editor_ui
+    # Existing supported Unicode is counted as code points, not UTF-16 units.
+    observed["payload"]["fields"][0].update(value="😀" * 1800, status="supported")
+    _open_editor(page)
+    expect(page.locator("#profile-editor-field-0")).to_have_value("😀" * 1800)
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    page.locator("#profile-editor-field-11").fill("城市\n" * 33)
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("城市最多 32 行")
+    assert _editor_posts(observed) == []
+    page.locator("#profile-editor-field-11").fill("")
+    for index in range(11):
+        page.locator(f"#profile-editor-field-{index}").fill("汉" * 2048)
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("本次资料内容过长")
+    assert _editor_posts(observed) == []
+
+
+def test_task_workspace_profile_editor_deterministic_rejection_is_not_reported_as_saved_or_uncertain(profile_editor_ui):
+    page, observed = profile_editor_ui
+    observed["save_status"] = 400
+    observed["save_payload"] = {"error": "invalid_request", "message": "PRIVATE_DO_NOT_RENDER"}
+    _open_editor(page)
+    page.locator("#profile-editor-field-0").fill("PRIVATE_EDIT")
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("资料未保存")
+    expect(page.locator("#profile-editor-reconcile")).not_to_be_visible()
+    expect(page.locator("#profile-editor-field-0")).to_have_value("PRIVATE_EDIT")
+    assert "PRIVATE_DO_NOT_RENDER" not in page.locator("#profile-editor-dialog").inner_text()
+    assert len(_editor_posts(observed)) == 1
+
+
+@pytest.mark.parametrize("interruption", ["close_reopen", "expired_session"])
+def test_task_workspace_profile_editor_late_post_response_cannot_revive_or_rewrite_dialog(profile_editor_ui, interruption):
+    page, observed = profile_editor_ui
+    pending = []
+    def held_post(route):
+        if route.request.method == "POST":
+            pending.append(route)
+            observed["requests"].append(("POST", "/ui/api/profile-editor", route.request.post_data_buffer))
+            page.evaluate("window.__editorHeldPost = true")
+        else:
+            route.fallback()
+    page.route("**/ui/api/profile-editor", held_post)
+    _open_editor(page)
+    page.locator("#profile-editor-field-0").fill("PRIVATE_POSTED")
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    page.wait_for_function("window.__editorHeldPost === true")
+    assert len(pending) == 1
+    if interruption == "close_reopen":
+        page.locator("#profile-editor-close").click()
+        _open_editor(page)
+        expect(page.locator("#profile-editor-field-0")).to_have_value("")
+    else:
+        observed["expired"] = True
+        page.evaluate("state()")
+        expect(page.locator("#session-expired")).to_be_visible()
+    with page.expect_response("**/ui/api/profile-editor"):
+        pending[0].fulfill(content_type="application/json", body=json.dumps({**observed["payload"], "save_status": "saved"}))
+    page.evaluate("async () => {await Promise.resolve()}")
+    if interruption == "close_reopen":
+        expect(page.locator("#profile-editor-field-0")).to_have_value("")
+        assert "已保存在本机并重新读取确认" not in page.locator("#profile-editor-status").inner_text()
+    else:
+        expect(page.locator("#profile-editor-dialog")).not_to_be_visible()
+        assert page.locator("#profile-editor-fields").inner_text() == ""
+    assert len(_editor_posts(observed)) == 1
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+
+
+def test_task_workspace_profile_editor_pending_admission_requires_successful_explicit_reconciliation(profile_editor_ui):
+    page, observed = profile_editor_ui
+    observed["payload"]["admission_status"] = "reconciliation_required"
+    observed["reconcile_status"] = 409
+    _open_editor(page)
+    expect(page.locator("#profile-editor-reconcile")).to_be_enabled()
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    expect(page.locator("#profile-editor-resume")).to_be_disabled()
+    page.locator("#profile-editor-reconcile").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("当前记录仍未确认")
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    assert [path for path, _ in _editor_posts(observed)] == ["/ui/api/profile-editor/reconcile"]
+    observed["payload"]["admission_status"] = "ready"
+    observed["reconcile_status"] = 200
+    page.locator("#profile-editor-reconcile").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("已重新读取本机当前记录")
+    expect(page.locator("#profile-editor-resume")).to_be_enabled()
+    assert all(path == "/ui/api/profile-editor/reconcile" for path, _ in _editor_posts(observed))

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import os
 import re
@@ -11,7 +10,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from urllib.parse import parse_qsl
 
-from .profile_setup import PROFILE_LIMIT, _profile_bytes
+from .profile_setup import PROFILE_LIMIT, validate_profile_text
 
 RESUME_LIMIT = 20 * 1024 * 1024
 RESUME_EXTENSIONS = {"resume_pdf": ".pdf", "resume_docx": ".docx", "resume_doc": ".doc"}
@@ -240,11 +239,9 @@ def prepare_task(queue, task_id, expected_revision):
         resume_file = None
         try:
             raw = profile_file.read()
-            # Reuse strict import validation, but hash the exact original bytes,
-            # not the validator's normalized serialization or model defaults.
-            text = raw.decode("utf-8")
-            _profile_bytes(text)
-            profile = json.loads(text)
+            # Validate the exact source-byte budget, independently of import
+            # writer formatting; preserve the exact content-version digest.
+            profile = validate_profile_text(raw.decode("utf-8"))
             version = hashlib.sha256(raw).hexdigest()
         except (_Unavailable, ValueError, TypeError, UnicodeError, RecursionError):
             pass

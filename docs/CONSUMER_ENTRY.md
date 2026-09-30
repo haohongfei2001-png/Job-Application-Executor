@@ -114,6 +114,46 @@ The newly typed form remains available for review instead of being silently
 cleared. New unsupported tasks retain submitted location, campaign and
 employment-type details, but those fields do not make the target verified.
 
+## Edit future-task profile and resume
+
+Open **资料设置 → 编辑基本资料与简历** to review the allowlisted basic
+fields in the authenticated local window. The main promise is:
+**仅用于以后新任务，已有任务仍使用原资料**.
+
+- Editing or choosing a file does not save automatically. **保存给以后新任务**
+  creates a new private profile version, then switches the future-task selection
+  only after checking the source profile and settings versions. A successful
+  message requires a second local read of the new versions.
+- Only changed fields are patched. Unchanged metadata, evidence and fields
+  outside this editor (including an existing identity-number field) are
+  preserved but not displayed here. Emptying a supported field explicitly
+  clears its value. Unsupported formats are read-only. Existing repeated
+  education records make the highest-education fields read-only to avoid
+  contradictory flat and row values; this editor does not rebuild those rows.
+- A selected PDF, DOCX or DOC is copied as opaque bytes to a random private
+  local filename. The total request, including metadata and framing, is capped
+  at 20 MiB. Extensions and MIME types are advisory, not proof of file safety
+  or content. The app does not preview, parse, execute or upload the file.
+  Replacing the resume does not rebuild old extracted facts; review them before
+  using a future task. Prior profile and asset versions remain intact.
+- A busy or changed source is rejected rather than overwritten. If a save
+  might have reached disk but cannot be confirmed, use **重新读取并核对**.
+  The app does not replay the save; uncertain future-task admission remains
+  fenced until a safe local read can reconcile it. Existing task controls are
+  not turned into new application permission.
+- Closing the editor, pressing Escape, refreshing the page or expiring the UI
+  session clears its private inputs and pending file selection. Unsent edits
+  are not stored in browser local/session storage. Reopen to read the current
+  local version; an earlier delayed response cannot restore a dismissed form.
+
+Legacy profiles without the canonical `fields` structure remain import-only;
+this editor does not silently migrate them. The existing JSON import remains
+available, and a pending JSON selection must be cleared before switching to
+field editing. This is an engineering-candidate local preparation feature, not
+proof of a supported live application driver, website persistence or permission
+to submit. No ID, CAPTCHA, privacy agreement, live upload or final-submit action
+is added by this editor.
+
 ## Safety boundary
 
 Consumer Entry v1 changes only startup and presentation. DeepSeek still receives

@@ -46,7 +46,7 @@ jobs:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
           JAE_UI_SCREENSHOT_DIR: ${{ runner.temp }}/jae-preparation-ui
         run: |
-          python -m pytest -q tests/test_local_operations_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py tests/test_task_preparation_v1.py tests/test_manager_v1.py tests/test_jcr03_discovery.py
+          python -m pytest -q tests/test_local_operations_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py tests/test_profile_editor_v1.py tests/test_task_preparation_v1.py tests/test_manager_v1.py tests/test_jcr03_discovery.py
           python -m pytest -q tests/test_dashboard_diagnostics_browser.py -k 'diagnostics_need_explicit_copy or expired_session or task_workspace'
       - name: Compile Python sources
         run: python -m compileall -q executor tests
@@ -72,7 +72,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: jae-local-preparation-ui-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/jae-preparation-ui/preparation-dialog.png
+          path: |
+            ${{ runner.temp }}/jae-preparation-ui/preparation-dialog.png
+            ${{ runner.temp }}/jae-preparation-ui/profile-editor-dialog.png
           if-no-files-found: error
           retention-days: 3
 
@@ -197,7 +199,7 @@ jobs:
           - suite: runtime_distribution
             tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py
           - suite: native_integration
-            tests: tests/test_macos_host_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py tests/test_task_preparation_v1.py tests/test_manager_v1.py tests/test_jcr03_discovery.py
+            tests: tests/test_macos_host_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py tests/test_profile_editor_v1.py tests/test_task_preparation_v1.py tests/test_manager_v1.py tests/test_jcr03_discovery.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

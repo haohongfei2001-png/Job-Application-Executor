@@ -481,6 +481,8 @@ class ManagerController:
         }
 
     def _profile_ref(self) -> str:
+        if getattr(self, "_profile_selection_uncertain", False):
+            raise RuntimeError("profile_selection_reconciliation_required")
         value = self.settings.get("profile_path")
         if not isinstance(value, str) or not value.strip():
             raise ValueError("profile_path is not configured")

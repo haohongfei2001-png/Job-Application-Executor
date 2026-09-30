@@ -58,19 +58,37 @@ def _validate_profile(profile):
         raise ValueError("invalid_profile")
 
 
-def _profile_bytes(text):
+def validate_profile_text(text):
+    """Validate exact source text without imposing a writer's output format.
+
+    Return the original JSON object. Schema validation must never coerce facts,
+    discard extensions, or manufacture model defaults in a persisted profile.
+    """
     from ..profile import CREDENTIAL_KEYS, _walk_keys
 
-    if not isinstance(text, str) or len(text.encode("utf-8")) > PROFILE_LIMIT:
-        raise ValueError("invalid_profile")
-    profile = json.loads(text, object_pairs_hook=settings._object,
-                         parse_constant=settings._constant)
-    if not isinstance(profile, dict) or not profile:
-        raise ValueError("invalid_profile")
-    forbidden = CREDENTIAL_KEYS | {"api_key", "access_token", "refresh_token", "deepseek"}
-    if any(key.strip().lower().split(".")[-1] in forbidden for key in _walk_keys(profile)):
-        raise ValueError("invalid_profile")
-    _validate_profile(profile)
+    try:
+        if not isinstance(text, str) or not 0 < len(text.encode("utf-8")) <= PROFILE_LIMIT:
+            raise ValueError("invalid_profile")
+        profile = json.loads(text, object_pairs_hook=settings._object,
+                             parse_constant=settings._constant)
+        if not isinstance(profile, dict) or not profile:
+            raise ValueError("invalid_profile")
+        forbidden = CREDENTIAL_KEYS | {"api_key", "access_token", "refresh_token", "deepseek"}
+        if any(key.strip().lower().split(".")[-1] in forbidden for key in _walk_keys(profile)):
+            raise ValueError("invalid_profile")
+        _validate_profile(profile)
+        # Also reject exponent overflow (1e999) and escaped invalid Unicode.
+        # This is a validation probe, not a normalized read-size requirement.
+        json.dumps(profile, ensure_ascii=False, allow_nan=False,
+                   separators=(",", ":")).encode("utf-8")
+        return profile
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise ValueError("invalid_profile") from None
+
+
+def _profile_bytes(text):
+    profile = validate_profile_text(text)
+    # Import remains the existing pretty-printed writer, with its own output cap.
     encoded = json.dumps(profile, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
     if len(encoded) > PROFILE_LIMIT:
         raise ValueError("invalid_profile")

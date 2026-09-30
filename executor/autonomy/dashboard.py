@@ -47,6 +47,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 .toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
 @media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:block;max-height:45vh;border-right:0;border-bottom:1px solid #e5e7eb}main{min-height:55vh}}
 #candidates>button[data-existing-task]{min-height:44px}
+.profile-editor-fields{display:grid;gap:12px;margin:18px 0}.profile-editor-field{display:grid;gap:5px;font-size:13px}.profile-editor-field input,.profile-editor-field textarea{width:100%;min-width:0;border:1px solid #cbd5e1;border-radius:7px;padding:9px;font:inherit}.profile-editor-field small{color:#64748b}.profile-editor-dialog .diagnostics-actions{flex-wrap:wrap;position:sticky;bottom:-22px;background:white;padding:12px 0}.profile-editor-dialog button{min-height:44px}.profile-editor-dialog input[type=file]{display:block;max-width:100%;margin:10px 0}.profile-editor-dialog details{font-size:12px;overflow-wrap:anywhere;margin:12px 0}.profile-editor-dialog p[role=status]{min-height:20px}
 </style>
 </head>
 <body>
@@ -104,12 +105,31 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 <dialog id="profile-dialog" class="diagnostics-dialog" aria-labelledby="profile-title">
   <h2 id="profile-title">资料设置</h2>
   <p>选择个人资料 JSON 文件，内容仅保存在本机，用于之后添加的任务。已有任务继续使用原资料。密码、验证码和 API 密钥请勿放入资料文件；最终提交由你本人完成。</p>
+  <button id="profile-editor-open" type="button" disabled>编辑基本资料与简历</button>
   <p id="profile-status" role="status">正在读取设置…</p>
   <label for="profile-file">选择资料文件（JSON，最多 256 KB）</label>
   <input id="profile-file" type="file" accept=".json,application/json" disabled>
   <div class="diagnostics-actions">
     <button id="profile-close" class="headerbtn" type="button">关闭</button>
     <button id="profile-save" type="button" disabled>保存资料</button>
+  </div>
+</dialog>
+<dialog id="profile-editor-dialog" class="diagnostics-dialog profile-editor-dialog" aria-labelledby="profile-editor-title">
+  <h2 id="profile-editor-title">基本资料与简历</h2>
+  <p><strong>仅用于以后新任务，已有任务仍使用原资料</strong></p>
+  <p>这里在本机保存你明确修改的内容，不会发送到招聘网站。已记录不代表资料正确，请本人核对。证件号码不在此展示或编辑。</p>
+  <p id="profile-editor-status" role="status"></p>
+  <div id="profile-editor-fields" class="profile-editor-fields"></div>
+  <p id="profile-editor-resume-status"></p>
+  <label for="profile-editor-resume">替换以后新任务的简历（PDF、DOCX 或 DOC）</label>
+  <input id="profile-editor-resume" type="file" accept=".pdf,.docx,.doc" disabled>
+  <p>文件与资料合计最多 20 MiB。只保存所选文件，不预览或解析；旧简历的解析记录不会自动更新，也不会代你上传到网站。</p>
+  <button id="profile-editor-clear-resume" type="button" disabled>撤销本次文件选择</button>
+  <details id="profile-editor-version-details" hidden><summary>本机版本信息</summary><p id="profile-editor-version"></p></details>
+  <div class="diagnostics-actions">
+    <button id="profile-editor-close" class="headerbtn" type="button">关闭</button>
+    <button id="profile-editor-reconcile" type="button" hidden disabled>重新读取并核对</button>
+    <button id="profile-editor-save" type="button" disabled>保存给以后新任务</button>
   </div>
 </dialog>
 <dialog id="readiness-dialog" class="diagnostics-dialog" aria-labelledby="readiness-title">
@@ -193,6 +213,7 @@ function validProfileState(data){
 function profileControls(){
   profileFile.disabled=uiSessionExpired||profileBusy||!profileVersion;
   profileSave.disabled=profileFile.disabled||profileFile.files.length!==1;
+  document.getElementById('profile-editor-open').disabled=profileFile.disabled||profileFile.files.length!==0;
 }
 function clearProfileSelection(){
   profileEpoch++;profileVersion=null;profileBusy=false;profileFile.value='';
@@ -258,6 +279,183 @@ profileSave.onclick=async()=>{
     }
   }finally{if(epoch===profileEpoch){profileBusy=false;profileControls();}}
 };
+
+const editorDialog=document.getElementById('profile-editor-dialog'),editorFields=document.getElementById('profile-editor-fields'),
+  editorStatus=document.getElementById('profile-editor-status'),editorResume=document.getElementById('profile-editor-resume'),
+  editorResumeStatus=document.getElementById('profile-editor-resume-status'),editorSave=document.getElementById('profile-editor-save'),
+  editorClose=document.getElementById('profile-editor-close'),editorReconcile=document.getElementById('profile-editor-reconcile'),
+  editorClearResume=document.getElementById('profile-editor-clear-resume'),editorVersion=document.getElementById('profile-editor-version'),
+  editorVersionDetails=document.getElementById('profile-editor-version-details');
+const editorFieldSpec=[['identity.full_name','姓名','text'],['identity.phone','电话号码','text'],
+  ['identity.email','邮箱号码','text'],['identity.gender','性别','text'],['education.highest.degree','最高学历','text'],
+  ['education.highest.school','毕业院校','text'],['education.highest.college','学院','text'],
+  ['education.highest.major','专业','text'],['education.highest.graduation_date','毕业时间','text'],
+  ['language.cet6.level','英语证书情况（本地六级记录）','text'],['language.cet6.score','英语考级分数（本地六级记录）','text_or_number'],
+  ['preferences.preferred_cities','期望工作城市（每行一个）','text_list']];
+let editorEpoch=0,editorState=null,editorBusy=false,editorUncertain=false;
+const editorHash=value=>typeof value==='string'&&/^[0-9a-f]{64}$/.test(value);
+function editorSupported(type,value){
+  if(value===null)return true;
+  if(type==='text_list')return Array.isArray(value)&&value.length<=32
+    &&value.every(v=>typeof v==='string'&&[...v].length<=200&&!/[\u0000-\u001f]/.test(v));
+  if(typeof value==='string')return [...value].length<=2048&&!/[\u0000-\u0008\u000b-\u001f]/.test(value);
+  return type==='text_or_number'&&typeof value==='number'&&Number.isFinite(value)&&Math.abs(value)<=1e12;
+}
+function validEditorState(data){
+  if(!data||data.schema_version!==1||!editorHash(data.settings_version)
+    ||!(data.profile_version===null||editorHash(data.profile_version))
+    ||!['canonical','new','legacy'].includes(data.mode)||data.future_tasks_only!==true||data.submit_capability!==false
+    ||!['ready','reconciliation_required'].includes(data.admission_status)||!Array.isArray(data.fields)
+    ||!data.resume||!['missing','recorded_locally','unsupported'].includes(data.resume.status)
+    ||!(data.resume.kind===null||['resume_pdf','resume_docx','resume_doc'].includes(data.resume.kind)))return false;
+  if(data.mode==='legacy')return data.fields.length===0;
+  return data.fields.length===editorFieldSpec.length&&editorFieldSpec.every(([key,_,type],index)=>{
+    const field=data.fields[index];
+    if(!field||field.key!==key||field.type!==type||!['missing','supported','unsupported'].includes(field.status)
+      ||typeof field.editable!=='boolean')return false;
+    if(field.status==='unsupported')return field.editable===false&&field.value===null;
+    if(!field.editable)return false;
+    return editorSupported(type,field.value);
+  });
+}
+const editorText=(value,type)=>value===null?'':type==='text_list'?value.join('\n'):String(value);
+function editorChanges(){
+  const edits={};
+  if(!editorState)return edits;
+  for(const input of editorFields.querySelectorAll('[data-editor-key]')){
+    const field=editorState.fields.find(item=>item.key===input.dataset.editorKey);
+    if(!field?.editable||input.value===editorText(field.value,field.type))continue;
+    edits[field.key]=input.value===''?null:field.type==='text_list'?input.value.split('\n'):input.value;
+  }
+  return edits;
+}
+function editorControls(){
+  const blocked=uiSessionExpired||editorBusy||editorUncertain||!editorState||editorState.mode==='legacy'
+    ||editorState.admission_status!=='ready';
+  for(const input of editorFields.querySelectorAll('[data-editor-key]'))
+    input.disabled=blocked||input.dataset.editorEditable!=='true';
+  editorResume.disabled=blocked;
+  editorSave.disabled=blocked||(!Object.keys(editorChanges()).length&&!editorResume.files.length);
+  editorClearResume.disabled=blocked||!editorResume.files.length;
+  editorReconcile.hidden=!editorUncertain;
+  editorReconcile.disabled=uiSessionExpired||editorBusy||!editorUncertain;
+}
+function clearEditor(){
+  editorEpoch++;editorState=null;editorBusy=false;editorUncertain=false;
+  editorFields.replaceChildren();editorResume.value='';editorResumeStatus.textContent='';editorStatus.textContent='';
+  editorVersion.textContent='';editorVersionDetails.hidden=true;editorVersionDetails.open=false;editorControls();
+}
+function renderEditor(data){
+  editorState=data;editorFields.replaceChildren();editorResume.value='';
+  editorUncertain=data.admission_status!=='ready';
+  if(data.mode!=='legacy')editorFieldSpec.forEach(([key,label,type],index)=>{
+    const field=data.fields[index],wrapper=document.createElement('label'),caption=document.createElement('span'),
+      input=document.createElement(type==='text_list'?'textarea':'input'),note=document.createElement('small');
+    wrapper.className='profile-editor-field';caption.textContent=label;
+    input.id='profile-editor-field-'+index;input.dataset.editorKey=key;input.dataset.editorEditable=String(field.editable);
+    input.autocomplete='off';input.spellcheck=false;if(type!=='text_list')input.type='text';
+    input.maxLength=type==='text_list'?12831:4096;
+    input.value=editorText(field.value,type);input.addEventListener('input',editorControls);
+    note.id=input.id+'-status';input.setAttribute('aria-describedby',note.id);
+    note.textContent=field.status==='unsupported'?'此项记录暂不支持在这里修改，原记录将保留；此处不展示。':
+      field.status==='missing'?'缺少记录，请本人填写并核对。':'已记录在本机，仍需本人核对。';
+    wrapper.append(caption,input,note);editorFields.append(wrapper);
+  });
+  const kinds={resume_pdf:'PDF',resume_docx:'DOCX',resume_doc:'DOC'};
+  editorResumeStatus.textContent=data.resume.status==='recorded_locally'?
+    '当前简历：本机已记录 '+(kinds[data.resume.kind]||'文件')+'，内容仍需本人核对。':
+    data.resume.status==='missing'?'当前简历：尚无本机记录。':'当前简历记录暂不支持在此核对；未选择替换时原记录保持不变。';
+  editorVersion.textContent='资料版本：'+(data.profile_version||'尚未保存')+'；设置版本：'+data.settings_version;
+  editorVersionDetails.hidden=false;
+  editorStatus.textContent=editorUncertain?'上次保存状态需要核对，请使用“重新读取并核对”；不会自动重试。':
+    data.mode==='legacy'?'旧版资料格式暂不支持逐项编辑，请关闭后通过资料 JSON 导入完整的新版资料。原资料没有修改。':
+    data.mode==='new'?'尚无资料。填写后明确保存，之后的新任务才会使用。':'已读取本机资料。仅保存你明确修改的项目；清空某项会移除该项记录。';
+  editorControls();
+}
+async function openEditor(){
+  if(uiSessionExpired||profileBusy||!profileVersion||profileFile.files.length)return;
+  closeProfileSetup();clearEditor();const epoch=editorEpoch;
+  editorBusy=true;editorStatus.textContent='正在读取本机资料…';editorDialog.showModal();editorClose.focus();editorControls();
+  try{
+    const response=await uiRequest('/ui/api/profile-editor',{credentials:'same-origin'}),data=await response.json();
+    if(uiSessionExpired||epoch!==editorEpoch||!editorDialog.open)return;
+    if(!response.ok||!validEditorState(data))throw new Error();
+    renderEditor(data);
+  }catch(_){if(!uiSessionExpired&&epoch===editorEpoch&&editorDialog.open)
+    editorStatus.textContent='无法读取资料，请关闭后重新打开；没有修改资料。';
+  }finally{if(epoch===editorEpoch){editorBusy=false;editorControls();}}
+}
+document.getElementById('profile-editor-open').onclick=()=>void openEditor();
+function closeEditor(){clearEditor();if(editorDialog.open)editorDialog.close();}
+editorClose.onclick=closeEditor;
+editorDialog.addEventListener('cancel',clearEditor);
+editorDialog.addEventListener('close',()=>{if(editorDialog.open)return;clearEditor();if(!uiSessionExpired)profileBtn.focus();});
+editorResume.onchange=()=>{
+  if(editorResume.files.length)editorStatus.textContent='已选择本次替换文件，尚未保存。请确认文件内容与资料一致后再保存。';
+  editorControls();
+};
+editorClearResume.onclick=()=>{editorResume.value='';editorStatus.textContent='已撤销本次文件选择，原简历记录保持不变。';editorControls();};
+function editorUnconfirmed(){
+  editorUncertain=true;editorResume.value='';
+  editorStatus.textContent='保存尚未确认，可能已经写入本机。请重新读取并核对；不会自动重试，也不会更换已有任务的资料。';
+}
+editorSave.onclick=async()=>{
+  if(editorSave.disabled||uiSessionExpired||!editorState)return;
+  const epoch=editorEpoch,state=editorState,edits=editorChanges(),file=editorResume.files[0];
+  const extension=file?.name.toLowerCase().match(/\.(pdf|docx|doc)$/)?.[1];
+  if(file&&(!extension||!file.size||file.size>=20*1024*1024)){
+    editorStatus.textContent='请选择非空 PDF、DOCX 或 DOC 文件，文件与资料合计须小于 20 MiB。';return;
+  }
+  const kinds={pdf:'resume_pdf',docx:'resume_docx',doc:'resume_doc'};
+  const metadata={schema_version:1,expected_settings_version:state.settings_version,expected_profile_version:state.profile_version,
+    edits,resume_action:file?'replace':'keep',resume_kind:file?kinds[extension]:null};
+  if(Object.entries(edits).some(([key,value])=>!editorSupported(editorFieldSpec.find(item=>item[0]===key)[2],value))){
+    editorStatus.textContent='请检查字段格式：每项最多 2048 个字符，城市最多 32 行且每行最多 200 个字符。';return;
+  }
+  const encoded=JSON.stringify(metadata);
+  if(new TextEncoder().encode(encoded).length>32*1024){editorStatus.textContent='本次资料内容过长，请减少内容后重新检查。';return;}
+  editorBusy=true;editorControls();let posted=false;
+  try{
+    const form=new FormData();form.append('metadata',new Blob([encoded],{type:'application/json'}),'metadata.json');
+    if(file)form.append('resume',file.slice(0,file.size,'application/octet-stream'),'resume.'+extension);
+    const envelope=new Response(form),contentType=envelope.headers.get('Content-Type'),body=await envelope.arrayBuffer();
+    if(uiSessionExpired||epoch!==editorEpoch||!editorDialog.open)return;
+    if(body.byteLength>20*1024*1024){editorStatus.textContent='文件与资料合计超过 20 MiB，请选择较小文件后再保存。';return;}
+    posted=true;
+    const response=await uiRequest('/ui/api/profile-editor',{method:'POST',credentials:'same-origin',headers:{'Content-Type':contentType},body});
+    const data=await response.json();
+    if(uiSessionExpired||epoch!==editorEpoch||!editorDialog.open)return;
+    if(response.status===400&&data.error==='invalid_request'){
+      editorStatus.textContent='本次请求格式被拒绝，资料未保存。请检查资料大小、字段格式、城市列表及文件后再决定是否保存。';return;
+    }
+    if(response.status===409&&data.error==='state_conflict'){
+      editorUncertain=true;editorResume.value='';
+      editorStatus.textContent='本次保存因资料版本变化或暂不可用而被拒绝。请重新读取并核对，再决定是否修改；不会自动重试。';return;
+    }
+    if(!response.ok||data.save_status!=='saved'||!validEditorState(data))throw new Error();
+    const readback=await uiRequest('/ui/api/profile-editor',{credentials:'same-origin'}),observed=await readback.json();
+    if(uiSessionExpired||epoch!==editorEpoch||!editorDialog.open)return;
+    if(!readback.ok||!validEditorState(observed)||observed.settings_version!==data.settings_version
+      ||observed.profile_version!==data.profile_version||observed.admission_status!=='ready')throw new Error();
+    renderEditor(observed);editorStatus.textContent='已保存在本机并重新读取确认。仅用于以后新任务，已有任务仍使用原资料。';void readiness();
+  }catch(_){if(!uiSessionExpired&&epoch===editorEpoch&&editorDialog.open){
+    if(posted)editorUnconfirmed();else editorStatus.textContent='无法准备本次保存，尚未发送保存请求。请检查资料与文件后再试。';
+  }}finally{if(epoch===editorEpoch){editorBusy=false;editorControls();}}
+};
+editorReconcile.onclick=async()=>{
+  if(editorReconcile.disabled||!editorUncertain||uiSessionExpired)return;
+  const epoch=editorEpoch;editorBusy=true;editorControls();
+  try{
+    const response=await uiRequest('/ui/api/profile-editor/reconcile',{method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},body:'{}'}),data=await response.json();
+    if(uiSessionExpired||epoch!==editorEpoch||!editorDialog.open)return;
+    if(!response.ok||data.reconciliation_status!=='reconciled'||!validEditorState(data)||data.admission_status!=='ready')throw new Error();
+    renderEditor(data);editorStatus.textContent='已重新读取本机当前记录。请逐项核对后再决定是否修改；刚才未确认的修改不会自动重试。';
+  }catch(_){if(!uiSessionExpired&&epoch===editorEpoch&&editorDialog.open)
+    editorStatus.textContent='当前记录仍未确认，请关闭并重新打开应用后检查。不会自动重试保存。';
+  }finally{if(epoch===editorEpoch){editorBusy=false;editorControls();}}
+};
+
 const newTaskForm=document.getElementById('newtask');
 const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
 const recoveryObservations=new Map();
@@ -530,6 +728,7 @@ function expireUISession(){
   providerRefreshObservation=null;providerLoadStatus.textContent='';
   currentTaskId=null;savedView=null;updateTaskContext();
   clearProfileSelection();if(profileDialog.open)profileDialog.close();
+  closeEditor();
   recoveryObservations.clear();tasksEl.querySelectorAll('[data-field-recovery]').forEach(panel=>panel.remove());
   const notice=document.getElementById('session-expired');
   notice.hidden=false;

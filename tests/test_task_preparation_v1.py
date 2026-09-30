@@ -343,10 +343,10 @@ def test_only_designated_resume_asset_is_inspected(local_task, tmp_path, monkeyp
 @pytest.mark.parametrize("change", ["contents", "replace", "unlink", "hardlink", "mode", "parent_replace", "task_cancel", "task_spec", "task_revision", "task_delete"])
 def test_observation_fences_profile_paths_fds_and_entire_persisted_task(local_task, tmp_path, monkeypatch, change):
     q, task, profile = local_task
-    original_bytes = preparation._profile_bytes
+    original_validator = preparation.validate_profile_text
     before = _snapshot(q)
     def change_during_validation(text):
-        result = original_bytes(text)
+        result = original_validator(text)
         if change == "contents":
             _write(profile, {"fields": {}})
         elif change == "replace":
@@ -381,7 +381,7 @@ def test_observation_fences_profile_paths_fds_and_entire_persisted_task(local_ta
             with q.tx() as db:
                 db.execute("DELETE FROM tasks WHERE task_id=?", (task["task_id"],))
         return result
-    monkeypatch.setattr(preparation, "_profile_bytes", change_during_validation)
+    monkeypatch.setattr(preparation, "validate_profile_text", change_during_validation)
     with pytest.raises(RuntimeError, match="^preparation changed$"):
         _prepare(q, task)
     if not change.startswith("task_"):
@@ -526,11 +526,11 @@ def test_http_stale_revision_cancel_race_and_errors_are_sanitized(api, monkeypat
     assert request(urlencode({"task_id": task["task_id"], "expected_revision": task["revision"] + 1}))[:2] == (409, {"error": "state_conflict"})
     def conflict(_):
         raise RuntimeError(PRIVATE)
-    monkeypatch.setattr(preparation, "_profile_bytes", conflict)
+    monkeypatch.setattr(preparation, "validate_profile_text", conflict)
     assert request()[:2] == (409, {"error": "state_conflict"})
     def unexpected(_):
         raise Exception(PRIVATE)
-    monkeypatch.setattr(preparation, "_profile_bytes", unexpected)
+    monkeypatch.setattr(preparation, "validate_profile_text", unexpected)
     assert request()[:2] == (500, {"error": "internal_error"})
 
 
