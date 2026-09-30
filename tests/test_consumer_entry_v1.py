@@ -4021,7 +4021,6 @@ def test_cold_restart_does_not_adopt_a_live_service_without_its_registry(
     assert not (root / "service.json").exists()
 
 
-@pytest.mark.parametrize("replace_registry", [False, True])
 def test_http_service_retirement_sends_ack_before_worker_stops(
     retirement_private_state, monkeypatch
 ):
@@ -4067,6 +4066,7 @@ def test_http_service_retirement_sends_ack_before_worker_stops(
         thread.join(timeout=5)
 
 
+@pytest.mark.parametrize("replace_registry", [False, True])
 def test_actual_isolated_service_retires_without_pid_signals_or_private_replay(
     retirement_private_state, tmp_path, monkeypatch, replace_registry
 ):
