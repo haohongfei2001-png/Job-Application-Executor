@@ -70,6 +70,42 @@ The dashboard translates internal states into user-facing language, for example:
 
 The underlying state values remain unchanged for audit and recovery.
 
+## Local preparation checklist
+
+The engineering candidate provides **查看本地准备清单** on a task card. This is
+an explicit local read, not permission to execute or submit that task.
+
+1. Open the checklist for the exact task you want to review. It uses that task's
+   original profile reference, even if you selected another profile for future
+   tasks.
+2. Check the profile and resume's last observed local versions. A field marked
+   **本机已记录** only means a local value exists; it does not prove correctness,
+   eligibility, website acceptance or a saved application draft.
+3. Review missing records and manual steps. The dated Qiyunfang campus-form
+   checklist appears only for its exact official source and the observed
+   **应用实施工程师（武汉）** role. It is a cached observation, not a fresh scan of
+   the website or a complete certification of required fields. A second role
+   is not selected or inferred; confirm on the official form whether it is
+   needed.
+4. Use **刷新检查** to read local state again. Closing the dialog, switching tasks,
+   refreshing the app or restarting the service clears the old observation.
+   The task and its history remain unchanged.
+
+The checklist never displays personal field values, identity numbers, file
+paths or file contents, and does not copy them to the clipboard or send them to
+a model or website. A matching resume digest proves only a local file version,
+not upload, format acceptance, content quality or server persistence. Identity
+entry, CAPTCHA, privacy decisions, uploads and final submission remain manual.
+The fixed official source link is never opened automatically. The native Mac
+window intentionally blocks external navigation; if its link does not open,
+use the selectable public URL shown in the checklist in your own browser. The
+application does not copy that address or any private data to the clipboard.
+
+Other targets still show local profile/resume availability and honest capability
+limits. Viewing or refreshing this report does not change the task's stage,
+authorization, account verification, server-draft verification or final-review
+certificate. It cannot turn an unsupported target into `READY_TO_SUBMIT`.
+
 ## Safety boundary
 
 Consumer Entry v1 changes only startup and presentation. DeepSeek still receives

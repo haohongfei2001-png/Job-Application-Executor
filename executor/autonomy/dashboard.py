@@ -42,6 +42,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 .diagnostics-dialog::backdrop{background:#0f172a99}.diagnostics-dialog h2{font-size:18px;margin:0 0 8px}.diagnostics-dialog p{font-size:13px;line-height:1.5;color:#475569}
 .diagnostics-dialog pre{max-height:48vh;overflow:auto;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .diagnostics-actions{display:flex;justify-content:flex-end;gap:8px}.diagnostics-actions button{min-height:36px}
+.preparation-checks{list-style:none;margin:12px 0;padding:0}.preparation-checks li{display:flex;justify-content:space-between;gap:14px;border-bottom:1px solid #e2e8f0;padding:9px 0;font-size:13px;line-height:1.5}.preparation-checks strong{color:#475569;text-align:right}.preparation-checks .missing{color:#9a3412}.preparation-manual{font-size:13px;line-height:1.7;padding-left:22px}.preparation-dialog h3{font-size:15px;margin:20px 0 8px}.preparation-dialog a{display:inline-block;min-height:44px;padding:12px 0;color:#1d4ed8}.preparation-dialog .diagnostics-actions{position:sticky;bottom:-22px;background:white;padding:12px 0}.preparation-dialog .diagnostics-actions button{min-height:44px}
 #session-expired{margin:0;padding:16px 22px;background:#fff7ed;color:#9a3412;border-bottom:1px solid #fed7aa;line-height:1.5}
 .toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
 @media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:block;max-height:45vh;border-right:0;border-bottom:1px solid #e5e7eb}main{min-height:55vh}}
@@ -142,6 +143,40 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
     <button id="update-refresh" type="button">刷新状态</button>
   </div>
 </dialog>
+<dialog id="preparation-dialog" class="diagnostics-dialog preparation-dialog" aria-labelledby="preparation-title">
+  <h2 id="preparation-title">本地准备清单</h2>
+  <p>这里只检查当前任务原先绑定的本机资料，不展示个人值、证件号码或文件位置。本机已记录不代表内容正确、已填入网站或已准备好提交。</p>
+  <p id="preparation-status" role="status"></p>
+  <div id="preparation-observation" hidden>
+    <h3>本机资料版本</h3>
+    <p id="preparation-profile"></p>
+    <p id="preparation-resume"></p>
+    <p>资料设置只影响之后添加的任务，不会替换此任务原先绑定的资料。版本摘要只用于区分本机内容。</p>
+    <section id="preparation-contract" hidden aria-label="已缓存的公开表单清单">
+      <h3>启云方公开表单清单</h3>
+      <p>武汉启云方科技有限公司 · 应用实施工程师（武汉）</p>
+      <p>以下字段来自 2026-09-30 的公开页面观察缓存，并非当前网站回读。页面星号与必填属性不一致，必填规则尚未核实。</p>
+      <ul id="preparation-checks" class="preparation-checks"></ul>
+      <p>本机已记录（仍需核对）：只表示发现记录。缺少记录：未发现可用记录。需本人核对：无法据此判断内容是否适用。以上均不证明网站已保存。</p>
+      <p>英语两项只检查本地六级记录；缺少记录不代表没有英语证书。CET4、IELTS、TOEFL 等其他证书及当前网站选项需本人核对。</p>
+      <p>身份证号码、投递岗位1、投递岗位2、简历上传、验证码、隐私条款及提交操作需本人在网站核对。投递岗位2仅在本人确认需要时填写，不会自动添加。</p>
+      <a id="preparation-source" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">尝试打开已核对的官方页面</a>
+      <p>官网地址：<span id="preparation-source-address">https://www.qiyunfang.com/h-col-124.html</span><br>如本机窗口无法打开链接，请在自己的浏览器打开这个官网地址。</p>
+    </section>
+    <p id="preparation-unmatched" hidden>当前任务与已核对的启云方岗位不完全匹配，因此不展示或套用该站的字段清单与链接。请自行核对任务的官方来源。</p>
+    <h3>接下来由本人核对</h3>
+    <ol class="preparation-manual">
+      <li>先核对当前岗位；若官网要求登录，再由本人核对账号。本应用尚未核验账号或服务端草稿。</li>
+      <li>按网站当前要求核对真实资料、必填项及简历版本；需要上传时由本人操作。</li>
+      <li>由本人处理验证码、隐私条款和其他确认，再逐项检查网站实际保留的完整内容。</li>
+      <li>最终提交始终只能由本人完成。这份清单不是可提交认证，也不会开始、继续或重试任务。</li>
+    </ol>
+  </div>
+  <div class="diagnostics-actions">
+    <button id="preparation-close" class="headerbtn" type="button">关闭</button>
+    <button id="preparation-refresh" type="button" disabled>刷新检查</button>
+  </div>
+</dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <script>
 const tasksEl=document.getElementById('tasks'),chat=document.getElementById('chat'),msg=document.getElementById('message'),send=document.getElementById('send'),diagnosticsBtn=document.getElementById('diagnostics'),diagnosticsDialog=document.getElementById('diagnostics-dialog'),diagnosticsReport=document.getElementById('diagnostics-report'),diagnosticsCopy=document.getElementById('diagnostics-copy'),diagnosticsClose=document.getElementById('diagnostics-close'),updateBtn=document.getElementById('update'),toast=document.getElementById('toast');
@@ -235,6 +270,160 @@ const updateDialog=document.getElementById('update-dialog'),
 let updateEpoch=0,updateReadBusy=false,legacyUpdateObservation={status:'idle'};
 let uiSessionExpired=false;
 let currentTaskId=null;
+const preparationDialog=document.getElementById('preparation-dialog'),
+  preparationStatus=document.getElementById('preparation-status'),
+  preparationObservation=document.getElementById('preparation-observation'),
+  preparationProfile=document.getElementById('preparation-profile'),
+  preparationResume=document.getElementById('preparation-resume'),
+  preparationContract=document.getElementById('preparation-contract'),
+  preparationChecks=document.getElementById('preparation-checks'),
+  preparationUnmatched=document.getElementById('preparation-unmatched'),
+  preparationSource=document.getElementById('preparation-source'),
+  preparationClose=document.getElementById('preparation-close'),
+  preparationRefresh=document.getElementById('preparation-refresh');
+const preparationOfficialSource='https://www.qiyunfang.com/h-col-124.html';
+const preparationFieldLabels={
+  'identity.full_name':'姓名','identity.phone':'电话号码','identity.email':'邮箱号码',
+  'identity.gender':'性别','education.highest.degree':'最高学历',
+  'education.highest.school':'毕业院校','education.highest.college':'学院',
+  'education.highest.major':'专业','education.highest.graduation_date':'毕业时间',
+  'language.cet6.level':'英语证书情况（本地六级记录）','language.cet6.score':'英语考级分数（本地六级记录）',
+  'preferences.preferred_cities':'期望工作城市'
+};
+const preparationStatusLabels={recorded_locally:'本机已记录（仍需核对）',missing:'缺少记录',needs_review:'需本人核对'};
+let preparationEpoch=0,preparationBinding=null,preparationBusy=false,preparationStale=false;
+let preparationTaskRevisions=new Map();
+function clearPreparationContent(){
+  preparationObservation.hidden=true;preparationContract.hidden=true;preparationUnmatched.hidden=true;
+  preparationProfile.textContent='';preparationResume.textContent='';preparationChecks.replaceChildren();
+  preparationSource.removeAttribute('href');preparationStatus.textContent='';
+}
+function clearPreparationObservation(){
+  preparationEpoch++;preparationBinding=null;preparationBusy=false;preparationStale=false;
+  clearPreparationContent();preparationRefresh.disabled=true;
+}
+function preparationTrigger(taskId){
+  return [...tasksEl.querySelectorAll('[data-task-preparation]')].find(button=>button.dataset.task===taskId);
+}
+function closePreparationDialog(restoreFocus=true){
+  const taskId=preparationBinding?.taskId;
+  clearPreparationObservation();
+  if(preparationDialog.open)preparationDialog.close();
+  if(restoreFocus&&!uiSessionExpired)(preparationTrigger(taskId)||taskContext).focus();
+}
+function reconcilePreparationTasks(tasks){
+  preparationTaskRevisions=new Map((tasks||[]).map(task=>[task.task_id,task.revision]));
+  // Unsent answers can deliberately hold the card DOM at its old revision.
+  // Refresh only this read-only trigger; never rebind its mutation controls.
+  for(const button of tasksEl.querySelectorAll('[data-task-preparation]')){
+    const revision=preparationTaskRevisions.get(button.dataset.task);
+    button.disabled=!Number.isSafeInteger(revision)||revision<0;
+    if(!button.disabled)button.dataset.revision=String(revision);
+  }
+  if(preparationBinding&&(preparationTaskRevisions.get(preparationBinding.taskId)!==preparationBinding.revision
+      ||currentTaskId!==preparationBinding.taskId)){
+    closePreparationDialog();notify('任务已变化，本地准备清单已清除；请从任务卡片重新查看。');
+  }
+}
+function preparationIsCurrent(epoch,binding){
+  return !uiSessionExpired&&preparationDialog.open&&epoch===preparationEpoch
+    &&preparationBinding===binding&&currentTaskId===binding.taskId
+    &&preparationTaskRevisions.get(binding.taskId)===binding.revision;
+}
+function validPreparation(data,binding){
+  const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+  const contract=data?.contract,profile=data?.profile,resume=data?.resume,caps=data?.capabilities;
+  if(!data||data.task_id!==binding.taskId||data.task_revision!==binding.revision
+    ||data.mode!=='LOCAL_PREPARATION_ONLY'||!caps
+    ||!['live_write','submit','account_verified','server_draft_verified'].every(key=>caps[key]===false)
+    ||!profile||!['available','unavailable'].includes(profile.status)
+    ||(profile.status==='available'?!digest(profile.version):profile.version!==null)
+    ||!resume||!['local_version_matches','local_version_differs','unverified','missing','unavailable'].includes(resume.status)
+    ||(['missing','unavailable'].includes(resume.status)?resume.version!==null:!digest(resume.version))
+    ||!contract||typeof contract.matched!=='boolean'||contract.requiredness!=='UNVERIFIED'
+    ||!Array.isArray(data.items))return false;
+  if(!contract.matched)return contract.id===null&&contract.source_url===null&&contract.observed_at===null
+    &&contract.coverage==='unavailable'&&contract.freshness==='unavailable'&&data.items.length===0;
+  const keys=data.items.map(item=>item?.key);
+  return contract.id==='qiyunfang-wuhan-implementation-v1'&&contract.source_url===preparationOfficialSource
+    &&contract.observed_at==='2026-09-30'&&contract.coverage==='observed_fields_only'
+    &&contract.freshness==='cached_observation'&&keys.length===Object.keys(preparationFieldLabels).length
+    &&new Set(keys).size===keys.length&&data.items.every(item=>Object.hasOwn(preparationFieldLabels,item.key)
+      &&Object.hasOwn(preparationStatusLabels,item.status));
+}
+function renderPreparation(data){
+  // Labels, notes, manual instructions and hrefs never come from response text.
+  // Only admitted enum values and validated, shortened content digests render.
+  preparationProfile.textContent=data.profile.status==='available'?
+    '此任务绑定的资料：本机可读取。当前版本摘要前 12 位：'+data.profile.version.slice(0,12)+'。':
+    '此任务绑定的资料：暂不可读取，需本人核对。';
+  const resumeLabels={local_version_matches:'本机简历与资料记录的版本一致，仍需本人核对内容。',
+    local_version_differs:'本机简历与资料记录的版本不同，请本人核对后再使用。',
+    unverified:'已读取本机简历，但没有可核实的记录版本，需本人核对。',
+    missing:'缺少本机简历记录，需本人准备。',unavailable:'本机简历暂不可读取，需本人核对。'};
+  preparationResume.textContent=resumeLabels[data.resume.status]+(data.resume.version?
+    ' 当前版本摘要前 12 位：'+data.resume.version.slice(0,12)+'。':'')+' 这不证明网站已接收或保存简历。';
+  preparationContract.hidden=!data.contract.matched;preparationUnmatched.hidden=data.contract.matched;
+  if(data.contract.matched){
+    for(const item of data.items){
+      const row=document.createElement('li'),label=document.createElement('span'),status=document.createElement('strong');
+      label.textContent=preparationFieldLabels[item.key];status.textContent=preparationStatusLabels[item.status];
+      status.className=item.status;row.append(label,status);preparationChecks.append(row);
+    }
+    preparationSource.href=preparationOfficialSource;
+  }
+  preparationObservation.hidden=false;
+  preparationStatus.textContent='已完成一次本机只读检查。以下是最近一次本地观察，不是网站草稿或可提交认证。';
+  preparationDialog.scrollTop=0;
+}
+async function readTaskPreparation(){
+  if(uiSessionExpired||!preparationDialog.open||!preparationBinding||preparationBusy||preparationStale)return;
+  const epoch=preparationEpoch,binding=preparationBinding;
+  if(!preparationIsCurrent(epoch,binding))return;
+  preparationBusy=true;preparationRefresh.disabled=true;clearPreparationContent();
+  preparationStatus.textContent='正在检查此任务的本机资料…';
+  try{
+    const response=await uiRequest('/ui/api/task-preparation?task_id='+encodeURIComponent(binding.taskId)
+      +'&expected_revision='+binding.revision,{credentials:'same-origin',cache:'no-store'});
+    if(!preparationIsCurrent(epoch,binding))return;
+    if(response.status===409){preparationStale=true;throw new Error();}
+    if(!response.ok)throw new Error();
+    const data=await response.json();
+    if(!preparationIsCurrent(epoch,binding))return;
+    if(!validPreparation(data,binding))throw new Error();
+    renderPreparation(data);
+  }catch(_){
+    if(preparationIsCurrent(epoch,binding)){
+      clearPreparationContent();
+      preparationStatus.textContent=preparationStale?
+        '任务或资料版本已变化，本次观察已清除。请关闭后从任务卡片重新查看。':
+        '本地准备检查暂不可用；没有修改任务。可明确点击刷新检查重试。';
+    }
+  }finally{
+    if(epoch===preparationEpoch){preparationBusy=false;preparationRefresh.disabled=uiSessionExpired||preparationStale;}
+  }
+}
+function openTaskPreparation(taskId,revision){
+  if(uiSessionExpired||!Number.isSafeInteger(revision)||revision<0
+    ||preparationTaskRevisions.get(taskId)!==revision)return;
+  if(preparationDialog.open&&preparationBinding?.taskId===taskId&&preparationBinding.revision===revision)return;
+  if(preparationDialog.open)closePreparationDialog(false);
+  clearPreparationObservation();currentTaskId=taskId;updateTaskContext();
+  preparationBinding={taskId,revision};preparationDialog.showModal();preparationClose.focus({preventScroll:true});
+  preparationDialog.scrollTop=0;
+  void readTaskPreparation();
+}
+tasksEl.addEventListener('click',event=>{
+  const button=event.target.closest('button[data-task-preparation]');if(!button)return;
+  openTaskPreparation(button.dataset.task,Number(button.dataset.revision));
+});
+preparationClose.onclick=()=>closePreparationDialog();
+preparationRefresh.onclick=readTaskPreparation;
+preparationDialog.addEventListener('cancel',event=>{event.preventDefault();closePreparationDialog();});
+preparationDialog.addEventListener('close',()=>{
+  // A queued close event cannot erase a newer dialog opened in the same turn.
+  if(!preparationDialog.open)clearPreparationObservation();
+});
 const taskContext=document.getElementById('task-context');
 const rememberView=document.getElementById('remember-task-view');
 const forgetView=document.getElementById('forget-task-view');
@@ -317,6 +506,7 @@ function updateTaskContext(){
 tasksEl.addEventListener('click',event=>{
   const button=event.target.closest('button[data-task-select]');
   if(!button||uiSessionExpired)return;
+  if(preparationBinding&&preparationBinding.taskId!==button.dataset.taskSelect)closePreparationDialog(false);
   currentTaskId=button.dataset.taskSelect;updateTaskContext();
 });
 tasksEl.addEventListener('keydown',event=>{
@@ -332,6 +522,7 @@ tasksEl.addEventListener('keydown',event=>{
 function expireUISession(){
   if(uiSessionExpired)return;
   uiSessionExpired=true;
+  closePreparationDialog(false);preparationTaskRevisions.clear();
   updateEpoch++;updateReadBusy=false;updateRefresh.disabled=true;
   updateObservation.textContent='';if(updateDialog.open)closeUpdateDialog();
   providerLoadEpoch++;providerLoad.disabled=true;providerRefresh.disabled=true;
@@ -443,7 +634,9 @@ function acceptRecoveryObservation(taskId,observed){
 }
 function render(state){
   if(uiSessionExpired)return;
+  const focusedPreparation=document.activeElement?.hasAttribute('data-task-preparation')?document.activeElement.dataset.task:null;
   acceptSavedView(state);
+  reconcilePreparationTasks(state.tasks);
   const counts={running:0,need:0,ready:0,done:0};
   (state.tasks||[]).forEach(t=>counts[stageGroup(t.stage)]++);
   Object.entries(counts).forEach(([k,v])=>document.getElementById(k).textContent=v);
@@ -451,7 +644,7 @@ function render(state){
   const focusedTask=document.activeElement?.dataset?.taskSelect;
   if(!(state.tasks||[]).length){
     tasksEl.className='empty';tasksEl.textContent='暂无任务';updateTaskContext();
-    if(focusedTask!==undefined)taskContext.focus();
+    if(focusedTask!==undefined||focusedPreparation)taskContext.focus();
     return;
   }
   tasksEl.className='';
@@ -477,7 +670,8 @@ function render(state){
       ${t.blocker==='security_challenge'?'<div class="otpnote">请在任务专用浏览器由本人完成安全验证；完成后继续，系统会重新核对目标。</div>':''}
       ${t.blocker==='auth_return_unverified'?'<div class="otpnote">系统无法证明登录后仍在原岗位。请核对页面；此任务不会自动重发短信或继续写入。</div>':''}
       ${t.blocker==='account_identity_unverified'?'<div class="otpnote">系统无法证明当前账号属于申请人。此站点表单保持只读，直到有受验证的站点账号识别能力。</div>':''}
-      <div class="taskcontrols">
+      <div class="taskcontrols task-view-controls">
+        <button type="button" data-task-preparation="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">查看本地准备清单</button>
         ${t.stage==='READY_TO_SUBMIT'&&t.review_values_available?`<button type="button" data-review-values="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}" aria-expanded="false" aria-controls="review-${esc(t.task_id)}">查看完整复核值</button>`:''}
         ${t.stage==='READY_TO_SUBMIT'?`<button type="button" data-observe-submission="true" data-task="${esc(t.task_id)}">只读查看提交结果</button>`:''}
         ${t.stage==='READY_TO_SUBMIT'&&t.can_confirm_submission?`<button type="button" data-confirm-submission="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">我已在招聘网站亲自提交</button>`:''}
@@ -493,6 +687,7 @@ function render(state){
     const restored=[...tasksEl.querySelectorAll('[data-task-select]')].find(button=>button.dataset.taskSelect===focusedTask);
     (restored||taskContext).focus({preventScroll:true});
   }
+  else if(focusedPreparation)(preparationTrigger(focusedPreparation)||taskContext).focus({preventScroll:true});
 }
 tasksEl.addEventListener('click',event=>{
   const button=event.target.closest('button[data-close-private-review]');if(!button)return;
@@ -917,6 +1112,8 @@ async function state(){
     if(!r.ok)throw new Error();
     const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     acceptSavedView(data);
+    // Reconcile even while an unsent answer or private review prevents a card rerender.
+    reconcilePreparationTasks(data.tasks);
     const openReview=tasksEl.querySelector('[data-private-review-open]');
     if(openReview){
       const current=(data.tasks||[]).find(t=>t.task_id===openReview.dataset.privateReviewOpen);

@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .. import browser, settings
 from .profile_setup import profile_setup_state, select_profile
+from .task_preparation import parse_preparation_query, prepare_task
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
@@ -671,6 +672,12 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/state":
                         self._send_json(200, supervisor.ui_state())
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/task-preparation":
+                        if parsed.fragment:
+                            raise ValueError("invalid preparation request")
+                        task_id, revision = parse_preparation_query(parsed.query)
+                        self._send_json(200, prepare_task(supervisor.queue, task_id, revision))
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/profile-setup":
                         self._send_json(200, profile_setup_state())

@@ -41,10 +41,12 @@ jobs:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
         run: python -m pytest -q tests/test_jcr07_review_certificate.py tests/test_application_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py tests/test_jcr06_forms.py tests/test_generic_browser_v1.py tests/test_field_action_journal_v1.py tests/test_jcr06_row_recovery.py
       - name: Validate update-state privacy readback
+        id: local_ui_verification
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+          JAE_UI_SCREENSHOT_DIR: ${{ runner.temp }}/jae-preparation-ui
         run: |
-          python -m pytest -q tests/test_local_operations_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py
+          python -m pytest -q tests/test_local_operations_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py tests/test_task_preparation_v1.py
           python -m pytest -q tests/test_dashboard_diagnostics_browser.py -k 'diagnostics_need_explicit_copy or expired_session or task_workspace'
       - name: Compile Python sources
         run: python -m compileall -q executor tests
@@ -65,6 +67,14 @@ jobs:
       - name: Diff whitespace check
         if: github.event_name == 'pull_request'
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+      - name: Retain synthetic local-preparation UI evidence
+        if: always() && steps.local_ui_verification.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jae-local-preparation-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/jae-preparation-ui/preparation-dialog.png
+          if-no-files-found: error
+          retention-days: 3
 
   packaged_candidate:
     if: github.event_name == 'pull_request' && github.event.pull_request.draft
@@ -187,7 +197,7 @@ jobs:
           - suite: runtime_distribution
             tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py
           - suite: native_integration
-            tests: tests/test_macos_host_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py
+            tests: tests/test_macos_host_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py tests/test_task_preparation_v1.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
