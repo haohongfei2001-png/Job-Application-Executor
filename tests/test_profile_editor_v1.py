@@ -781,6 +781,146 @@ def test_changed_uploaded_resume_keeps_uncertain_admission_fenced_until_proven(c
     assert supervisor.manager._profile_ref() == selected["profile_path"]
 
 
+def test_changed_uploaded_resume_restart_fences_admission_until_explicit_reconcile(configured, tmp_path, monkeypatch):
+    from executor.discovery.core import DiscoveryRequest, DiscoveryResult
+
+    authority, path, prior_resume, original = configured
+    supervisor = supervisor_for(tmp_path, original)
+    old = supervisor.queue.enqueue(TaskSpec(company="Synthetic", role="Existing",
+        target_url="https://existing.example.test", profile_ref=str(path), live_authorized=False))
+    before_tasks = supervisor.queue.tasks()
+    before_events = supervisor.queue.recent_events(100)
+    before_originals = snapshot(path), snapshot(prior_resume)
+    request = metadata(resume_action="replace", resume_kind="resume_pdf")
+    real_write = settings._write_at
+    original_bytes = b"ORIGINAL_OPAQUE"
+    def alter_published_resume(parent, encoded):
+        real_write(parent, encoded)
+        selected = json.loads(encoded)
+        profile = json.loads(Path(selected["profile_path"]).read_bytes())
+        Path(profile["assets"]["resume"]["path"]).write_bytes(b"CHANGED_OPAQUE")
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("future-task admission must not initialize a provider")
+    monkeypatch.setattr(settings, "_write_at", alter_published_resume)
+    monkeypatch.setattr(ManagerController, "provider", property(forbidden))
+    with pytest.raises(editor.PublicationUncertain) as failure:
+        supervisor.configure_profile_editor(request, original_bytes)
+    assert failure.value.current is None and supervisor.manager._profile_selection_uncertain
+    with pytest.raises(RuntimeError, match="^profile_selection_reconciliation_required$"):
+        supervisor.manager._profile_ref()
+    with pytest.raises(editor.EditorConflict):
+        supervisor.reconcile_profile_editor()
+    assert supervisor.manager._profile_selection_uncertain
+
+    # Reconstruct the actual default manager/worker from disk, not copied state.
+    restarted = Supervisor(TaskQueue(supervisor.queue.root), token="s" * 40)
+    selected = settings.load_settings()
+    assert restarted.manager.settings == restarted.worker.settings == selected
+    assert not getattr(restarted.manager, "_profile_selection_uncertain", False)
+    future_request = DiscoveryRequest("Synthetic", "Future", source_url="https://future.example.test")
+    discovered = DiscoveryResult("UNSUPPORTED", (), None, "synthetic", "no_official_site_contract")
+    before_authority = {x.name: snapshot(x) for x in authority.iterdir()}
+    with pytest.raises(RuntimeError, match="^profile_selection_reconciliation_required$"):
+        restarted.manager.commit_local_form(future_request, discovered)
+    assert restarted.manager._profile_selection_uncertain
+    with pytest.raises(editor.EditorConflict):
+        restarted.reconcile_profile_editor()
+    assert restarted.queue.tasks() == before_tasks
+    assert restarted.queue.recent_events(100) == before_events
+    assert {x.name: snapshot(x) for x in authority.iterdir()} == before_authority
+    assert (snapshot(path), snapshot(prior_resume)) == before_originals
+
+    profile = json.loads(Path(selected["profile_path"]).read_bytes())
+    Path(profile["assets"]["resume"]["path"]).write_bytes(original_bytes)
+    before_reconcile = {x.name: snapshot(x) for x in authority.iterdir()}
+    # A successful read alone cannot silently clear a latched admission fence.
+    assert editor.editor_state()[0] == selected
+    with pytest.raises(RuntimeError, match="^profile_selection_reconciliation_required$"):
+        restarted.manager.commit_local_form(future_request, discovered)
+    assert restarted.reconcile_profile_editor()["reconciliation_status"] == "reconciled"
+    assert restarted.manager._profile_ref() == selected["profile_path"]
+    assert restarted.worker.settings == restarted.manager.settings == selected
+    assert restarted.queue.tasks() == before_tasks
+    assert restarted.queue.recent_events(100) == before_events
+    assert {x.name: snapshot(x) for x in authority.iterdir()} == before_reconcile
+    future = restarted.manager.commit_local_form(future_request, discovered)
+    assert future["spec"]["profile_ref"] == selected["profile_path"]
+    assert future["spec"]["live_authorized"] is False
+    assert restarted.queue.get(old["task_id"]) == old
+    assert (snapshot(path), snapshot(prior_resume)) == before_originals
+
+
+def test_managed_admission_rejects_stale_memory_selection_without_rebinding(configured, tmp_path):
+    authority, _, _, _ = configured
+    first, _ = editor.save_profile(metadata())
+    supervisor = supervisor_for(tmp_path, first)
+    second, _ = editor.save_profile(metadata(edits={"identity.full_name": "NEW_SELECTION"}))
+    before = {x.name: snapshot(x) for x in authority.iterdir()}
+    with pytest.raises(RuntimeError, match="^profile_selection_reconciliation_required$"):
+        supervisor.manager._profile_ref()
+    assert supervisor.manager._profile_selection_uncertain
+    assert supervisor.manager.settings == supervisor.worker.settings == first
+    assert supervisor.queue.tasks() == [] and supervisor.queue.recent_events(100) == []
+    assert settings.load_settings() == second
+    assert {x.name: snapshot(x) for x in authority.iterdir()} == before
+    assert supervisor.reconcile_profile_editor()["reconciliation_status"] == "reconciled"
+    assert supervisor.manager._profile_ref() == second["profile_path"]
+    assert {x.name: snapshot(x) for x in authority.iterdir()} == before
+
+
+@pytest.mark.parametrize("profile", [canonical(), {"identity": {"full_name": "PRIVATE_LEGACY"}}])
+def test_managed_json_imports_remain_admissible(configured, tmp_path, profile):
+    from executor.autonomy.profile_setup import select_profile
+
+    authority, _, _, original = configured
+    selected = select_profile(json.dumps(profile), settings.settings_version(original))
+    supervisor = Supervisor(TaskQueue(tmp_path.resolve() / "import-runtime"), token="s" * 40)
+    before = {x.name: snapshot(x) for x in authority.iterdir()}
+    assert supervisor.manager._profile_ref() == selected["profile_path"]
+    assert not getattr(supervisor.manager, "_profile_selection_uncertain", False)
+    assert {x.name: snapshot(x) for x in authority.iterdir()} == before
+
+
+@pytest.mark.parametrize("fault", ["corrupt", "missing", "symlink", "hardlink", "mode", "authority_mode",
+                                    "dot_component", "duplicate_separator", "parent_component"])
+def test_managed_admission_retains_safe_reader_path_and_file_guards(configured, tmp_path, fault):
+    authority, prior, _, _ = configured
+    selected, _ = editor.save_profile(metadata())
+    path = Path(selected["profile_path"])
+    if fault == "corrupt": path.write_bytes(b"PRIVATE_INVALID_JSON")
+    elif fault == "missing": path.unlink()
+    elif fault == "symlink": path.unlink(); path.symlink_to(prior)
+    elif fault == "hardlink": path.unlink(); os.link(prior, path)
+    elif fault == "mode": path.chmod(0o644)
+    elif fault == "authority_mode": authority.chmod(0o755)
+    else:
+        component = {"dot_component": "/./", "duplicate_separator": "//",
+                     "parent_component": "/../private/"}[fault]
+        selected = {**selected, "profile_path": str(authority) + component + path.name}
+        settings.save_settings(selected)
+    supervisor = supervisor_for(tmp_path, selected)
+    before = snapshot(prior)
+    with pytest.raises(RuntimeError, match="^profile_selection_reconciliation_required$"):
+        supervisor.manager._profile_ref()
+    assert supervisor.manager._profile_selection_uncertain
+    assert supervisor.queue.tasks() == [] and supervisor.queue.recent_events(100) == []
+    assert snapshot(prior) == before
+
+
+@pytest.mark.parametrize("managed_name", [False, True])
+def test_unrelated_profile_paths_keep_existing_admission_behavior(configured, tmp_path, monkeypatch, managed_name):
+    _, prior, _, original = configured
+    path = tmp_path / ("profile-" + "a" * 32 + ".json") if managed_name else prior
+    if managed_name:
+        path.write_bytes(b"ordinary unrelated fixture")
+    supervisor = supervisor_for(tmp_path, {**original, "profile_path": str(path)})
+    def forbidden():
+        pytest.fail("unrelated profile paths do not use managed editor admission")
+    monkeypatch.setattr(editor, "editor_state", forbidden)
+    assert supervisor.manager._profile_ref() == str(path)
+    assert not getattr(supervisor.manager, "_profile_selection_uncertain", False)
+
+
 def test_resume_history_key_collision_preserves_existing_extension(configured, monkeypatch):
     _, path, _, original = configured
     profile = json.loads(path.read_bytes())

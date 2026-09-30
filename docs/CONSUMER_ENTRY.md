@@ -1,5 +1,10 @@
 # Consumer Entry v1
 
+For the current self-contained unsigned engineering candidate, use the
+[Chinese candidate guide](consumer-readiness-v1/ENGINEERING_CANDIDATE_GUIDE.zh-CN.md).
+The installation notes immediately below describe the historical thin-launcher
+path, not the current delivered archive or a certified consumer release.
+
 Consumer Entry v1 is a thin macOS launcher for the existing local-first
 Application Executor. It does not replace the executor, queue, browser adapter,
 OTP broker or safety gates.
@@ -139,7 +144,9 @@ fields in the authenticated local window. The main promise is:
 - A busy or changed source is rejected rather than overwritten. If a save
   might have reached disk but cannot be confirmed, use **重新读取并核对**.
   The app does not replay the save; uncertain future-task admission remains
-  fenced until a safe local read can reconcile it. Existing task controls are
+  fenced until a safe local read can reconcile it. Managed selections and
+  editor-owned resume integrity are revalidated when binding each future task,
+  including after a service restart. Existing task controls are
   not turned into new application permission.
 - Closing the editor, pressing Escape, refreshing the page or expiring the UI
   session clears its private inputs and pending file selection. Unsent edits

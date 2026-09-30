@@ -18,6 +18,7 @@ from ..settings import load_settings
 from ..profile import DEFAULT_ALIASES
 from ..evidence import BOOL_KEYS
 from ..target_resolver import is_oppo_campus_landing, resolve_known_landing
+from . import profile_editor
 from .queue import TaskQueue, TaskSpec
 
 
@@ -486,6 +487,16 @@ class ManagerController:
         value = self.settings.get("profile_path")
         if not isinstance(value, str) or not value.strip():
             raise ValueError("profile_path is not configured")
+        if profile_editor.is_managed_profile_path(value):
+            try:
+                # A restart loses the memory fence, not the need to prove the
+                # selected version and its editor-owned resume before admission.
+                current, _view = profile_editor.editor_state()
+                if current.get("profile_path") != value:
+                    raise profile_editor.EditorConflict()
+            except Exception:
+                self._profile_selection_uncertain = True
+                raise RuntimeError("profile_selection_reconciliation_required") from None
         return value
 
     def prepare_local_form(self, company: str, role: str, target_url: str = "", *,

@@ -2133,6 +2133,7 @@ def test_task_workspace_profile_editor_explicit_private_projection_narrow_and_sa
     for forbidden in ("PRIVATE_HIDDEN_ID", "PRIVATE_PATH", "UNTRUSTED_LABEL"):
         assert forbidden not in private_surface
     assert not page.locator("#profile-editor-version-details").get_attribute("open")
+    assert page.locator("#profile-editor-version-details").evaluate("node => node.open") is False
     assert dialog.evaluate("node => node.scrollWidth <= node.clientWidth")
     assert all(page.locator(selector).bounding_box()["height"] >= 44 for selector in (
         "#profile-editor-close", "#profile-editor-save", "#profile-editor-clear-resume"))
@@ -2141,6 +2142,9 @@ def test_task_workspace_profile_editor_explicit_private_projection_narrow_and_sa
         destination = Path(screenshot_dir)
         destination.mkdir(parents=True, exist_ok=True)
         dialog.screenshot(path=str(destination / "profile-editor-dialog.png"), animations="disabled")
+        page.locator("#profile-editor-resume").scroll_into_view_if_needed()
+        assert page.locator("#profile-editor-resume").input_value() == ""
+        dialog.screenshot(path=str(destination / "profile-editor-resume.png"), animations="disabled")
     page.locator("#profile-editor-close").click()
     expect(dialog).not_to_be_visible()
     expect(page.locator("#profile-setup")).to_be_focused()
@@ -2475,3 +2479,36 @@ def test_task_workspace_profile_editor_pending_admission_requires_successful_exp
     expect(page.locator("#profile-editor-status")).to_contain_text("已重新读取本机当前记录")
     expect(page.locator("#profile-editor-resume")).to_be_enabled()
     assert all(path == "/ui/api/profile-editor/reconcile" for path, _ in _editor_posts(observed))
+
+
+@pytest.mark.parametrize("field_index,original", [(0, "\n姓名\t尾\n"), (10, "\n550\t\n")])
+def test_task_workspace_profile_editor_untouched_multiline_value_is_never_sanitized_into_patch(profile_editor_ui, field_index, original):
+    page, observed = profile_editor_ui
+    observed["payload"]["fields"][field_index].update(value=original, status="supported")
+    _open_editor(page)
+    field = page.locator(f"#profile-editor-field-{field_index}")
+    expect(field).to_have_value(original)
+    assert field.evaluate("node => node.tagName") == "TEXTAREA"
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    page.locator("#profile-editor-field-2").fill("synthetic@example.test")
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("已保存在本机并重新读取确认")
+    posts = _editor_posts(observed)
+    assert len(posts) == 1
+    metadata = json.loads(posts[0][1].split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0])
+    assert metadata["edits"] == {"identity.email": "synthetic@example.test"}
+    expect(field).to_have_value(original)
+
+
+def test_task_workspace_profile_editor_explicit_multiline_edit_preserves_exact_line_breaks(profile_editor_ui):
+    page, observed = profile_editor_ui
+    observed["payload"]["fields"][0].update(value="旧\n资料", status="supported")
+    _open_editor(page)
+    changed = "\n新\t资料\n第二行\n"
+    page.locator("#profile-editor-field-0").fill(changed)
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("已保存在本机并重新读取确认")
+    posts = _editor_posts(observed)
+    assert len(posts) == 1
+    metadata = json.loads(posts[0][1].split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0])
+    assert metadata["edits"] == {"identity.full_name": changed}

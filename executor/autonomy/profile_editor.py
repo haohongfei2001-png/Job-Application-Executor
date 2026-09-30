@@ -447,6 +447,19 @@ def editor_state():
         raise EditorConflict() from None
 
 
+def is_managed_profile_path(path):
+    """Classify local versions lexically; never follow a filesystem alias.
+
+    Normalize only for classification so noncanonical spellings cannot skip
+    the safe reader, which still validates the original exact path.
+    """
+    if not isinstance(path, str) or not path.startswith("/"):
+        return False
+    candidate = Path(os.path.normpath("/" + path.lstrip("/")))
+    return (candidate.parent == settings.PATH.parent
+            and re.fullmatch(r"profile-[0-9a-f]{32}\.json", candidate.name) is not None)
+
+
 def _publish_file(parent, prefix, suffix, payload):
     name = prefix + secrets.token_hex(16) + suffix
     descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,

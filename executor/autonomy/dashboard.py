@@ -349,11 +349,12 @@ function renderEditor(data){
   editorState=data;editorFields.replaceChildren();editorResume.value='';
   editorUncertain=data.admission_status!=='ready';
   if(data.mode!=='legacy')editorFieldSpec.forEach(([key,label,type],index)=>{
-    const field=data.fields[index],wrapper=document.createElement('label'),caption=document.createElement('span'),
-      input=document.createElement(type==='text_list'?'textarea':'input'),note=document.createElement('small');
+    const field=data.fields[index],multiline=type==='text_list'||(typeof field.value==='string'&&field.value.includes('\n')),
+      wrapper=document.createElement('label'),caption=document.createElement('span'),
+      input=document.createElement(multiline?'textarea':'input'),note=document.createElement('small');
     wrapper.className='profile-editor-field';caption.textContent=label;
     input.id='profile-editor-field-'+index;input.dataset.editorKey=key;input.dataset.editorEditable=String(field.editable);
-    input.autocomplete='off';input.spellcheck=false;if(type!=='text_list')input.type='text';
+    input.autocomplete='off';input.spellcheck=false;if(!multiline)input.type='text';
     input.maxLength=type==='text_list'?12831:4096;
     input.value=editorText(field.value,type);input.addEventListener('input',editorControls);
     note.id=input.id+'-status';input.setAttribute('aria-describedby',note.id);
