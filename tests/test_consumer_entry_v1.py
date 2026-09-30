@@ -3255,7 +3255,7 @@ def test_profile_setup_stale_window_never_overwrites_preferences_or_creates_vers
     settings.save_settings({**original, "changed_in_other_window": "PRIVATE_OTHER"})
     before = {p.name: p.read_bytes() for p in settings.PATH.parent.iterdir()}
     with pytest.raises(settings.SettingsConflict, match="^settings_changed$"):
-        setup.select_profile('{"name":"PRIVATE_STALE"}', version)
+        setup.select_profile('{"fields":{"identity.full_name":{"value":"PRIVATE_STALE"}}}', version)
     assert {p.name: p.read_bytes() for p in settings.PATH.parent.iterdir()} == before
 
 
@@ -3269,7 +3269,7 @@ def test_profile_setup_concurrent_select_has_one_complete_winner(tmp_path, monke
     def select(value):
         barrier.wait(timeout=5)
         try:
-            return setup.select_profile(json.dumps({"name": value}), version)
+            return setup.select_profile(json.dumps({"fields": {"identity.full_name": {"value": value}}}), version)
         except settings.SettingsConflict:
             return None
 
@@ -3280,7 +3280,7 @@ def test_profile_setup_concurrent_select_has_one_complete_winner(tmp_path, monke
     assert settings.load_settings() == winners[0]
     profiles = list(settings.PATH.parent.glob("profile-*.json"))
     assert profiles == [Path(winners[0]["profile_path"])]
-    assert json.loads(profiles[0].read_text())["name"] in {"PRIVATE_A", "PRIVATE_B"}
+    assert json.loads(profiles[0].read_text())["fields"]["identity.full_name"]["value"] in {"PRIVATE_A", "PRIVATE_B"}
     assert settings.load_settings()["unknown_preference"] == original["unknown_preference"]
 
 
@@ -3294,14 +3294,14 @@ def test_profile_setup_publication_fault_never_activates_partial_profile(tmp_pat
 
     monkeypatch.setattr(settings.os, "fsync" if fault == "profile_sync" else "replace", refuse)
     with pytest.raises(ValueError, match="^settings_unavailable$"):
-        setup.select_profile('{"name":"PRIVATE_NEW"}', setup.profile_setup_state()["settings_version"])
+        setup.select_profile('{"fields":{"identity.full_name":{"value":"PRIVATE_NEW"}}}', setup.profile_setup_state()["settings_version"])
     assert settings.PATH.read_bytes() == before
     assert settings.load_settings()["profile_path"] is None
     profiles = list(settings.PATH.parent.glob("profile-*.json"))
     if fault == "profile_sync":
         assert profiles == []
     else:
-        assert len(profiles) == 1 and json.loads(profiles[0].read_text()) == {"name": "PRIVATE_NEW"}
+        assert len(profiles) == 1 and json.loads(profiles[0].read_text()) == {"fields": {"identity.full_name": {"value": "PRIVATE_NEW"}}}
     assert not list(settings.PATH.parent.glob(".settings-*.tmp"))
 
 
@@ -3309,7 +3309,7 @@ def test_profile_setup_publication_fault_never_activates_partial_profile(tmp_pat
 def test_profile_setup_refuses_version_name_collision_without_overwriting(tmp_path, monkeypatch, alias):
     settings, setup, _ = _profile_settings(tmp_path, monkeypatch)
     monkeypatch.setattr(setup.secrets, "token_hex", lambda *_: "a" * 32)
-    encoded = setup._profile_bytes('{"name":"PRIVATE_SYNTHETIC"}')
+    encoded = setup._profile_bytes('{"fields":{"identity.full_name":{"value":"PRIVATE_SYNTHETIC"}}}')
     target = settings.PATH.parent / ("profile-" + "a" * 32 + ".json")
     outside = tmp_path / "PRIVATE_OUTSIDE"
     outside.write_bytes(encoded)
@@ -3325,7 +3325,7 @@ def test_profile_setup_refuses_version_name_collision_without_overwriting(tmp_pa
         target.chmod(0o644 if alias == "public" else 0o600)
     before = settings.PATH.read_bytes(), outside.read_bytes(), target.lstat().st_mode
     with pytest.raises(ValueError, match="^settings_unavailable$"):
-        setup.select_profile('{"name":"PRIVATE_SYNTHETIC"}', setup.profile_setup_state()["settings_version"])
+        setup.select_profile('{"fields":{"identity.full_name":{"value":"PRIVATE_SYNTHETIC"}}}', setup.profile_setup_state()["settings_version"])
     assert (settings.PATH.read_bytes(), outside.read_bytes(), target.lstat().st_mode) == before
 
 
@@ -3335,7 +3335,7 @@ def test_profile_setup_refuses_public_parent_without_chmod(tmp_path, monkeypatch
     settings.PATH.parent.chmod(0o755)
     before = settings.PATH.read_bytes()
     with pytest.raises(ValueError, match="^settings_unavailable$"):
-        setup.select_profile('{"name":"PRIVATE"}', setup.profile_setup_state()["settings_version"])
+        setup.select_profile('{"fields":{"identity.full_name":{"value":"PRIVATE"}}}', setup.profile_setup_state()["settings_version"])
     assert settings.PATH.read_bytes() == before
     assert settings.PATH.parent.stat().st_mode & 0o777 == 0o755
 
@@ -3998,7 +3998,7 @@ def test_cold_restart_does_not_adopt_a_live_service_without_its_registry(
 ):
     root, queue, db, key = retirement_private_state
     calls = []
-    def request(_root, port, path, data=None):
+    def request(_root, port, path, data=None, **_kwargs):
         calls.append(path)
         assert path == "/health"
         if live:

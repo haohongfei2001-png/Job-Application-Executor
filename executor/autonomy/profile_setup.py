@@ -18,6 +18,46 @@ def profile_setup_state():
             "submit_capability": False}
 
 
+def _validate_profile(profile):
+    from ..field_classifier import AUTO_RULES
+    from ..models import ApplicantProfile
+    from ..profile import DEFAULT_ALIASES
+
+    # Validate the reader's actual envelope, including provenance and assets.
+    # Keep the original object below: model defaults/coercion must not rewrite
+    # facts, confirmation flags, or extension metadata during an import.
+    if profile.get("schema_version", "1.0") != "1.0":
+        raise ValueError("invalid_profile")
+    ApplicantProfile.model_validate(profile, strict=True)
+    if "fields" in profile:
+        if any(not key.strip() for key in profile["fields"]):
+            raise ValueError("invalid_profile")
+        return
+
+    # The generic reader also accepts the documented nested legacy candidate
+    # form. Require a recognized leaf, not just an arbitrary JSON object, while
+    # retaining additional legacy facts and unknown evidence without migration.
+    paths = set(DEFAULT_ALIASES) | {rule.key for rule in AUTO_RULES}
+    paths.update({"identity.household_before_gaokao", "identity.household_address"})
+    paths.update(key.replace("policy.", "application_policy.", 1)
+                 for key in DEFAULT_ALIASES if key.startswith("policy."))
+    found = False
+    for path in paths:
+        current = profile
+        for part in path.split("."):
+            if not isinstance(current, dict):
+                raise ValueError("invalid_profile")
+            if part not in current:
+                break
+            current = current[part]
+        else:
+            if isinstance(current, dict):
+                raise ValueError("invalid_profile")
+            found = True
+    if not found:
+        raise ValueError("invalid_profile")
+
+
 def _profile_bytes(text):
     from ..profile import CREDENTIAL_KEYS, _walk_keys
 
@@ -30,6 +70,7 @@ def _profile_bytes(text):
     forbidden = CREDENTIAL_KEYS | {"api_key", "access_token", "refresh_token", "deepseek"}
     if any(key.strip().lower().split(".")[-1] in forbidden for key in _walk_keys(profile)):
         raise ValueError("invalid_profile")
+    _validate_profile(profile)
     encoded = json.dumps(profile, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
     if len(encoded) > PROFILE_LIMIT:
         raise ValueError("invalid_profile")

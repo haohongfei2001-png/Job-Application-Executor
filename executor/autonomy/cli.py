@@ -21,6 +21,8 @@ from .runtime_paths import (RUNTIME, private_dir, local_token, runtime_root,
 from .process_entry import isolated_cli_command
 from .consumer_presentation import ConsumerSurface, loopback_origin, present_surface
 
+_SERVICE_STARTUP_BUDGET_SECONDS = 15.0
+
 
 def browser_mode():
     from ..browser import browser_mode as observe_mode
@@ -32,12 +34,12 @@ def ensure_chrome():
     return start_owned_chrome()
 
 
-def request(root, port, path, data=None):
+def request(root, port, path, data=None, *, timeout=10):
     root = runtime_root(root)
     req = urllib.request.Request(f"http://127.0.0.1:{port}" + path,
         data=json.dumps(data).encode() if data is not None else None,
         headers={"Authorization": "Bearer " + local_token(root), "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -178,12 +180,29 @@ def lifecycle(action, root, port):
         elif action == "stop":
             return stopped
     if action in {"start", "restart"}:
+        # One retry budget covers the initial probe, spawning and retries. Fifty
+        # independent ten-second HTTP waits could otherwise freeze app launch
+        # for more than eight minutes when a listener accepts but stalls.
+        # HTTP timeouts bound socket inactivity, not arbitrary slow-drip bodies.
+        deadline = time.monotonic() + _SERVICE_STARTUP_BUDGET_SECONDS
+
+        def startup_health():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("service startup deadline elapsed")
+            result = request(root, port, "/health", timeout=min(1.0, remaining))
+            if time.monotonic() >= deadline:
+                raise TimeoutError("service startup deadline elapsed")
+            return result
+
         try:
-            return request(root, port, "/health")
+            return startup_health()
         except ValueError:
             return {"ok": False, "reason": "service_runtime_unavailable"}
         except (OSError, urllib.error.URLError):
             pass
+        if time.monotonic() >= deadline:
+            return {"ok": False, "reason": "health_timeout"}
         try:
             private_dir(root)
             local_token(root)
@@ -192,15 +211,17 @@ def lifecycle(action, root, port):
                     cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL, stdout=stream, stderr=stream, start_new_session=True)
         except (OSError, ValueError):
             return {"ok": False, "reason": "service_runtime_unavailable"}
-        for _ in range(50):
+        while time.monotonic() < deadline:
             if child.poll() is not None:
                 return {"ok": False, "reason": "service_start_failed"}
             try:
-                return request(root, port, "/health")
+                return startup_health()
             except ValueError:
                 return {"ok": False, "reason": "service_runtime_unavailable"}
             except (OSError, urllib.error.URLError):
-                time.sleep(.1)
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(.1, remaining))
         return {"ok": False, "reason": "health_timeout"}
 
 
