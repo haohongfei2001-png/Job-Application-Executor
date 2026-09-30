@@ -46,6 +46,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 #session-expired{margin:0;padding:16px 22px;background:#fff7ed;color:#9a3412;border-bottom:1px solid #fed7aa;line-height:1.5}
 .toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
 @media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:block;max-height:45vh;border-right:0;border-bottom:1px solid #e5e7eb}main{min-height:55vh}}
+#candidates>button[data-existing-task]{min-height:44px}
 </style>
 </head>
 <body>
@@ -798,13 +799,31 @@ newTaskForm.addEventListener('submit',async event=>{
       credentials:'same-origin',body:JSON.stringify(data)});
     if(!r.ok)throw new Error();
     const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');showDiscovery(result,data);
-    if(result.task_id){newTaskForm.reset();await state()}
+    if(result.task_id){if(result.task_binding!=='existing_different')newTaskForm.reset();await state()}
   }catch(e){notify('暂时无法安全查找岗位；请核对公司、岗位和官方链接。')}
   finally{button.disabled=uiSessionExpired}
 });
 function showDiscovery(result,request){
   const discovery=result.discovery||{};
-  if(result.task_id){pendingDiscovery=null;candidatesEl.replaceChildren();notify(discovery.status==='VERIFIED'?'已核验并添加明确岗位；准备草稿前会再次检查授权。':'已添加待核验任务；不会自动写入招聘网站。');return}
+  if(result.task_id){
+    pendingDiscovery=null;candidatesEl.replaceChildren();
+    if(result.task_binding==='existing_different'){
+      const message='同一目标已有任务，仍保留原岗位、资料和授权；本次没有替换或启动任务。';
+      const note=document.createElement('p');note.className='candidate-note';
+      note.id='existing-task-note';note.textContent=message;
+      candidatesEl.append(note);
+      if(typeof result.task_id==='string'&&/^[A-Za-z0-9_.:-]{1,120}$/.test(result.task_id)){
+        const review=document.createElement('button');review.type='button';
+        review.setAttribute('aria-describedby','existing-task-note');
+        review.dataset.existingTask=result.task_id;review.textContent='查看已有任务';
+        candidatesEl.append(review);
+      }
+      notify(message);
+    }else{
+      notify(discovery.status==='VERIFIED'?'任务已保留在列表中；请从卡片核对岗位，准备草稿前仍会检查授权。':'待核验任务已保留在列表中；不会自动写入招聘网站。');
+    }
+    return;
+  }
   pendingDiscovery={request,discovery};
   const labels={AMBIGUOUS:'发现多个同名岗位，请按地点、批次和用工类型选择。',INCOMPLETE:'公开列表覆盖范围尚未证实，暂不选择或写入。',UNAVAILABLE:'未找到符合全部条件的在招岗位。',UNSUPPORTED:'此公司或链接暂不在已验证的发现范围内。'};
   candidatesEl.innerHTML='<div class="candidate-note">'+esc(labels[discovery.status]||'岗位尚未核验。')+'</div>'+
@@ -818,8 +837,19 @@ candidatesEl.addEventListener('click',async event=>{
     const r=await uiRequest('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(data)});
     if(!r.ok)throw new Error();
     const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');showDiscovery(result,pendingDiscovery?.request||data);
-    if(result.task_id){newTaskForm.reset();await state()}
+    if(result.task_id){if(result.task_binding!=='existing_different')newTaskForm.reset();await state()}
   }catch(e){notify('候选已变化或暂时无法核验，请重新查找。');button.disabled=uiSessionExpired}
+});
+candidatesEl.addEventListener('click',event=>{
+  const button=event.target.closest('button[data-existing-task]');
+  if(!button||uiSessionExpired)return;
+  const card=[...tasksEl.querySelectorAll('[data-task-card]')]
+    .find(item=>item.dataset.taskCard===button.dataset.existingTask);
+  const select=card?.querySelector('[data-task-select]');
+  if(!select){notify('原任务暂未显示，请刷新后从任务列表核对。');return;}
+  // Reuse the existing read-only task-selection action. No queue control,
+  // authorization, automatic retry or profile rebinding is performed.
+  select.click();select.focus();select.scrollIntoView({block:'nearest'});
 });
 tasksEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-answer]');if(!button)return;

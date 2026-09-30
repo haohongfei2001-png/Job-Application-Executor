@@ -516,8 +516,7 @@ class ManagerController:
                 target_source_chain=list(target.source_chain),
                 profile_ref=self._profile_ref(), live_authorized=False,
             )
-            task = self.queue.enqueue(spec)
-            return {**task, "discovery": result.public_dict()}
+            return self._enqueue_local_form(spec, result)
         if (result.status != "UNSUPPORTED" or result.reason != "no_official_site_contract"
                 or not request.source_url or selected_candidate_id):
             return {"discovery": result.public_dict()}
@@ -527,12 +526,22 @@ class ManagerController:
             company=request.company,
             role=request.role,
             target_url=request.source_url,
+            location=request.location, campaign=request.campaign,
+            employment_type=request.employment_type,
             profile_ref=self._profile_ref(),
             # JCR-03 owns verified target identity. A user-supplied URL alone
             # is not yet sufficient evidence for automatic external writes.
             live_authorized=False,
         )
-        return {**self.queue.enqueue(spec), "discovery": result.public_dict()}
+        return self._enqueue_local_form(spec, result)
+
+    def _enqueue_local_form(self, spec: TaskSpec, discovery: DiscoveryResult) -> dict[str, Any]:
+        # Exact-target deduplication must keep the original task/profile and
+        # authority. Explain a different retained binding without exposing the
+        # private reference or pretending the new form replaced the old task.
+        task = self.queue.enqueue(spec)
+        binding = "requested" if task["spec"] == spec.model_dump() else "existing_different"
+        return {**task, "discovery": discovery.public_dict(), "task_binding": binding}
 
     def create_from_local_form(self, company: str, role: str, target_url: str = "", *,
                                location: str = "", campaign: str = "",
@@ -562,9 +571,17 @@ class ManagerController:
         result = discovered["discovery"]
         status = result["status"]
         if "task_id" in discovered:
-            reply = "已找到并核验唯一岗位，任务已加入；开始准备前仍会检查运行授权。"
+            retained = discovered.get("task_binding") == "existing_different"
+            verified = discovered["spec"].get("target_verified") is True
+            reply = ("同一目标已有任务，仍保留原岗位、资料和授权；本次没有替换或启动任务，请查看原任务卡片。"
+                     if retained else
+                     "已找到并核验唯一岗位，任务已保留在列表中；开始准备前仍会检查运行授权。"
+                     if verified else
+                     "待核验任务已保留在列表中；不会自动写入招聘网站，请先核对任务卡片。")
             action = {"action": "CREATE_TASK", "status": "accepted",
-                      "task_id": discovered["task_id"], "resolved_target": True}
+                      "task_id": discovered["task_id"],
+                      "resolved_target": verified,
+                      "task_binding": discovered.get("task_binding", "requested")}
         elif status == "AMBIGUOUS":
             labels = "；".join(
                 f"{item['title']}（{item['location'] or '地点未注明'}、"

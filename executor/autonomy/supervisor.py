@@ -781,6 +781,8 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         response = {"discovery": result.get("discovery")}
                         if "task_id" in result:
                             response.update(task_id=result["task_id"], revision=result["revision"])
+                            if result.get("task_binding") in {"requested", "existing_different"}:
+                                response["task_binding"] = result["task_binding"]
                         self._send_json(200, response)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/human-submission":

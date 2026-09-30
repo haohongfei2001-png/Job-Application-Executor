@@ -106,6 +106,14 @@ limits. Viewing or refreshing this report does not change the task's stage,
 authorization, account verification, server-draft verification or final-review
 certificate. It cannot turn an unsupported target into `READY_TO_SUBMIT`.
 
+Adding the same target again does not overwrite its original task, profile or
+authorization. If the requested binding differs, the app explicitly says the
+existing task was retained and offers **查看已有任务**. That button only selects
+the original card for review; it does not resume, retry, rebind or authorize it.
+The newly typed form remains available for review instead of being silently
+cleared. New unsupported tasks retain submitted location, campaign and
+employment-type details, but those fields do not make the target verified.
+
 ## Safety boundary
 
 Consumer Entry v1 changes only startup and presentation. DeepSeek still receives

@@ -1554,7 +1554,8 @@ def preparation_ui():
             observed["requests"].append((request.method, request.url, request.post_data))
             if parsed.netloc != "preparation.test":
                 observed["external"].append((request.url, request.headers))
-                route.fulfill(status=200, content_type="text/html", body='<link rel="icon" href="data:,"><p>合成官方页面</p>')
+                route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                              body='<meta charset="utf-8"><link rel="icon" href="data:,"><p>合成官方页面</p>')
             elif parsed.path == "/":
                 route.fulfill(status=200, content_type="text/html", body=DASHBOARD_HTML)
             elif observed["expired"]:
@@ -1968,3 +1969,63 @@ def test_task_workspace_preparation_actual_authenticated_service_preserves_task_
                 restarted_server.shutdown()
                 restarted_server.server_close()
                 restarted_thread.join()
+
+
+@pytest.mark.parametrize("discovery_status", ["VERIFIED", "UNSUPPORTED"])
+def test_task_workspace_duplicate_binding_requires_explicit_review_and_preserves_new_form(preparation_ui, discovery_status):
+    page, observed = preparation_ui
+    original = json.dumps(observed["tasks"], sort_keys=True)
+    submissions = []
+    def submit(route):
+        submissions.append((route.request.method, route.request.post_data))
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "task_id":"prep-a", "revision":7, "task_binding":"existing_different",
+            "discovery":{"status":discovery_status},
+            "profile_ref":"/private/PRIVATE_DO_NOT_RENDER.json"}))
+    page.route("https://preparation.test/ui/api/tasks", submit)
+    page.locator('[data-task-select="prep-b"]').click()
+    expect(page.locator('[data-task-card="prep-b"]')).to_have_attribute("data-current-task", "true")
+    page.locator('#newtask input[name="company"]').fill("Requested Co")
+    page.locator('#newtask input[name="role"]').fill("Requested Other Role")
+    page.locator('#newtask input[name="target_url"]').fill(_PREPARATION_SOURCE)
+    page.locator('#newtask button').click()
+    review = page.get_by_role("button", name="查看已有任务", exact=True)
+    expect(review).to_be_visible()
+    expect(page.locator('#candidates')).to_contain_text("仍保留原岗位、资料和授权")
+    expect(page.locator('#candidates')).to_contain_text("本次没有替换或启动任务")
+    expect(page.locator('#newtask input[name="role"]')).to_have_value("Requested Other Role")
+    expect(page.locator('#newtask input[name="company"]')).to_have_value("Requested Co")
+    expect(page.locator('[data-task-card="prep-b"]')).to_have_attribute("data-current-task", "true")
+    assert "PRIVATE_DO_NOT_RENDER" not in page.locator('body').inner_text()
+    assert "/private/" not in page.locator('#candidates').inner_text()
+    assert len(submissions) == 1 and submissions[0][0] == "POST"
+    review.click()
+    expect(page.locator('[data-task-card="prep-a"]')).to_have_attribute("data-current-task", "true")
+    expect(page.locator('[data-task-select="prep-a"]')).to_be_focused()
+    assert len(submissions) == 1
+    assert all(method == "GET" for method, _, _ in observed["requests"])
+    assert json.dumps(observed["tasks"], sort_keys=True) == original
+    assert observed["external"] == [] and observed["errors"] == []
+    assert page.evaluate("window.__copied") == []
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+
+
+def test_task_workspace_exact_binding_success_does_not_claim_a_new_duplicate(preparation_ui):
+    page, observed = preparation_ui
+    submissions = []
+    def submit(route):
+        submissions.append(route.request.post_data)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "task_id":"prep-a", "revision":7, "task_binding":"requested",
+            "discovery":{"status":"VERIFIED"}}))
+    page.route("https://preparation.test/ui/api/tasks", submit)
+    page.locator('#newtask input[name="company"]').fill("武汉启云方科技有限公司")
+    page.locator('#newtask input[name="role"]').fill("应用实施工程师（武汉）")
+    page.locator('#newtask input[name="target_url"]').fill(_PREPARATION_SOURCE)
+    page.locator('#newtask button').click()
+    expect(page.locator('#toast')).to_contain_text("任务已保留在列表中")
+    expect(page.locator('#newtask input[name="role"]')).to_have_value("")
+    assert page.get_by_role("button", name="查看已有任务", exact=True).count() == 0
+    assert "已添加" not in page.locator('#toast').inner_text()
+    assert len(submissions) == 1
+    assert observed["external"] == [] and observed["errors"] == []
