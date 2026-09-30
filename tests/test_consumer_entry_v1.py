@@ -6228,3 +6228,40 @@ def test_bundle_control_swap_after_precheck_never_reads_external_inode(
     assert inspections >= (1 if control == "Info.plist" else 2)
     assert outside.read_bytes() == original
     assert target.read_bytes() == original
+
+
+
+def test_ten_actual_service_retirements_preserve_private_authority_and_ack(
+    retirement_private_state, monkeypatch
+):
+    """Repeat the exact owned stop handshake across fresh local service instances."""
+    from executor.autonomy.worker import ProcessLock
+
+    monkeypatch.setenv("APPLICATION_EXECUTOR_BROWSER_MODE", "isolated")
+    monkeypatch.delenv("APPLICATION_EXECUTOR_LOCAL_TOKEN", raising=False)
+    root, queue, db, key = retirement_private_state
+    before = _retirement_authority(root, db)
+    instances = set()
+    for seed in range(10):
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        try:
+            assert cli.lifecycle("start", root, port)["ok"] is True
+            identity = cli.request(root, port, "/v1/service-identity")
+            assert identity == json.loads((root / "service.json").read_text())
+            assert identity["port"] == port
+            assert identity["instance"] not in instances
+            instances.add(identity["instance"])
+            assert cli.lifecycle("health", root, port)["ok"] is True
+            assert cli.lifecycle("stop", root, port) == {"ok": True, "running": False}
+            assert not (root / "service.json").exists()
+            with ProcessLock(root / "worker.lock"):
+                pass
+            _assert_retirement_authority(root, db, before)
+            assert (root / "task-answers.key").read_bytes() == key
+        finally:
+            # Only the authenticated exact-instance stop path may retire a
+            # synthetic daemon; never signal an unverified process ID.
+            cli.lifecycle("stop", root, port)
+    assert len(instances) == 10
