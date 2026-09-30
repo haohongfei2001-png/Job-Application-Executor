@@ -361,7 +361,7 @@ class Supervisor:
         return {"pid": os.getpid(), "port": self._service_port,
                 "instance": self._service_instance}
 
-    def stop_service(self, data):
+    def stop_service(self, data, *, defer_stop=False):
         # This internal bearer-only route has no task or final-click authority.
         if (type(data) is not dict or set(data) != {"pid", "port", "instance"}
                 or type(data["pid"]) is not int or type(data["port"]) is not int
@@ -384,7 +384,10 @@ class Supervisor:
                 # Serialize against all task/fact/config admission before the
                 # existing worker safe-checkpoint stop flag can be observed.
                 self._service_stop_requested = True
-                self.worker.stop_event.set()
+                # HTTP retirement sends its acknowledgement before releasing the
+                # worker. The admission fence is already active under both locks.
+                if not defer_stop:
+                    self.worker.stop_event.set()
                 return {"ok": True, "stopping": True}
 
     def update_state(self):
@@ -473,11 +476,11 @@ class Supervisor:
                                              remember=remember)
             return {"status": "accepted", "task": safe_task_view(updated)}
 
-    def dispatch(self, method, path, data):
+    def dispatch(self, method, path, data, *, defer_stop=False):
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
         if method == "POST" and parts == ["v1", "service-stop"]:
-            return self.stop_service(data)
+            return self.stop_service(data, defer_stop=defer_stop)
         if method == "POST" and parts == ["v1", "commands"]:
             return self._dispatch_unlocked(method, path, data)
         if method == "POST" and parts != ["v1", "ui-ticket"]:
@@ -844,7 +847,8 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                 elif not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + supervisor.token):
                     status, result = 401, {"error": "unauthorized"}
                 else:
-                    result = supervisor.dispatch(self.command, self.path, self._read_json())
+                    result = supervisor.dispatch(
+                        self.command, self.path, self._read_json(), defer_stop=True)
             except KeyError:
                 status, result = 404, {"error": "not_found"}
             except (ValueError, TypeError):
@@ -853,7 +857,19 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                 status, result = 409, {"error": "state_conflict"}
             except Exception:
                 status, result = 500, {"error": "internal_error"}
-            self._send_json(status, result)
+            retire_after_response = (
+                self.command == "POST" and parsed.path == "/v1/service-stop"
+                and status == 200 and type(result) is dict and result.get("ok") is True
+            )
+            try:
+                self._send_json(status, result)
+                if retire_after_response:
+                    self.wfile.flush()
+            finally:
+                # Even a disconnected client cannot leave admission permanently
+                # fenced; the worker stops only after the response write attempt.
+                if retire_after_response:
+                    supervisor.worker.stop_event.set()
 
         do_GET = handle_request
         do_POST = handle_request
