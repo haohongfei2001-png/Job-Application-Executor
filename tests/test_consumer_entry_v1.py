@@ -4022,6 +4022,51 @@ def test_cold_restart_does_not_adopt_a_live_service_without_its_registry(
 
 
 @pytest.mark.parametrize("replace_registry", [False, True])
+def test_http_service_retirement_sends_ack_before_worker_stops(
+    retirement_private_state, monkeypatch
+):
+    """The exact owned service must not close its response before acknowledging stop."""
+    import threading
+    from executor.autonomy.supervisor import Supervisor, create_server
+
+    root, queue, db, key = retirement_private_state
+    supervisor = Supervisor(queue)
+    server = create_server(supervisor, port=0)
+    handler = server.RequestHandlerClass
+    response_written = threading.Event()
+    original_send = handler._send_json
+    original_stop = supervisor.worker.stop_event.set
+
+    def observe_response(self, status, result, *, extra_headers=None):
+        value = original_send(self, status, result, extra_headers=extra_headers)
+        if self.path == "/v1/service-stop" and status == 200:
+            response_written.set()
+        return value
+
+    def guarded_worker_stop():
+        assert response_written.is_set(), "worker exited before stop acknowledgement"
+        original_stop()
+
+    monkeypatch.setattr(handler, "_send_json", observe_response)
+    monkeypatch.setattr(supervisor.worker.stop_event, "set", guarded_worker_stop)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        before = _retirement_authority(root, db)
+        identity = supervisor.service_identity()
+        assert cli.request(root, server.server_port, "/v1/service-stop", identity) == {
+            "ok": True, "stopping": True}
+        assert response_written.is_set()
+        assert supervisor.worker.stop_event.is_set()
+        assert supervisor.mutation_fenced()
+        _assert_retirement_authority(root, db, before)
+        assert (root / "task-answers.key").read_bytes() == key
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_actual_isolated_service_retires_without_pid_signals_or_private_replay(
     retirement_private_state, tmp_path, monkeypatch, replace_registry
 ):
