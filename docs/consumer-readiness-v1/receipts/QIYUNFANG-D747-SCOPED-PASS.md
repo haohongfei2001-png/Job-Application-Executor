@@ -35,3 +35,22 @@ Unknown module/bootstrap bodies remain denied until actual finite selectors are
 observed. A DOM observation confirms public col124, manageMode=false,
 _vueStyleGrayTest=false, major color#2b2b2b and the empty module1567 form inside
 module1566. Runtime_extId/actual popup response were not inferred from those facts.
+
+## Follow-up research run 36859394707 (72bc9827)
+
+The first split research run failed before public site access. Ubuntu24's bundled
+headless-shell rejected sandbox startup: 37 failed, 430 passed, 29 skipped,
+2 unsafe-comparator XPASS. Mac's sandboxed launch succeeded, but native command
+line inspection required explicit `--enable-automation`, absent from pinned
+Playwright1.63 defaults: 59 failed, 437 passed, 1 comparator XFAIL, 1 XPASS.
+Neither preflight reached the site. These failures are retained, not retried as
+if transient. The next recipe explicitly discloses automation and retains all
+safe-flag checks.
+
+The next Linux experiment is the **distinct already-installed official Chrome**
+channel with sandboxing enabled and its existing Ubuntu AppArmor profile. It is
+not evidence for bundled Linux Chromium. No AppArmor/sysctl/setuid changes,
+executable copying, no-sandbox fallback or certificate bypass are permitted.
+Sources: [Playwright branded channels](https://playwright.dev/python/docs/browsers#google-chrome--microsoft-edge),
+[Chromium Ubuntu sandbox policy](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md),
+[GitHub Ubuntu24 image](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md).

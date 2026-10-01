@@ -381,6 +381,10 @@ class PreparationAuthority:
             db.execute("UPDATE preparation_approvals SET outcome=?,context_closed=?,updated=? WHERE nonce_sha=?",
                        (outcome, int(context_closed), now, permit["nonce_sha"]))
             if context_closed:
+                # Closure proves no future transport can run. It cannot prove
+                # whether a previously consumed final request reached the site.
+                db.execute("UPDATE preparation_final_requests SET outcome='UNKNOWN_OUTCOME',updated=? WHERE preparation_nonce_sha=? AND outcome='ATTEMPTED'",
+                           (now, permit["nonce_sha"]))
                 _clear_marker(self.queue.root, permit["nonce_sha"], permit["browser"])
                 db.execute("UPDATE tasks SET owner=NULL,lease_until=NULL,updated=? WHERE task_id=? AND owner=?",
                            (now, permit["task_id"], permit["owner"]))
@@ -435,6 +439,7 @@ class PreparationAuthority:
                 now = self.queue.clock()
                 if record is not None:
                     db.execute("UPDATE preparation_approvals SET outcome='UNKNOWN_OUTCOME',context_closed=1,updated=? WHERE nonce_sha=?", (now, nonce_sha))
+                    db.execute("UPDATE preparation_final_requests SET outcome='UNKNOWN_OUTCOME',updated=? WHERE preparation_nonce_sha=? AND outcome='ATTEMPTED'", (now, nonce_sha))
                     db.execute("UPDATE tasks SET owner=NULL,lease_until=NULL,updated=? WHERE task_id=? AND owner=?", (now, record["task_id"], record["owner"]))
                     if record["attempt_id"]:
                         db.execute("UPDATE field_actions SET outcome='UNKNOWN_OUTCOME',updated=? WHERE attempt_id=?", (now, record["attempt_id"]))

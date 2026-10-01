@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from executor.preparation.session import DisposablePreparationSession
 from executor.preparation.qiyunfang import CONTRACT_URL, ROOT, OBSERVE_ROOT, validate_observation
+from executor.preparation.public_reads import public_style_url
 
 
 def descriptor(url,method):
@@ -34,8 +35,14 @@ def descriptor(url,method):
 def probe():
     result={'source':CONTRACT_URL,'status':'READ_ONLY_PREFLIGHT_UNVERIFIED',
             'root_count':0,'contract':'UNOBSERVED','blocked':[],'fetched':[],
-            'applicant_data_entered':False,'live_enabled':False,'public_reads':[]}
-    with DisposablePreparationSession(headless=True,channel=None) as session:
+            'applicant_data_entered':False,'live_enabled':False,'public_reads':[],
+            'public_html_style_links':[]}
+    # Explicit platform target. Never retry a sandbox rejection with weaker
+    # flags, a renamed executable, or changes to host security settings.
+    channel='chrome' if sys.platform=='linux' else None
+    result['browser_target']='installed_chrome_headless_linux' if channel else 'bundled_headless_mac'
+    with DisposablePreparationSession(headless=True,channel=channel) as session:
+        result['browser_version']=session.browser.version
         transport=session.transport;original=transport._route
         def route(request_route):
             request=request_route.request
@@ -62,6 +69,17 @@ def probe():
         def fetch(url):
             response=public_get(url)
             result['fetched'].append({'url':url,'status':response.status,'sha256':hashlib.sha256(response.body()).hexdigest()})
+            if url==CONTRACT_URL and response.status==200:
+                from html.parser import HTMLParser
+                from urllib.parse import urljoin
+                class Styles(HTMLParser):
+                    def handle_starttag(self,tag,attrs):
+                        if tag!='link':return
+                        href=dict(attrs).get('href','');candidate=urljoin(CONTRACT_URL,href)
+                        if public_style_url(candidate):
+                            result['public_html_style_links'].append(descriptor(candidate,'GET'))
+                raw=response.body()
+                if len(raw)<=2000000:Styles().feed(raw.decode('utf-8',errors='replace'))
             return response
         transport.public_fetch=fetch
         page=session.context.new_page()

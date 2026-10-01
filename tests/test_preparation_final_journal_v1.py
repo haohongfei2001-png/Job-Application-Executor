@@ -135,3 +135,63 @@ def test_unknown_final_and_closed_context_cannot_mint_new_preparation(prepared):
     authority.finish(permit,'UNKNOWN_OUTCOME',context_closed=True)
     current=q.get(task['task_id']);offer=authority.issue(current['task_id'],current['revision'],SESSION,BROWSER,['0'])
     with pytest.raises(PreparationConflict):authority.consume(offer['nonce'],SESSION,offer['scope_sha'],BROWSER,approve_transmission=True)
+
+
+@pytest.mark.parametrize('during',['record','before_send'])
+def test_real_journal_downgrade_reaches_bridge_and_cannot_authorize_later_send(prepared,during):
+    from types import SimpleNamespace
+    from executor.preparation.human_request import OpaqueHumanRequest,CONTRACT_URL
+    from test_preparation_human_request_v1 import Request
+    (q,task,_,_,_),_,binding,final,scope=prepared
+    events=[];request=Request()
+    route=SimpleNamespace(request=request,abort=lambda *_:events.append('abort'),fulfill=lambda **_:events.append('fulfill'))
+    page=SimpleNamespace(main_frame='frame',evaluate=lambda *_:None)
+    response=SimpleNamespace(status=200,dispose=lambda:None)
+    def fetch(actual,**_):
+        assert actual is request;events.append('fetch');return response
+    def consume(scope):
+        intent=final.consume(scope)
+        if during=='before_send':final.record(intent,'UNKNOWN_OUTCOME')
+        return intent
+    def record(intent,outcome):
+        if during=='record':q.cancel(task['task_id'])
+        return final.record(intent,outcome)
+    bridge=OpaqueHumanRequest(page=page,client=SimpleNamespace(fetch=fetch),binding=binding,
+        guard=final.guard,consume=consume,record=record,clock=lambda:10)
+    bridge.hold(route,scope['metadata']);bridge.present()
+    bridge.dialog_opened({'type':'confirm','url':CONTRACT_URL,'message':bridge._message,
+                         'frameId':binding['frame_id'],'hasBrowserHandler':True})
+    bridge.dialog_closed({'result':True,'frameId':binding['frame_id']})
+    assert bridge.drain()['status']=='UNKNOWN_OUTCOME'
+    assert bridge._state=='UNKNOWN' and rows(q)[0]['outcome']=='UNKNOWN_OUTCOME'
+    assert events.count('fetch')==(1 if during=='record' else 0)
+    bridge.drain()
+    assert events.count('fetch')==(1 if during=='record' else 0)
+
+
+@pytest.mark.parametrize('restart',[False,True])
+def test_proven_transport_closure_downgrades_unfinished_final_slot_without_refund(prepared,restart):
+    from executor.preparation.authority import PreparationAuthority
+    (q,_,_,authority,now),permit,_,final,scope=prepared
+    final.consume(scope)
+    if restart:
+        recovered=PreparationAuthority(q,session_valid=lambda value:value==SESSION,clock=lambda:now[0])
+        recovered.reconcile_closed_context(permit['nonce_sha'],SESSION,
+            lambda binding:{'status':'ABSENT','browser':binding})
+    else:authority.finish(permit,'UNKNOWN_OUTCOME',context_closed=True)
+    assert rows(q)[0]['outcome']=='UNKNOWN_OUTCOME' and not q.preparation_in_flight()
+    with pytest.raises(PreparationConflict):final.guard()
+
+
+@pytest.mark.parametrize('outcome',['RETURNED_UNVERIFIED','UNKNOWN_OUTCOME'])
+@pytest.mark.parametrize('restart',[False,True])
+def test_closure_preserves_existing_final_receipt_without_upgrade(prepared,outcome,restart):
+    from executor.preparation.authority import PreparationAuthority
+    (q,_,_,authority,now),permit,_,final,scope=prepared
+    intent=final.consume(scope);final.record(intent,outcome)
+    if restart:
+        recovered=PreparationAuthority(q,session_valid=lambda value:value==SESSION,clock=lambda:now[0])
+        recovered.reconcile_closed_context(permit['nonce_sha'],SESSION,
+            lambda binding:{'status':'ABSENT','browser':binding})
+    else:authority.finish(permit,'UNKNOWN_OUTCOME',context_closed=True)
+    assert rows(q)[0]['outcome']==outcome

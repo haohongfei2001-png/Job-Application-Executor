@@ -73,3 +73,13 @@ def test_native_launch_receipt_rejects_bypass_security_or_recording_flags(extra)
         if extra:
             with pytest.raises(RuntimeError):proxy.verify_launch(browser)
         else:assert proxy.verify_launch(browser) is True
+
+
+def test_native_command_line_read_requires_explicit_automation_disclosure():
+    from types import SimpleNamespace
+    with DenyOnlyProxy() as proxy:
+        options=proxy.browser_options();assert '--enable-automation' in options['args']
+        args=['chrome','--remote-debugging-pipe',*options['args'],'--proxy-server='+options['proxy']['server']]
+        args.remove('--enable-automation')
+        browser=SimpleNamespace(new_browser_cdp_session=lambda:SimpleNamespace(send=lambda _:{'arguments':args},detach=lambda:None))
+        with pytest.raises(RuntimeError,match='recipe_changed'):proxy.verify_launch(browser)

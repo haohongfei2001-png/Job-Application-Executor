@@ -44,7 +44,13 @@ from executor.preparation.network_fence import DenyOnlyProxy
 proxy=DenyOnlyProxy().__enter__() if fence=="deny" else None
 with sync_playwright() as pw:
  print(json.dumps({"event":"driver","pid":pw._impl_obj._connection._transport._proc.pid}),flush=True)
- browser=pw.chromium.connect_over_cdp(cdp) if cdp else pw.chromium.launch(headless=True,**(proxy.browser_options() if proxy else {}))
+ # Ubuntu24's installed Chrome has an existing AppArmor sandbox profile;
+ # bundled headless-shell does not. This is a distinct explicit test target.
+ channel='chrome' if proxy and sys.platform=='linux' else None
+ browser=pw.chromium.connect_over_cdp(cdp) if cdp else pw.chromium.launch(headless=True,channel=channel,**(proxy.browser_options() if proxy else {}))
+ if proxy:
+  proxy.verify_launch(browser)
+  print(json.dumps({'event':'launch_target','channel':channel,'version':browser.version}),flush=True)
  context=browser.new_context(service_workers='block')
  def guard(route):
   if route.request.url==url:

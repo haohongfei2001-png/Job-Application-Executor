@@ -49,7 +49,10 @@ class DenyOnlyProxy:
         if self._server is None or not self._thread.is_alive():
             raise RuntimeError('preparation_proxy_unavailable')
         return {'chromium_sandbox':True, 'proxy': {'server': f'http://127.0.0.1:{self._server.server_address[1]}'},
-                'args': ['--proxy-bypass-list=<-loopback>', '--disable-quic',
+                # Chromium exposes the native command line only for an
+                # explicitly disclosed automation launch. Pinned Playwright
+                # 1.63 does not add this switch itself.
+                'args': ['--enable-automation', '--proxy-bypass-list=<-loopback>', '--disable-quic',
                          '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
                          '--webrtc-ip-handling-policy=disable_non_proxied_udp',
                          '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']}

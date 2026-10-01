@@ -1,4 +1,5 @@
 """Actual owned process/context identity with only an empty synthetic popup."""
+import sys
 from executor.preparation.session import DisposablePreparationSession
 from executor.preparation.process_identity import OwnedProcessIdentity
 from executor.preparation.qiyunfang import CONTRACT_URL,digest
@@ -6,7 +7,8 @@ from test_qiyunfang_preparation_browser import replica,bounded_browser_oracle
 
 
 def test_owned_disposable_process_identity_persists_and_requires_both_processes_absent(tmp_path):
-    with DisposablePreparationSession(headless=True,channel=None) as owner:
+    # Distinct declared targets, never a fallback after a failed sandbox launch.
+    with DisposablePreparationSession(headless=True,channel='chrome' if sys.platform=='linux' else None) as owner:
         assert owner.identity.absence()['status']=='PRESENT'
         sha=owner.identity.save(tmp_path.resolve())
         restored=OwnedProcessIdentity.load(tmp_path.resolve(),sha)

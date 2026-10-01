@@ -11,8 +11,14 @@ from executor.preparation.network_fence import DenyOnlyProxy
 from test_qiyunfang_preparation_browser import server, bounded_browser_oracle
 
 
-@pytest.fixture(params=['bundled_headless','installed_chrome_headful'])
+@pytest.fixture(params=['bundled_headless_mac','installed_chrome_headless_linux','installed_chrome_headful'])
 def launch_mode(request):
+    if request.param=='installed_chrome_headless_linux':
+        if sys.platform!='linux':pytest.skip('Linux installed Chrome target only')
+        assert Path('/opt/google/chrome/chrome').is_file(), 'official installed Chrome target unavailable'
+        return {'headless':True,'channel':'chrome'}
+    if request.param=='bundled_headless_mac' and sys.platform!='darwin':
+        pytest.skip('bundled Linux headless-shell sandbox unsupported on Ubuntu24; not certified')
     if request.param=='installed_chrome_headful':
         if sys.platform!='darwin' or not Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome').is_file():
             pytest.skip('installed headful Mac Chrome unavailable; not verified')
