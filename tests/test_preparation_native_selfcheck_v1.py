@@ -123,3 +123,56 @@ def test_native_event_delivered_after_evaluate_is_pumped_before_admission():
     value=owner('late_native')
     result=check_owned_native_browser(value)
     assert result['native_proxy_blocked'] is True and value.proxy.denied_connections==4
+
+
+def test_slow_native_setup_does_not_spend_the_network_probe_budget():
+    value=owner();now=[0.0];original=value.browser.new_context
+    def setup(**kwargs):
+        now[0]+=20
+        return original(**kwargs)
+    value.browser.new_context=setup
+    result=check_owned_native_browser(value,clock=lambda:now[0])
+    assert result['native_proxy_blocked'] is True
+
+
+def test_network_probe_budget_still_refuses_even_with_valid_native_proof():
+    value=owner();now=[0.0];original=value.browser.new_context
+    def setup(**kwargs):
+        context=original(**kwargs);new_page=context.new_page
+        def page_factory():
+            page=new_page();evaluate=page.evaluate
+            def slow(*args):now[0]+=13;return evaluate(*args)
+            page.evaluate=slow;return page
+        context.new_page=page_factory;return context
+    value.browser.new_context=setup
+    with pytest.raises(NativeSelfCheckFailed) as caught:
+        check_owned_native_browser(value,clock=lambda:now[0])
+    assert caught.value.diagnostic['success_budget_exceeded'] is True
+    assert caught.value.diagnostic['scoped_proof'] is True
+
+
+def test_whole_selfcheck_cannot_succeed_after_ninety_seconds_of_setup():
+    value=owner();now=[0.0];original=value.browser.new_context
+    def setup(**kwargs):
+        now[0]+=91
+        return original(**kwargs)
+    value.browser.new_context=setup
+    with pytest.raises(NativeSelfCheckFailed):check_owned_native_browser(value,clock=lambda:now[0])
+    assert value.browser.probes[0].closed and value.proxy.denied_connections==0
+
+
+@pytest.mark.parametrize('phase',['constructor','start'])
+def test_receiver_thread_start_failure_closes_listener_without_admission(monkeypatch,phase):
+    from executor.preparation import native_selfcheck as module
+    servers=[];base=module.ThreadingHTTPServer
+    class TrackingServer(base):
+        def __init__(self,*args,**kwargs):super().__init__(*args,**kwargs);servers.append(self)
+    def unavailable():raise RuntimeError('synthetic thread allocation failed')
+    monkeypatch.setattr(module,'ThreadingHTTPServer',TrackingServer)
+    def thread_factory(**_):
+        if phase=='constructor':unavailable()
+        return SimpleNamespace(start=unavailable)
+    monkeypatch.setattr(module.threading,'Thread',thread_factory)
+    value=owner()
+    with pytest.raises(RuntimeError,match='synthetic thread allocation'):check_owned_native_browser(value)
+    assert len(servers)==1 and servers[0].socket.fileno()==-1 and value.browser.probes==[]

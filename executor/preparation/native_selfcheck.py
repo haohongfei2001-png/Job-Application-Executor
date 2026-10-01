@@ -4,9 +4,9 @@ No employer request or applicant data is used. A separate temporary context has
 no website cookies or preparation routes. Its canary requests must be rejected
 by the native deny proxy itself, while an independent local receiver is proved
 reachable by the Python control. The receipt is process-local, not a persistent
-credential or a claim of OS-wide network isolation. The12s success budget is
-checked between completed operations; the owning controller supplies outer
-timeout/revocation. It is not a claim that a hung renderer can be preempted here.
+credential or a claim of OS-wide network isolation. The12s network-probe budget starts after synthetic-context setup and is checked
+between completed operations; the owning controller supplies the whole-open
+90s timeout/revocation. Neither budget claims to preempt a hung renderer here.
 """
 from __future__ import annotations
 
@@ -24,14 +24,15 @@ class NativeSelfCheckFailed(RuntimeError):
         self.diagnostic=diagnostic or {}
 
 
-def check_owned_native_browser(owner, *, still_authorized=lambda:True):
-    start=time.monotonic()
+def check_owned_native_browser(owner, *, still_authorized=lambda:True, clock=time.monotonic):
+    start=clock()
     if still_authorized() is not True:raise NativeSelfCheckFailed()
     browser=owner.browser
     before=list(browser.contexts)
     if before != [owner.context] or owner.proxy.verify_launch(browser) is not True:
         raise NativeSelfCheckFailed()
     identity=owner.identity.verify(browser)
+    if still_authorized() is not True or clock()-start>90:raise NativeSelfCheckFailed()
     nonce=secrets.token_hex(16)
     positive='/positive/'+nonce
     unexpected=[]
@@ -52,15 +53,18 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True):
     class ReceiverServer(ThreadingHTTPServer):
         def get_request(self):
             result=super().get_request();connections.append(True);return result
+        def handle_error(self,*_):pass
 
     server=ReceiverServer(('127.0.0.1',0),Receiver)
     server.daemon_threads=True
-    serving=threading.Thread(target=lambda:server.serve_forever(poll_interval=.05),daemon=True)
-    serving.start()
+    serving=None
+    started=False
     context=None
     cdp=None
     failed=False
     try:
+        serving=threading.Thread(target=lambda:server.serve_forever(poll_interval=.05),daemon=True)
+        serving.start();started=True
         connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=2)
         try:
             connection.request('GET',positive)
@@ -111,7 +115,9 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True):
         cdp.on('Network.webSocketCreated',socket_created)
         cdp.on('Network.webSocketHandshakeResponseReceived',socket_response)
         cdp.on('Network.webSocketFrameError',socket_error)
-        # No request-routing handler is present for either probe. The original
+        if still_authorized() is not True or clock()-start>90:raise NativeSelfCheckFailed()
+        probe_start=clock()
+        # No request-routing handler is present for any probe. The original
         # applicant context and its transport remain untouched throughout.
         for mode in ('fetch','fetch_tls','websocket','websocket_tls'):
             if still_authorized() is not True:raise NativeSelfCheckFailed()
@@ -139,21 +145,22 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True):
             # CDP network events and the evaluate reply use separate delivery
             # paths. Pump until the scoped proof arrives, never infer it from
             # a fulfilled JS promise or an unrelated global denial.
-            observe_until=min(start+12,time.monotonic()+.5)
-            while not evidence[native_url] and time.monotonic()<observe_until:
+            observe_until=min(probe_start+12,clock()+.5)
+            while not evidence[native_url] and clock()<observe_until:
                 if still_authorized() is not True or len(connections)!=1:break
                 page.wait_for_timeout(10)
             if (result not in ({'kind':'blocked'},{'kind':'response','status':403})
                     or owner.proxy.denied_connections<=denied or not evidence[native_url]
                     or unexpected or len(connections)!=1 or still_authorized() is not True
-                    or time.monotonic()-start>12):
+                    or clock()-probe_start>12 or clock()-start>90):
                 raise NativeSelfCheckFailed('native_selfcheck_'+mode+'_unverified',
                     {'protocol':mode,'outcome':result.get('kind') if result.get('kind') in {'blocked','response','timeout','escaped'} else 'invalid',
                      'response_status':result.get('status') if type(result.get('status')) is int else None,
                      'native_observations':native_observations[native_url][:8],
                      'scoped_proof':bool(evidence[native_url]),'proxy_denial_seen':owner.proxy.denied_connections>denied,
                      'receiver_connections':len(connections),'revoked':still_authorized() is not True,
-                     'success_budget_exceeded':time.monotonic()-start>12})
+                     'success_budget_exceeded':clock()-probe_start>12,'overall_budget_exceeded':clock()-start>90,
+                     'setup_ms':int((probe_start-start)*1000),'probe_elapsed_ms':int((clock()-probe_start)*1000)})
         if owner.proxy.verify_launch(browser) is not True or owner.identity.verify(browser)!=identity:
             raise NativeSelfCheckFailed()
     except BaseException:
@@ -167,8 +174,11 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True):
         if context is not None:
             try:context.close()
             except Exception:cleanup_ok=False
-        server.shutdown();server.server_close();serving.join(timeout=2)
-        if serving.is_alive():cleanup_ok=False
+        if started:server.shutdown()
+        server.server_close()
+        if started:
+            serving.join(timeout=2)
+            if serving.is_alive():cleanup_ok=False
         try:
             if list(browser.contexts)!=before:cleanup_ok=False
         except Exception:cleanup_ok=False
@@ -176,6 +186,7 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True):
     if (still_authorized() is not True or owner.identity.verify(browser)!=identity
             or owner.proxy.verify_launch(browser) is not True):
         raise NativeSelfCheckFailed()
+    if clock()-start>90 or still_authorized() is not True:raise NativeSelfCheckFailed()
     return {'schema':'native-loopback-self-check-v1','process_sha':identity,
             'browser_version':browser.version,'control_reachable':True,
             'native_proxy_blocked':True,'temporary_context_closed':True,
