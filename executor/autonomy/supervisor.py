@@ -738,6 +738,26 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         callback=getattr(supervisor.preparation_sessions,action)
                         self._send_json(200,callback(data,self._cookie_session()))
                         return
+                    native_actions={'open':'open_native','approve-fill':'approve_fill',
+                                    'review-resume':'review_resume','approve-resume':'approve_resume',
+                                    'status':'native_status','cancel':'cancel'}
+                    if parsed.path.startswith('/ui/api/native-preparation/'):
+                        action=parsed.path.removeprefix('/ui/api/native-preparation/')
+                        if action not in native_actions:
+                            self._send_json(404,{'error':'not_found'});return
+                        if self.command!='POST' or parsed.query or parsed.fragment:
+                            raise ValueError('invalid native preparation request')
+                        if origin!=expected_origin:
+                            self._send_json(403,{'error':'local_origin_required'});return
+                        data=self._read_json(limit=4096,strict=True)
+                        from ..preparation.native_admission import NativeAdmissionUnavailable
+                        try:
+                            callback=getattr(supervisor.preparation_sessions,native_actions[action])
+                            result=callback(data,self._cookie_session())
+                        except NativeAdmissionUnavailable:
+                            self._send_json(409,{'error':'native_preparation_runtime_not_admitted',
+                                                 'submit_capability':False});return
+                        self._send_json(200,result);return
                     if self.command == "GET" and parsed.path == "/ui/api/task-preparation":
                         if parsed.fragment:
                             raise ValueError("invalid preparation request")

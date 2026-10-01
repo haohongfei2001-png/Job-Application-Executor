@@ -76,7 +76,7 @@ class PreparationFlow:
                 session=self.session,browser_binding=self._binding(),plan_sha=self.permit['plan_sha'])
             if finished['status']!='PREPARED_UNVERIFIED':raise PreparationConflict()
             self.state='PREPARED_UNVERIFIED';self.offer=None
-            return result
+            return {**result,'task_revision':self.permit['task_revision']}
         except BaseException:
             self.state='UNKNOWN_OUTCOME'
             if self.journal is not None:

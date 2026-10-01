@@ -47,6 +47,7 @@ def test_flow_requires_private_exact_offer_before_one_durable_run(flow_setup):
     with pytest.raises(PreparationConflict):flow.approve('wrong',offer['scope_sha'],SESSION,approve_transmission=True)
     result=flow.approve(offer['nonce'],offer['scope_sha'],SESSION,approve_transmission=True)
     assert result['status']=='PREPARED_UNVERIFIED' and events.count('primitive')==2
+    assert result['task_revision']==q.get(task['task_id'])['revision']==task['revision']+1
     assert q.preparation_in_flight() and len(q.run_attempts(task['task_id']))==1
     with pytest.raises(PreparationConflict):flow.approve(offer['nonce'],offer['scope_sha'],SESSION,approve_transmission=True)
     assert flow.close()['context_closed'] and not q.preparation_in_flight()

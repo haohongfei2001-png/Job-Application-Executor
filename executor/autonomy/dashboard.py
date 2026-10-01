@@ -190,6 +190,21 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
         <p>可勾选拟填写项，再只读核对当前官网表单。勾选不授权发送资料。自动填写仍等待本机浏览器与人工接管验收；身份证、岗位2、附件上传、验证码、协议和最终提交不在拟填写内容中。</p>
         <button id="preparation-site-check" type="button" disabled>只读核对当前官网（不填写）</button>
         <p id="preparation-site-status" role="status"></p>
+        <button id="preparation-native-open" type="button" disabled>检查受控填写条件</button>
+        <p id="preparation-native-status" role="status"></p>
+        <section id="preparation-native-consent" hidden aria-label="填写与简历上传分别确认">
+          <p id="preparation-native-warning"></p>
+          <label><input id="preparation-fill-consent" type="checkbox">我已核对上方勾选的实际值，同意仅将这些常规资料填写到启云方本岗位</label>
+          <button id="preparation-fill-approve" type="button" disabled>确认本次填写</button>
+          <button id="preparation-resume-review" type="button" hidden disabled>单独核对本次简历上传</button>
+          <div id="preparation-resume-consent" hidden>
+            <p id="preparation-resume-detail"></p>
+            <p>仅上传当前任务绑定的原始 PDF 或 DOCX，最多 4 MiB，并遵守官网更低的限制；不转换文件。上传回包不证明附件留存成功。</p>
+            <label><input id="preparation-upload-consent" type="checkbox">我同意将这份原始简历上传到武汉启云方科技有限公司</label>
+            <button id="preparation-upload-approve" type="button" disabled>确认这份简历上传</button>
+          </div>
+          <p>以上确认均不授权证件、验证码、协议或最终提交。关闭、隐藏资料或更换任务会结束本次准备，结果不明时不会自动重试。</p>
+        </section>
         <button id="preparation-review-hide" type="button">隐藏个人值</button>
       </section>
       <a id="preparation-source" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">尝试打开已核对的官方页面</a>
@@ -528,6 +543,7 @@ function cancelSitePreflight(){
       expected_revision:request.expected_revision})}).catch(()=>{});
 }
 function clearPrivatePreparation(){
+  cancelNativePreparation();
   cancelSitePreflight();preparationSiteStatus.textContent='';
   privatePreparationValues=null;
   privatePreparationEpoch++;privatePreparation.hidden=true;privatePreparationFields.replaceChildren();
@@ -570,7 +586,9 @@ privatePreparationOpen.onclick=async()=>{
         const choice=document.createElement('input');choice.type='checkbox';choice.dataset.fieldId=item.field_id;
         choice.setAttribute('aria-label','选择核对'+labels[item.field_id]);
         choice.onchange=()=>{if(preparationSiteRequest){cancelSitePreflight();preparationSiteStatus.textContent='选择已变化，请重新核对官网。';}
-          preparationSiteCheck.disabled=!privatePreparationFields.querySelector('input:checked');};
+          cancelNativePreparation();
+          preparationSiteCheck.disabled=!privatePreparationFields.querySelector('input:checked');
+          nativeOpen.disabled=preparationSiteCheck.disabled;};
         label.prepend(choice);
       }
       row.append(label,value);privatePreparationFields.append(row);
@@ -587,6 +605,7 @@ privatePreparationOpen.onclick=async()=>{
 };
 preparationSiteCheck.onclick=async()=>{
   if(!preparationBinding||!privatePreparationValues||privatePreparation.hidden||uiSessionExpired||preparationSiteCheck.disabled)return;
+  cancelNativePreparation();nativeOpen.disabled=true;
   const selected=[...privatePreparationFields.querySelectorAll('input:checked')].map(item=>item.dataset.fieldId);
   if(!selected.length)return;
   const epoch=preparationEpoch,privateEpoch=privatePreparationEpoch,binding=preparationBinding;
@@ -614,6 +633,7 @@ preparationSiteCheck.onclick=async()=>{
       ||!['live_write','submit','account_verified','server_draft_verified'].every(key=>result.capabilities[key]===false)
       ||!Number.isInteger(result.expires_in_seconds)||result.expires_in_seconds<1||result.expires_in_seconds>120)throw new Error();
     preparationSiteStatus.textContent='当前官网表单已通过只读核对，本轮没有填写。自动填写仍等待本机验收；关闭或隐藏个人值会结束这次检查。';
+    nativeOpen.disabled=false;
     preparationSiteTimer=setTimeout(()=>{if(current()){clearPrivatePreparation();privatePreparationStatus.textContent='只读核对已到期，已隐藏个人值。';}},result.expires_in_seconds*1000);
     const poll=async()=>{
       if(!current())return;
@@ -631,6 +651,134 @@ preparationSiteCheck.onclick=async()=>{
     if(current()){clearPrivatePreparation();privatePreparationStatus.textContent='资料或官网状态无法核对，已隐藏个人值，没有填写。前次浏览器未确认关闭时不会另开，请稍后重新检查。';}
   }
 };
+const nativeOpen=document.getElementById('preparation-native-open'),nativeStatus=document.getElementById('preparation-native-status'),
+  nativeConsent=document.getElementById('preparation-native-consent'),nativeWarning=document.getElementById('preparation-native-warning'),
+  fillConsent=document.getElementById('preparation-fill-consent'),fillApprove=document.getElementById('preparation-fill-approve'),
+  resumeReview=document.getElementById('preparation-resume-review'),resumeConsent=document.getElementById('preparation-resume-consent'),
+  resumeDetail=document.getElementById('preparation-resume-detail'),uploadConsent=document.getElementById('preparation-upload-consent'),
+  uploadApprove=document.getElementById('preparation-upload-approve');
+let nativeRequest=null,nativeOffer=null,nativeUploadOffer=null,nativePoll=null,nativeExpiry=null,nativeBusy=false;
+function nativeBase(request){return {request_id:request.request_id,task_id:request.task_id,expected_revision:request.expected_revision};}
+function cancelNativePreparation(){
+  const request=nativeRequest;nativeRequest=nativeOffer=nativeUploadOffer=null;nativeBusy=false;
+  if(nativePoll)clearTimeout(nativePoll);if(nativeExpiry)clearTimeout(nativeExpiry);nativePoll=nativeExpiry=null;
+  nativeConsent.hidden=true;resumeConsent.hidden=true;resumeReview.hidden=true;
+  fillConsent.checked=uploadConsent.checked=false;fillConsent.disabled=uploadConsent.disabled=false;
+  fillApprove.disabled=uploadApprove.disabled=resumeReview.disabled=nativeOpen.disabled=true;
+  nativeWarning.textContent=resumeDetail.textContent=nativeStatus.textContent='';
+  if(request)uiRequest('/ui/api/native-preparation/cancel',{method:'POST',credentials:'same-origin',cache:'no-store',keepalive:true,
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(nativeBase(request))}).catch(()=>{});
+}
+async function nativeCall(action,request,extra={}){
+  const response=await uiRequest('/ui/api/native-preparation/'+action,{method:'POST',credentials:'same-origin',cache:'no-store',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({...nativeBase(request),...extra})});
+  const result=await response.json();
+  if(!response.ok)throw new Error(result.error==='native_preparation_runtime_not_admitted'?'native-unavailable':'state-conflict');
+  return result;
+}
+function nativeCurrent(request){return nativeRequest===request&&!uiSessionExpired&&preparationDialog.open
+  &&request.epoch===preparationEpoch&&preparationBinding===request.binding&&currentTaskId===request.task_id
+  &&(request.fillPending===true||preparationTaskRevisions.get(request.task_id)===request.binding.revision)
+  &&request.privateEpoch===privatePreparationEpoch&&!privatePreparation.hidden;}
+function nativeFail(request,message){if(nativeCurrent(request)){clearPrivatePreparation();privatePreparationStatus.textContent=message;}}
+function nativeDeadline(request,seconds){
+  if(nativeExpiry)clearTimeout(nativeExpiry);
+  nativeExpiry=setTimeout(()=>nativeFail(request,'本次私密确认已到期，个人值已隐藏；没有自动重试。'),seconds*1000);
+}
+function nativeWatch(request){
+  if(nativePoll)clearTimeout(nativePoll);
+  nativePoll=setTimeout(async()=>{
+    if(!nativeCurrent(request))return;
+    try{
+      const state=await nativeCall('status',request);if(!nativeCurrent(request))return;
+      if(state.submit_capability!==false||!['OFFERED','PREPARING','PREPARED_UNVERIFIED','REVIEWING_RESUME','RESUME_OFFERED','UPLOADING_RESUME'].includes(state.status))throw new Error();
+      nativeWatch(request);
+    }catch(_){nativeFail(request,'准备状态已结束或无法确认，个人值已隐藏；不要据此重复填写或上传。');}
+  },1000);
+}
+function validNativeOffer(result,request,selected){
+  return result.mode==='PRIVATE_NATIVE_FILL_OFFER'&&result.request_id===request.request_id
+    &&result.task_id===request.task_id&&result.task_revision===request.expected_revision
+    &&result.source_url===preparationOfficialSource&&result.profile_version===privatePreparationValues.profile_version
+    &&result.resume_version===privatePreparationValues.resume_version&&result.submit_capability===false
+    &&typeof result.nonce==='string'&&/^[A-Za-z0-9_-]{32,128}$/.test(result.nonce)
+    &&typeof result.scope_sha==='string'&&/^[a-f0-9]{64}$/.test(result.scope_sha)
+    &&Number.isInteger(result.expires_in_seconds)&&result.expires_in_seconds>0&&result.expires_in_seconds<=120
+    &&JSON.stringify(result.plan)===JSON.stringify(selected);
+}
+nativeOpen.onclick=async()=>{
+  if(nativeOpen.disabled||!preparationBinding||!privatePreparationValues||privatePreparation.hidden||uiSessionExpired)return;
+  cancelNativePreparation();cancelSitePreflight();
+  const selectedIds=[...privatePreparationFields.querySelectorAll('input:checked')].map(input=>input.dataset.fieldId);
+  const selected=privatePreparationValues.proposals.filter(item=>selectedIds.includes(item.field_id)).map(item=>({field_id:item.field_id,value:item.value}));
+  if(!selectedIds.length||selected.length!==selectedIds.length)return;
+  const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);
+  const request={request_id:[...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join(''),task_id:preparationBinding.taskId,
+    expected_revision:preparationBinding.revision,binding:preparationBinding,epoch:preparationEpoch,privateEpoch:privatePreparationEpoch};
+  nativeRequest=request;nativeStatus.textContent='正在检查本机原生浏览器条件并核对官网；尚未授权填写…';
+  try{
+    const result=await nativeCall('open',request,{selected_ids:selectedIds,profile_version:privatePreparationValues.profile_version,
+      resume_version:privatePreparationValues.resume_version});
+    if(!nativeCurrent(request))return;if(!validNativeOffer(result,request,selected))throw new Error();
+    nativeOffer={nonce:result.nonce,scope_sha:result.scope_sha};nativeConsent.hidden=false;
+    nativeWarning.textContent='请再次核对上方勾选的实际值。确认后会向武汉启云方科技有限公司的应用实施工程师（武汉）表单填写这些常规资料；输入本身可能传送资料。这不是最终提交。';
+    nativeStatus.textContent='条件与当前表单已核对，等待你单独确认本次填写。';
+    nativeDeadline(request,result.expires_in_seconds);nativeWatch(request);
+  }catch(error){nativeFail(request,error.message==='native-unavailable'?'当前原生浏览器版本尚未通过完整准入验收，未填写或上传；只读检查仍可使用。':'条件或资料无法确认，未自动重试。请重新核对准备状态。');}
+};
+fillConsent.onchange=()=>{fillApprove.disabled=!fillConsent.checked||!nativeOffer||nativeBusy;};
+fillApprove.onclick=async()=>{
+  const request=nativeRequest,offer=nativeOffer;
+  if(!request||!offer||!nativeCurrent(request)||nativeBusy||!fillConsent.checked||fillApprove.disabled)return;
+  nativeBusy=true;request.fillPending=true;nativeOffer=null;fillApprove.disabled=fillConsent.disabled=true;
+  nativeStatus.textContent='正在执行这一份已确认的填写计划…';
+  try{
+    const result=await nativeCall('approve-fill',request,{...offer,approve_transmission:true});
+    if(!nativeCurrent(request))return;
+    if(result.status!=='PREPARED_UNVERIFIED'||result.submit_capability!==false||result.server_draft_verified!==false
+      ||!Number.isSafeInteger(result.task_revision)||result.task_revision<=request.expected_revision
+      ||!Number.isSafeInteger(preparationTaskRevisions.get(request.task_id))
+      ||preparationTaskRevisions.get(request.task_id)>result.task_revision)throw new Error();
+    request.binding.revision=result.task_revision;preparationTaskRevisions.set(request.task_id,result.task_revision);
+    request.fillPending=false;nativeBusy=false;fillConsent.checked=false;resumeReview.hidden=false;resumeReview.disabled=false;
+    nativeStatus.textContent='已执行本次填写；尚未核实网站草稿、附件留存或申请提交。简历上传需要下面的单独确认。';
+    nativeDeadline(request,900);
+  }catch(_){nativeFail(request,'本次填写结果无法确认，个人值已隐藏；不会自动重试，也不能当作已提交。');}
+};
+resumeReview.onclick=async()=>{
+  const request=nativeRequest;if(!request||!nativeCurrent(request)||nativeBusy||resumeReview.disabled)return;
+  nativeBusy=true;resumeReview.disabled=true;
+  try{
+    const result=await nativeCall('review-resume',request);if(!nativeCurrent(request))return;
+    const material=result.resume;
+    if(result.submit_capability!==false||result.recipient!=='https://www.qiyunfang.com/ajax/advanceUpload.jsp'
+      ||typeof result.nonce!=='string'||!/^[A-Za-z0-9_-]{32,128}$/.test(result.nonce)
+      ||typeof result.scope_sha!=='string'||!/^[a-f0-9]{64}$/.test(result.scope_sha)
+      ||!material||material.resume_sha256!==privatePreparationValues.resume_version
+      ||!['resume_pdf','resume_docx'].includes(material.kind)||!Number.isInteger(material.byte_count)
+      ||material.byte_count<1||material.byte_count>4*1024*1024
+      ||material.destination_filename!==(material.kind==='resume_pdf'?'resume.pdf':'resume.docx')
+      ||!Number.isInteger(result.expires_in_seconds)||result.expires_in_seconds<1||result.expires_in_seconds>120)throw new Error();
+    nativeBusy=false;nativeUploadOffer={nonce:result.nonce,scope_sha:result.scope_sha};resumeConsent.hidden=false;
+    resumeDetail.textContent='接收方：武汉启云方科技有限公司；原文件类型：'+(material.kind==='resume_pdf'?'PDF':'DOCX')
+      +'；大小：'+material.byte_count+' 字节；发送文件名：'+material.destination_filename+'；本机版本：'+material.resume_sha256;
+    nativeDeadline(request,result.expires_in_seconds);
+  }catch(_){nativeFail(request,'无法确认这份原始简历与上传条件，未自动重试；没有转换或替换简历。');}
+};
+uploadConsent.onchange=()=>{uploadApprove.disabled=!uploadConsent.checked||!nativeUploadOffer||nativeBusy;};
+uploadApprove.onclick=async()=>{
+  const request=nativeRequest,offer=nativeUploadOffer;
+  if(!request||!offer||!nativeCurrent(request)||nativeBusy||!uploadConsent.checked||uploadApprove.disabled)return;
+  nativeBusy=true;nativeUploadOffer=null;uploadApprove.disabled=true;uploadConsent.disabled=true;
+  nativeStatus.textContent='正在发送这份单独确认的原始简历…';
+  try{
+    const result=await nativeCall('approve-resume',request,{...offer,approve_upload:true});if(!nativeCurrent(request))return;
+    if(result.status!=='RETURNED_UNVERIFIED'||result.server_attachment_verified!==false||result.automatic_retry!==false||result.submit_capability!==false)throw new Error();
+    nativeBusy=false;uploadConsent.checked=false;
+    nativeStatus.textContent='上传请求已返回，但网站是否实际保留附件尚未验证。没有最终提交，不能当作投递成功；不会自动再次上传。';
+  }catch(_){nativeFail(request,'上传结果无法确认，个人值已隐藏；可能已经发送，不会自动重传或最终提交。');}
+};
+
 function clearPreparationObservation(){
   preparationEpoch++;preparationBinding=null;preparationBusy=false;preparationStale=false;
   clearPreparationContent();preparationRefresh.disabled=true;
@@ -645,7 +793,9 @@ function closePreparationDialog(restoreFocus=true){
   if(restoreFocus&&!uiSessionExpired)(preparationTrigger(taskId)||taskContext).focus();
 }
 function reconcilePreparationTasks(tasks){
-  preparationTaskRevisions=new Map((tasks||[]).map(task=>[task.task_id,task.revision]));
+  // Task revisions only increase; late state reads cannot undo a witnessed native handover.
+  preparationTaskRevisions=new Map((tasks||[]).map(task=>[task.task_id,
+    Number.isSafeInteger(task.revision)?Math.max(task.revision,preparationTaskRevisions.get(task.task_id)||0):task.revision]));
   // Unsent answers can deliberately hold the card DOM at its old revision.
   // Refresh only this read-only trigger; never rebind its mutation controls.
   for(const button of tasksEl.querySelectorAll('[data-task-preparation]')){
@@ -653,7 +803,8 @@ function reconcilePreparationTasks(tasks){
     button.disabled=!Number.isSafeInteger(revision)||revision<0;
     if(!button.disabled)button.dataset.revision=String(revision);
   }
-  if(preparationBinding&&(preparationTaskRevisions.get(preparationBinding.taskId)!==preparationBinding.revision
+  if(preparationBinding&&((preparationTaskRevisions.get(preparationBinding.taskId)!==preparationBinding.revision
+      &&!(nativeRequest?.fillPending===true&&nativeRequest.binding===preparationBinding))
       ||currentTaskId!==preparationBinding.taskId)){
     closePreparationDialog();notify('任务已变化，本地准备清单已清除；请从任务卡片重新查看。');
   }

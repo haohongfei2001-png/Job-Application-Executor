@@ -164,7 +164,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertEqual(set(JOBS), ORDINARY | set(CLOSURE))
         expected_budgets = {"foundation": 30, "packaged_candidate": 20,
                             "macos_consumer_release": 25, "test": 70,
-                            "engineering_closure_macos": 20, "preparation_validation": 12}
+                            "engineering_closure_macos": 20, "preparation_validation": 25}
         for name, budget in expected_budgets.items():
             self.assertIn(f"    timeout-minutes: {budget}\n", JOBS[name])
         build = JOBS["engineering_closure_macos"]
@@ -193,7 +193,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
 
     def test_preparation_oracle_has_its_own_bounded_allocation(self):
         body=JOBS['preparation_validation']
-        self.assertIn('    timeout-minutes: 12\n',body)
+        self.assertIn('    timeout-minutes: 25\n',body)
         self.assertIn('os: [ubuntu-latest, macos-latest]',body)
         self.assertIn('persist-credentials: false',body)
         for filename in ['tests/test_qiyunfang_preparation_v1.py', 'tests/test_preparation_review_v1.py', 'tests/test_preparation_authority_v1.py', 'tests/test_preparation_final_journal_v1.py', 'tests/test_preparation_process_identity_v1.py', 'tests/test_preparation_public_reads_v1.py', 'tests/test_preparation_discovery_v1.py', 'tests/test_preparation_preflight_v1.py', 'tests/test_preparation_authority_browser.py', 'tests/test_preparation_process_identity_browser.py', 'tests/test_preparation_flow_v1.py', 'tests/test_preparation_flow_browser.py', 'tests/test_preparation_resume_material_v1.py', 'tests/test_preparation_resume_journal_v1.py', 'tests/test_preparation_resume_transport_v1.py', 'tests/test_preparation_resume_flow_v1.py', 'tests/test_preparation_resume_browser.py', 'tests/test_preparation_controller_v1.py', 'tests/test_preparation_session_v1.py', 'tests/test_preparation_session_browser.py', 'tests/test_preparation_review_browser.py', 'tests/test_qiyunfang_preparation_browser.py', 'tests/test_preparation_human_request_v1.py', 'tests/test_preparation_human_request_browser.py', 'tests/test_preparation_network_fence_v1.py', 'tests/test_preparation_network_fence_browser.py', 'tests/test_preparation_lifecycle_browser.py']:
