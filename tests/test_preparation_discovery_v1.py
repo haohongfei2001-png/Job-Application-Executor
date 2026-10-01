@@ -102,3 +102,20 @@ def test_identical_resource_refetch_after_certificate_still_invalidates_sealing(
     assert transport.resource_evidence==before and transport.blocked==3
     transport.seal()
     with pytest.raises(RuntimeError):transport.require_sealed()
+
+
+@pytest.mark.parametrize('fault',[None,'double_leading','internal_empty','duplicate','extra_command','other_column','missing_key'])
+def test_source_shaped_stats_leading_ampersand_is_finite_denial_only(fault):
+    body='&colId=124&pdId=-1&ndId=-1&browserType=1&screenType=1&sc=synthetic&rf=&visitUrl=synthetic&visitEquipment=1&statId=1'
+    if fault=='double_leading':body='&'+body
+    elif fault=='internal_empty':body=body.replace('&pdId','&&pdId')
+    elif fault=='duplicate':body+='&colId=124'
+    elif fault=='extra_command':body+='&cmd=addWafCk_addSubmit'
+    elif fault=='other_column':body=body.replace('colId=124','colId=125')
+    elif fault=='missing_key':body=body.replace('&rf=','')
+    item=request('https://www.qiyunfang.com/ajax/statistics_h.jsp?cmd=wafNotCk_visited','POST',body)
+    result=expected_discovery_denial(item)
+    assert bool(result) is (fault is None)
+    calls=[];transport=PreparationTransport(public_fetch=lambda _:pytest.fail('stats forwarded'))
+    transport._route(SimpleNamespace(request=item,abort=lambda *_:calls.append('abort')))
+    assert calls==['abort'] and transport.blocked==1

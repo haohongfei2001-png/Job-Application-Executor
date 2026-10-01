@@ -78,6 +78,15 @@ def expected_discovery_denial(request):
             extras={'error','status'} if parsed.path=='/ajax/logAjaxErr_h.jsp' else {'_v'} if parsed.path=='/ajax/site_h.jsp' else set()
             if set(query)-{'cmd'}<=extras:
                 body=request.post_data
+                if parsed.path=='/ajax/statistics_h.jsp':
+                    # Pinned partitionSite.js joins ten fragments that each
+                    # begin '&'. This exact observed stats shape stays DENIED;
+                    # normalize one leading empty component only for it.
+                    if not isinstance(body,str) or not body.startswith('&') or len(body)>8192:return None
+                    data=_pairs(body[1:],16)
+                    if (set(data)!={'colId','pdId','ndId','browserType','screenType','sc','rf','visitUrl','visitEquipment','statId'}
+                            or data['colId']!='124'):return None
+                    return 'known_background_command_denied'
                 if method=='GET' and body is not None:return None
                 if body:
                     if not isinstance(body,str) or len(body)>8192:return None
