@@ -86,3 +86,23 @@ approval/state/mapping/lifecycle integration, plus 8–16 for adversarial and na
 verification. Side-effect-boundary research is additional, plausibly 1–3 days,
 and may still end with the site unsupported. No per-use model call is necessary;
 development and bounded CI dominate. This is future work, not a release promise.
+
+## 2026-10-01 implementation checkpoint
+
+The public read-only bootstrap now independently matches the complete original
+empty 90-control form and seals a source/activity receipt on Linux installed
+Chrome and Mac bundled Chromium. Research run36865769165 records zero
+unclassified requests while retaining all 54/55 denied background requests.
+The dedicated owned-browser, one-shot approval, field journal, disposal and
+opaque final-slot components have synthetic evidence; none invent an account,
+server draft, READY state or verified application.
+
+The next private UI surface selects routine fields and checks the current real
+public form through a headless disposable browser. It has cookie-only exact-
+Origin open/cancel/status routes, no field-approval endpoint, no returned
+approval nonce, and hardcoded no-write/no-submit capabilities. Exact task,
+profile/resume versions and selected values are rechecked; expiry, cancellation,
+owner closure or retirement clears the private view. No hand-written JSON is
+needed. This is still a read-only checkpoint: user-data filling requires native
+runtime/device admission, and resume/CAPTCHA/legal/human-final stages remain
+separate unresolved product gates.

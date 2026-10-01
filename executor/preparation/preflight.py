@@ -40,12 +40,13 @@ def open_public_form(owner):
     return PublicFormPreflight(page,document,receipt['resources_sha'])
 
 
-def prepare_public_flow(authority,owner,*,task_id,revision,session,selected_ids):
+def prepare_public_flow(authority,owner,*,task_id,revision,session,selected_ids,still_authorized=lambda:True):
     """Internal opening/review stage only. Explicit approval is a later action."""
     from .flow import PreparationFlow
     preflight=open_public_form(owner)
+    if still_authorized() is not True:raise ContractChanged()
     flow=PreparationFlow(authority,owner,preflight.page,task_id=task_id,revision=revision,
-        session=session,selected_ids=selected_ids,resources_sha=preflight.resources_sha)
+        session=session,selected_ids=selected_ids,resources_sha=preflight.resources_sha,still_authorized=still_authorized)
     if flow.binding!=preflight.document.public_binding():
         flow.close();raise ContractChanged()
     return flow

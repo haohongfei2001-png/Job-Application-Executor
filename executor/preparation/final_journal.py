@@ -16,6 +16,33 @@ from .qiyunfang import CONTRACT_VERSION, CONTRACT_ROLE, digest
 from .human_request import FINAL_URL
 
 
+def _prepared_task(db,permit,attempt_id):
+    """Read-only retained preparation proof, without renewing field authority."""
+    row=db.execute('SELECT * FROM preparation_approvals WHERE nonce_sha=?',(permit['nonce_sha'],)).fetchone()
+    task=db.execute('SELECT * FROM tasks WHERE task_id=?',(permit['task_id'],)).fetchone()
+    if (row is None or row['context_closed'] or row['outcome']!='PREPARED_UNVERIFIED'
+            or row['owner']!=permit['owner'] or row['scope_sha']!=permit['scope_sha']
+            or row['plan_sha']!=permit['plan_sha'] or row['session_sha']!=permit['session_sha']
+            or row['attempt_id']!=attempt_id or task is None
+            or task['owner']!=permit['owner'] or task['revision']!=permit['task_revision']
+            or task['stage']!='BLOCKED' or task['blocker']!='anonymous_preparation_unverified'
+            or digest(json.loads(task['spec']))!=permit['spec_sha']
+            or db.execute('SELECT 1 FROM profile_write_barriers WHERE profile_ref=?',
+                          (json.loads(task['spec'])['profile_ref'],)).fetchone()):
+        raise PreparationConflict()
+    run=db.execute('SELECT * FROM run_attempts WHERE attempt_id=?',(attempt_id,)).fetchone()
+    actions=db.execute('SELECT field_sha256,outcome FROM field_actions WHERE attempt_id=?',(attempt_id,)).fetchall()
+    expected={digest({'scope_sha':permit['scope_sha'],'field_id':key,'ordinal':index})
+              for index,key in enumerate(_primitive_fields(permit['plan']))}
+    if (run is None or run['owner']!=permit['owner'] or run['task_id']!=permit['task_id']
+            or run['outcome']!='RETURNED_UNVERIFIED' or len(actions)!=len(expected)
+            or {action['field_sha256'] for action in actions}!=expected
+            or any(action['outcome']!='DOM_READBACK_UNVERIFIED' for action in actions)):
+        raise PreparationConflict()
+    return task
+
+
+
 class PreparationFinalJournal:
     def __init__(self, authority, permit, session, observe):
         if not callable(observe):raise PreparationConflict()
@@ -48,29 +75,7 @@ class PreparationFinalJournal:
             raise PreparationConflict()
 
     def _rows(self,db):
-        permit=self.permit
-        row=db.execute('SELECT * FROM preparation_approvals WHERE nonce_sha=?',(permit['nonce_sha'],)).fetchone()
-        task=db.execute('SELECT * FROM tasks WHERE task_id=?',(permit['task_id'],)).fetchone()
-        if (row is None or row['context_closed'] or row['outcome']!='PREPARED_UNVERIFIED'
-                or row['owner']!=permit['owner'] or row['scope_sha']!=permit['scope_sha']
-                or row['plan_sha']!=permit['plan_sha'] or row['session_sha']!=permit['session_sha']
-                or row['attempt_id']!=self.attempt_id or task is None
-                or task['owner']!=permit['owner'] or task['revision']!=permit['task_revision']
-                or task['stage']!='BLOCKED' or task['blocker']!='anonymous_preparation_unverified'
-                or digest(json.loads(task['spec']))!=permit['spec_sha']
-                or db.execute('SELECT 1 FROM profile_write_barriers WHERE profile_ref=?',
-                              (json.loads(task['spec'])['profile_ref'],)).fetchone()):
-            raise PreparationConflict()
-        run=db.execute('SELECT * FROM run_attempts WHERE attempt_id=?',(self.attempt_id,)).fetchone()
-        actions=db.execute('SELECT field_sha256,outcome FROM field_actions WHERE attempt_id=?',(self.attempt_id,)).fetchall()
-        expected={digest({'scope_sha':permit['scope_sha'],'field_id':key,'ordinal':index})
-                  for index,key in enumerate(_primitive_fields(permit['plan']))}
-        if (run is None or run['owner']!=permit['owner'] or run['task_id']!=permit['task_id']
-                or run['outcome']!='RETURNED_UNVERIFIED' or len(actions)!=len(expected)
-                or {action['field_sha256'] for action in actions}!=expected
-                or any(action['outcome']!='DOM_READBACK_UNVERIFIED' for action in actions)):
-            raise PreparationConflict()
-        return task
+        return _prepared_task(db,self.permit,self.attempt_id)
 
     def _material_matches(self,report):
         if report['profile']['version']!=self.permit['profile_sha'] or report['resume']!=self.permit['resume']:

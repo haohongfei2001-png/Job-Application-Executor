@@ -148,6 +148,7 @@ def serve(root, port):
         try:
             worker.run_forever()
         finally:
+            supervisor.preparation_sessions.revoke_all()
             server.shutdown()
             server.server_close()
             try:

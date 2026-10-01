@@ -1,4 +1,4 @@
-"""Unregistered disposable browser owner. No CDP adoption or final-send method.
+"""Disposable browser owner. No CDP adoption or final-send method.
 
 Only audited public GETs can be fetched by a separate API client and fulfilled.
 The native browser's proxy can never forward traffic, even if routing disappears.
@@ -44,6 +44,8 @@ class DisposablePreparationSession:
         self.proxy = self.pw = self.browser = self.context = self.client = None
         self.transport = None
         self.identity = None
+        self.entry_cleanup_attempted = False
+        self.entry_cleanup_closed = False
 
     def __enter__(self):
         if self.proxy is not None:raise RuntimeError('preparation_session_already_started')
@@ -72,7 +74,9 @@ class DisposablePreparationSession:
             self.transport.install(self.context)
             return self
         except BaseException:
-            self.close()
+            self.entry_cleanup_attempted=True
+            try:self.entry_cleanup_closed=self.close() is True
+            except BaseException:self.entry_cleanup_closed=False
             error=RuntimeError('preparation_session_unavailable')
             error.phase=phase
             raise error from None

@@ -43,6 +43,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 .diagnostics-dialog pre{max-height:48vh;overflow:auto;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .diagnostics-actions{display:flex;justify-content:flex-end;gap:8px}.diagnostics-actions button{min-height:36px}
 .preparation-checks{list-style:none;margin:12px 0;padding:0}.preparation-checks li{display:flex;justify-content:space-between;gap:14px;border-bottom:1px solid #e2e8f0;padding:9px 0;font-size:13px;line-height:1.5}.preparation-checks strong{color:#475569;text-align:right;min-width:0;overflow-wrap:anywhere}.preparation-checks .missing{color:#9a3412}.preparation-manual{font-size:13px;line-height:1.7;padding-left:22px}.preparation-dialog h3{font-size:15px;margin:20px 0 8px}.preparation-dialog a{display:inline-block;min-height:44px;padding:12px 0;color:#1d4ed8}.preparation-dialog .diagnostics-actions{position:sticky;bottom:-22px;background:white;padding:12px 0}.preparation-dialog .diagnostics-actions button{min-height:44px}
+.preparation-checks label{display:flex;align-items:center;gap:8px;min-height:28px;margin:0}.preparation-checks input[type=checkbox]{width:18px;height:18px;flex:0 0 auto;margin:0}
 #session-expired{margin:0;padding:16px 22px;background:#fff7ed;color:#9a3412;border-bottom:1px solid #fed7aa;line-height:1.5}
 .toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
 @media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:block;max-height:45vh;border-right:0;border-bottom:1px solid #e5e7eb}main{min-height:55vh}}
@@ -186,7 +187,9 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
       <section id="preparation-review" hidden aria-label="此任务的私密拟填写内容">
         <p>以下是此任务原资料的实际值与明确匹配的官网选项，仅在本机显示。尚未发送到官网，也没有授权填写。不能明确匹配的项目留给本人核对，不会猜测。</p>
         <ul id="preparation-review-fields" class="preparation-checks"></ul>
-        <p>自动填写尚未启用：专用浏览器的关闭、异常中断与人工接管边界仍需验证。身份证、岗位2、附件上传、验证码、协议和最终提交不在拟填写内容中。</p>
+        <p>可勾选拟填写项，再只读核对当前官网表单。勾选不授权发送资料。自动填写仍等待本机浏览器与人工接管验收；身份证、岗位2、附件上传、验证码、协议和最终提交不在拟填写内容中。</p>
+        <button id="preparation-site-check" type="button" disabled>只读核对当前官网（不填写）</button>
+        <p id="preparation-site-status" role="status"></p>
         <button id="preparation-review-hide" type="button">隐藏个人值</button>
       </section>
       <a id="preparation-source" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">尝试打开已核对的官方页面</a>
@@ -512,7 +515,21 @@ const privatePreparation=document.getElementById('preparation-review'),
   privatePreparationFields=document.getElementById('preparation-review-fields'),
   privatePreparationStatus=document.getElementById('preparation-review-status'),
   privatePreparationOpen=document.getElementById('preparation-review-open');
+const preparationSiteCheck=document.getElementById('preparation-site-check'),
+  preparationSiteStatus=document.getElementById('preparation-site-status');
+let preparationSiteRequest=null,preparationSiteTimer=null,preparationSitePoll=null,privatePreparationValues=null;
+function cancelSitePreflight(){
+  const request=preparationSiteRequest;preparationSiteRequest=null;
+  if(preparationSiteTimer)clearTimeout(preparationSiteTimer);preparationSiteTimer=null;
+  if(preparationSitePoll)clearTimeout(preparationSitePoll);preparationSitePoll=null;
+  preparationSiteCheck.disabled=true;
+  if(request)uiRequest('/ui/api/preparation-session/cancel',{method:'POST',credentials:'same-origin',cache:'no-store',keepalive:true,
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:request.request_id,task_id:request.task_id,
+      expected_revision:request.expected_revision})}).catch(()=>{});
+}
 function clearPrivatePreparation(){
+  cancelSitePreflight();preparationSiteStatus.textContent='';
+  privatePreparationValues=null;
   privatePreparationEpoch++;privatePreparation.hidden=true;privatePreparationFields.replaceChildren();
   privatePreparationStatus.textContent='';privatePreparationOpen.disabled=false;
 }
@@ -535,6 +552,7 @@ privatePreparationOpen.onclick=async()=>{
       ||data.task_id!==binding.taskId||data.task_revision!==binding.revision
       ||data.contract_version!=='qiyunfang-public-form-2026-10-01-v1'||data.observed_at!=='2026-10-01'
       ||typeof data.profile_version!=='string'||!/^[a-f0-9]{64}$/.test(data.profile_version)
+      ||!(data.resume_version===null||typeof data.resume_version==='string'&&/^[a-f0-9]{64}$/.test(data.resume_version))
       ||!data.capabilities||!['live_write','submit','account_verified','server_draft_verified'].every(key=>data.capabilities[key]===false)
       ||!Array.isArray(data.proposals)||data.proposals.length!==Object.keys(labels).length
       ||new Set(data.proposals.map(item=>item?.field_id)).size!==data.proposals.length
@@ -544,12 +562,20 @@ privatePreparationOpen.onclick=async()=>{
           ||item.field_id==='17'&&Array.isArray(item.value)&&item.value.length>0&&item.value.length<=3
           &&item.value.every(value=>['武汉','深圳','成都'].includes(value))):item.value!==null)))throw new Error();
     for(const item of data.proposals){
-      const row=document.createElement('li'),label=document.createElement('span'),value=document.createElement('strong');
+      const row=document.createElement('li'),label=document.createElement(item.status==='proposed'?'label':'span'),value=document.createElement('strong');
       label.textContent=labels[item.field_id];
       value.textContent=item.status==='proposed'?(Array.isArray(item.value)?item.value.join('、'):item.value):
         item.status==='missing'?'缺少记录，须本人填写':'无法明确匹配，须本人核对';
+      if(item.status==='proposed'){
+        const choice=document.createElement('input');choice.type='checkbox';choice.dataset.fieldId=item.field_id;
+        choice.setAttribute('aria-label','选择核对'+labels[item.field_id]);
+        choice.onchange=()=>{if(preparationSiteRequest){cancelSitePreflight();preparationSiteStatus.textContent='选择已变化，请重新核对官网。';}
+          preparationSiteCheck.disabled=!privatePreparationFields.querySelector('input:checked');};
+        label.prepend(choice);
+      }
       row.append(label,value);privatePreparationFields.append(row);
     }
+    privatePreparationValues=data;
     privatePreparation.hidden=false;privatePreparationStatus.textContent='已显示本机拟填写值；未操作官网。';
   }catch(_){
     if(preparationIsCurrent(epoch,binding)&&privateEpoch===privatePreparationEpoch){
@@ -557,6 +583,52 @@ privatePreparationOpen.onclick=async()=>{
     }
   }finally{
     if(preparationIsCurrent(epoch,binding)&&privateEpoch===privatePreparationEpoch)privatePreparationOpen.disabled=false;
+  }
+};
+preparationSiteCheck.onclick=async()=>{
+  if(!preparationBinding||!privatePreparationValues||privatePreparation.hidden||uiSessionExpired||preparationSiteCheck.disabled)return;
+  const selected=[...privatePreparationFields.querySelectorAll('input:checked')].map(item=>item.dataset.fieldId);
+  if(!selected.length)return;
+  const epoch=preparationEpoch,privateEpoch=privatePreparationEpoch,binding=preparationBinding;
+  const expectedPlan=privatePreparationValues.proposals.filter(item=>selected.includes(item.field_id))
+    .map(item=>({field_id:item.field_id,value:item.value}));
+  const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);
+  const request={request_id:[...bytes].map(value=>value.toString(16).padStart(2,'0')).join(''),
+    task_id:binding.taskId,expected_revision:binding.revision,selected_ids:selected,
+    profile_version:privatePreparationValues.profile_version,resume_version:privatePreparationValues.resume_version};
+  preparationSiteRequest=request;preparationSiteCheck.disabled=true;
+  preparationSiteStatus.textContent='正在本机后台只读核对官网；不会填入、上传或提交资料…';
+  const current=()=>preparationSiteRequest===request&&preparationIsCurrent(epoch,binding)&&privateEpoch===privatePreparationEpoch;
+  try{
+    const response=await uiRequest('/ui/api/preparation-session/open',{method:'POST',credentials:'same-origin',cache:'no-store',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    const result=await response.json();
+    if(!current())return;
+    if(!response.ok||result.mode!=='READ_ONLY_PUBLIC_PREFLIGHT'||result.status!=='EMPTY_FORM_VERIFIED'
+      ||result.request_id!==request.request_id||result.task_id!==binding.taskId||result.task_revision!==binding.revision
+      ||result.source_url!=='https://www.qiyunfang.com/h-col-124.html'||!Array.isArray(result.plan)
+      ||result.plan.length!==selected.length||!result.capabilities
+      ||result.profile_version!==request.profile_version||result.resume_version!==request.resume_version
+      ||result.plan.some((item,index)=>!item||Object.keys(item).sort().join(',')!=='field_id,value'
+        ||item.field_id!==expectedPlan[index].field_id||JSON.stringify(item.value)!==JSON.stringify(expectedPlan[index].value))
+      ||!['live_write','submit','account_verified','server_draft_verified'].every(key=>result.capabilities[key]===false)
+      ||!Number.isInteger(result.expires_in_seconds)||result.expires_in_seconds<1||result.expires_in_seconds>120)throw new Error();
+    preparationSiteStatus.textContent='当前官网表单已通过只读核对，本轮没有填写。自动填写仍等待本机验收；关闭或隐藏个人值会结束这次检查。';
+    preparationSiteTimer=setTimeout(()=>{if(current()){clearPrivatePreparation();privatePreparationStatus.textContent='只读核对已到期，已隐藏个人值。';}},result.expires_in_seconds*1000);
+    const poll=async()=>{
+      if(!current())return;
+      try{
+        const response=await uiRequest('/ui/api/preparation-session/status',{method:'POST',credentials:'same-origin',cache:'no-store',
+          headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:request.request_id,task_id:request.task_id,
+            expected_revision:request.expected_revision})});
+        const state=await response.json();if(!current())return;
+        if(!response.ok||state.status!=='OFFERED'||state.live_write_available!==false)throw new Error();
+        preparationSitePoll=setTimeout(poll,1000);
+      }catch(_){if(current()){clearPrivatePreparation();privatePreparationStatus.textContent='只读检查已结束或状态无法确认，已隐藏个人值。';}}
+    };
+    preparationSitePoll=setTimeout(poll,1000);
+  }catch(_){
+    if(current()){clearPrivatePreparation();privatePreparationStatus.textContent='资料或官网状态无法核对，已隐藏个人值，没有填写。前次浏览器未确认关闭时不会另开，请稍后重新检查。';}
   }
 };
 function clearPreparationObservation(){

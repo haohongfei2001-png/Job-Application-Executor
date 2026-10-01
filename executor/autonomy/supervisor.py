@@ -16,6 +16,7 @@ from .profile_setup import profile_setup_state, select_profile
 from . import profile_editor
 from .task_preparation import parse_preparation_query, prepare_task
 from .preparation_review import review_preparation
+from .preparation_session import PrivatePreparationSessions
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
@@ -48,6 +49,7 @@ class Supervisor:
         self._service_instance = secrets.token_urlsafe(32)
         self._service_port = None
         self._service_stop_requested = False
+        self.preparation_sessions = PrivatePreparationSessions(queue,self.valid_ui_session,self.mutation_fenced)
 
     def configure_profile(self, text, expected_version):
         current = select_profile(text, expected_version)
@@ -423,6 +425,7 @@ class Supervisor:
                 # Serialize against all task/fact/config admission before the
                 # existing worker safe-checkpoint stop flag can be observed.
                 self._service_stop_requested = True
+                self.preparation_sessions.revoke_all()
                 # HTTP retirement sends its acknowledgement before releasing the
                 # worker. The admission fence is already active under both locks.
                 if not defer_stop:
@@ -716,6 +719,17 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                             raise ValueError("invalid preparation request")
                         task_id, revision = parse_preparation_query(parsed.query)
                         self._send_json(200, review_preparation(supervisor.queue, task_id, revision))
+                        return
+                    if parsed.path in {'/ui/api/preparation-session/open','/ui/api/preparation-session/cancel','/ui/api/preparation-session/status'}:
+                        if self.command!='POST' or parsed.query or parsed.fragment:
+                            raise ValueError('invalid preparation session request')
+                        if origin != expected_origin:
+                            self._send_json(403, {'error':'local_origin_required'})
+                            return
+                        data=self._read_json(limit=4096,strict=True)
+                        action=parsed.path.rsplit('/',1)[1]
+                        callback=getattr(supervisor.preparation_sessions,action)
+                        self._send_json(200,callback(data,self._cookie_session()))
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/task-preparation":
                         if parsed.fragment:

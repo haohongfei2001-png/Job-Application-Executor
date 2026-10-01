@@ -95,3 +95,45 @@ def test_disposal_exception_revokes_prepared_state_and_readback_evidence(flow_se
     assert flow.state=='UNKNOWN_OUTCOME' and q.preparation_in_flight()
     assert {row['outcome'] for row in q.field_actions(task['task_id'])}=={'UNKNOWN_OUTCOME'}
     with pytest.raises(PreparationConflict):flow.close()
+
+
+def test_revocation_delivered_during_identity_observation_refuses_before_consumption(flow_setup):
+    (q,_,_,_,_),flow,events,_,_=flow_setup;offer=flow.private_offer();alive=[True]
+    flow._still_authorized=lambda:alive[0]
+    original=flow.owner.observe
+    def observe(*args,**kwargs):
+        result=original(*args,**kwargs);alive[0]=False;return result
+    flow.owner.observe=observe
+    with pytest.raises(PreparationConflict):flow.approve(offer['nonce'],offer['scope_sha'],SESSION,approve_transmission=True)
+    assert not q.preparation_in_flight() and 'primitive' not in events
+
+
+@pytest.mark.parametrize('fault',['cancel','profile','proof','task_revision','owner'])
+def test_manual_review_heartbeat_rejects_task_content_or_retained_proof_drift(flow_setup,fault):
+    (q,task,profile,_,_),flow,_,_,_=flow_setup;offer=flow.private_offer()
+    flow.approve(offer['nonce'],offer['scope_sha'],SESSION,approve_transmission=True)
+    if fault=='cancel':q.cancel(task['task_id'])
+    elif fault=='profile':profile.write_text('{"fields":{}}')
+    else:
+        with q.tx() as db:
+            if fault=='proof':db.execute("UPDATE field_actions SET outcome='UNKNOWN_OUTCOME'")
+            elif fault=='owner':db.execute("UPDATE tasks SET owner='changed'")
+            else:db.execute('UPDATE tasks SET revision=revision+1')
+    with pytest.raises((PreparationConflict,RuntimeError)):flow.review_fence()
+
+
+def test_manual_review_heartbeat_does_not_renew_expired_field_authority(flow_setup):
+    (q,_,_,authority,now),flow,_,_,_=flow_setup;offer=flow.private_offer()
+    flow.approve(offer['nonce'],offer['scope_sha'],SESSION,approve_transmission=True)
+    now[0]+=121
+    assert flow.review_fence() is True and q.preparation_in_flight()
+    with pytest.raises(PreparationConflict):authority.guard(flow.permit,SESSION,BROWSER,plan_sha=flow.permit['plan_sha'])
+
+
+@pytest.mark.parametrize('fault',['profile','cancel','expiry'])
+def test_offer_heartbeat_cannot_leave_stale_private_review_open(flow_setup,fault):
+    (q,task,profile,_,now),flow,_,_,_=flow_setup
+    if fault=='profile':profile.write_text('{"fields":{}}')
+    elif fault=='cancel':q.cancel(task['task_id'])
+    else:now[0]+=121
+    with pytest.raises((PreparationConflict,RuntimeError)):flow.review_fence()

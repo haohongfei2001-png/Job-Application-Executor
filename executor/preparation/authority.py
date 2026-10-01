@@ -248,6 +248,7 @@ class PreparationAuthority:
             self.pending[_sha(nonce)] = record
             return {"nonce": nonce, "expires_in_seconds": TTL, "scope_sha": record["scope_sha"],
                     "plan": copy.deepcopy(plan), "recipient_url": task["spec"]["target_url"],
+                    "profile_version":report["profile"]["version"],"resume_version":report["resume"]["version"],
                     "company": task["spec"]["company"], "role": task["spec"]["role"],
                     "warning": "网站可能在输入时接收这些已核对的常规资料；这不授权上传、证件、验证码、协议或最终提交。",
                     "submit_capability": False}

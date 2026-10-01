@@ -1,26 +1,30 @@
-"""Internal one-owner preparation flow, not registered with HTTP/model/worker.
+"""One-owner preparation flow; HTTP exposes only its read-only opening stage.
 
 The caller supplies the already-preflighted empty public page in a disposable
 session. This joins real process identity, private review, durable approval and
 field journals without granting upload, protected-input or final-send methods.
+Its field-writing method is not registered with HTTP/model/worker entrypoints.
 """
 from __future__ import annotations
 
 import copy
 import threading
 
-from .authority import PreparationConflict, PreparationJournal
-from .qiyunfang import ROOT, OBSERVE_ROOT, validate_observation
+from .authority import PreparationConflict, PreparationJournal, _material, _sha
+from .qiyunfang import ROOT, OBSERVE_ROOT, validate_observation, digest
+from .final_journal import _prepared_task
 from .runner import PreparationKernel
 
 
 class PreparationFlow:
     def __repr__(self):return '<PreparationFlow>'
 
-    def __init__(self,authority,owner,page,*,task_id,revision,session,selected_ids,resources_sha):
+    def __init__(self,authority,owner,page,*,task_id,revision,session,selected_ids,resources_sha,still_authorized=lambda:True):
         self._thread=threading.get_ident()
         self.authority,self.owner,self.page=authority,owner,page
         self.session,self.resources_sha=session,resources_sha
+        if not callable(still_authorized):raise PreparationConflict()
+        self._still_authorized=still_authorized
         self.permit=self.journal=None
         self.consumption_started=False;self.closure_attempted=False
         self.state='OPENING';self.offer=None
@@ -46,9 +50,11 @@ class PreparationFlow:
         return copy.deepcopy(self.offer)
 
     def _binding(self):
-        self._owner();self.owner.transport.require_sealed()
+        self._owner()
+        if self._still_authorized() is not True:raise PreparationConflict()
+        self.owner.transport.require_sealed()
         binding=self.owner.observe(self.page,resources_sha=self.resources_sha).public_binding()
-        if binding!=self.binding:raise PreparationConflict()
+        if self._still_authorized() is not True or binding!=self.binding:raise PreparationConflict()
         return binding
 
     def approve(self,nonce,scope_sha,session,*,approve_transmission):
@@ -79,6 +85,37 @@ class PreparationFlow:
             try:self.close()
             except Exception:pass
             raise PreparationConflict() from None
+
+    def review_fence(self):
+        """Read-only heartbeat; no field lease renewal or new write permission."""
+        self._binding();self.authority._session(self.session)
+        if self.state=='OFFERED':
+            with self.authority.lock:
+                record=self.authority.pending.get(_sha(self.offer['nonce'])) if self.offer else None
+                if record is None or record['expires']<=self.authority.clock():raise PreparationConflict()
+                scope=record['scope']
+                with _material(self.authority.queue,scope['task_id'],scope['revision']) as (task,report,_,fence):
+                    if (task!=record['task'] or report['profile']['version']!=scope['profile_sha']
+                            or report['resume']!=scope['resume']):raise PreparationConflict()
+                    fence()
+            return True
+        if (self.state!='PREPARED_UNVERIFIED' or self.permit is None or self.journal is None
+                or self.authority.active.get(self.permit['nonce_sha'])!=self.permit
+                or self.permit['authority_sha']!=self.authority.instance_sha
+                or self.permit['session_sha']!=_sha(self.session)
+                or self.permit['plan_sha']!=digest(self.permit['plan'])):raise PreparationConflict()
+        with _material(self.authority.queue,self.permit['task_id'],self.permit['task_revision']) as (_,report,_,fence):
+            if report['profile']['version']!=self.permit['profile_sha'] or report['resume']!=self.permit['resume']:
+                raise PreparationConflict()
+            with self.authority.queue.tx() as db:
+                _prepared_task(db,self.permit,self.journal.attempt_id)
+                # Final transport requires an explicit future ownership change;
+                # this preparation-only controller cannot silently coexist.
+                if db.execute('SELECT 1 FROM preparation_final_requests WHERE preparation_nonce_sha=?',
+                              (self.permit['nonce_sha'],)).fetchone():raise PreparationConflict()
+            fence();self.authority._session(self.session)
+            if self._still_authorized() is not True:raise PreparationConflict()
+        return True
 
     def close(self):
         """Destroy the owned browser/API transport before releasing its fence.

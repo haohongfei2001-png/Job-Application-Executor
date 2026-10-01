@@ -1,6 +1,6 @@
 """Unregistered exact-request, human-dialog-only final transport prototype.
 
-No public HTTP/model/queue entrypoint imports this module. Production code never
+No public HTTP/model/queue entrypoint invokes this transport. Production code never
 accepts a dialog. Only the browser's matched native close event may authorize
 one already-paused Request; protected bodies stay opaque in local Playwright
 transport and are never read, parsed, displayed, logged or persisted here.
