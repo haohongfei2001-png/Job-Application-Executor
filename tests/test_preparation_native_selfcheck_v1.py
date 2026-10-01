@@ -26,6 +26,7 @@ def owner(fault=None):
         def __init__(self):self.contexts=[value.context];self.probes=[]
         def new_context(self,**kwargs):
             assert kwargs=={'service_workers':'block','accept_downloads':False,'ignore_https_errors':False}
+            if fault=='preconnect':value.proxy.denied_connections+=1
             probe=Context(self);self.probes.append(probe);self.contexts.append(probe);return probe
     class Context:
         def __init__(self,browser):self.browser=browser;self.closed=False;self.routes=[];self.events={}
@@ -65,7 +66,7 @@ def owner(fault=None):
                 target=urlsplit(data['target']);connection=http.client.HTTPConnection(target.hostname,target.port,timeout=2)
                 try:connection.request('POST',target.path,body='SYNTHETIC');response=connection.getresponse();response.read()
                 finally:connection.close()
-            if fault!='no_proxy_observation':value.proxy.denied_connections+=1
+            if fault not in {'no_proxy_observation','preconnect'}:value.proxy.denied_connections+=1
             if fault=='identity':value.identity.value='b'*64
             if fault=='proxy':value.proxy.valid=False
             if fault=='cancel':value.authorized=False
@@ -200,3 +201,19 @@ def test_exact_chromium_proxy_tunnel_text_is_a_scoped_native_error():
 def test_generic_and_near_match_websocket_errors_do_not_establish_proxy_proof(message):
     from executor.preparation.native_selfcheck import native_proxy_error_code
     assert native_proxy_error_code(message) is None
+
+
+def test_preconnected_proxy_refusal_uses_whole_check_counter_and_four_scoped_proofs():
+    value=owner('preconnect')
+    receipt=check_owned_native_browser(value)
+    assert value.proxy.denied_connections==1
+    assert receipt['whole_check_proxy_denial_seen'] is True
+    assert len(receipt['proof_by_protocol'])==4
+    assert all(proof['proof'] for proof in receipt['proof_by_protocol'].values())
+
+
+def test_denials_before_selfcheck_cannot_satisfy_whole_check_corrobation():
+    value=owner('no_proxy_observation');value.proxy.denied_connections=10
+    with pytest.raises(NativeSelfCheckFailed,match='proxy_unobserved'):
+        check_owned_native_browser(value)
+    assert value.proxy.denied_connections==10

@@ -40,6 +40,8 @@ class NativeSelfCheckFailed(RuntimeError):
 
 def check_owned_native_browser(owner, *, still_authorized=lambda:True, clock=time.monotonic):
     start=clock()
+    initial_denied=owner.proxy.denied_connections
+    if type(initial_denied) is not int or initial_denied<0:raise NativeSelfCheckFailed()
     if still_authorized() is not True:raise NativeSelfCheckFailed()
     browser=owner.browser
     before=list(browser.contexts)
@@ -136,7 +138,7 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True, clock=tim
         # applicant context and its transport remain untouched throughout.
         for mode in ('fetch','fetch_tls','websocket','websocket_tls'):
             if still_authorized() is not True:raise NativeSelfCheckFailed()
-            denied=owner.proxy.denied_connections
+            denied_before_probe=owner.proxy.denied_connections
             target=base+'/blocked-'+mode+'/'+nonce
             if mode.endswith('_tls'):target=target.replace('http:','https:',1)
             native_url=target.replace('http','ws',1) if mode.startswith('websocket') else target
@@ -165,14 +167,16 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True, clock=tim
                 if still_authorized() is not True or len(connections)!=1:break
                 page.wait_for_timeout(10)
             if (result not in ({'kind':'blocked'},{'kind':'response','status':403})
-                    or owner.proxy.denied_connections<=denied or not evidence[native_url]
+                    or not evidence[native_url]
                     or unexpected or len(connections)!=1 or still_authorized() is not True
                     or clock()-probe_start>12 or clock()-start>90):
                 raise NativeSelfCheckFailed('native_selfcheck_'+mode+'_unverified',
                     {'protocol':mode,'outcome':result.get('kind') if result.get('kind') in {'blocked','response','timeout','escaped'} else 'invalid',
                      'response_status':result.get('status') if type(result.get('status')) is int else None,
                      'native_observations':native_observations[native_url][:8],
-                     'scoped_proof':bool(evidence[native_url]),'proxy_denial_seen':owner.proxy.denied_connections>denied,
+                     'scoped_proof':bool(evidence[native_url]),
+                     'whole_check_proxy_denial_seen':owner.proxy.denied_connections>initial_denied,
+                     'new_proxy_connection_for_probe':owner.proxy.denied_connections>denied_before_probe,
                      'receiver_connections':len(connections),'revoked':still_authorized() is not True,
                      'success_budget_exceeded':clock()-probe_start>12,'overall_budget_exceeded':clock()-start>90,
                      'setup_ms':int((probe_start-start)*1000),'probe_elapsed_ms':int((clock()-probe_start)*1000)})
@@ -203,8 +207,15 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True, clock=tim
             or owner.proxy.verify_launch(browser) is not True):
         raise NativeSelfCheckFailed()
     if clock()-start>90 or still_authorized() is not True:raise NativeSelfCheckFailed()
+    # The proxy counts TCP accepts, not requests. Preconnect/reuse can produce
+    # an exact native refusal without a new accept during that single probe.
+    # This total delta is corroborative; each protocol above still needs its
+    # own scoped native proof and zero receiver arrivals.
+    if owner.proxy.denied_connections<=initial_denied:
+        raise NativeSelfCheckFailed('native_selfcheck_proxy_unobserved',{'whole_check_proxy_denial_seen':False})
     return {'schema':'native-loopback-self-check-v1','process_sha':identity,
             'browser_version':browser.version,'control_reachable':True,
             'native_proxy_blocked':True,'temporary_context_closed':True,
             'protocols':['http','https','ws','wss'],'proof_by_protocol':proofs,
+            'whole_check_proxy_denial_seen':True,
             'external_recipient_used':False,'applicant_data_used':False}
