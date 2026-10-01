@@ -1,6 +1,10 @@
 # Deferred anonymous preparation design
 
-**Status: design only; not implemented, enabled or certified.**
+**Status: partially implemented; live execution remains disabled and uncertified.**
+
+The separate deterministic mapper, private task-value review, one-pass kernel and
+synthetic safety oracles are described in [the current implementation checkpoint](QIYUNFANG_PREPARATION_KERNEL.md). Durable live approval, lifecycle proof and safe
+human transition remain gates; the generic account/draft executor is unchanged.
 
 Assessment baseline: `fce8f0bf54778165f29e329e136130ae5ca4dec3`, 2026-09-30.
 This does not authorize real applicant data transmission, page writes, uploads,

@@ -36,6 +36,10 @@ STATIC_STEP = (
 )
 
 
+PREPARATION_STEP = '      - name: Anonymous preparation kernel and controller-death oracle\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n          JAE_UI_SCREENSHOT_DIR: ${{ runner.temp }}/jae-preparation-ui\n        run: python -m pytest -q tests/test_qiyunfang_preparation_v1.py tests/test_preparation_review_v1.py tests/test_preparation_review_browser.py tests/test_qiyunfang_preparation_browser.py tests/test_preparation_lifecycle_browser.py\n'
+PREPARATION_NATIVE_SUFFIX = ' tests/test_qiyunfang_preparation_v1.py tests/test_preparation_review_v1.py tests/test_preparation_review_browser.py tests/test_qiyunfang_preparation_browser.py tests/test_preparation_lifecycle_browser.py'
+
+
 def event(sha=SHA, label=None, *, draft=True, fork=False, action="labeled"):
     return {
         "action": action,
@@ -223,9 +227,17 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 protected = body[body.index("    steps:\n"):]
                 if name in {"packaged_candidate", "macos_consumer_release"}:
                     protected = body[body.index("    strategy:\n"):]
+                if name == "macos_consumer_release":
+                    self.assertEqual(protected.count(PREPARATION_NATIVE_SUFFIX), 1)
+                    protected = protected.replace(PREPARATION_NATIVE_SUFFIX, "", 1)
                 if name == "foundation":
+                    self.assertEqual(protected.count(PREPARATION_STEP), 1)
+                    protected = protected.replace(PREPARATION_STEP, "", 1)
                     self.assertEqual(protected.count(STATIC_STEP), 1)
                     protected = protected.replace(STATIC_STEP, "", 1)
+                    private_review_path = "            ${{ runner.temp }}/jae-preparation-ui/preparation-private-review.png\n"
+                    self.assertEqual(protected.count(private_review_path), 1)
+                    protected = protected.replace(private_review_path, "", 1)
                     resume_path = "            ${{ runner.temp }}/jae-preparation-ui/profile-editor-resume.png\n"
                     self.assertEqual(protected.count(resume_path), 1)
                     protected = protected.replace(resume_path, "", 1)

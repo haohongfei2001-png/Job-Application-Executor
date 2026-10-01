@@ -15,6 +15,7 @@ from .. import browser, settings
 from .profile_setup import profile_setup_state, select_profile
 from . import profile_editor
 from .task_preparation import parse_preparation_query, prepare_task
+from .preparation_review import review_preparation
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
@@ -709,6 +710,12 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/state":
                         self._send_json(200, supervisor.ui_state())
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/preparation-review":
+                        if parsed.fragment:
+                            raise ValueError("invalid preparation request")
+                        task_id, revision = parse_preparation_query(parsed.query)
+                        self._send_json(200, review_preparation(supervisor.queue, task_id, revision))
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/task-preparation":
                         if parsed.fragment:

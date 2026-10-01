@@ -42,7 +42,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 .diagnostics-dialog::backdrop{background:#0f172a99}.diagnostics-dialog h2{font-size:18px;margin:0 0 8px}.diagnostics-dialog p{font-size:13px;line-height:1.5;color:#475569}
 .diagnostics-dialog pre{max-height:48vh;overflow:auto;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .diagnostics-actions{display:flex;justify-content:flex-end;gap:8px}.diagnostics-actions button{min-height:36px}
-.preparation-checks{list-style:none;margin:12px 0;padding:0}.preparation-checks li{display:flex;justify-content:space-between;gap:14px;border-bottom:1px solid #e2e8f0;padding:9px 0;font-size:13px;line-height:1.5}.preparation-checks strong{color:#475569;text-align:right}.preparation-checks .missing{color:#9a3412}.preparation-manual{font-size:13px;line-height:1.7;padding-left:22px}.preparation-dialog h3{font-size:15px;margin:20px 0 8px}.preparation-dialog a{display:inline-block;min-height:44px;padding:12px 0;color:#1d4ed8}.preparation-dialog .diagnostics-actions{position:sticky;bottom:-22px;background:white;padding:12px 0}.preparation-dialog .diagnostics-actions button{min-height:44px}
+.preparation-checks{list-style:none;margin:12px 0;padding:0}.preparation-checks li{display:flex;justify-content:space-between;gap:14px;border-bottom:1px solid #e2e8f0;padding:9px 0;font-size:13px;line-height:1.5}.preparation-checks strong{color:#475569;text-align:right;min-width:0;overflow-wrap:anywhere}.preparation-checks .missing{color:#9a3412}.preparation-manual{font-size:13px;line-height:1.7;padding-left:22px}.preparation-dialog h3{font-size:15px;margin:20px 0 8px}.preparation-dialog a{display:inline-block;min-height:44px;padding:12px 0;color:#1d4ed8}.preparation-dialog .diagnostics-actions{position:sticky;bottom:-22px;background:white;padding:12px 0}.preparation-dialog .diagnostics-actions button{min-height:44px}
 #session-expired{margin:0;padding:16px 22px;background:#fff7ed;color:#9a3412;border-bottom:1px solid #fed7aa;line-height:1.5}
 .toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
 @media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:block;max-height:45vh;border-right:0;border-bottom:1px solid #e5e7eb}main{min-height:55vh}}
@@ -181,6 +181,14 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
       <p>本机已记录（仍需核对）：只表示发现记录。缺少记录：未发现可用记录。需本人核对：无法据此判断内容是否适用。以上均不证明网站已保存。</p>
       <p>英语两项只检查本地六级记录；缺少记录不代表没有英语证书。CET4、IELTS、TOEFL 等其他证书及当前网站选项需本人核对。</p>
       <p>身份证号码、投递岗位1、投递岗位2、简历上传、验证码、隐私条款及提交操作需本人在网站核对。投递岗位2仅在本人确认需要时填写，不会自动添加。</p>
+      <button id="preparation-review-open" type="button">核对拟填写内容（仅本机显示）</button>
+      <p id="preparation-review-status" role="status"></p>
+      <section id="preparation-review" hidden aria-label="此任务的私密拟填写内容">
+        <p>以下是此任务原资料的实际值与明确匹配的官网选项，仅在本机显示。尚未发送到官网，也没有授权填写。不能明确匹配的项目留给本人核对，不会猜测。</p>
+        <ul id="preparation-review-fields" class="preparation-checks"></ul>
+        <p>自动填写尚未启用：专用浏览器的关闭、异常中断与人工接管边界仍需验证。身份证、岗位2、附件上传、验证码、协议和最终提交不在拟填写内容中。</p>
+        <button id="preparation-review-hide" type="button">隐藏个人值</button>
+      </section>
       <a id="preparation-source" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">尝试打开已核对的官方页面</a>
       <p>官网地址：<span id="preparation-source-address">https://www.qiyunfang.com/h-col-124.html</span><br>如本机窗口无法打开链接，请在自己的浏览器打开这个官网地址。</p>
     </section>
@@ -497,7 +505,60 @@ function clearPreparationContent(){
   preparationObservation.hidden=true;preparationContract.hidden=true;preparationUnmatched.hidden=true;
   preparationProfile.textContent='';preparationResume.textContent='';preparationChecks.replaceChildren();
   preparationSource.removeAttribute('href');preparationStatus.textContent='';
+  clearPrivatePreparation();
 }
+let privatePreparationEpoch=0;
+const privatePreparation=document.getElementById('preparation-review'),
+  privatePreparationFields=document.getElementById('preparation-review-fields'),
+  privatePreparationStatus=document.getElementById('preparation-review-status'),
+  privatePreparationOpen=document.getElementById('preparation-review-open');
+function clearPrivatePreparation(){
+  privatePreparationEpoch++;privatePreparation.hidden=true;privatePreparationFields.replaceChildren();
+  privatePreparationStatus.textContent='';privatePreparationOpen.disabled=false;
+}
+document.getElementById('preparation-review-hide').onclick=clearPrivatePreparation;
+window.addEventListener('pagehide',()=>closePreparationDialog(false));
+privatePreparationOpen.onclick=async()=>{
+  if(!preparationBinding||preparationBusy||preparationStale||uiSessionExpired||privatePreparationOpen.disabled)return;
+  clearPrivatePreparation();
+  const epoch=preparationEpoch,binding=preparationBinding,privateEpoch=privatePreparationEpoch;
+  privatePreparationOpen.disabled=true;privatePreparationStatus.textContent='正在读取此任务原资料的拟填写内容…';
+  try{
+    const response=await uiRequest('/ui/api/preparation-review?task_id='+encodeURIComponent(binding.taskId)
+      +'&expected_revision='+binding.revision,{credentials:'same-origin',cache:'no-store'});
+    const data=await response.json();
+    if(!preparationIsCurrent(epoch,binding)||privateEpoch!==privatePreparationEpoch)return;
+    const labels={'0':'姓名','4':'电话号码','5':'邮箱号码','2':'性别','14':'最高学历',
+      '6':'毕业院校','20':'学院','7':'专业','19':'毕业时间','15':'英语证书情况','16':'英语考级分数',
+      '8':'投递岗位1','17':'期望工作城市'};
+    if(!response.ok||data?.mode!=='PRIVATE_MAPPING_REVIEW'||data.state!=='AWAITING_LIVE_PREFLIGHT'
+      ||data.task_id!==binding.taskId||data.task_revision!==binding.revision
+      ||data.contract_version!=='qiyunfang-public-form-2026-10-01-v1'||data.observed_at!=='2026-10-01'
+      ||typeof data.profile_version!=='string'||!/^[a-f0-9]{64}$/.test(data.profile_version)
+      ||!data.capabilities||!['live_write','submit','account_verified','server_draft_verified'].every(key=>data.capabilities[key]===false)
+      ||!Array.isArray(data.proposals)||data.proposals.length!==Object.keys(labels).length
+      ||new Set(data.proposals.map(item=>item?.field_id)).size!==data.proposals.length
+      ||data.proposals.some(item=>!item||!Object.hasOwn(labels,item.field_id)
+        ||!['proposed','manual','missing'].includes(item.status)||item.requires_explicit_selection!==true
+        ||(item.status==='proposed'?!(typeof item.value==='string'&&item.value.length>0&&item.value.length<=100
+          ||item.field_id==='17'&&Array.isArray(item.value)&&item.value.length>0&&item.value.length<=3
+          &&item.value.every(value=>['武汉','深圳','成都'].includes(value))):item.value!==null)))throw new Error();
+    for(const item of data.proposals){
+      const row=document.createElement('li'),label=document.createElement('span'),value=document.createElement('strong');
+      label.textContent=labels[item.field_id];
+      value.textContent=item.status==='proposed'?(Array.isArray(item.value)?item.value.join('、'):item.value):
+        item.status==='missing'?'缺少记录，须本人填写':'无法明确匹配，须本人核对';
+      row.append(label,value);privatePreparationFields.append(row);
+    }
+    privatePreparation.hidden=false;privatePreparationStatus.textContent='已显示本机拟填写值；未操作官网。';
+  }catch(_){
+    if(preparationIsCurrent(epoch,binding)&&privateEpoch===privatePreparationEpoch){
+      clearPrivatePreparation();privatePreparationStatus.textContent='无法读取或资料已变化。未操作官网，请关闭后重新检查。';
+    }
+  }finally{
+    if(preparationIsCurrent(epoch,binding)&&privateEpoch===privatePreparationEpoch)privatePreparationOpen.disabled=false;
+  }
+};
 function clearPreparationObservation(){
   preparationEpoch++;preparationBinding=null;preparationBusy=false;preparationStale=false;
   clearPreparationContent();preparationRefresh.disabled=true;
