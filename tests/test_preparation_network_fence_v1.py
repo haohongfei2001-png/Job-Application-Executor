@@ -83,3 +83,83 @@ def test_native_command_line_read_requires_explicit_automation_disclosure():
         args.remove('--enable-automation')
         browser=SimpleNamespace(new_browser_cdp_session=lambda:SimpleNamespace(send=lambda _:{'arguments':args},detach=lambda:None))
         with pytest.raises(RuntimeError,match='recipe_changed'):proxy.verify_launch(browser)
+
+
+@pytest.mark.parametrize('fault',[None,'browser','client','driver'])
+def test_owned_cleanup_attempts_each_phase_once_and_requires_exact_absence(fault):
+    from types import SimpleNamespace
+    from executor.preparation.session import DisposablePreparationSession
+    owner=DisposablePreparationSession();events=[]
+    def phase(name):
+        events.append(name)
+        if name==fault:raise OSError('synthetic acknowledgement loss')
+    owner._driver_start_attempted=True
+    owner.browser=SimpleNamespace(close=lambda:phase('browser'))
+    owner.client=SimpleNamespace(dispose=lambda:phase('client'))
+    owner.pw=SimpleNamespace(stop=lambda:phase('driver'))
+    owner.identity=SimpleNamespace(process_sha='a'*64,
+        absence=lambda:(events.append('absence') or {'status':'ABSENT','process_sha':'a'*64}))
+    owner.proxy=SimpleNamespace(__exit__=lambda *_:phase('proxy'))
+    assert owner.close() is True
+    assert events==['browser','client','driver','absence','proxy']
+    assert owner.close() is True and events==['browser','client','driver','absence','proxy']
+    with pytest.raises(RuntimeError,match='already_started'):owner.__enter__()
+
+
+@pytest.mark.parametrize('evidence',[{'status':'UNKNOWN'},{'status':'PRESENT','process_sha':'a'*64},
+                                    {'status':'ABSENT','process_sha':'b'*64},{'status':'ABSENT'}])
+def test_uncertain_cleanup_keeps_proxy_and_never_retries_native_close(evidence):
+    from types import SimpleNamespace
+    from executor.preparation.session import DisposablePreparationSession
+    owner=DisposablePreparationSession();events=[]
+    owner._driver_start_attempted=True
+    owner.browser=SimpleNamespace(close=lambda:events.append('browser'))
+    owner.client=SimpleNamespace(dispose=lambda:events.append('client'))
+    owner.pw=SimpleNamespace(stop=lambda:events.append('driver'))
+    owner.identity=SimpleNamespace(process_sha='a'*64,absence=lambda:evidence)
+    proxy=owner.proxy=SimpleNamespace(__exit__=lambda *_:pytest.fail('proxy removed without absence'))
+    assert owner.close() is False and owner.proxy is proxy
+    assert owner.close() is False and events==['browser','client','driver']
+
+
+def test_missing_startup_identity_never_certifies_a_started_runtime_closed():
+    from types import SimpleNamespace
+    from executor.preparation.session import DisposablePreparationSession
+    owner=DisposablePreparationSession();owner._driver_start_attempted=True
+    owner.proxy=SimpleNamespace(__exit__=lambda *_:pytest.fail('unidentified runtime fence removed'))
+    assert owner.close() is False
+
+
+def test_cleanup_before_driver_start_has_no_process_to_reconcile():
+    from types import SimpleNamespace
+    from executor.preparation.session import DisposablePreparationSession
+    owner=DisposablePreparationSession();events=[]
+    owner.proxy=SimpleNamespace(__exit__=lambda *_:events.append('proxy'))
+    assert owner.close() is True and events==['proxy']
+
+
+@pytest.mark.parametrize('failure',['absence','digest','proxy'])
+def test_cleanup_observation_or_proxy_ack_loss_stays_unknown_without_retry(failure):
+    from types import SimpleNamespace
+    from executor.preparation.session import DisposablePreparationSession
+    owner=DisposablePreparationSession();owner._driver_start_attempted=True;events=[]
+    owner.browser=SimpleNamespace(close=lambda:events.append('browser'))
+    owner.client=SimpleNamespace(dispose=lambda:events.append('client'))
+    owner.pw=SimpleNamespace(stop=lambda:events.append('driver'))
+    class Identity:
+        def absence(self):
+            events.append('absence')
+            if failure=='absence':raise OSError('synthetic observation uncertainty')
+            return {'status':'ABSENT','process_sha':'a'*64}
+        @property
+        def process_sha(self):
+            if failure=='digest':raise ValueError('synthetic identity uncertainty')
+            return 'a'*64
+    owner.identity=Identity()
+    def proxy_close(*_):events.append('proxy');raise OSError('synthetic proxy acknowledgement loss')
+    proxy=owner.proxy=SimpleNamespace(__exit__=proxy_close)
+    assert owner.close() is False
+    before=list(events)
+    assert owner.close() is False and events==before and owner.proxy is proxy
+    assert events[:3]==['browser','client','driver'] and ('proxy' in events)==(failure=='proxy')
+    with pytest.raises(RuntimeError):owner.__enter__()

@@ -19,3 +19,22 @@ def test_owned_disposable_process_identity_persists_and_requires_both_processes_
         assert document.binding['process_sha']==sha
         assert owner.identity.absence()['status']=='PRESENT'
     assert restored.absence()=={'status':'ABSENT','process_sha':sha}
+
+
+def test_one_pass_cleanup_recovers_lost_acknowledgements_without_retrying_native_close():
+    from types import SimpleNamespace
+    owner=DisposablePreparationSession(headless=True,channel='chrome' if sys.platform=='linux' else None)
+    owner.__enter__();events=[]
+    try:
+        identity=owner.identity;assert identity.absence()['status']=='PRESENT'
+        browser,client,pw=owner.browser,owner.client,owner.pw
+        def lost(name,callback):
+            events.append(name);callback();raise OSError('synthetic post-effect acknowledgement loss')
+        owner.browser=SimpleNamespace(close=lambda:lost('browser',browser.close))
+        owner.client=SimpleNamespace(dispose=lambda:lost('client',client.dispose))
+        owner.pw=SimpleNamespace(stop=lambda:lost('driver',pw.stop))
+        assert owner.close() is True
+        assert identity.absence()=={'status':'ABSENT','process_sha':identity.process_sha}
+        assert events==['browser','client','driver'] and owner.proxy is None
+        assert owner.close() is True and events==['browser','client','driver']
+    finally:owner.close()

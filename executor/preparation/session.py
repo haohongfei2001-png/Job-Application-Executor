@@ -47,15 +47,19 @@ class DisposablePreparationSession:
         self.identity = None
         self.entry_cleanup_attempted = False
         self.entry_cleanup_closed = False
+        self._driver_start_attempted=False
+        self._close_attempted=False
+        self._closure_proven=False
 
     def __enter__(self):
-        if self.proxy is not None:raise RuntimeError('preparation_session_already_started')
+        if self.proxy is not None or self._close_attempted:raise RuntimeError('preparation_session_already_started')
         phase='PRIVATE_ENVIRONMENT'
         try:
             require_private_transport_environment()
             phase='DENY_LISTENER'
             self.proxy = DenyOnlyProxy().__enter__()
             phase='DRIVER_START'
+            self._driver_start_attempted=True
             self.pw = sync_playwright().start()
             phase='SANDBOXED_BROWSER_LAUNCH'
             self.browser = self.pw.chromium.launch(headless=self.headless,channel=self.channel,
@@ -108,24 +112,32 @@ class DisposablePreparationSession:
         return document
 
     def close(self):
-        # Never remove the proxy while a browser might survive a failed close.
-        # An uncertain browser stays fenced; caller must retain durable UNKNOWN.
+        # Attempt each already-owned cleanup phase at most once. One failed
+        # acknowledgement must not skip disposal of the other owned resources.
+        # Process absence proves closure, never the outcome of a prior request.
+        if self._close_attempted:return self._closure_proven
+        self._close_attempted=True
         if self.browser is not None:
             try:self.browser.close()
-            except Exception:return False
-            self.browser=self.context=None
+            except BaseException:pass
         if self.client is not None:
             try:self.client.dispose()
-            except Exception:pass
-            self.client=None
+            except BaseException:pass
         if self.pw is not None:
             try:self.pw.stop()
-            except Exception:return False
-            self.pw=None
-        if self.identity is not None and self.identity.absence().get('status')!='ABSENT':
-            return False
+            except BaseException:pass
+        if self._driver_start_attempted or any(value is not None for value in (self.browser,self.client,self.pw)):
+            try:
+                if (self.identity is None or self.identity.absence()!=
+                        {'status':'ABSENT','process_sha':self.identity.process_sha}):return False
+            except BaseException:return False
+        self.browser=self.context=self.client=self.pw=None
+        # Never remove the deny proxy while browser/driver absence is unproved.
         if self.proxy is not None:
-            self.proxy.__exit__(None,None,None);self.proxy=None
+            try:self.proxy.__exit__(None,None,None)
+            except BaseException:return False
+            self.proxy=None
+        self._closure_proven=True
         return True
 
     def __exit__(self,*_):
