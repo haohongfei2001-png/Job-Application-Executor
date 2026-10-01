@@ -42,3 +42,19 @@ def test_public_broker_only_accepts_finite_resources_and_never_browser_request_b
         with pytest.raises(ValueError):session._public_get(url)
     session._public_get(CONTRACT_URL)
     assert calls==[((CONTRACT_URL,),{'max_redirects':0,'max_retries':0,'timeout':15000})]
+
+
+@pytest.mark.parametrize('key',['DEBUG','DEBUG_FILE','PWDEBUG','SSLKEYLOGFILE','CHROME_LOG_FILE','NODE_OPTIONS','PLAYWRIGHT_TRACE_DIR'])
+def test_recording_environment_is_refused_before_driver_or_browser(monkeypatch,key):
+    from executor.preparation import session
+    monkeypatch.setenv(key,'SYNTHETIC_DO_NOT_LOG')
+    def forbidden(*_,**__):pytest.fail('private browser launched in recording environment')
+    monkeypatch.setattr(session,'sync_playwright',forbidden)
+    with pytest.raises(RuntimeError,match='preparation_session_unavailable'):
+        session.DisposablePreparationSession().__enter__()
+
+
+def test_environment_privacy_check_never_modifies_proxy_or_trust_settings():
+    from executor.preparation.session import require_private_transport_environment
+    env={'HTTPS_PROXY':'https://proxy.example.test','SSL_CERT_FILE':'/synthetic/managed-ca.pem'}
+    before=dict(env);require_private_transport_environment(env);assert env==before

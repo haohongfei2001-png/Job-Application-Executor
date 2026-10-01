@@ -109,8 +109,10 @@ def _sink_liveness(service, *, udp):
 
 def _secure_fixture(browser):
     context=browser.new_context()
-    context.route('https://127.0.0.1/',lambda route:route.fulfill(body='<!doctype html>'))
+    def source(route):route.fulfill(body='<!doctype html>')
+    context.route('https://127.0.0.1/',source)
     page=context.new_page();page.goto('https://127.0.0.1/')
+    context.unroute('https://127.0.0.1/',source)
     return page
 
 
@@ -162,8 +164,9 @@ def _webtransport_attempt(page,endpoint):
     }''',endpoint)
 
 
-def test_native_webtransport_never_reaches_udp_sink(launch_mode):
+def test_native_webtransport_never_reaches_udp_sink(launch_mode,server):
     import socketserver,threading
+    source_url,source_received=server
     class Sink(socketserver.BaseRequestHandler):
         def handle(self):self.server.arrivals.append(True)
     service=socketserver.ThreadingUDPServer(('127.0.0.1',0),Sink);service.arrivals=[]
@@ -174,15 +177,32 @@ def test_native_webtransport_never_reaches_udp_sink(launch_mode):
         with sync_playwright() as pw:
             control=pw.chromium.launch(**launch_mode)
             try:
-                state=_webtransport_attempt(_secure_fixture(control),endpoint)
+                # A real loopback response establishes actual local address
+                # space without granting/bypassing Local Network Access.
+                control_page=control.new_page();control_page.goto(source_url+'/')
+                assert source_received, 'real loopback source was not visited'
+                diagnostics=[]
+                control_page.on('console',lambda message:diagnostics.append(message.text[:500]))
+                control_page.on('pageerror',lambda error:diagnostics.append(str(error)[:500]))
+                state=_webtransport_attempt(control_page,endpoint)
                 assert state!='unsupported', 'native WebTransport unavailable; not verified'
-                assert service.arrivals, 'unfenced browser never reached UDP sink; oracle invalid'
+                assert service.arrivals, 'unfenced browser never reached UDP sink; oracle invalid: '+repr({'state':state,'diagnostics':diagnostics})
             finally:control.close()
             service.arrivals.clear()
             with DenyOnlyProxy() as proxy:
                 browser=pw.chromium.launch(**launch_mode,**proxy.browser_options())
                 try:
-                    assert _webtransport_attempt(_secure_fixture(browser),endpoint)=='refused'
-                    assert service.arrivals==[], 'WebTransport bypassed fixed proxy'
+                    page=browser.new_page();context=page.context
+                    def source(route):route.fulfill(body='<!doctype html>')
+                    context.route(source_url+'/',source);page.goto(source_url+'/');context.unroute(source_url+'/',source)
+                    diagnostics=[];cdp=context.new_cdp_session(page)
+                    cdp.on('Log.entryAdded',lambda event:diagnostics.append(event.get('entry',{}).get('text','')[:500]))
+                    cdp.send('Log.enable')
+                    try:
+                        assert _webtransport_attempt(page,endpoint)=='refused'
+                        page.wait_for_timeout(100)
+                        assert service.arrivals==[], 'WebTransport bypassed fixed proxy'
+                        assert any('ERR_TUNNEL_CONNECTION_FAILED' in item for item in diagnostics), 'fixed-proxy refusal not independently observed: '+repr(diagnostics)
+                    finally:cdp.detach()
                 finally:browser.close()
     finally:service.shutdown();service.server_close();thread.join()

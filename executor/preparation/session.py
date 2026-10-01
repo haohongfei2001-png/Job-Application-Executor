@@ -6,10 +6,30 @@ Live UI admission remains disabled until resource/lifecycle gates are complete.
 """
 from __future__ import annotations
 
+import os
+
 from playwright.sync_api import sync_playwright
 
 from .network_fence import DenyOnlyProxy
 from .transport import PreparationTransport, PUBLIC_RESOURCES
+
+
+PRIVATE_TRANSPORT_FORBIDDEN_ENV = frozenset({
+    'DEBUG','DEBUG_FILE','PWDEBUG','SSLKEYLOGFILE','CHROME_LOG_FILE','NODE_OPTIONS',
+    'PW_TRACE_DIR','PLAYWRIGHT_TRACE_DIR','PLAYWRIGHT_HAR_PATH',
+})
+
+
+def require_private_transport_environment(environ=None):
+    """Refuse inherited recording/debug modes before driver/browser creation.
+
+    Do not silently modify corporate proxy/trust settings or mutate global
+    process environment. The eventual dedicated child launcher must sanitize
+    its own debug environment; an ambiguous caller remains unsupported.
+    """
+    source=os.environ if environ is None else environ
+    if any(source.get(key) for key in PRIVATE_TRANSPORT_FORBIDDEN_ENV):
+        raise RuntimeError('preparation_recording_environment_unsupported')
 
 
 class DisposablePreparationSession:
@@ -24,6 +44,7 @@ class DisposablePreparationSession:
     def __enter__(self):
         if self.proxy is not None:raise RuntimeError('preparation_session_already_started')
         try:
+            require_private_transport_environment()
             self.proxy = DenyOnlyProxy().__enter__()
             self.pw = sync_playwright().start()
             self.browser = self.pw.chromium.launch(headless=self.headless,channel=self.channel,

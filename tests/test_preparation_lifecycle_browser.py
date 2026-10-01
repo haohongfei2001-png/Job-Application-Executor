@@ -43,6 +43,7 @@ url,phase,cdp,fence=sys.argv[1:]
 from executor.preparation.network_fence import DenyOnlyProxy
 proxy=DenyOnlyProxy().__enter__() if fence=="deny" else None
 with sync_playwright() as pw:
+ print(json.dumps({"event":"driver","pid":pw._impl_obj._connection._transport._proc.pid}),flush=True)
  browser=pw.chromium.connect_over_cdp(cdp) if cdp else pw.chromium.launch(headless=True,**(proxy.browser_options() if proxy else {}))
  context=browser.new_context(service_workers='block')
  def guard(route):
@@ -135,12 +136,13 @@ def test_controller_sigkill_never_releases_delayed_requests(transport, failure, 
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
         selector.register(process.stdout, selectors.EVENT_READ)
         expected = "pending" if phase == "pending" else "ready"
-        deadline, observed, output = time.monotonic() + 25, False, []
+        deadline, observed, output, driver_pid = time.monotonic() + 25, False, [], None
         while time.monotonic() < deadline and process.poll() is None:
             if not selector.select(.2): continue
             line = process.stdout.readline(); output.append(line)
             try: event = json.loads(line)
             except ValueError: continue
+            if event.get("event") == "driver":driver_pid=event.get("pid")
             if event.get("event") == expected: observed = True; break
         assert observed, "lifecycle milestone was not reached: " + "".join(output)[-1500:]
         assert any(item[1] == "/" for item in received), "independent source server was never visited"
@@ -148,7 +150,7 @@ def test_controller_sigkill_never_releases_delayed_requests(transport, failure, 
         assert len(known) > 1, "Playwright driver process was not observed"
         if external: known.update(descendants(external.pid))
         if failure == "driver":
-            drivers = [pid for pid,row in known.items() if row[0] == process.pid and 'node' in row[2].lower()]
+            drivers = [pid for pid,row in known.items() if row[0] == process.pid and pid==driver_pid]
             assert len(drivers) == 1, "unique Node driver was not independently observed"
             os.kill(drivers[0], signal.SIGKILL)
         else:
