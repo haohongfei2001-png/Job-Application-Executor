@@ -10,8 +10,8 @@ import hashlib
 from urllib.parse import urlsplit
 
 from .qiyunfang import CONTRACT_URL
-from .resources import OBSERVED_STATIC_RESOURCES
-from .public_reads import public_style_url, form_lookup_request, lookup_evidence
+from .resources import OBSERVED_STATIC_RESOURCES, OBSERVED_SCRIPT_DIGESTS
+from .public_reads import public_style_url, form_lookup_request, lookup_evidence, popup_request, popup_evidence
 
 PUBLIC_RESOURCES = OBSERVED_STATIC_RESOURCES | frozenset({
     CONTRACT_URL,
@@ -28,10 +28,7 @@ PUBLIC_RESOURCES = OBSERVED_STATIC_RESOURCES | frozenset({
 })
 # The manifest is deliberately incomplete for live admission. An unknown asset
 # is a refusal, never a dynamically learned permission from untrusted page code.
-SCRIPT_DIGESTS = {
-    "https://1-ss-sys.huaweicloudsite.cn/js/dist/site.min.js?v=202506121459":
-        "d9e0a901236460425c9cef8a16bc06614b9336347f0384c420d840162b630da3",
-}
+SCRIPT_DIGESTS = OBSERVED_SCRIPT_DIGESTS
 PUBLIC_HOSTS = frozenset({"www.qiyunfang.com", "1-ss-sys.huaweicloudsite.cn", "jzfe-sys.huaweicloudsite.cn", "2-ss-sys.huaweicloudsite.cn", "jzs-sys.huaweicloudsite.cn"})
 
 
@@ -40,15 +37,18 @@ class PreparationTransport:
 
     Install on a newly-created dedicated context before creating its first page;
     it is not safe to retrofit this onto a persistent or shared user context.
-    READ_ONLY permits HTTPS GET public assets only, aborts redirects and every
-    form endpoint. SEALED refuses routed HTTP and page WebSocket requests. This page-level
+    READ_ONLY permits finite HTTPS GET assets and two exact one-shot public form
+    bootstrap POSTs. All redirects and other commands are refused. SEALED
+    refuses routed HTTP and page WebSocket requests. This page-level
     WebSocket mock is not an adversarial-script/worker network sandbox.
     No method reopens the gate or grants final-submit authority.
     """
-    def __init__(self, *, public_fetch=None, public_lookup=None):
+    def __init__(self, *, public_fetch=None, public_lookup=None, public_popup=None):
         self.public_fetch = public_fetch
         self.public_lookup = public_lookup
         self.public_lookup_used = False
+        self.public_popup = public_popup
+        self.public_popup_used = False
         self.public_read_evidence = []
         self.phase = "READ_ONLY"
         self.blocked = 0
@@ -117,16 +117,24 @@ class PreparationTransport:
         is_get = self._public_get(request)
         is_lookup = (not is_get and self.public_lookup is not None and not self.public_lookup_used
                      and form_lookup_request(request))
-        if not is_get and not is_lookup:
+        is_popup = (not is_get and not is_lookup and self.public_popup is not None and not self.public_popup_used
+                    and any(item.get('kind')=='formId6_popup_lookup' and item.get('popup_id')==1566 for item in self.public_read_evidence)
+                    and popup_request(request))
+        if not is_get and not is_lookup and not is_popup:
             self.blocked += 1
             self._abort(route)
             return
         try:
-            if is_lookup:
+            if is_lookup or is_popup:
                 # Retire this sole pre-data lookup before its bounded request.
-                self.public_lookup_used = True
-                response = self.public_lookup()
-                evidence = lookup_evidence(response)
+                if is_lookup:
+                    self.public_lookup_used = True
+                    response = self.public_lookup()
+                    evidence = lookup_evidence(response)
+                else:
+                    self.public_popup_used = True
+                    response = self.public_popup()
+                    evidence = popup_evidence(response)
                 if self.phase != "READ_ONLY":raise RuntimeError("public lookup phase changed")
                 self.public_read_evidence.append(evidence)
                 route.fulfill(response=response)

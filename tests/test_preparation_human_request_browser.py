@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import sqlite3
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from types import SimpleNamespace
@@ -55,7 +56,8 @@ def test_exact_request_opaque_forward_preserves_fresh_session_cookie_and_no_repl
         ledger.execute('UPDATE final_intent SET outcome=? WHERE intent=?',(outcome,intent));ledger.commit();return outcome
     try:
         with DenyOnlyProxy() as proxy,sync_playwright() as pw:
-            browser=pw.chromium.launch(headless=True,**proxy.browser_options())
+            browser=pw.chromium.launch(headless=True,channel='chrome' if sys.platform=='linux' else None,**proxy.browser_options())
+            assert proxy.verify_launch(browser)
             client=pw.request.new_context(ignore_https_errors=False)
             context=browser.new_context(service_workers='block',ignore_https_errors=False)
             page=context.new_page()

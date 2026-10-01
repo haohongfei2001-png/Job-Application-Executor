@@ -54,3 +54,20 @@ executable copying, no-sandbox fallback or certificate bypass are permitted.
 Sources: [Playwright branded channels](https://playwright.dev/python/docs/browsers#google-chrome--microsoft-edge),
 [Chromium Ubuntu sandbox policy](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md),
 [GitHub Ubuntu24 image](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md).
+
+## Sandboxed research run36860470239 (46575b3)
+
+- Mac:505 passed,29 platform-only skips,1 unsafe-CDP XFAIL,1 timing XPASS in425.92s
+- Linux installed Chrome:473 passed,58 platform skips,2 comparator XPASS;3 opaque
+  request fixtures still used bundled headless-shell and failed sandbox startup.
+  Those fixtures now explicitly select installed Chrome and verify native flags
+- Both public probes launched safely and observed form6→popup1566 with matching
+  response hash. The next blocked read had `_extId=undefined`, popup1566,
+  col124, false management/fresh/gray flags and color#2b2b2b
+- Both main HTML responses explicitly linked the public CSS variant with
+  `clientSupportWebp=false`; all19 fetched script hashes matched across platforms
+
+The next research iteration exercises the exact popup read and affected opaque
+request fixtures only. The full native channel/lifecycle oracle stays in the
+main owning workflow; this scope reduction avoids repeatedly spending seven
+Mac minutes on unchanged transport code. Live admission remains disabled.

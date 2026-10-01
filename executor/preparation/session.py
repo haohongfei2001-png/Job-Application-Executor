@@ -14,7 +14,7 @@ from .network_fence import DenyOnlyProxy
 from .transport import PreparationTransport, PUBLIC_RESOURCES
 from .process_identity import OwnedProcessIdentity
 from .observation import observe_owned_document
-from .public_reads import FORM_LOOKUP_URL, FORM_LOOKUP_BODY, public_style_url
+from .public_reads import FORM_LOOKUP_URL, FORM_LOOKUP_BODY, POPUP_URL, POPUP_BODY, public_style_url
 
 
 PRIVATE_TRANSPORT_FORBIDDEN_ENV = frozenset({
@@ -67,7 +67,8 @@ class DisposablePreparationSession:
             self.context = self.browser.new_context(service_workers='block',accept_downloads=False,
                                                     ignore_https_errors=False)
             phase='REQUEST_GUARD'
-            self.transport = PreparationTransport(public_fetch=self._public_get,public_lookup=self._public_form_lookup)
+            self.transport = PreparationTransport(public_fetch=self._public_get,public_lookup=self._public_form_lookup,
+                                                  public_popup=self._public_popup)
             self.transport.install(self.context)
             return self
         except BaseException:
@@ -84,6 +85,11 @@ class DisposablePreparationSession:
 
     def _public_form_lookup(self):
         return self.client.post(FORM_LOOKUP_URL,data=FORM_LOOKUP_BODY,
+            headers={'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},
+            max_redirects=0,max_retries=0,timeout=15000)
+
+    def _public_popup(self):
+        return self.client.post(POPUP_URL,data=POPUP_BODY,
             headers={'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},
             max_redirects=0,max_retries=0,timeout=15000)
 

@@ -34,7 +34,7 @@ def descriptor(url,method):
 
 def probe():
     result={'source':CONTRACT_URL,'status':'READ_ONLY_PREFLIGHT_UNVERIFIED',
-            'root_count':0,'contract':'UNOBSERVED','blocked':[],'fetched':[],
+            'root_count':0,'contract':'UNOBSERVED','outside_static_get_manifest':[],'fetched':[],
             'applicant_data_entered':False,'live_enabled':False,'public_reads':[],
             'public_html_style_links':[]}
     # Explicit platform target. Never retry a sandbox rejection with weaker
@@ -46,7 +46,7 @@ def probe():
         transport=session.transport;original=transport._route
         def route(request_route):
             request=request_route.request
-            if not transport._public_get(request) and len(result['blocked'])<100:
+            if not transport._public_get(request) and len(result['outside_static_get_manifest'])<100:
                 item=descriptor(request.url,request.method)
                 # This probe never loads profiles or enters a field. Inspect
                 # only public template selectors, never arbitrary request bodies.
@@ -61,7 +61,7 @@ def probe():
                             if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_#-]{0,70}',value):known[key]=value
                         item['public_template_parameters']=known
                     except Exception:item['public_template_parameters']={'status':'UNAVAILABLE'}
-                if item not in result['blocked']:result['blocked'].append(item)
+                if item not in result['outside_static_get_manifest']:result['outside_static_get_manifest'].append(item)
             original(request_route)
         session.context.unroute('**/*',transport._route)
         session.context.route('**/*',route)
