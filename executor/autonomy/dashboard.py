@@ -738,7 +738,7 @@ nativeOpen.onclick=async()=>{
     nativeWarning.textContent='请再次核对上方勾选的实际值。确认后会向武汉启云方科技有限公司的应用实施工程师（武汉）表单填写这些常规资料；输入本身可能传送资料。这不是最终提交。';
     nativeStatus.textContent='条件与当前表单已核对，等待你单独确认本次填写。';
     nativeDeadline(request,result.expires_in_seconds);nativeWatch(request);
-  }catch(error){nativeFail(request,error.message==='native-unavailable'?'当前原生浏览器版本尚未通过完整准入验收，未填写或上传；只读检查仍可使用。':'条件或资料无法确认，未自动重试。请重新核对准备状态。');}
+  }catch(error){nativeFail(request,error.message==='native-unavailable'?'本机浏览器安全检查未通过，未填写或上传；只读检查仍可使用。':'条件或资料无法确认，未自动重试。请重新核对准备状态。');}
 };
 fillConsent.onchange=()=>{fillApprove.disabled=!fillConsent.checked||!nativeOffer||nativeBusy;};
 fillApprove.onclick=async()=>{

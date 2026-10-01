@@ -79,7 +79,7 @@ def test_late_native_offer_does_not_restore_private_values(preparation_ui,interr
 
 def test_unadmitted_runtime_has_actionable_truthful_state(preparation_ui):
     page,observed=preparation_ui;calls,_,_=install(page,observed,unavailable=True)
-    expect(page.locator('#preparation-review-status')).to_contain_text('尚未通过完整准入验收')
+    expect(page.locator('#preparation-review-status')).to_contain_text('本机浏览器安全检查未通过')
     assert not any(action=='approve-fill' for action,_ in calls)
     assert CANARY not in page.content() and observed['errors']==[]
 

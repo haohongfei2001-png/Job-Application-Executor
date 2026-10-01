@@ -169,6 +169,7 @@ class PreparationController:
                         if not self._alive():raise PreparationConflict()
                         offer=self._flow.private_offer()
                         available=self._write_admission(self._owner) is True
+                        if not self._alive():raise PreparationConflict()
                         with self._lock:
                             self._write_available=available;self._state='OFFERED'
                             self._deadline=self._clock()+offer['expires_in_seconds']

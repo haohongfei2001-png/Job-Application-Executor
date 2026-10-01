@@ -7,7 +7,8 @@ from test_preparation_session_v1 import setup, close_data, SESSION
 from test_task_preparation_v1 import local_task
 
 
-def test_default_runtime_is_not_admitted_or_launched():
+def test_unavailable_runtime_is_not_admitted_or_launched(monkeypatch):
+    monkeypatch.setattr(NativePreparationAdmission,'available',staticmethod(lambda:False))
     assert NativePreparationAdmission.available() is False
     with pytest.raises(NativeAdmissionUnavailable):
         _native_factory(None, lambda _: True)

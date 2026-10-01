@@ -240,3 +240,18 @@ def test_every_upload_guard_observes_controller_manual_deadline(setup):
     with pytest.raises(PreparationConflict):controller.approve_resume(offer['nonce'],offer['scope_sha'],SESSION,approve_upload=True)
     assert controller.shutdown() and resume.retired
     assert not any(name=='upload' for name,_ in setup[1])
+
+
+def test_cancellation_during_native_selfcheck_cannot_publish_a_late_offer(setup):
+    factory,calls,*_=setup;entered=threading.Event();release=threading.Event();outcomes=[]
+    def slow_admission(_):
+        entered.set();assert release.wait(2);return True
+    controller=factory(write_admission=slow_admission)
+    def opening():
+        try:controller.open('task',1,SESSION,['0'])
+        except PreparationConflict:outcomes.append('refused')
+    caller=threading.Thread(target=opening);caller.start();assert entered.wait(2)
+    controller.cancel(SESSION);release.set();caller.join(2)
+    assert not caller.is_alive() and outcomes==['refused']
+    assert controller.shutdown() and controller.status()['status']=='CLOSED'
+    assert not any(name=='primitive' for name,_ in calls)

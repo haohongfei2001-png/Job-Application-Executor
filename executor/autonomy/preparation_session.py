@@ -42,10 +42,11 @@ def _factory(queue,session_valid):
 
 def _native_factory(queue,session_valid):
     if not NativePreparationAdmission.available():raise NativeAdmissionUnavailable()
-    admission=NativePreparationAdmission()
-    return PreparationController(queue,session_valid,
+    admission=NativePreparationAdmission(still_authorized=lambda:controller._alive())
+    controller=PreparationController(queue,session_valid,
         owner_factory=lambda:DisposablePreparationSession(headless=False,channel='chrome'),
         write_admission=admission.admit,upload_admission=admission.admit)
+    return controller
 
 
 class PrivatePreparationSessions:

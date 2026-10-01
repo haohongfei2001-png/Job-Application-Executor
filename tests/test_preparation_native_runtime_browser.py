@@ -38,3 +38,22 @@ def test_headed_installed_chrome_exact_file_and_changed_document_refusal(tmp_pat
 
 def test_headed_installed_chrome_two_mib_controller_and_single_upload(tmp_path,native_target):
     original.test_private_controller_preserves_two_mib_docx_and_one_upload_authority(tmp_path)
+
+
+def test_current_owned_native_browser_proves_its_own_capabilities_without_private_material():
+    from executor.preparation.native_admission import NativePreparationAdmission
+    assert NativePreparationAdmission.available()
+    with DisposablePreparationSession(headless=False,channel='chrome') as owner:
+        original=owner.context
+        from executor.preparation.native_selfcheck import check_owned_native_browser
+        receipt=check_owned_native_browser(owner)
+        assert receipt['protocols']==['http','https','ws','wss']
+        admission=NativePreparationAdmission()
+        assert admission.admit(owner) is True
+        assert admission._receipt['temporary_context_closed'] is True
+        assert admission._receipt['external_recipient_used'] is False
+        assert admission._receipt['applicant_data_used'] is False
+        assert owner.browser.contexts==[original] and original.pages==[]
+        receipt=admission._receipt
+        assert admission.admit(owner) is True and admission._receipt is receipt
+        assert admission._receipt['browser_version']==owner.browser.version
