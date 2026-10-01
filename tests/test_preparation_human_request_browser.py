@@ -25,6 +25,74 @@ META={'contract':h.CONTRACT_VERSION,'command':'addWafCk_addSubmit','form_id':6,
 BINDING={'document':'fixture','root':'fixture-root','change_epoch':7,'frame_id':'synthetic-native-frame'}
 
 
+@pytest.mark.skipif(sys.platform!='darwin',reason='Native headful Mac dialog gate; Linux display is not provisioned here')
+@pytest.mark.parametrize('decision',['cancel','accept'])
+def test_headful_native_dialog_pairs_real_events_without_automatic_product_acceptance(monkeypatch,decision):
+    """Automation drives a synthetic dialog; this is not physical-human proof."""
+    from executor.preparation.session import DisposablePreparationSession
+    received=[];consumed=[];opened=[];closed=[]
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*_):pass
+        def do_POST(self):
+            received.append((self.command,self.path,self.rfile.read(int(self.headers.get('Content-Length','0')))))
+            self.send_response(204);self.end_headers()
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    serving=threading.Thread(target=server.serve_forever,daemon=True);serving.start()
+    base=f'http://127.0.0.1:{server.server_port}'
+    monkeypatch.setattr(h,'CONTRACT_URL',base+'/');monkeypatch.setattr(h,'FINAL_URL',base+'/final')
+    try:
+        with DisposablePreparationSession(headless=False,channel=None) as owner:
+            page=owner.context.new_page()
+            owner.context.route(base+'/',lambda route:route.fulfill(status=200,content_type='text/html',body='<p>Synthetic local confirmation</p>'))
+            page.goto(base+'/')
+            cdp=owner.context.new_cdp_session(page);cdp.send('Page.enable')
+            frame_id=cdp.send('Page.getFrameTree')['frameTree']['frame']['id']
+            binding={**BINDING,'frame_id':frame_id}
+            def consume(scope):consumed.append(scope);return 'a'*64
+            bridge=h.OpaqueHumanRequest(page=page,client=owner.client,binding=binding,
+                guard=lambda:dict(binding),consume=consume,record=lambda _,outcome:outcome)
+            def opening(event):
+                opened.append({key:event.get(key) for key in ('type','frameId','hasBrowserHandler')})
+                bridge.dialog_opened(event)
+            def closing(event):
+                closed.append({key:event.get(key) for key in ('result','frameId')})
+                bridge.dialog_closed(event)
+            cdp.on('Page.javascriptDialogOpening',opening)
+            cdp.on('Page.javascriptDialogClosed',closing)
+            page.on('dialog',bridge.dialog_handle)
+            owner.context.route(base+'/final',lambda route:bridge.hold(route,META))
+            try:
+                page.evaluate('''({url,body})=>{fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body}).catch(()=>{});}''',
+                    {'url':base+'/final','body':BODY})
+                for _ in range(100):
+                    if bridge._state=='HELD':break
+                    page.wait_for_timeout(20)
+                assert bridge._state=='HELD' and received==[] and consumed==[]
+                bridge.present()
+                for _ in range(100):
+                    if bridge._dialog is not None and opened:break
+                    page.wait_for_timeout(20)
+                assert opened==[{'type':'confirm','frameId':frame_id,'hasBrowserHandler':True}]
+                assert bridge._state=='DIALOG_OPEN' and received==[] and consumed==[]
+                # Only this fixture accepts/dismisses. Product code has no
+                # automatic accept call; real user operation remains required.
+                if decision=='accept':bridge._dialog.accept()
+                else:bridge._dialog.dismiss()
+                for _ in range(100):
+                    if bridge._state!='DIALOG_OPEN':break
+                    page.wait_for_timeout(20)
+                result=bridge.drain()
+                assert result['status']==('RETURNED_UNVERIFIED' if decision=='accept' else 'CANCELLED')
+                assert closed==[{'result':decision=='accept','frameId':frame_id}]
+                assert len(consumed)==(decision=='accept')
+                assert received==([('POST','/final',BODY.encode())] if decision=='accept' else [])
+                bridge.drain();page.wait_for_timeout(50)
+                assert len(received)==(decision=='accept')
+            finally:
+                bridge.cancel();cdp.detach()
+    finally:server.shutdown();server.server_close();serving.join()
+
+
 @pytest.mark.parametrize('server_result',['ok','redirect','disconnect'])
 def test_exact_request_opaque_forward_preserves_fresh_session_cookie_and_no_replay(tmp_path,monkeypatch,server_result):
     received=[]
