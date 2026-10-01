@@ -137,3 +137,13 @@ def test_offer_heartbeat_cannot_leave_stale_private_review_open(flow_setup,fault
     elif fault=='cancel':q.cancel(task['task_id'])
     else:now[0]+=121
     with pytest.raises((PreparationConflict,RuntimeError)):flow.review_fence()
+
+
+def test_closed_offer_cannot_revive_after_transient_session_fence(flow_setup):
+    (_,_,_,authority,_),flow,_,_,_=flow_setup;offer=flow.private_offer();valid=[True]
+    authority.session_valid=lambda value:value==SESSION and valid[0]
+    valid[0]=False
+    assert flow.close()['status']=='CLOSED' and authority.pending=={}
+    valid[0]=True
+    with pytest.raises(PreparationConflict):
+        authority.consume(offer['nonce'],SESSION,offer['scope_sha'],BROWSER,approve_transmission=True)

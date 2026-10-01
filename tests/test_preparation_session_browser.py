@@ -4,8 +4,11 @@ import json
 import os
 from pathlib import Path
 import time
+import threading
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from urllib.parse import urlsplit
 import pytest
-from playwright.sync_api import expect,Error
+from playwright.sync_api import expect
 
 from test_preparation_review_browser import open_review,payload,CANARY
 from test_dashboard_diagnostics_browser import preparation_ui
@@ -100,22 +103,77 @@ def test_backend_closure_is_polled_and_hides_a_previously_verified_view(preparat
 
 
 def test_real_back_forward_clears_private_values_and_retires_pending_check(preparation_ui):
+    """Use an independent HTTP recipient for unload/keepalive delivery.
+
+    Page-bound DevTools routing can lose an unload request with its old frame;
+    server receipt, not a surviving route callback, is the cancellation oracle.
+    """
+    from executor.autonomy.dashboard import DASHBOARD_HTML
     page,observed=preparation_ui
-    prior='https://preparation.test/synthetic-prior'
-    page.route(prior,lambda route:route.fulfill(status=200,content_type='text/html',body='<p>Known local prior page</p>'))
-    page.goto(prior);page.goto('https://preparation.test/')
-    expect(page.locator('[data-task-preparation]')).to_have_count(2)
-    pending,calls,_,result=install(page,observed,hold=True)
-    pump_until(page,lambda:len(pending)==1)
-    page.go_back();expect(page).to_have_url(prior)
-    pump_until(page,lambda:any(action=='cancel' for action,_ in calls))
-    assert CANARY not in page.content()
-    route,data=pending[0]
-    try:route.fulfill(status=200,content_type='application/json',body=json.dumps(result(data)))
-    except Error:pass  # Back may already have aborted this old HTTP exchange.
-    page.go_forward();expect(page).to_have_url('https://preparation.test/')
-    expect(page.locator('[data-task-preparation]')).to_have_count(2)
-    assert CANARY not in page.content()
-    expect(page.locator('#preparation-review')).to_be_hidden()
-    assert page.locator('#preparation-site-status').inner_text()==''
-    assert observed['external']==[] and observed['errors']==[]
+    page.context.unroute('**/*')
+    opened=threading.Event();cancelled=threading.Event();release=threading.Event()
+    requests=[];source_visits=[];lock=threading.Lock()
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*_):pass
+        def reply(self,value,*,html=False):
+            body=(value if html else json.dumps(value)).encode()
+            self.send_response(200)
+            self.send_header('Content-Type','text/html; charset=utf-8' if html else 'application/json')
+            self.send_header('Content-Length',str(len(body)))
+            self.send_header('Cache-Control','no-store')
+            self.send_header('Set-Cookie','synthetic_session=local_fixture; HttpOnly; SameSite=Strict; Path=/')
+            self.end_headers()
+            try:self.wfile.write(body)
+            except (BrokenPipeError,ConnectionResetError):pass
+        def do_GET(self):
+            path=urlsplit(self.path).path
+            if path in {'/','/synthetic-prior'}:
+                with lock:source_visits.append(path)
+                self.reply(DASHBOARD_HTML if path=='/' else '<p>Known local prior page</p>',html=True)
+            elif path=='/ui/api/task-preparation':self.reply(observed['payload'])
+            elif path=='/ui/api/preparation-review':self.reply(payload())
+            else:self.reply({'tasks':observed['tasks'],'ready_for_live_e2e':False})
+        def do_POST(self):
+            data=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))))
+            action=self.path.rsplit('/',1)[-1]
+            with lock:requests.append((action,data,self.headers.get('Origin'),self.headers.get('Cookie')))
+            if action=='open':
+                opened.set();release.wait(10)
+                self.reply({'mode':'READ_ONLY_PUBLIC_PREFLIGHT','status':'EMPTY_FORM_VERIFIED',
+                    'request_id':data['request_id'],'task_id':data['task_id'],'task_revision':data['expected_revision'],
+                    'source_url':CONTRACT_URL,'profile_version':data['profile_version'],'resume_version':None,
+                    'plan':[{'field_id':'0','value':CANARY}], 'expires_in_seconds':120,
+                    'capabilities':{'live_write':False,'submit':False,'account_verified':False,'server_draft_verified':False}})
+            elif action=='cancel':
+                cancelled.set();self.reply({'status':'CANCELLATION_REQUESTED','context_closed':False,'submit_capability':False})
+            else:self.reply({'status':'OFFERED','live_write_available':False,'submit_capability':False})
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    origin='http://127.0.0.1:'+str(server.server_address[1]);prior=origin+'/synthetic-prior'
+    try:
+        page.goto(prior);page.goto(origin+'/')
+        expect(page.locator('[data-task-preparation]')).to_have_count(2)
+        page.locator('[data-task-preparation][data-task="prep-a"]').click()
+        page.locator('#preparation-review-open').click()
+        expect(page.locator('#preparation-review-fields')).to_contain_text(CANARY)
+        page.get_by_role('checkbox',name='选择核对姓名',exact=True).check()
+        page.locator('#preparation-site-check').click()
+        assert opened.wait(3)
+        page.go_back();expect(page).to_have_url(prior)
+        assert cancelled.wait(3),'independent loopback recipient did not receive unload cancellation'
+        assert CANARY not in page.content()
+        release.set()
+        page.go_forward();expect(page).to_have_url(origin+'/')
+        expect(page.locator('[data-task-preparation]')).to_have_count(2)
+        assert CANARY not in page.content()
+        expect(page.locator('#preparation-review')).to_be_hidden()
+        assert page.locator('#preparation-site-status').inner_text()==''
+        with lock:
+            assert [row[0] for row in requests]==['open','cancel']
+            assert requests[0][1]['request_id']==requests[1][1]['request_id']
+            assert all(row[2]==origin and row[3]=='synthetic_session=local_fixture' for row in requests)
+            assert CANARY not in json.dumps(requests)
+            assert '/' in source_visits and '/synthetic-prior' in source_visits
+        assert observed['errors']==[]
+    finally:
+        release.set();server.shutdown();server.server_close();thread.join(3)

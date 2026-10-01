@@ -254,7 +254,10 @@ class PreparationAuthority:
                     "submit_capability": False}
 
     def revoke(self, nonce, session):
-        self._session(session)
+        # Revocation removes only an already-issued matching-session offer.
+        # Expiry, service retirement or a temporary mutation fence must not
+        # preserve authority which could revive after that fence clears.
+        if not isinstance(session,str) or not SESSION.fullmatch(session):raise PreparationConflict()
         with self.lock:
             record = self.pending.get(_sha(nonce)) if isinstance(nonce, str) else None
             if record and hmac.compare_digest(record["scope"]["session_sha"], _sha(session)):

@@ -41,7 +41,7 @@ def test_private_surface_returns_review_without_approval_or_write_capability(set
     assert 'PRIVATE_SYNTHETIC' in json.dumps(result) and 'NEVER_PROJECT' not in json.dumps(result)
     assert sessions.status(close_data(data),SESSION)['live_write_available'] is False
     sessions.cancel(close_data(data),SESSION)
-    assert _snapshot(q)==before and [row[0] for row in calls]==['open','cancel']
+    assert _snapshot(q)==before and [row[0] for row in calls]==['open','shutdown']
 
 
 def test_cancel_before_delayed_open_is_a_tombstone_not_a_noop(setup):
@@ -176,3 +176,39 @@ def test_retirement_during_final_offer_return_never_publishes_stale_verification
     sessions.factory=replaced
     with pytest.raises(PreparationConflict):sessions.open(data,SESSION)
     assert sessions.retired and any(call[0]=='shutdown' for call in calls)
+
+
+def test_cancel_after_registration_before_controller_open_never_creates_browser(local_task):
+    from executor.preparation.controller import PreparationController
+    q,task,profile=local_task;registered=threading.Event();release=threading.Event();outcomes=[];owners=[]
+    def owner():owners.append('created');raise AssertionError('cancelled browser must not start')
+    def factory(queue,valid):
+        controller=PreparationController(queue,valid,owner_factory=owner)
+        original=controller.open
+        def delayed(*args):
+            registered.set();assert release.wait(2)
+            return original(*args)
+        controller.open=delayed
+        return controller
+    sessions=PrivatePreparationSessions(q,lambda value:value==SESSION,lambda:False,factory=factory)
+    data={'request_id':'a'*32,'task_id':task['task_id'],'expected_revision':task['revision'],'selected_ids':['0'],
+          'profile_version':hashlib.sha256(profile.read_bytes()).hexdigest(),'resume_version':None}
+    def opening():
+        try:sessions.open(data,SESSION)
+        except PreparationConflict:outcomes.append('refused')
+    thread=threading.Thread(target=opening);thread.start();assert registered.wait(2)
+    result=sessions.cancel(close_data(data),SESSION)
+    assert result['status']=='CANCELLATION_REQUESTED' and not result['context_closed']
+    release.set();thread.join(2)
+    assert not thread.is_alive() and outcomes==['refused'] and owners==[]
+    assert sessions.active['controller']._thread is None
+    assert sessions.active['controller'].status()['status']=='CLOSED'
+
+    # Proven never-started cancellation does not strand future read-only checks.
+    sessions.factory=lambda *_:SimpleNamespace(
+        open=lambda *_:{'plan':[],'recipient_url':CONTRACT_URL,'company':CONTRACT_COMPANY,'role':CONTRACT_ROLE,
+                        'expires_in_seconds':120,'profile_version':data['profile_version'],'resume_version':None},
+        status=lambda:{'status':'OFFERED'},shutdown=lambda **_:None)
+    replacement=dict(data,request_id='b'*32)
+    assert sessions.open(replacement,SESSION)['status']=='EMPTY_FORM_VERIFIED'
+    assert owners==[]

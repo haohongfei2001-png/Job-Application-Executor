@@ -93,7 +93,11 @@ class PrivatePreparationSessions:
             # not recreate a session after Close/Back/navigation already won.
             self.cancelled[key]=self.clock()+3600
             if self.active and self.active['key']==key:
-                return self.active['controller'].cancel(session)
+                # The manager has already checked the exact private request key.
+                # Revoke even before controller.open has bound its session;
+                # cancel(session) alone rejects that IDLE interleaving.
+                self.active['controller'].shutdown(timeout=0)
+                return {'status':'CANCELLATION_REQUESTED','context_closed':False,'submit_capability':False}
         return {'status':'CANCELLATION_REQUESTED','context_closed':False,'submit_capability':False}
 
     def status(self,data,session):

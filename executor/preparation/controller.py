@@ -79,8 +79,15 @@ class PreparationController:
 
     def shutdown(self,timeout=5):
         self._revoked.set()
-        if self._thread is not None:self._thread.join(timeout=timeout)
-        return self._thread is None or not self._thread.is_alive()
+        with self._lock:
+            if self._thread is None:
+                # open starts the owner thread under this same lock and refuses
+                # the revocation flag. No browser was ever admitted here.
+                self._state='CLOSED';self._deadline=0;self._write_available=False
+                return True
+            thread=self._thread
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
 
     def _close_owned(self):
         # Only this thread calls Playwright. HTTP cancellation sets an Event,

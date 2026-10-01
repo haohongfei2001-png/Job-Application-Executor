@@ -622,3 +622,15 @@ def test_admission_lock_and_then_marker_both_exclude_activation(fixture,monkeypa
     assert observed==[True]
     with pytest.raises(BlockingIOError):
         with task_state_guard(q.root):pytest.fail('activation ignored durable context fence')
+
+
+def test_retired_session_may_only_revoke_its_own_exact_offer(fixture):
+    _,task,_,authority,_=fixture
+    offer=authority.issue(task['task_id'],task['revision'],SESSION,BROWSER,['0'])
+    authority.session_valid=lambda _:False
+    authority.revoke(offer['nonce'],'x'*40)
+    assert len(authority.pending)==1
+    authority.revoke('other-nonce',SESSION)
+    assert len(authority.pending)==1
+    authority.revoke(offer['nonce'],SESSION)
+    assert authority.pending=={}
