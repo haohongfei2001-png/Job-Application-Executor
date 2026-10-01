@@ -4055,6 +4055,9 @@ def test_http_service_retirement_sends_ack_before_worker_stops(
         identity = supervisor.service_identity()
         assert cli.request(root, server.server_port, "/v1/service-stop", identity) == {
             "ok": True, "stopping": True}
+        # Reading the complete HTTP body does not join the handler thread. Its
+        # observer and deferred stop can still be pending after client return.
+        assert supervisor.worker.stop_event.wait(timeout=5)
         assert response_written.is_set()
         assert supervisor.worker.stop_event.is_set()
         assert supervisor.mutation_fenced()
@@ -6265,3 +6268,103 @@ def test_ten_actual_service_retirements_preserve_private_authority_and_ack(
             # synthetic daemon; never signal an unverified process ID.
             cli.lifecycle("stop", root, port)
     assert len(instances) == 10
+
+
+@pytest.mark.parametrize("pause_at", ["before_write", "after_write", "before_stop"])
+def test_http_service_retirement_observation_is_ordered_across_paused_handler(
+    retirement_private_state, monkeypatch, pause_at
+):
+    """Client ACK receipt and server-side marker/stop completion are distinct."""
+    import threading
+    from executor.autonomy.supervisor import Supervisor, create_server
+
+    root, queue, db, key = retirement_private_state
+    supervisor = Supervisor(queue)
+    server = create_server(supervisor, port=0)
+    handler = server.RequestHandlerClass
+    boundary = threading.Event()
+    release_handler = threading.Event()
+    response_written = threading.Event()
+    client_finished = threading.Event()
+    original_send = handler._send_json
+    original_stop = supervisor.worker.stop_event.set
+    replies, failures = [], []
+
+    def pause_handler():
+        boundary.set()
+        assert release_handler.wait(timeout=5), "test did not release the paused handler"
+
+    def observe_response(self, status, result, *, extra_headers=None):
+        retiring = self.path == "/v1/service-stop" and status == 200
+        if retiring and pause_at == "before_write":
+            pause_handler()
+        value = original_send(self, status, result, extra_headers=extra_headers)
+        if retiring:
+            if pause_at == "after_write":
+                pause_handler()
+            response_written.set()
+        return value
+
+    def guarded_worker_stop():
+        assert response_written.is_set(), "worker exited before stop acknowledgement"
+        if pause_at == "before_stop":
+            pause_handler()
+        original_stop()
+
+    def request_stop():
+        try:
+            replies.append(cli.request(root, server.server_port, "/v1/service-stop",
+                                       supervisor.service_identity()))
+        except BaseException as exc:
+            failures.append(type(exc).__name__)
+        finally:
+            client_finished.set()
+
+    monkeypatch.setattr(handler, "_send_json", observe_response)
+    monkeypatch.setattr(supervisor.worker.stop_event, "set", guarded_worker_stop)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    client_thread = threading.Thread(target=request_stop, daemon=True)
+    before = _retirement_authority(root, db)
+    server_thread.start()
+    client_thread.start()
+    try:
+        assert boundary.wait(timeout=5)
+        assert supervisor.mutation_fenced()
+        assert not supervisor.worker.stop_event.is_set()
+        if pause_at == "before_write":
+            assert not client_finished.is_set()
+            assert not response_written.is_set()
+            # Negative order control: the retained guard rejects an attempted
+            # premature stop while the genuine response path is still paused.
+            with pytest.raises(AssertionError, match="before stop acknowledgement"):
+                supervisor.worker.stop_event.set()
+            assert not supervisor.worker.stop_event.is_set()
+        else:
+            # The full, exact Content-Length body is already available to the
+            # client while the handler's own observer or stop is held back.
+            assert client_finished.wait(timeout=5)
+            assert not failures
+            assert replies == [{"ok": True, "stopping": True}]
+            assert response_written.is_set() is (pause_at == "before_stop")
+            assert not supervisor.worker.stop_event.is_set()
+        _assert_retirement_authority(root, db, before)
+        assert (root / "task-answers.key").read_bytes() == key
+
+        release_handler.set()
+        assert client_finished.wait(timeout=5)
+        assert not failures
+        assert replies == [{"ok": True, "stopping": True}]
+        assert supervisor.worker.stop_event.wait(timeout=5)
+        assert response_written.is_set()
+        assert supervisor.worker.stop_event.is_set()
+        assert supervisor.mutation_fenced()
+        _assert_retirement_authority(root, db, before)
+        assert (root / "task-answers.key").read_bytes() == key
+    finally:
+        release_handler.set()
+        client_thread.join(timeout=5)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
+    assert not client_thread.is_alive()
+    assert not server_thread.is_alive()
