@@ -109,6 +109,24 @@ def _stop_owned_service(root, port):
         return {"ok": False, "reason": "service_identity_unverified"}
 
 
+def _await_preparation_retirement(supervisor):
+    # Caller retains the service's worker locks throughout this wait. A stopped
+    # owner thread or timeout is not proof that browser/API transport is gone.
+    # This never retries a native close, signals a PID, or grants new authority.
+    retired=False
+    while True:
+        try:
+            if not retired:
+                supervisor.retire_for_shutdown();retired=True
+            if supervisor.preparation_sessions.await_retired(timeout=1) is True:return
+        except BaseException:
+            # Losing an acknowledgement or a retirement callback cannot release
+            # the enclosing worker locks. A later read may prove CLOSED; no
+            # exception text or private browser/transport data is emitted.
+            pass
+        time.sleep(.1)
+
+
 def serve(root, port):
     from ..otp.bridge import OtpBridge
     from .queue import TaskQueue
@@ -148,7 +166,7 @@ def serve(root, port):
         try:
             worker.run_forever()
         finally:
-            supervisor.preparation_sessions.revoke_all()
+            _await_preparation_retirement(supervisor)
             server.shutdown()
             server.server_close()
             try:

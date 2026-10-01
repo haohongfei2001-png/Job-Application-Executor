@@ -12,6 +12,58 @@ import pytest
 from executor.autonomy import cli
 
 
+def test_service_worker_lock_stays_owned_until_preparation_cleanup_proven(tmp_path,monkeypatch):
+    from executor.autonomy.worker import ProcessLock
+    from executor.autonomy.state_compatibility import _private_lock_fd
+    calls=[];returns=iter([False,False,True]);path=tmp_path/'runtime'/'worker.lock'
+    def wait(timeout):
+        assert timeout==1
+        with pytest.raises(BlockingIOError):_private_lock_fd(path)
+        calls.append('wait');return next(returns)
+    supervisor=SimpleNamespace(retire_for_shutdown=lambda:calls.append('retire'),
+        preparation_sessions=SimpleNamespace(await_retired=wait))
+    monkeypatch.setattr(cli.time,'sleep',lambda _:calls.append('idle'))
+    with ProcessLock(path):cli._await_preparation_retirement(supervisor)
+    assert calls==['retire','wait','idle','wait','idle','wait']
+    import os
+    fd=_private_lock_fd(path);os.close(fd)
+
+
+def test_retirement_uncertainty_never_turns_into_a_timeout_success(monkeypatch):
+    class StopProbe(Exception):pass
+    calls=[]
+    supervisor=SimpleNamespace(retire_for_shutdown=lambda:calls.append('retire'),
+        preparation_sessions=SimpleNamespace(await_retired=lambda timeout:False))
+    def waiting(_):calls.append('blocked');raise StopProbe()
+    monkeypatch.setattr(cli.time,'sleep',waiting)
+    with pytest.raises(StopProbe):cli._await_preparation_retirement(supervisor)
+    assert calls==['retire','blocked']
+
+
+@pytest.mark.parametrize('fault',['retire','wait','malformed'])
+def test_retirement_errors_cannot_release_worker_exclusion(tmp_path,monkeypatch,fault):
+    from executor.autonomy.worker import ProcessLock
+    from executor.autonomy.state_compatibility import _private_lock_fd
+    path=tmp_path/'runtime'/'worker.lock';calls=[];first=[True]
+    def retire():
+        calls.append('retire')
+        if fault=='retire' and first[0]:first[0]=False;raise RuntimeError('synthetic retirement acknowledgement loss')
+    def wait(timeout):
+        calls.append('wait')
+        if first[0]:
+            first[0]=False
+            if fault=='wait':raise RuntimeError('synthetic cleanup observation failure')
+            if fault=='malformed':return {'context_closed':True}
+        return True
+    def idle(_):
+        with pytest.raises(BlockingIOError):_private_lock_fd(path)
+        calls.append('blocked')
+    monkeypatch.setattr(cli.time,'sleep',idle)
+    supervisor=SimpleNamespace(retire_for_shutdown=retire,preparation_sessions=SimpleNamespace(await_retired=wait))
+    with ProcessLock(path):cli._await_preparation_retirement(supervisor)
+    assert 'blocked' in calls and calls[-1]=='wait'
+
+
 @pytest.fixture
 def startup_clock(monkeypatch):
     clock = SimpleNamespace(now=100.0, sleeps=[])

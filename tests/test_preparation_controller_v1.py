@@ -85,7 +85,7 @@ def test_runtime_admission_is_rechecked_not_borrowed_from_offer(setup):
 
 def test_uncertain_browser_disposal_does_not_report_closed(setup):
     factory,_,_,_,_,closed=setup;closed[0]=False
-    controller,_=opened(factory);assert controller.shutdown()
+    controller,_=opened(factory);assert controller.shutdown() is False
     assert controller.status()['status']=='UNKNOWN_OUTCOME'
 
 
@@ -101,6 +101,7 @@ def test_offer_expiry_closes_without_approval_or_primitive(setup):
     deadline=time.monotonic()+2
     while controller.status()['status']!='CLOSED' and time.monotonic()<deadline:time.sleep(.01)
     assert controller.status()['status']=='CLOSED' and controller.shutdown()
+    assert controller._alive() is False
     assert not any(name=='primitive' for name,_ in calls)
 
 
@@ -115,7 +116,7 @@ def test_failed_enter_keeps_owned_cleanup_evidence_and_never_retries_disposal(fi
         def close(self):pytest.fail('uncertain entry cleanup retried')
     controller=PreparationController(q,lambda value:value==SESSION,owner_factory=Owner)
     with pytest.raises(PreparationConflict):controller.open('task',1,SESSION,['0'])
-    assert controller.shutdown()
+    assert controller.shutdown() is closed
     assert controller.status()['status']==('CLOSED' if closed else 'UNKNOWN_OUTCOME')
     assert calls==['entry_cleanup']
 
@@ -127,5 +128,115 @@ def test_unannotated_entry_failure_remains_unknown_without_second_close(fixture)
         def close(self):calls.append('close');return False
     controller=PreparationController(q,lambda value:value==SESSION,owner_factory=Owner)
     with pytest.raises(PreparationConflict):controller.open('task',1,SESSION,['0'])
-    assert controller.shutdown() and controller._owner is not None
+    assert controller.shutdown() is False and controller._owner is not None
     assert controller.status()['status']=='UNKNOWN_OUTCOME' and calls==['close']
+
+
+def resume_controller(setup,**options):
+    factory,calls,*_=setup;uploads=[]
+    class Resume:
+        def __init__(self,flow):
+            self.flow=flow;self.retired=False;uploads.append(self)
+            calls.append(('resume_create',threading.get_ident()))
+        def private_offer(self):
+            self.flow._binding();return {'nonce':'upload-private-nonce','scope_sha':'b'*64,
+                'expires_in_seconds':120,'resume':{'resume_sha256':'c'*64,'byte_count':1900,'kind':'resume_docx'},
+                'submit_capability':False}
+        def approve(self,nonce,scope,*,approve_upload):
+            assert nonce=='upload-private-nonce' and scope=='b'*64 and approve_upload is True
+            self.flow._binding();calls.append(('upload',threading.get_ident()))
+            return {'status':'RETURNED_UNVERIFIED','server_attachment_verified':False,'submit_capability':False}
+        def _retire(self):self.retired=True;calls.append(('resume_retire',threading.get_ident()))
+    controller,offer=opened(factory,write_admission=lambda _:True,resume_factory=Resume,**options)
+    controller.approve(offer['nonce'],offer['scope_sha'],SESSION,approve_transmission=True)
+    return controller,uploads
+
+
+def test_internal_upload_requires_separate_default_closed_admission(setup):
+    controller,uploads=resume_controller(setup)
+    with pytest.raises(PreparationConflict):controller.review_resume(SESSION)
+    assert controller.shutdown() and uploads==[]
+    assert not any(name=='upload' for name,_ in setup[1])
+
+
+def test_internal_resume_review_and_single_approval_stay_on_owner_thread(setup):
+    controller,uploads=resume_controller(setup,upload_admission=lambda _:True)
+    manual_deadline=controller._review_deadline
+    try:
+        offer=controller.review_resume(SESSION)
+        assert offer['resume']['kind']=='resume_docx' and controller.status()['resume_status']=='OFFERED'
+        assert controller._deadline<=manual_deadline
+        public=json.dumps(controller.status())
+        assert all(secret not in public for secret in ['upload-private-nonce','c'*64,'1900','resume_docx'])
+        with pytest.raises(PreparationConflict):controller.approve_resume(offer['nonce'],offer['scope_sha'],'wrong-session',approve_upload=True)
+        with pytest.raises(PreparationConflict):controller.approve_resume(offer['nonce'],offer['scope_sha'],SESSION,approve_upload=False)
+        result=controller.approve_resume(offer['nonce'],offer['scope_sha'],SESSION,approve_upload=True)
+        assert result['status']=='RETURNED_UNVERIFIED'
+        assert controller.status()['status']=='PREPARED_UNVERIFIED' and controller.status()['resume_status']=='RETURNED_UNVERIFIED'
+        assert controller._deadline==manual_deadline
+        with pytest.raises(PreparationConflict):controller.approve_resume(offer['nonce'],offer['scope_sha'],SESSION,approve_upload=True)
+        with pytest.raises(PreparationConflict):controller.review_resume(SESSION)
+    finally:assert controller.shutdown()
+    assert len(uploads)==1 and uploads[0].retired
+    assert len({thread for _,thread in setup[1]})==1 and threading.get_ident() not in {thread for _,thread in setup[1]}
+
+
+def test_upload_admission_is_rechecked_after_private_review(setup):
+    valid=[True];controller,uploads=resume_controller(setup,upload_admission=lambda _:valid[0])
+    offer=controller.review_resume(SESSION);valid[0]=False
+    with pytest.raises(PreparationConflict):controller.approve_resume(offer['nonce'],offer['scope_sha'],SESSION,approve_upload=True)
+    assert controller.shutdown() and uploads[0].retired
+    assert not any(name=='upload' for name,_ in setup[1])
+
+
+def test_upload_offer_expiry_retires_bytes_without_renewing_field_or_manual_deadline(setup):
+    now=[10.];controller,uploads=resume_controller(setup,upload_admission=lambda _:True,clock=lambda:now[0])
+    controller.review_resume(SESSION);assert controller._deadline==130. and controller._review_deadline==910.
+    now[0]=131.
+    deadline=time.monotonic()+2
+    while controller.status()['status']!='CLOSED' and time.monotonic()<deadline:time.sleep(.01)
+    assert controller.shutdown() and uploads[0].retired
+    assert not any(name=='upload' for name,_ in setup[1])
+
+
+def test_cancel_during_upload_never_publishes_a_clean_result(setup):
+    controller,uploads=resume_controller(setup,upload_admission=lambda _:True)
+    offer=controller.review_resume(SESSION);resume=uploads[0];original=resume.approve
+    def cancelled(*args,**kwargs):
+        result=original(*args,**kwargs);controller.cancel(SESSION);return result
+    resume.approve=cancelled
+    with pytest.raises(PreparationConflict):controller.approve_resume(offer['nonce'],offer['scope_sha'],SESSION,approve_upload=True)
+    assert controller.shutdown() and resume.retired
+    assert controller.status()['resume_status']=='UNKNOWN_OUTCOME'
+
+
+def test_uncertain_close_retires_upload_material_but_shutdown_is_false(setup):
+    controller,uploads=resume_controller(setup,upload_admission=lambda _:True)
+    controller.review_resume(SESSION);setup[-1][0]=False
+    assert controller.shutdown() is False and uploads[0].retired
+    assert controller.status()['status']=='UNKNOWN_OUTCOME'
+
+
+def test_manual_deadline_wins_during_upload_admission_before_any_upload(setup):
+    now=[10.];admissions=[0]
+    def admitted(_):
+        admissions[0]+=1
+        if admissions[0]==2:now[0]=911.
+        return True
+    controller,uploads=resume_controller(setup,upload_admission=admitted,clock=lambda:now[0])
+    now[0]=890.;offer=controller.review_resume(SESSION)
+    assert controller._deadline==910.
+    with pytest.raises(PreparationConflict):controller.approve_resume(offer['nonce'],offer['scope_sha'],SESSION,approve_upload=True)
+    assert controller.shutdown() and uploads[0].retired
+    assert not any(name=='upload' for name,_ in setup[1])
+
+
+def test_every_upload_guard_observes_controller_manual_deadline(setup):
+    now=[10.];controller,uploads=resume_controller(setup,upload_admission=lambda _:True,clock=lambda:now[0])
+    now[0]=890.;offer=controller.review_resume(SESSION);resume=uploads[0];original=resume.approve
+    def expiring(*args,**kwargs):
+        now[0]=911.;return original(*args,**kwargs)
+    resume.approve=expiring
+    with pytest.raises(PreparationConflict):controller.approve_resume(offer['nonce'],offer['scope_sha'],SESSION,approve_upload=True)
+    assert controller.shutdown() and resume.retired
+    assert not any(name=='upload' for name,_ in setup[1])

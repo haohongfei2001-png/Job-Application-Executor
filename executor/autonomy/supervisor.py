@@ -435,6 +435,13 @@ class Supervisor:
     def update_state(self):
         return reconciled_update_state(self.queue.root)
 
+    def retire_for_shutdown(self):
+        """Fence new mutations before waiting for disposable owners to close."""
+        with self._mutation_lock:
+            with self._command_lock:
+                self._service_stop_requested=True
+                self.preparation_sessions.revoke_all()
+
     def update_in_progress(self) -> bool:
         return self.update_state().get("status") in {
             "checking",

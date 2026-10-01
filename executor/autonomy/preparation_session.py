@@ -106,10 +106,11 @@ class PrivatePreparationSessions:
             if (not self.active or self.active['key']!=key
                     or (self.active['task_id'],self.active['revision'])!=(task_id,revision)):
                 return {'status':'UNAVAILABLE','submit_capability':False,'live_write_available':False}
-            result=self.active['controller'].status()
+            observed=self.active['controller'].status()
             # This API remains read-only even if a test controller has extra
             # internal capabilities. No request field can enable production fill.
-            result['live_write_available']=False
+            result={key:observed[key] for key in ('status','field_count','remaining_seconds') if key in observed}
+            result.update(live_write_available=False,submit_capability=False)
             return result
 
     def revoke_all(self):
@@ -118,3 +119,10 @@ class PrivatePreparationSessions:
             self.retired=True
             controller=self.active['controller'] if self.active else None
         if controller is not None:controller.shutdown(timeout=0)
+
+    def await_retired(self,timeout=1):
+        """Wait outside service/manager locks for proven owner cleanup only."""
+        with self.lock:
+            if not self.retired:raise PreparationConflict()
+            controller=self.active['controller'] if self.active else None
+        return controller is None or controller.shutdown(timeout=timeout) is True

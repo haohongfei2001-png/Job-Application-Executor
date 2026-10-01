@@ -18,7 +18,7 @@ def setup(local_task):
     q,task,profile=local_task;calls=[];gate=threading.Event();blocked=[False]
     class Controller:
         def __init__(self):self.state='IDLE'
-        def status(self):return {'status':self.state,'live_write_available':True,'submit_capability':False}
+        def status(self):return {'status':self.state,'live_write_available':True,'resume_status':'INTERNAL_ONLY','submit_capability':False}
         def open(self,tid,revision,session,selected):
             calls.append(('open',tid,selected));self.state='OFFERED'
             if blocked[0]:assert gate.wait(2)
@@ -40,6 +40,7 @@ def test_private_surface_returns_review_without_approval_or_write_capability(set
     assert result['status']=='EMPTY_FORM_VERIFIED' and all(value is False for value in result['capabilities'].values())
     assert 'PRIVATE_SYNTHETIC' in json.dumps(result) and 'NEVER_PROJECT' not in json.dumps(result)
     assert sessions.status(close_data(data),SESSION)['live_write_available'] is False
+    assert 'resume_status' not in sessions.status(close_data(data),SESSION)
     sessions.cancel(close_data(data),SESSION)
     assert _snapshot(q)==before and [row[0] for row in calls]==['open','shutdown']
 
@@ -212,3 +213,30 @@ def test_cancel_after_registration_before_controller_open_never_creates_browser(
     replacement=dict(data,request_id='b'*32)
     assert sessions.open(replacement,SESSION)['status']=='EMPTY_FORM_VERIFIED'
     assert owners==[]
+
+
+def test_retirement_wait_requires_proven_cleanup_outside_manager_lock(setup):
+    _,sessions,data,*_=setup;sessions.open(data,SESSION);controller=sessions.active['controller']
+    with pytest.raises(PreparationConflict):sessions.await_retired()
+    states=[None,False,True];seen=[]
+    def shutdown(timeout):
+        assert not sessions.lock._is_owned()
+        seen.append(timeout);return states.pop(0)
+    controller.shutdown=shutdown
+    sessions.revoke_all()
+    assert sessions.await_retired(timeout=.01) is False
+    assert sessions.await_retired(timeout=.01) is True
+    assert seen==[0,.01,.01]
+
+
+def test_no_owner_retirement_has_nothing_to_wait_for(setup):
+    _,sessions,*_=setup;sessions.revoke_all();assert sessions.await_retired()
+
+
+def test_read_only_status_projects_no_internal_upload_offer_or_capability(setup):
+    _,sessions,data,*_=setup;sessions.open(data,SESSION)
+    sessions.active['controller'].status=lambda:{'status':'OFFERED','field_count':3,'remaining_seconds':20,
+        'resume_status':'OFFERED','resume':{'byte_count':1900},'nonce':'NEVER_PROJECT',
+        'upload_available':True,'live_write_available':True,'submit_capability':True}
+    assert sessions.status(close_data(data),SESSION)=={'status':'OFFERED','field_count':3,'remaining_seconds':20,
+        'live_write_available':False,'submit_capability':False}

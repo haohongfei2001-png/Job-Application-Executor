@@ -144,3 +144,81 @@ def test_owned_resume_stage_is_exact_private_nonreplayable_and_synchronous_xhr_s
                 assert 'SYNTHETIC_PROTECTED_CANARY' not in json.dumps(slots+stages)
             assert not q.preparation_in_flight()
     finally:server.shutdown();server.server_close();thread.join()
+
+
+def test_private_controller_preserves_two_mib_docx_and_one_upload_authority(tmp_path):
+    """Synthetic internal commands, real owner thread and independent recipient."""
+    from executor.preparation.controller import PreparationController
+    q,task,profile,_=setup(tmp_path)
+    original=b'PK\x03\x04SYNTHETIC_DOCX'+bytes(range(256))*8192
+    asset=tmp_path/'original.docx';asset.write_bytes(original)
+    value=json.loads(profile.read_text());value['assets']={'resume':{'path':str(asset),'kind':'resume_docx',
+        'sha256':hashlib.sha256(original).hexdigest()}}
+    profile.write_text(json.dumps(value));profile.chmod(0o600)
+    received=[];owner_threads=[]
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*_):pass
+        def do_GET(self):
+            self.send_response(200);self.send_header('Set-Cookie','controller_upload=ANONYMOUS; HttpOnly; Path=/')
+            self.end_headers();self.wfile.write(b'fixture')
+        def do_POST(self):
+            raw=self.rfile.read(int(self.headers['Content-Length']))
+            if self.headers.get('Content-Type','').startswith('multipart/form-data;'):
+                message=BytesParser(policy=policy.default).parsebytes(('Content-Type: '+self.headers['Content-Type']+'\r\n\r\n').encode()+raw)
+                parts=list(message.iter_parts())
+                assert len(parts)==5
+                file=next(part for part in parts if part.get_param('name',header='content-disposition')=='filedata')
+                received.append(('file',file.get_filename(),file.get_content_type(),file.get_payload(decode=True)))
+            else:received.append(('lookup',parse_qs(raw.decode(),strict_parsing=True)))
+            assert self.headers.get('Cookie')=='controller_upload=ANONYMOUS'
+            self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers()
+            self.wfile.write(b'{"success":true,"size":0,"id":"SYNTHETIC"}')
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    serving=threading.Thread(target=server.serve_forever,daemon=True);serving.start()
+    base=f'http://127.0.0.1:{server.server_port}'
+    script='''document.querySelector('[data-formid="11"] input[type="file"]').addEventListener('change',function(){
+      const file=this.files[0];
+      for(let n=0;n<2;n++){const x=new XMLHttpRequest();x.open('POST',LOOKUP,false);
+        x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');x.send('untrusted=DISCARD');if(x.status!==200)return;}
+      const form=new FormData();form.append('filedata',file,file.name);form.append('identity','DISCARD_PROTECTED');
+      const x=new XMLHttpRequest();x.open('POST',TARGET,true);x.send(form);
+    });'''.replace('LOOKUP',json.dumps(LOOKUP_URL)).replace('TARGET',json.dumps(UPLOAD_URL+'?cmd=_mobiupload&app=21&type=0&fileUploadLimit=4&pieceUpload=true&checkId=6&checkItemId=11&bizType=5'))
+    def flow_factory(authority,owner,**kwargs):
+        owner_threads.append(threading.get_ident())
+        owner.context.route(CONTRACT_URL,lambda route:route.fulfill(status=200,content_type='text/html',body=replica(script)))
+        page=owner.context.new_page();page.goto(CONTRACT_URL)
+        actual=owner.client;seed=actual.get(base+'/seed',max_redirects=0,max_retries=0);seed.dispose()
+        class LocalRecipient:
+            def post(self,url,**options):
+                owner_threads.append(threading.get_ident())
+                assert url==LOOKUP_URL or UPLOAD_PATTERN.fullmatch(url)
+                parsed=urlsplit(url);return actual.post(base+parsed.path+'?'+parsed.query,**options)
+            def dispose(self):actual.dispose()
+        owner.client=LocalRecipient()
+        return PreparationFlow(authority,owner,page,resources_sha=digest('synthetic controller upload'),**kwargs)
+    controller=PreparationController(q,lambda session:session==SESSION,flow_factory=flow_factory,
+        owner_factory=lambda:DisposablePreparationSession(headless=True,channel='chrome' if sys.platform=='linux' else None),
+        write_admission=lambda _:True,upload_admission=lambda _:True)
+    try:
+        offer=controller.open(task['task_id'],task['revision'],SESSION,['0','5','8'])
+        assert controller.approve(offer['nonce'],offer['scope_sha'],SESSION,approve_transmission=True)['field_count']==3
+        upload=controller.review_resume(SESSION)
+        assert upload['resume']['kind']=='resume_docx' and upload['resume']['byte_count']==len(original)
+        assert upload['resume']['resume_sha256']==hashlib.sha256(original).hexdigest()
+        result=controller.approve_resume(upload['nonce'],upload['scope_sha'],SESSION,approve_upload=True)
+        assert result['status']=='RETURNED_UNVERIFIED' and not result['server_attachment_verified']
+        assert controller.status()['resume_status']=='RETURNED_UNVERIFIED'
+        with pytest.raises(PreparationConflict):controller.approve_resume(upload['nonce'],upload['scope_sha'],SESSION,approve_upload=True)
+        with pytest.raises(PreparationConflict):controller.review_resume(SESSION)
+        assert [row[0] for row in received]==['lookup','lookup','file']
+        assert received[-1]==('file',*RESUME_TYPES['resume_docx'],original)
+        assert len(q.field_actions(task['task_id']))==3 and len(q.run_attempts(task['task_id']))==1
+        with q.tx() as db:
+            assert db.execute('SELECT COUNT(*) FROM preparation_resume_uploads').fetchone()[0]==1
+            assert db.execute('SELECT COUNT(*) FROM preparation_resume_stages').fetchone()[0]==3
+        assert len(set(owner_threads))==1 and threading.get_ident() not in owner_threads
+    finally:
+        closed=controller.shutdown(timeout=10)
+        server.shutdown();server.server_close();serving.join()
+        assert closed
+    assert controller.status()['status']=='CLOSED' and not q.preparation_in_flight()
