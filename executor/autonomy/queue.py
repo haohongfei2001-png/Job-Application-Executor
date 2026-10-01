@@ -198,6 +198,14 @@ class TaskQueue:
                     nonce_sha TEXT PRIMARY KEY, browser_binding TEXT NOT NULL,
                     outcome TEXT NOT NULL CHECK(outcome='RECOVERED_ORPHAN'),
                     closed_at REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS preparation_final_requests (
+                    intent_sha TEXT PRIMARY KEY,
+                    preparation_nonce_sha TEXT NOT NULL UNIQUE,
+                    attempt_id TEXT NOT NULL, task_id TEXT NOT NULL, task_revision INTEGER NOT NULL,
+                    request_nonce_sha TEXT NOT NULL,
+                    scope_sha TEXT NOT NULL, outcome TEXT NOT NULL
+                    CHECK(outcome IN ('ATTEMPTED','RETURNED_UNVERIFIED','UNKNOWN_OUTCOME')),
+                    created REAL NOT NULL, updated REAL NOT NULL)''')
                 db.execute("INSERT OR IGNORE INTO task_view_context VALUES(1,NULL,0)")
             self.path.chmod(0o600)
 

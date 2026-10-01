@@ -38,7 +38,7 @@ def setup():
         events.append('fetch');return response
     bridge=h.OpaqueHumanRequest(page=page,client=SimpleNamespace(fetch=fetch),binding=BINDING,
         guard=lambda:dict(BINDING),consume=lambda scope:events.append('consume') or 'a'*64,
-        record=lambda intent,outcome:events.append(outcome),clock=lambda:clock[0])
+        record=lambda intent,outcome:events.append(outcome) or outcome,clock=lambda:clock[0])
     return bridge,route,events,clock,response
 
 
@@ -141,7 +141,7 @@ def test_reentrant_post_send_revocation_cannot_be_promoted_to_clean_receipt(setu
     if during=='dispose':response.dispose=interrupt
     if during=='record':
         original=bridge._record
-        def record(intent,outcome):original(intent,outcome);interrupt()
+        def record(intent,outcome):original(intent,outcome);interrupt();return outcome
         bridge._record=record
     assert bridge.drain()['status']=='UNKNOWN_OUTCOME'
     assert bridge._state=='UNKNOWN'
@@ -158,3 +158,11 @@ def test_final_bridge_does_not_imply_multipart_upload_permission(setup,content_t
     route.request=WithType()
     with pytest.raises(h.HumanRequestConflict):bridge.hold(route,META)
     assert events==['abort']
+
+
+@pytest.mark.parametrize('reported',['UNKNOWN_OUTCOME',None,'invalid'])
+def test_record_callback_downgrade_or_invalid_receipt_is_never_clean(setup,reported):
+    bridge,route,events,_,_=setup;bridge.hold(route,META);confirm(bridge)
+    bridge._record=lambda intent,outcome:events.append(outcome) or reported
+    assert bridge.drain()['status']=='UNKNOWN_OUTCOME' and bridge._state=='UNKNOWN'
+    assert events[-1]=='UNKNOWN_OUTCOME'

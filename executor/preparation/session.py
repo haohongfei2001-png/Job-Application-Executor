@@ -12,6 +12,9 @@ from playwright.sync_api import sync_playwright
 
 from .network_fence import DenyOnlyProxy
 from .transport import PreparationTransport, PUBLIC_RESOURCES
+from .process_identity import OwnedProcessIdentity
+from .observation import observe_owned_document
+from .public_reads import FORM_LOOKUP_URL, FORM_LOOKUP_BODY, public_style_url
 
 
 PRIVATE_TRANSPORT_FORBIDDEN_ENV = frozenset({
@@ -40,30 +43,58 @@ class DisposablePreparationSession:
         self.headless, self.channel = headless, channel
         self.proxy = self.pw = self.browser = self.context = self.client = None
         self.transport = None
+        self.identity = None
 
     def __enter__(self):
         if self.proxy is not None:raise RuntimeError('preparation_session_already_started')
+        phase='PRIVATE_ENVIRONMENT'
         try:
             require_private_transport_environment()
+            phase='DENY_LISTENER'
             self.proxy = DenyOnlyProxy().__enter__()
+            phase='DRIVER_START'
             self.pw = sync_playwright().start()
+            phase='SANDBOXED_BROWSER_LAUNCH'
             self.browser = self.pw.chromium.launch(headless=self.headless,channel=self.channel,
                                                   **self.proxy.browser_options())
+            phase='NATIVE_LAUNCH_RECIPE'
+            self.proxy.verify_launch(self.browser)
+            phase='OWNED_PROCESS_IDENTITY'
+            self.identity = OwnedProcessIdentity.capture(self.pw,self.browser)
+            phase='API_CLIENT'
             self.client = self.pw.request.new_context(ignore_https_errors=False)
+            phase='EMPTY_CONTEXT'
             self.context = self.browser.new_context(service_workers='block',accept_downloads=False,
                                                     ignore_https_errors=False)
-            self.transport = PreparationTransport(public_fetch=self._public_get)
+            phase='REQUEST_GUARD'
+            self.transport = PreparationTransport(public_fetch=self._public_get,public_lookup=self._public_form_lookup)
             self.transport.install(self.context)
             return self
         except BaseException:
             self.close()
-            raise RuntimeError('preparation_session_unavailable') from None
+            error=RuntimeError('preparation_session_unavailable')
+            error.phase=phase
+            raise error from None
 
     def _public_get(self, url):
         # Transport already checked exact URL + method + no request body. Do
         # not forward arbitrary request headers, credentials, URLs or payloads.
-        if url not in PUBLIC_RESOURCES:raise ValueError("public_resource_not_admitted")
+        if url not in PUBLIC_RESOURCES and not public_style_url(url):raise ValueError("public_resource_not_admitted")
         return self.client.get(url,max_redirects=0,max_retries=0,timeout=15000)
+
+    def _public_form_lookup(self):
+        return self.client.post(FORM_LOOKUP_URL,data=FORM_LOOKUP_BODY,
+            headers={'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},
+            max_redirects=0,max_retries=0,timeout=15000)
+
+    def observe(self,page,*,resources_sha):
+        if self.identity is None or page.context is not self.context:
+            raise RuntimeError('preparation_context_identity_unknown')
+        before=self.identity.verify(self.browser)
+        document=observe_owned_document(page,process_sha=before,resources_sha=resources_sha)
+        if self.identity.verify(self.browser)!=before:
+            raise RuntimeError('preparation_context_identity_changed')
+        return document
 
     def close(self):
         # Never remove the proxy while a browser might survive a failed close.
@@ -80,6 +111,8 @@ class DisposablePreparationSession:
             try:self.pw.stop()
             except Exception:return False
             self.pw=None
+        if self.identity is not None and self.identity.absence().get('status')!='ABSENT':
+            return False
         if self.proxy is not None:
             self.proxy.__exit__(None,None,None);self.proxy=None
         return True

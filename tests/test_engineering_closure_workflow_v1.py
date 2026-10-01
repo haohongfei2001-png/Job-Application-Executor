@@ -25,7 +25,7 @@ JOBS = dict(re.findall(
     r"^  ([a-z_]+):\n(.*?)(?=^  [a-z_]+:\n|\Z)",
     SOURCE.split("\njobs:\n", 1)[1], re.MULTILINE | re.DOTALL,
 ))
-ORDINARY = {"foundation", "packaged_candidate", "macos_consumer_release"}
+ORDINARY = {"foundation", "packaged_candidate", "macos_consumer_release", "preparation_validation"}
 CLOSURE = ("test", "engineering_closure_macos")
 SHA = "1234567890abcdef1234567890abcdef12345678"
 OTHER_SHA = "abcdef1234567890abcdef1234567890abcdef1234"
@@ -141,12 +141,12 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 self.assert_jobs(event(draft=draft, fork=True), ())
 
     def test_normal_push_and_pr_policies_are_preserved(self):
-        self.assert_jobs({}, {"foundation", "macos_consumer_release", "test"}, event_name="push")
+        self.assert_jobs({}, {"foundation", "macos_consumer_release", "test", "preparation_validation"}, event_name="push")
         for action in ("opened", "synchronize", "reopened", "ready_for_review"):
             for draft in (True, False):
                 for fork in (True, False):
                     with self.subTest(action=action, draft=draft, fork=fork):
-                        expected = ORDINARY if draft else {"foundation", "macos_consumer_release", "test"}
+                        expected = ORDINARY if draft else {"foundation", "macos_consumer_release", "test", "preparation_validation"}
                         self.assert_jobs(event(action=action, draft=draft, fork=fork), expected)
 
     def test_build_requires_success_and_same_tested_head(self):
@@ -164,7 +164,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertEqual(set(JOBS), ORDINARY | set(CLOSURE))
         expected_budgets = {"foundation": 30, "packaged_candidate": 20,
                             "macos_consumer_release": 25, "test": 70,
-                            "engineering_closure_macos": 20}
+                            "engineering_closure_macos": 20, "preparation_validation": 12}
         for name, budget in expected_budgets.items():
             self.assertIn(f"    timeout-minutes: {budget}\n", JOBS[name])
         build = JOBS["engineering_closure_macos"]
@@ -190,6 +190,17 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         for forbidden in ("workflow_dispatch", "pull_request_target", "secrets.", "write-all", "codesign ",
                           "notarytool", "gh pr ready", "gh api", "curl ", "trace.zip", "profiles/", "continue-on-error"):
             self.assertNotIn(forbidden, SOURCE)
+
+    def test_preparation_oracle_has_its_own_bounded_allocation(self):
+        body=JOBS['preparation_validation']
+        self.assertIn('    timeout-minutes: 12\n',body)
+        self.assertIn('os: [ubuntu-latest, macos-latest]',body)
+        self.assertIn('persist-credentials: false',body)
+        for filename in ['tests/test_qiyunfang_preparation_v1.py', 'tests/test_preparation_review_v1.py', 'tests/test_preparation_authority_v1.py', 'tests/test_preparation_final_journal_v1.py', 'tests/test_preparation_process_identity_v1.py', 'tests/test_preparation_public_reads_v1.py', 'tests/test_preparation_authority_browser.py', 'tests/test_preparation_process_identity_browser.py', 'tests/test_preparation_review_browser.py', 'tests/test_qiyunfang_preparation_browser.py', 'tests/test_preparation_human_request_v1.py', 'tests/test_preparation_human_request_browser.py', 'tests/test_preparation_network_fence_v1.py', 'tests/test_preparation_network_fence_browser.py', 'tests/test_preparation_lifecycle_browser.py']:
+            self.assertEqual(body.count(filename),1)
+        self.assertNotIn('tests/test_macos_host_v1.py',body)
+        self.assertNotIn('secrets.',body)
+        self.assertLess(body.index('Retain value-free public preflight diagnostic'),body.index('Isolated preparation ownership'))
 
     def test_both_guards_precede_repository_code_and_use_exact_checkout(self):
         self.assertEqual(guard_shell("test"), guard_shell("engineering_closure_macos"))
@@ -231,18 +242,18 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 if name in {"packaged_candidate", "macos_consumer_release"}:
                     protected = body[body.index("    strategy:\n"):]
                 if name == "macos_consumer_release":
-                    self.assertEqual(protected.count(PREPARATION_MAC_STEP), 1)
+                    self.assertEqual(protected.count(PREPARATION_MAC_STEP), 0)
                     protected = protected.replace(PREPARATION_MAC_STEP, "", 1)
                 if name == "foundation":
-                    self.assertEqual(protected.count(PREPARATION_STEP), 1)
+                    self.assertEqual(protected.count(PREPARATION_STEP), 0)
                     protected = protected.replace(PREPARATION_STEP, "", 1)
-                    self.assertEqual(protected.count(PUBLIC_PROBE_STEP),1)
-                    self.assertEqual(protected.count(PUBLIC_PROBE_ARTIFACT),1)
+                    self.assertEqual(protected.count(PUBLIC_PROBE_STEP),0)
+                    self.assertEqual(protected.count(PUBLIC_PROBE_ARTIFACT),0)
                     protected = protected.replace(PUBLIC_PROBE_STEP,"",1).replace(PUBLIC_PROBE_ARTIFACT,"",1)
                     self.assertEqual(protected.count(STATIC_STEP), 1)
                     protected = protected.replace(STATIC_STEP, "", 1)
                     private_review_path = "            ${{ runner.temp }}/jae-preparation-ui/preparation-private-review.png\n"
-                    self.assertEqual(protected.count(private_review_path), 1)
+                    self.assertEqual(protected.count(private_review_path), 0)
                     protected = protected.replace(private_review_path, "", 1)
                     resume_path = "            ${{ runner.temp }}/jae-preparation-ui/profile-editor-resume.png\n"
                     self.assertEqual(protected.count(resume_path), 1)

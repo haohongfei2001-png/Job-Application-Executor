@@ -48,11 +48,39 @@ class DenyOnlyProxy:
     def browser_options(self):
         if self._server is None or not self._thread.is_alive():
             raise RuntimeError('preparation_proxy_unavailable')
-        return {'proxy': {'server': f'http://127.0.0.1:{self._server.server_address[1]}'},
+        return {'chromium_sandbox':True, 'proxy': {'server': f'http://127.0.0.1:{self._server.server_address[1]}'},
                 'args': ['--proxy-bypass-list=<-loopback>', '--disable-quic',
                          '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
                          '--webrtc-ip-handling-policy=disable_non_proxied_udp',
                          '--force-webrtc-ip-handling-policy=disable_non_proxied_udp']}
+
+    def verify_launch(self,browser):
+        """Read native launch flags before loading a public page or any values."""
+        cdp=None
+        try:
+            cdp=browser.new_browser_cdp_session()
+            args=cdp.send('Browser.getBrowserCommandLine')['arguments']
+            if not isinstance(args,list) or any(not isinstance(arg,str) for arg in args):
+                raise RuntimeError('preparation_launch_recipe_unknown')
+            forbidden=('--no-sandbox','--disable-setuid-sandbox','--disable-seccomp-filter-sandbox',
+                       '--disable-web-security','--ignore-certificate-errors','--allow-running-insecure-content',
+                       '--log-net-log','--ssl-key-log-file','--enable-logging','--remote-debugging-port',
+                       '--no-proxy-server','--proxy-auto-detect','--proxy-pac-url')
+            if any(arg.split('=',1)[0] in forbidden for arg in args):
+                raise RuntimeError('preparation_launch_recipe_unsafe')
+            options=self.browser_options()
+            required=[*options['args'],'--proxy-server='+options['proxy']['server']]
+            for expected in required:
+                key=expected.split('=',1)[0]
+                if {arg for arg in args if arg.split('=',1)[0]==key}!={expected}:
+                    raise RuntimeError('preparation_launch_recipe_changed')
+            if '--remote-debugging-pipe' not in args:
+                raise RuntimeError('preparation_launch_recipe_unknown')
+            return True
+        finally:
+            if cdp is not None:
+                try:cdp.detach()
+                except Exception:pass
 
     def __exit__(self, *_):
         if self._server is not None:

@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from .qiyunfang import CONTRACT_URL
 from .resources import OBSERVED_STATIC_RESOURCES
+from .public_reads import public_style_url, form_lookup_request, lookup_evidence
 
 PUBLIC_RESOURCES = OBSERVED_STATIC_RESOURCES | frozenset({
     CONTRACT_URL,
@@ -44,8 +45,11 @@ class PreparationTransport:
     WebSocket mock is not an adversarial-script/worker network sandbox.
     No method reopens the gate or grants final-submit authority.
     """
-    def __init__(self, *, public_fetch=None):
+    def __init__(self, *, public_fetch=None, public_lookup=None):
         self.public_fetch = public_fetch
+        self.public_lookup = public_lookup
+        self.public_lookup_used = False
+        self.public_read_evidence = []
         self.phase = "READ_ONLY"
         self.blocked = 0
         self.installed = False
@@ -57,7 +61,7 @@ class PreparationTransport:
             parsed = urlsplit(request.url)
             path = parsed.path.lower()
             return (request.method == "GET" and parsed.scheme == "https"
-                    and request.url in PUBLIC_RESOURCES
+                    and (request.url in PUBLIC_RESOURCES or public_style_url(request.url))
                     and parsed.hostname in PUBLIC_HOSTS and parsed.netloc == parsed.hostname
                     and not parsed.username and not parsed.password and not parsed.fragment
                     and request.post_data is None
@@ -106,11 +110,27 @@ class PreparationTransport:
                  and request.frame == self.context.pages[0].main_frame))
         except Exception:
             navigation_ok = False
-        if self.phase != "READ_ONLY" or not navigation_ok or not self._public_get(request):
+        if self.phase != "READ_ONLY" or not navigation_ok:
+            self.blocked += 1
+            self._abort(route)
+            return
+        is_get = self._public_get(request)
+        is_lookup = (not is_get and self.public_lookup is not None and not self.public_lookup_used
+                     and form_lookup_request(request))
+        if not is_get and not is_lookup:
             self.blocked += 1
             self._abort(route)
             return
         try:
+            if is_lookup:
+                # Retire this sole pre-data lookup before its bounded request.
+                self.public_lookup_used = True
+                response = self.public_lookup()
+                evidence = lookup_evidence(response)
+                if self.phase != "READ_ONLY":raise RuntimeError("public lookup phase changed")
+                self.public_read_evidence.append(evidence)
+                route.fulfill(response=response)
+                return
             # Never let the HTTP client or browser carry permission across a
             # redirect chain. Public content must be returned directly.
             response = (self.public_fetch(request.url) if self.public_fetch is not None

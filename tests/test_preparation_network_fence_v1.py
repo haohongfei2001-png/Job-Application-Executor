@@ -58,3 +58,18 @@ def test_environment_privacy_check_never_modifies_proxy_or_trust_settings():
     from executor.preparation.session import require_private_transport_environment
     env={'HTTPS_PROXY':'https://proxy.example.test','SSL_CERT_FILE':'/synthetic/managed-ca.pem'}
     before=dict(env);require_private_transport_environment(env);assert env==before
+
+
+@pytest.mark.parametrize('extra',[None,'--no-sandbox','--disable-web-security','--ignore-certificate-errors','--enable-logging=stderr','--proxy-server=direct://','--proxy-bypass-list=*'])
+def test_native_launch_receipt_rejects_bypass_security_or_recording_flags(extra):
+    from types import SimpleNamespace
+    with DenyOnlyProxy() as proxy:
+        options=proxy.browser_options()
+        assert options['chromium_sandbox'] is True
+        args=['chrome','--remote-debugging-pipe',*options['args'],'--proxy-server='+options['proxy']['server']]
+        if extra:args.append(extra)
+        cdp=SimpleNamespace(send=lambda _: {'arguments':args},detach=lambda:None)
+        browser=SimpleNamespace(new_browser_cdp_session=lambda:cdp)
+        if extra:
+            with pytest.raises(RuntimeError):proxy.verify_launch(browser)
+        else:assert proxy.verify_launch(browser) is True

@@ -51,3 +51,26 @@ configuration uses resumable/chunk options. CDP may omit file bytes from request
 postData entries, so the final text-forwarder is deliberately not an upload gate.
 CAPTCHA retrieval and user handling likewise need their own narrowly bounded
 stage. No endpoint is automatically admitted from this document or site scripts.
+
+## Durable final-slot and process-identity additions (still unregistered)
+
+`PreparationFinalJournal` binds the consumed preparation nonce, its unique run
+attempt, original task/revision/materials, live UI/service identity and retained
+browser/frame/change epoch. It admits one final slot before an outbound call;
+UNKNOWN, changed/returned slots and a new request nonce cannot refund it. The
+bridge treats a receipt callback's downgrade as UNKNOWN instead of reporting a
+cleaner local result. No journal method accepts a dialog or sends bytes.
+
+A fresh human confirmation may occur after the original120-second routine-fill
+offer/60-second task lease, provided the distinct unclosed context fence, exact
+owner, unchanged source materials and UI/service scope still hold. This does not
+renew or re-enable any routine-write permit. Cancellation/owner loss revokes the
+manual-review path. Restart cannot recreate a pending Request or human proof.
+
+`OwnedProcessIdentity` captures the newly launched browser and its own driver
+around native process inventory; it can persist an immutable, no-follow, private
+PID/hash receipt before field admission. OS reads pin C locale/UTC formatting.
+Formatted lstart has one-second resolution and is not treated as a kernel birth
+token: any present-but-different snapshot is UNKNOWN. Only missing/zombie browser
+AND driver proves this owned receipt absent. No unrelated process is signaled.
+Runtime private UI/classifier/session wiring remains a separate gate.

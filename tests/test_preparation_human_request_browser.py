@@ -52,7 +52,7 @@ def test_exact_request_opaque_forward_preserves_fresh_session_cookie_and_no_repl
         ledger.execute('INSERT INTO final_intent VALUES(1,?,?)',(intent,'ATTEMPTED'));ledger.commit()
         events.append('durable_consume');return intent
     def record(intent,outcome):
-        ledger.execute('UPDATE final_intent SET outcome=? WHERE intent=?',(outcome,intent));ledger.commit()
+        ledger.execute('UPDATE final_intent SET outcome=? WHERE intent=?',(outcome,intent));ledger.commit();return outcome
     try:
         with DenyOnlyProxy() as proxy,sync_playwright() as pw:
             browser=pw.chromium.launch(headless=True,**proxy.browser_options())

@@ -24,7 +24,7 @@ def descriptor(url,method):
         parsed=urlsplit(url);query=parse_qs(parsed.query,keep_blank_values=True)
         result={'scheme':parsed.scheme,'host':parsed.hostname,'path':parsed.path,'method':method,
                 'query_keys':sorted(query)}
-        for key in ('cmd','formId','id','moduleId'):
+        for key in ('cmd','formId','id','moduleId','colId','extId','_csw','clientSupportWebp'):
             values=query.get(key,[])
             if len(values)==1 and re.fullmatch(r'[A-Za-z0-9_]{1,70}',values[0]):result[key]=values[0]
         return result
@@ -34,13 +34,26 @@ def descriptor(url,method):
 def probe():
     result={'source':CONTRACT_URL,'status':'READ_ONLY_PREFLIGHT_UNVERIFIED',
             'root_count':0,'contract':'UNOBSERVED','blocked':[],'fetched':[],
-            'applicant_data_entered':False,'live_enabled':False}
+            'applicant_data_entered':False,'live_enabled':False,'public_reads':[]}
     with DisposablePreparationSession(headless=True,channel=None) as session:
         transport=session.transport;original=transport._route
         def route(request_route):
             request=request_route.request
             if not transport._public_get(request) and len(result['blocked'])<100:
                 item=descriptor(request.url,request.method)
+                # This probe never loads profiles or enters a field. Inspect
+                # only public template selectors, never arbitrary request bodies.
+                if request.method=='POST' and request.url=='https://www.qiyunfang.com/ajax/module_h.jsp':
+                    try:
+                        from urllib.parse import parse_qsl
+                        body=request.post_data or ''
+                        params=dict(parse_qsl(body,keep_blank_values=True,max_num_fields=16)) if len(body)<2048 else {}
+                        known={}
+                        for key in ('cmd','_fresh','_colId','_extId','popupZoneId','manageMode','_manageMode','_majorColor','_vueStyleGrayTest'):
+                            value=params.get(key)
+                            if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_#-]{0,70}',value):known[key]=value
+                        item['public_template_parameters']=known
+                    except Exception:item['public_template_parameters']={'status':'UNAVAILABLE'}
                 if item not in result['blocked']:result['blocked'].append(item)
             original(request_route)
         session.context.unroute('**/*',transport._route)
@@ -67,6 +80,7 @@ def probe():
         except Exception:
             # No exception repr/URL/body values in diagnostic output.
             result['status']='PUBLIC_PREFLIGHT_INCOMPLETE'
+        result['public_reads']=list(transport.public_read_evidence)
         return result
 
 
@@ -74,6 +88,9 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--output',required=True);args=parser.parse_args()
     faulthandler.dump_traceback_later(90,exit=True)
     try:result=probe()
-    except Exception:result={'status':'PUBLIC_PROBE_UNAVAILABLE','live_enabled':False,'applicant_data_entered':False}
+    except Exception as error:
+        phase=getattr(error,'phase','UNCLASSIFIED')
+        allowed={'PRIVATE_ENVIRONMENT','DENY_LISTENER','DRIVER_START','SANDBOXED_BROWSER_LAUNCH','NATIVE_LAUNCH_RECIPE','OWNED_PROCESS_IDENTITY','API_CLIENT','EMPTY_CONTEXT','REQUEST_GUARD'}
+        result={'status':'PUBLIC_PROBE_UNAVAILABLE','phase':phase if phase in allowed else 'UNCLASSIFIED','live_enabled':False,'applicant_data_entered':False}
     Path(args.output).write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
     print(json.dumps({'status':result['status'],'live_enabled':False}))

@@ -29,6 +29,7 @@ def test_native_browser_cannot_reach_loopback_recipient_even_without_route_guard
     with DenyOnlyProxy() as proxy, sync_playwright() as pw:
         browser=pw.chromium.launch(**launch_mode,**proxy.browser_options())
         try:
+            assert proxy.verify_launch(browser)
             context=browser.new_context(service_workers='block');page=context.new_page()
             context.route(url+'/',lambda route:route.fulfill(status=200,content_type='text/html',body='<input id="ordinary">'))
             page.goto(url+'/');context.unroute(url+'/')
@@ -81,6 +82,7 @@ def test_native_destination_variants_never_even_connect_to_recipient(host,scheme
         with DenyOnlyProxy() as proxy,sync_playwright() as pw:
             browser=pw.chromium.launch(**launch_mode,**proxy.browser_options())
             try:
+                assert proxy.verify_launch(browser)
                 page=browser.new_page();base=proxy.denied_connections
                 destination=f'{scheme}://{host}:{recipient.server_address[1]}/submit-synthetic'
                 if scheme in ['http','https']:
@@ -140,7 +142,7 @@ def test_webrtc_candidate_probe_does_not_bypass_disposable_proxy(ice_transport,l
         if not udp:endpoint+='?transport=tcp'
         with sync_playwright() as pw:
             # Prove THIS browser/fixture reaches THIS sink without the fence.
-            control=pw.chromium.launch(**launch_mode)
+            control=pw.chromium.launch(chromium_sandbox=True,**launch_mode)
             try:
                 assert _ice_attempt(_secure_fixture(control),endpoint) in ['gathering','complete']
                 assert service.arrivals, 'unfenced browser never reached ICE sink; oracle invalid'
@@ -149,6 +151,7 @@ def test_webrtc_candidate_probe_does_not_bypass_disposable_proxy(ice_transport,l
             with DenyOnlyProxy() as proxy:
                 browser=pw.chromium.launch(**launch_mode,**proxy.browser_options())
                 try:
+                    assert proxy.verify_launch(browser)
                     assert _ice_attempt(_secure_fixture(browser),endpoint) in ['gathering','complete']
                     assert service.arrivals==[], 'WebRTC bypassed disposable proxy'
                 finally:browser.close()
@@ -175,7 +178,7 @@ def test_native_webtransport_never_reaches_udp_sink(launch_mode,server):
         _sink_liveness(service,udp=True)
         endpoint=f'https://127.0.0.1:{service.server_address[1]}/synthetic'
         with sync_playwright() as pw:
-            control=pw.chromium.launch(**launch_mode)
+            control=pw.chromium.launch(chromium_sandbox=True,**launch_mode)
             try:
                 # A real loopback response establishes actual local address
                 # space without granting/bypassing Local Network Access.
@@ -192,6 +195,7 @@ def test_native_webtransport_never_reaches_udp_sink(launch_mode,server):
             with DenyOnlyProxy() as proxy:
                 browser=pw.chromium.launch(**launch_mode,**proxy.browser_options())
                 try:
+                    assert proxy.verify_launch(browser)
                     page=browser.new_page();context=page.context
                     def source(route):route.fulfill(body='<!doctype html>')
                     context.route(source_url+'/',source);page.goto(source_url+'/');context.unroute(source_url+'/',source)

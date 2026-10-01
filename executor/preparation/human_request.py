@@ -205,7 +205,10 @@ class OpaqueHumanRequest:
                 try:response.dispose()
                 except Exception:outcome='UNKNOWN_OUTCOME'
             if self._state!='FORWARD_ATTEMPTED':outcome='UNKNOWN_OUTCOME'
-            try:self._record(self._intent,outcome)
+            try:
+                recorded=self._record(self._intent,outcome)
+                if recorded not in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME'} or recorded=='UNKNOWN_OUTCOME':
+                    outcome='UNKNOWN_OUTCOME'
             except Exception:outcome='UNKNOWN_OUTCOME'
             # Fulfill/dispose/record can all deliver cancellation callbacks.
             # Never promote their uncertainty to a clean returned receipt.
