@@ -191,6 +191,8 @@ def _tasks_safe_for_update(tasks: list[dict], *, now: float | None = None) -> tu
 def safe_to_update(supervisor) -> tuple[bool, str]:
     if supervisor.worker.active:
         return False, "worker_active"
+    if supervisor.queue.preparation_in_flight():
+        return False, "preparation_context_unclosed"
     return _tasks_safe_for_update(
         supervisor.queue.tasks(),
         now=supervisor.queue.clock(),
@@ -200,6 +202,8 @@ def safe_to_update(supervisor) -> tuple[bool, str]:
 def runtime_safe_to_update(runtime: str | Path) -> tuple[bool, str]:
     try:
         queue = TaskQueue(Path(runtime).expanduser().resolve())
+        if queue.preparation_in_flight():
+            return False, "preparation_context_unclosed"
         return _tasks_safe_for_update(queue.tasks(), now=queue.clock())
     except Exception:
         return False, "runtime_state_unavailable"

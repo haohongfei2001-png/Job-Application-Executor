@@ -137,6 +137,11 @@ def task_state_guard(root: str | Path):
         fd = _private_lock_fd(root / "worker.lock")
         migration_fd = _private_lock_fd(root / "migration.lock")
         _refuse_live_service(root)
+        # No database open here: even mode=ro can change legacy WAL/SHM
+        # reader marks. Admission creates this durable marker before effects;
+        # only proven dedicated-context disposal can remove it.
+        if os.path.lexists(root / "preparation-context.active"):
+            raise BlockingIOError("preparation_context_unclosed")
         yield
     finally:
         if migration_fd is not None:

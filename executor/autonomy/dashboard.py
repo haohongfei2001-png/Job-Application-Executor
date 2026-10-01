@@ -852,6 +852,8 @@ const blockerText={
   isolated_external_target:'隔离测试模式只支持本地合成站',
   browser_ownership_unknown:'浏览器页面归属不明，等待安全核对',
   user_paused_from_browser_ownership_unknown:'浏览器页面归属不明，等待安全核对',
+  anonymous_preparation_unverified:'独立填写准备尚未验证，不能自动继续或提交',
+  user_paused_from_anonymous_preparation_unverified:'独立填写准备已暂停，等待只读核对',
   unknown_outcome:'上次写入结果不明，等待只读核对',
   user_paused_from_unknown_outcome:'上次写入结果不明，等待只读核对',
   validation:'需要检查表单',
@@ -939,7 +941,7 @@ function render(state){
         ${t.stage==='READY_TO_SUBMIT'&&t.can_confirm_submission?`<button type="button" data-confirm-submission="true" data-task="${esc(t.task_id)}" data-revision="${t.revision}">我已在招聘网站亲自提交</button>`:''}
         ${!['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION','READY_TO_SUBMIT','SUBMITTED','VERIFIED','CANCELLED'].includes(t.stage)?`<button type="button" data-action="PAUSE" data-task="${esc(t.task_id)}" data-revision="${t.revision}">暂停</button>`:''}
         ${['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown'].includes(t.blocker)?`<button type="button" data-action="OBSERVE" data-task="${esc(t.task_id)}">只读核对</button>`:''}
-      ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown','auth_return_unverified','account_identity_unverified','draft_persistence_unverified'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
+      ${['BLOCKED','NEEDS_USER_INPUT','NEEDS_USER_ACTION'].includes(t.stage)&&t.blocker!=='otp_waiting'&&!['unknown_outcome','browser_ownership_unknown','user_paused_from_unknown_outcome','user_paused_from_browser_ownership_unknown','auth_return_unverified','account_identity_unverified','draft_persistence_unverified','anonymous_preparation_unverified','user_paused_from_anonymous_preparation_unverified'].includes(t.blocker)?`<button type="button" data-action="RESUME" data-task="${esc(t.task_id)}" data-revision="${t.revision}">继续</button>`:''}
         ${!['SUBMITTED','VERIFIED','CANCELLED','READY_TO_SUBMIT'].includes(t.stage)?`<button type="button" data-action="CANCEL" data-task="${esc(t.task_id)}" data-revision="${t.revision}">取消</button>`:''}
       </div>
       ${t.stage==='READY_TO_SUBMIT'?`<div id="review-${esc(t.task_id)}" class="review private-review" data-private-review-panel role="region" aria-label="完整申请复核" tabindex="-1" hidden></div>`:''}

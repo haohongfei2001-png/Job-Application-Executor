@@ -88,6 +88,15 @@ class PreparationTransport:
         route.on_message(lambda _message: None)
         route.on_close(lambda *_args: None)
 
+    @staticmethod
+    def _abort(route):
+        try:
+            route.abort("blockedbyclient")
+        except Exception:
+            # A closing/disconnected route is uncertain, never permission to
+            # continue or a reason to log a potentially value-bearing URL.
+            pass
+
     def _route(self, route):
         request = route.request
         try:
@@ -98,7 +107,7 @@ class PreparationTransport:
             navigation_ok = False
         if self.phase != "READ_ONLY" or not navigation_ok or not self._public_get(request):
             self.blocked += 1
-            route.abort("blockedbyclient")
+            self._abort(route)
             return
         try:
             # Never let the HTTP client or browser carry permission across a
@@ -106,17 +115,17 @@ class PreparationTransport:
             response = route.fetch(max_redirects=0, max_retries=0, timeout=15000)
             if 300 <= response.status < 400 or self.phase != "READ_ONLY":
                 self.blocked += 1
-                route.abort("blockedbyclient")
+                self._abort(route)
             else:
                 expected = SCRIPT_DIGESTS.get(request.url)
                 if expected and hashlib.sha256(response.body()).hexdigest() != expected:
                     self.blocked += 1
-                    route.abort("blockedbyclient")
+                    self._abort(route)
                     return
                 route.fulfill(response=response)
         except Exception:
             self.blocked += 1
-            route.abort("blockedbyclient")
+            self._abort(route)
 
     def seal(self):
         if not self.installed or self.phase != "READ_ONLY":

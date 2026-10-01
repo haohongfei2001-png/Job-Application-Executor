@@ -54,6 +54,15 @@ manifest is deliberately incomplete; unknown assets fail closed. This component
 is not an OS-level network sandbox and must not be advertised as a proof of zero
 transmission over every browser channel.
 
+## Durable authority checkpoint
+
+The separate nonce/lease/context fence, one-attempt primitive journal and
+read-only recovery implementation is documented in
+[Preparation authority and recovery](PREPARATION_AUTHORITY.md). It remains
+unregistered and needs its own exact-head browser integration results. The
+[6e95 lifecycle receipt](receipts/QIYUNFANG-6E95-LIFECYCLE-PASS.md) covers the
+previous kernel/transport candidate only.
+
 ## Required next gates
 
 - Hosted Linux and Mac browser oracle results for this exact candidate, including

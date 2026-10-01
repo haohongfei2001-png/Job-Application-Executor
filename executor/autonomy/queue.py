@@ -22,6 +22,7 @@ from .state_compatibility import _private_lock_fd
 
 from .runtime_paths import RUNTIME, default_runtime, private_dir
 SAFE_STAGES = {"DISCOVERED", "PROFILE_RESOLVED", "FORM_FILLED", "VALIDATED"}
+PREPARATION_MARKER = "preparation-context.active"
 STOPPED = {"READY_TO_SUBMIT", "SUBMITTED", "VERIFIED", "CANCELLED"}
 STAGES = {str(x) for x in ApplicationStage}
 IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.:-]{0,150}$")
@@ -29,7 +30,7 @@ RECONCILIATION_REQUIRED = frozenset({
     "browser_ownership_unknown", "unknown_outcome", "auth_return_unverified",
     "account_identity_unverified", "draft_persistence_unverified",
     "attachment_persistence_unverified", "form_observation_unavailable",
-    "row_reconciliation_unverified",
+    "row_reconciliation_unverified", "anonymous_preparation_unverified",
 })
 PAUSED_RECONCILIATION_REQUIRED = frozenset(
     "user_paused_from_" + blocker for blocker in RECONCILIATION_REQUIRED)
@@ -185,6 +186,18 @@ class TaskQueue:
                 db.execute('''CREATE TABLE IF NOT EXISTS task_view_context (
                     slot INTEGER PRIMARY KEY CHECK(slot=1), task_id TEXT,
                     revision INTEGER NOT NULL CHECK(revision>=0))''')
+                db.execute('''CREATE TABLE IF NOT EXISTS preparation_approvals (
+                    nonce_sha TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+                    owner TEXT NOT NULL, scope_sha TEXT NOT NULL, plan_sha TEXT NOT NULL,
+                    session_sha TEXT NOT NULL, outcome TEXT NOT NULL,
+                    browser_binding TEXT NOT NULL, attempt_id TEXT UNIQUE,
+                    prior_stage TEXT NOT NULL, prior_blocker TEXT,
+                    context_closed INTEGER NOT NULL DEFAULT 0 CHECK(context_closed IN (0,1)),
+                    created REAL NOT NULL, updated REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS preparation_nonce_tombstones (
+                    nonce_sha TEXT PRIMARY KEY, browser_binding TEXT NOT NULL,
+                    outcome TEXT NOT NULL CHECK(outcome='RECOVERED_ORPHAN'),
+                    closed_at REAL NOT NULL)''')
                 db.execute("INSERT OR IGNORE INTO task_view_context VALUES(1,NULL,0)")
             self.path.chmod(0o600)
 
@@ -652,9 +665,19 @@ class TaskQueue:
                 (document_epoch, self.clock(), tid),
             )
 
+    def preparation_in_flight(self):
+        # Expired task leases, pause and cancel do not prove the dedicated
+        # browser context has closed. Keep a separate durable global fence.
+        with self.tx() as db:
+            return (os.path.lexists(self.root / PREPARATION_MARKER)
+                    or db.execute("SELECT 1 FROM preparation_approvals WHERE context_closed=0 LIMIT 1").fetchone() is not None)
+
     def claim(self, worker, lease_seconds=60):
         now = self.clock()
         with self.tx() as db:
+            if (os.path.lexists(self.root / PREPARATION_MARKER)
+                    or db.execute("SELECT 1 FROM preparation_approvals WHERE context_closed=0 LIMIT 1").fetchone()):
+                return None
             # A crash after persisting a pause must not leave an unresumable owner.
             db.execute("UPDATE tasks SET owner=NULL,lease_until=NULL WHERE owner IS NOT NULL AND lease_until<=? AND stage IN ('NEEDS_USER_INPUT','NEEDS_USER_ACTION','BLOCKED','READY_TO_SUBMIT','CANCELLED')", (now,))
             # One active task, including across independent processes/queue instances.
@@ -830,6 +853,8 @@ class TaskQueue:
             raise ValueError("task active or at immutable human boundary")
         if row["attempts"] >= json.loads(row["spec"])["max_attempts"] and row["stage"] == "ERROR":
             raise ValueError("retry budget exhausted")
+        if db.execute("SELECT 1 FROM preparation_approvals WHERE task_id=? LIMIT 1", (tid,)).fetchone():
+            raise ValueError("preparation requires separate one-shot authority")
         if row["blocker"] in RECONCILIATION_REQUIRED | PAUSED_RECONCILIATION_REQUIRED:
             raise ValueError("browser or draft outcome requires read-only reconciliation")
         if db.execute(
@@ -979,7 +1004,10 @@ class TaskQueue:
                 and row["lease_until"] is not None
                 and row["lease_until"] > now
             )
-            paused_attempts = max(0, row["attempts"] - 1) if active_claim else row["attempts"]
+            preparation_owner = db.execute(
+                "SELECT 1 FROM preparation_approvals WHERE owner=? AND context_closed=0 LIMIT 1",
+                (row["owner"],)).fetchone()
+            paused_attempts = max(0, row["attempts"] - 1) if active_claim and not preparation_owner else row["attempts"]
             db.execute(
                 "UPDATE tasks SET stage='BLOCKED',blocker=?,attempts=?,"
                 "owner=NULL,lease_until=NULL,next_run=0,paused_from=COALESCE(paused_from,?),updated=? WHERE task_id=?",
