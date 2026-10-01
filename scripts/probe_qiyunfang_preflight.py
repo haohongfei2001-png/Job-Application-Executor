@@ -48,7 +48,7 @@ def probe():
     result={'source':CONTRACT_URL,'status':'READ_ONLY_PREFLIGHT_UNVERIFIED',
             'root_count':0,'contract':'UNOBSERVED','outside_static_get_manifest':[],'fetched':[],
             'applicant_data_entered':False,'live_enabled':False,'public_reads':[],
-            'public_html_style_links':[]}
+            'public_html_style_links':[],'unclassified_request_descriptors':[]}
     # Explicit platform target. Never retry a sandbox rejection with weaker
     # flags, a renamed executable, or changes to host security settings.
     channel='chrome' if sys.platform=='linux' else None
@@ -58,6 +58,7 @@ def probe():
         transport=session.transport;original=transport._route
         def route(request_route):
             request=request_route.request
+            before=(transport.blocked,sum(transport.discovery_denials.values()))
             if not transport._public_get(request) and len(result['outside_static_get_manifest'])<100:
                 item=descriptor(request.url,request.method)
                 # This probe never loads profiles or enters a field. Inspect
@@ -84,6 +85,21 @@ def probe():
                     except Exception:pass
                 if item not in result['outside_static_get_manifest']:result['outside_static_get_manifest'].append(item)
             original(request_route)
+            after=(transport.blocked,sum(transport.discovery_denials.values()))
+            if after[0]-before[0]>after[1]-before[1] and len(result['unclassified_request_descriptors'])<20:
+                item=descriptor(request.url,request.method)
+                if request.method=='POST':
+                    # This diagnostic only ever opens an empty public page.
+                    # Export parameter names/finite command, never payload values.
+                    try:
+                        body=request.post_data or ''
+                        params=parse_qs(body,keep_blank_values=True,max_num_fields=64) if len(body)<8192 else {}
+                        item['public_body_keys']=sorted(key for key in params if re.fullmatch(r'[A-Za-z0-9_]{1,80}',key))
+                        cmd=params.get('cmd',[])
+                        if len(cmd)==1 and re.fullmatch(r'[A-Za-z0-9_]{1,80}',cmd[0]):item['public_body_command']=cmd[0]
+                        item['public_body_size']=len(body)
+                    except Exception:item['public_body_shape']='unclassified'
+                result['unclassified_request_descriptors'].append(item)
         session.context.unroute('**/*',transport._route)
         session.context.route('**/*',route)
         public_get=transport.public_fetch
