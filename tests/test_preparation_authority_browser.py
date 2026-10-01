@@ -94,3 +94,14 @@ def test_explicit_readonly_recovery_requires_real_context_absence_and_never_repl
     assert {row['outcome'] for row in q.field_actions(task['task_id'])}=={'UNKNOWN_OUTCOME'}
     with pytest.raises(ValueError):q.resume(task['task_id'])
     assert observe_context_absence(browser,document.binding,process_sha='a'*64)=={'status':'UNKNOWN'}
+
+
+def test_identity_observation_does_not_read_any_dynamic_input_value(browser):
+    with session(browser) as (page,_):
+        before=binding(page)
+        page.evaluate('''()=>document.querySelectorAll('input').forEach(input=>{
+          Object.defineProperty(input,'value',{get(){throw new Error('synthetic value access forbidden')}});
+          Object.defineProperty(input,'checked',{get(){throw new Error('synthetic checked access forbidden')}});
+          Object.defineProperty(input,'files',{get(){throw new Error('synthetic file access forbidden')}});
+        })''')
+        assert binding(page).binding==before.binding

@@ -131,7 +131,7 @@ def select_plan(proposals, selected_ids):
 
 # Read-only observation of exactly one retained root. Protected values are never
 # returned; only emptiness is observed, to refuse an already-used application.
-OBSERVE_ROOT = r'''root => {
+OBSERVE_ROOT = r'''(root, shapeOnly=false) => {
   const visible = e => e.isConnected && !!e.getClientRects().length &&
     !e.closest('[hidden],[inert],[aria-hidden="true"]') &&
     getComputedStyle(e).visibility === 'visible' && getComputedStyle(e).display !== 'none';
@@ -150,11 +150,13 @@ OBSERVE_ROOT = r'''root => {
           id: e.id, name: e.getAttribute('name') || '', required: !!e.required,
           disabled: !!e.disabled, readonly: !!e.readOnly,
           maxlength: e.getAttribute('maxlength'), placeholder: e.getAttribute('placeholder') || '',
+          ...(shapeOnly ? {} : {
           value: protectedIds.has(id) ? null : e.value,
           option_value: e.type === 'radio' || (e.type === 'checkbox' && id === '17') ? e.value : null,
           occupied: e.type === 'radio' || e.type === 'checkbox' ? !!e.checked :
               e.type === 'file' ? !!e.files.length : e.type === 'button' ? false : !!e.value,
           checked: protectedIds.has(id) ? null : !!e.checked,
+          }),
           label: e.labels?.length === 1 ? e.labels[0].textContent.trim() : '',
           visible: visible(e), formaction: e.getAttribute('formaction'), has_form_owner: !!e.form,
         })),
@@ -167,6 +169,11 @@ OBSERVE_ROOT = r'''root => {
     control_count: root.querySelectorAll('input,textarea,select,button,[contenteditable="true"]').length,
   };
 }'''
+
+# The shape-only branch does not even read dynamic input values. It is used for
+# identity re-fencing during human review, including after unexpected metadata
+# drift, before any routine-only kernel readback can be considered.
+OBSERVE_SHAPE_ROOT = 'root => (' + OBSERVE_ROOT + ')(root, true)'
 
 
 class ContractChanged(RuntimeError):

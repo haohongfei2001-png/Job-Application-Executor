@@ -85,7 +85,7 @@ def test_popup_broker_reconstructs_literal_without_forwarding_request_headers():
 
 def test_all_observed_script_versions_include_the_audited_popup_and_form_handlers():
     from executor.preparation.transport import SCRIPT_DIGESTS,PreparationTransport
-    assert len(SCRIPT_DIGESTS)==19
+    assert len(SCRIPT_DIGESTS)==20
     assert SCRIPT_DIGESTS['https://1-ss-sys.huaweicloudsite.cn/js/dist/partitionSite.min.js?v=202511071120']=='400d6555c37e246737952ca0f9c948b813abd9ad16e8444fa8409b1e81d13651'
     assert SCRIPT_DIGESTS['https://1-ss-sys.huaweicloudsite.cn/js/dist/module.min.js?v=202506121459']=='0050b03259f7044c5666b42a3075dabf9607c8d179eac070798a894997132031'
     for url in SCRIPT_DIGESTS:

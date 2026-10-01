@@ -60,3 +60,5 @@ OBSERVED_SCRIPT_DIGESTS = {'https://1-ss-sys.huaweicloudsite.cn/js/comm/jquery/j
  'https://jzfe-sys.huaweicloudsite.cn/dist/jz/locale/2052.min.js?v=202607211512': 'da2ca3295fd1cf2e32354878c2918d1e3998c52274aa3538f7d4884e95eb0f59',
  'https://jzfe-sys.huaweicloudsite.cn/dist/jz/request/jzRequest.min.js?v=202506121719': '2152b73f3bf4267bd49f391e77a536e3dbdebc8a4f464b92ce3e01134499a60d',
  'https://jzfe-sys.huaweicloudsite.cn/dist/jz/utils/jzUtils.min.js?v=202506121754': 'a85273cdcf54a9bfcf9e24667f2691c21c41cd80b4a23ee40ceaac43e078e442'}
+# Popup upload-widget initialization source observed read-only; no upload grant.
+OBSERVED_SCRIPT_DIGESTS['https://1-ss-sys.huaweicloudsite.cn/js/comm/SWFUpload2v/jquery.uploadify.min.js?v=202307101206'] = 'aa8443a2e1f53f8cf4deb2471d5796dde9e5e67ed6de487cb7ee3284f07d7383'

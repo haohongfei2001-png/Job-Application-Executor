@@ -80,3 +80,18 @@ The strict empty-form validator still refused its structure; no input was filled
 The next diagnostic waits briefly for full asynchronous initialization and
 exports only control structure/empty flags, with every input value removed. This
 is a refusal to investigate, not a relaxed driver contract or live certification.
+
+## Complete empty-form observation run36862577094 (5682b85)
+
+Both platforms report READ_ONLY_EMPTY_FORM_OBSERVED / EMPTY_FORM_MATCHED for the
+real official popup, without applicant data. A bounded wait resolved asynchronous
+widget initialization; the original90-control contract was unchanged. Linux's
+focused suite passed428 tests, including real owned-process approval/fill/close
+with synthetic values. Mac's same focused lane also completed successfully.
+
+The next discovery receipt retains every denied request, classifies only observed
+source-backed background commands/assets, pins the twentieth upload-widget script
+without granting an upload, and seals an exact source/activity epoch. A new route,
+socket or page event cannot borrow the prior receipt, even for identical bytes.
+Identity observation now avoids dynamic input values entirely inside the browser;
+a throwing-getter native regression is included. Live UI admission stays closed.

@@ -10,7 +10,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 
-from .qiyunfang import CONTRACT_URL, ROOT, OBSERVE_ROOT, ContractChanged, digest
+from .qiyunfang import CONTRACT_URL, ROOT, OBSERVE_SHAPE_ROOT, ContractChanged, digest
 
 
 @dataclass(frozen=True, repr=False)
@@ -44,11 +44,7 @@ def observe_owned_document(page, *, process_sha, resources_sha):
             raise ContractChanged()
     finally:
         cdp.detach()
-    observed = page.locator(ROOT).evaluate(OBSERVE_ROOT)
-    for row in observed['fields']:
-        for control in row['controls']:
-            for key in ('value','checked','occupied'):
-                control.pop(key, None)
+    observed = page.locator(ROOT).evaluate(OBSERVE_SHAPE_ROOT)
     # Opaque digests only, never applicant values or protected inputs.
     binding = {'process_sha': process_sha,
         'context_sha': hashlib.sha256(context_id.encode()).hexdigest(),

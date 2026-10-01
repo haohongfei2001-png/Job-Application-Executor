@@ -9,7 +9,8 @@ from __future__ import annotations
 import hashlib
 from urllib.parse import urlsplit
 
-from .qiyunfang import CONTRACT_URL
+from .qiyunfang import CONTRACT_URL, digest
+from .discovery_denials import expected_discovery_denial
 from .resources import OBSERVED_STATIC_RESOURCES, OBSERVED_SCRIPT_DIGESTS
 from .public_reads import public_style_url, form_lookup_request, lookup_evidence, popup_request, popup_evidence
 
@@ -50,6 +51,12 @@ class PreparationTransport:
         self.public_popup = public_popup
         self.public_popup_used = False
         self.public_read_evidence = []
+        self.resource_evidence = {}
+        self.discovery_denials = {}
+        self.discovery_sequence = 0
+        self._certified_discovery = None
+        self._sealed_denial_epoch = 0
+        self._sealed_certificate_valid = True
         self.phase = "READ_ONLY"
         self.blocked = 0
         self.installed = False
@@ -79,6 +86,7 @@ class PreparationTransport:
         context.on("page", self._page_created)
 
     def _page_created(self, page):
+        self.discovery_sequence += 1
         # _route refuses popup navigations before fetch. Do not close a page
         # synchronously inside an event callback: that can nest an unbounded
         # browser RPC during the current primitive. The owner closes the whole
@@ -87,6 +95,7 @@ class PreparationTransport:
             self.blocked += 1
 
     def _websocket(self, route):
+        self.discovery_sequence += 1
         self.blocked += 1
         # Playwright-routed sockets are nonconnecting mocks until explicitly
         # connect_to_server() is called. Drop messages locally and return;
@@ -103,6 +112,7 @@ class PreparationTransport:
             pass
 
     def _route(self, route):
+        self.discovery_sequence += 1
         request = route.request
         try:
             navigation_ok = (not request.is_navigation_request() or
@@ -122,6 +132,9 @@ class PreparationTransport:
                     and popup_request(request))
         if not is_get and not is_lookup and not is_popup:
             self.blocked += 1
+            category=expected_discovery_denial(request)
+            if category:
+                self.discovery_denials[category]=self.discovery_denials.get(category,0)+1
             self._abort(route)
             return
         try:
@@ -152,17 +165,45 @@ class PreparationTransport:
                     self.blocked += 1
                     self._abort(route)
                     return
+                self.resource_evidence[request.url]=hashlib.sha256(response.body()).hexdigest()
                 route.fulfill(response=response)
         except Exception:
             self.blocked += 1
             self._abort(route)
 
+    def certify_discovery(self):
+        """Bind version-pinned external scripts and retained classified denials.
+
+        Caller must independently validate the complete empty DOM. No denied
+        request gets permission, and no historical counter is cleared here.
+        Main HTML/popup bytes are observed and hashed, not semantically audited
+        or pinned inline-script execution evidence.
+        """
+        if (self.phase!='READ_ONLY' or not self.installed
+                or self.blocked!=sum(self.discovery_denials.values())
+                or any(self.resource_evidence.get(url)!=sha for url,sha in SCRIPT_DIGESTS.items())
+                or any(urlsplit(url).path.endswith('.js') and url not in SCRIPT_DIGESTS for url in self.resource_evidence)
+                or [item.get('kind') for item in self.public_read_evidence]!=['formId6_popup_lookup','popup1566_public_dom']):
+            raise RuntimeError('preparation_discovery_unverified')
+        receipt=self._discovery_receipt()
+        self._certified_discovery=(self.blocked,digest(receipt))
+        return {'resources_sha':digest(receipt),'denied':dict(self.discovery_denials),'denial_epoch':self.blocked}
+
+    def _discovery_receipt(self):
+        return {'resources':dict(self.resource_evidence),'public_reads':list(self.public_read_evidence),
+                'denied':dict(self.discovery_denials),'denial_epoch':self.blocked,
+                'activity_sequence':self.discovery_sequence}
+
     def seal(self):
         if not self.installed or self.phase != "READ_ONLY":
             raise RuntimeError("preparation transport state conflict")
         self.phase = "SEALED"
+        if self._certified_discovery is not None:
+            self._sealed_certificate_valid=self._certified_discovery==(self.blocked,digest(self._discovery_receipt()))
+            if self._sealed_certificate_valid:self._sealed_denial_epoch=self.blocked
         # Preserve unexpected activity from discovery; sealing is not a reset.
 
     def require_sealed(self):
-        if not self.installed or self.phase != "SEALED" or self.blocked:
+        if (not self.installed or self.phase != "SEALED" or not self._sealed_certificate_valid
+                or self.blocked!=self._sealed_denial_epoch):
             raise RuntimeError("preparation transport changed")

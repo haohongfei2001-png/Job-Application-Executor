@@ -126,6 +126,13 @@ def probe():
                     page.wait_for_timeout(100)
             result['contract']='EMPTY_FORM_MATCHED'
             result['status']='READ_ONLY_EMPTY_FORM_OBSERVED'
+            result['discovery_denials']=dict(transport.discovery_denials)
+            result['unclassified_denials']=transport.blocked-sum(transport.discovery_denials.values())
+            try:
+                result['source_receipt']=transport.certify_discovery()
+                transport.seal();transport.require_sealed()
+                result['sealed_empty_preflight']=True
+            except RuntimeError:result['sealed_empty_preflight']=False
         except Exception:
             # No exception repr/URL/body values in diagnostic output.
             result['status']='PUBLIC_PREFLIGHT_INCOMPLETE'
