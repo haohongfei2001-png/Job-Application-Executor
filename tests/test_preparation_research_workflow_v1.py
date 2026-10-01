@@ -18,6 +18,8 @@ class PreparationResearchWorkflowTests(unittest.TestCase):
         self.assertIn('tests/test_preparation_public_reads_v1.py',SOURCE)
         self.assertIn('tests/test_preparation_final_journal_v1.py',SOURCE)
         self.assertIn('tests/test_preparation_process_identity_browser.py',SOURCE)
+        self.assertIn('tests/test_preparation_flow_v1.py',SOURCE)
+        self.assertIn('tests/test_preparation_flow_browser.py',SOURCE)
         self.assertIn('retention-days: 3',SOURCE)
         for forbidden in ('pull_request','workflow_dispatch','secrets.','write-all','contents: write',
                           'build_macos_app','upload-release','gh pr','curl ','profiles/',

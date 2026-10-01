@@ -94,3 +94,13 @@ def test_all_observed_script_versions_include_the_audited_popup_and_form_handler
         gate._route(SimpleNamespace(request=request,abort=lambda *_:calls.append('abort'),
                                     fulfill=lambda **_:pytest.fail('changed source executed')))
         assert calls==['abort'] and gate.blocked==1
+
+
+def test_readonly_probe_diagnostics_never_project_control_values():
+    from scripts.probe_qiyunfang_preflight import value_free_contract
+    raw={'fields':[{'controls':[{'value':'PRIVATE_SYNTHETIC','type':'text'},
+                               {'value':None,'type':'text'}]}]}
+    result=value_free_contract(raw)
+    assert 'PRIVATE_SYNTHETIC' not in json.dumps(result)
+    assert result['fields'][0]['controls'][0]['value_empty'] is False
+    assert raw['fields'][0]['controls'][0]['value']=='PRIVATE_SYNTHETIC'

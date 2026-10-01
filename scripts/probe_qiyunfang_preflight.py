@@ -12,11 +12,13 @@ import json
 from pathlib import Path
 import re
 import sys
+import time
+import copy
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from executor.preparation.session import DisposablePreparationSession
-from executor.preparation.qiyunfang import CONTRACT_URL, ROOT, OBSERVE_ROOT, validate_observation
+from executor.preparation.qiyunfang import CONTRACT_URL, ROOT, OBSERVE_ROOT, validate_observation, ContractChanged
 from executor.preparation.public_reads import public_style_url
 
 
@@ -25,11 +27,21 @@ def descriptor(url,method):
         parsed=urlsplit(url);query=parse_qs(parsed.query,keep_blank_values=True)
         result={'scheme':parsed.scheme,'host':parsed.hostname,'path':parsed.path,'method':method,
                 'query_keys':sorted(query)}
-        for key in ('cmd','formId','id','moduleId','colId','extId','_csw','clientSupportWebp'):
+        for key in ('cmd','formId','id','moduleId','colId','extId','_csw','clientSupportWebp','v','vCodeId'):
             values=query.get(key,[])
             if len(values)==1 and re.fullmatch(r'[A-Za-z0-9_]{1,70}',values[0]):result[key]=values[0]
         return result
     except Exception:return {'status':'UNCLASSIFIED'}
+
+
+def value_free_contract(observation):
+    """Public empty-form research only; never include an input value."""
+    value=copy.deepcopy(observation)
+    for field in value.get('fields',[]):
+        for control in field.get('controls',[]):
+            entered=control.pop('value',None)
+            control['value_empty']=entered in ('',None)
+    return value
 
 
 def probe():
@@ -61,6 +73,15 @@ def probe():
                             if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_#-]{0,70}',value):known[key]=value
                         item['public_template_parameters']=known
                     except Exception:item['public_template_parameters']={'status':'UNAVAILABLE'}
+                elif request.method=='POST' and request.url.split('?',1)[0] in {
+                        'https://www.qiyunfang.com/ajax/site_h.jsp','https://www.qiyunfang.com/ajax/log_h.jsp',
+                        'https://www.qiyunfang.com/ajax/ajaxLoadModuleDom_h.jsp'}:
+                    try:
+                        body=request.post_data or ''
+                        params=parse_qs(body,keep_blank_values=True,max_num_fields=32) if len(body)<4096 else {}
+                        cmd=params.get('cmd',[])
+                        if len(cmd)==1 and re.fullmatch(r'[A-Za-z0-9_]{1,80}',cmd[0]):item['public_body_command']=cmd[0]
+                    except Exception:pass
                 if item not in result['outside_static_get_manifest']:result['outside_static_get_manifest'].append(item)
             original(request_route)
         session.context.unroute('**/*',transport._route)
@@ -91,8 +112,18 @@ def probe():
             button.click(timeout=10000)
             page.locator(ROOT).wait_for(state='visible',timeout=15000)
             result['root_count']=page.locator(ROOT).count()
-            observation=page.locator(ROOT).evaluate(OBSERVE_ROOT)
-            validate_observation(observation)
+            # The popup container can be visible before its async controls are
+            # initialized. Wait for the complete existing contract, never accept
+            # a weaker shape just because the root became visible.
+            deadline=time.monotonic()+3
+            while True:
+                observation=page.locator(ROOT).evaluate(OBSERVE_ROOT)
+                try:validate_observation(observation);break
+                except ContractChanged:
+                    if time.monotonic()>=deadline:
+                        result['observed_contract']=value_free_contract(observation)
+                        raise
+                    page.wait_for_timeout(100)
             result['contract']='EMPTY_FORM_MATCHED'
             result['status']='READ_ONLY_EMPTY_FORM_OBSERVED'
         except Exception:

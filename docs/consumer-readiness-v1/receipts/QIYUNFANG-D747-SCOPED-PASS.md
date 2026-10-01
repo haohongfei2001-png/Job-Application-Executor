@@ -71,3 +71,12 @@ The next research iteration exercises the exact popup read and affected opaque
 request fixtures only. The full native channel/lifecycle oracle stays in the
 main owning workflow; this scope reduction avoids repeatedly spending seven
 Mac minutes on unchanged transport code. Live admission remains disabled.
+
+## Focused popup run36861798818 (d868f12)
+
+Both affected-path jobs passed418 tests (Mac73.24s, Linux35.41s). The reconstructed
+public read successfully rendered exactly one real popup root on both platforms.
+The strict empty-form validator still refused its structure; no input was filled.
+The next diagnostic waits briefly for full asynchronous initialization and
+exports only control structure/empty flags, with every input value removed. This
+is a refusal to investigate, not a relaxed driver contract or live certification.
