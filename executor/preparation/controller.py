@@ -164,13 +164,18 @@ class PreparationController:
                         if not self._alive():raise PreparationConflict()
                         try:self._owner.__enter__()
                         except BaseException:self._entry_failed=True;raise
+                        if not self._alive():raise PreparationConflict()
+                        # Native setup may take time. Complete it before the
+                        # flow issues its short-lived private approval, so the
+                        # UI never advertises time already spent on self-check.
+                        available=self._write_admission(self._owner) is True
+                        if not self._alive():raise PreparationConflict()
                         self._flow=self._flow_factory(self.authority,self._owner,task_id=task_id,revision=revision,
                             session=self._session,selected_ids=selected_ids,still_authorized=self._alive)
                         if not self._alive():raise PreparationConflict()
                         offer=self._flow.private_offer()
-                        available=self._write_admission(self._owner) is True
-                        if not self._alive():raise PreparationConflict()
                         with self._lock:
+                            if not self._alive():raise PreparationConflict()
                             self._write_available=available;self._state='OFFERED'
                             self._deadline=self._clock()+offer['expires_in_seconds']
                         offer['live_write_available']=available

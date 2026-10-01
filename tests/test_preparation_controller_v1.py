@@ -255,3 +255,76 @@ def test_cancellation_during_native_selfcheck_cannot_publish_a_late_offer(setup)
     assert not caller.is_alive() and outcomes==['refused']
     assert controller.shutdown() and controller.status()['status']=='CLOSED'
     assert not any(name=='primitive' for name,_ in calls)
+
+
+def test_slow_runtime_admission_finishes_before_private_offer_is_issued(setup):
+    factory,calls,*_=setup;now=[100.0];issued=[]
+    def admission(_):
+        assert not any(name=='flow' for name,_ in calls)
+        now[0]+=45
+        calls.append(('admission',threading.get_ident()))
+        return True
+    controller=factory(write_admission=admission,clock=lambda:now[0])
+    original=controller._flow_factory
+    def flow_factory(*args,**kwargs):
+        issued.append(now[0]);return original(*args,**kwargs)
+    controller._flow_factory=flow_factory
+    try:
+        offer=controller.open('task',1,SESSION,['0'])
+        assert issued==[145.0] and offer['expires_in_seconds']==120
+        assert controller.status()['remaining_seconds']==120
+        assert [name for name,_ in calls][:3]==['enter','admission','flow']
+    finally:assert controller.shutdown()
+
+
+def test_authority_and_ui_share_full_lifetime_after_native_setup(fixture):
+    import hashlib
+    from test_preparation_authority_v1 import BROWSER
+    q,task,_,_,now=fixture
+    class Owner:
+        def __init__(self):self.context=SimpleNamespace(pages=[])
+        def __enter__(self):return self
+        def close(self):self.context=None;return True
+    class Flow:
+        def __init__(self,authority,owner,**kwargs):
+            self.authority,self.owner=authority,owner
+            self.offer=authority.issue(kwargs['task_id'],kwargs['revision'],kwargs['session'],BROWSER,kwargs['selected_ids'])
+        def private_offer(self):return dict(self.offer)
+        def close(self):
+            self.authority.revoke(self.offer['nonce'],SESSION)
+            return {'context_closed':self.owner.close(),'reconciliation_required':False}
+    def admission(_):now[0]+=45;return True
+    controller=PreparationController(q,lambda s:s==SESSION,owner_factory=Owner,flow_factory=Flow,
+        write_admission=admission,clock=lambda:now[0])
+    try:
+        offered=controller.open(task['task_id'],task['revision'],SESSION,['0'])
+        record=controller.authority.pending[hashlib.sha256(offered['nonce'].encode()).hexdigest()]
+        assert record['expires']==controller._deadline==now[0]+120
+        assert offered['expires_in_seconds']==controller.status()['remaining_seconds']==120
+        now[0]+=119
+        assert controller.status()['remaining_seconds']==1 and record['expires']-now[0]==1
+        now[0]+=2
+        with pytest.raises(PreparationConflict):
+            controller.authority.consume(offered['nonce'],SESSION,offered['scope_sha'],BROWSER,approve_transmission=True)
+        assert q.run_attempts(task['task_id'])==[]
+    finally:assert controller.shutdown()
+
+
+def test_cancellation_during_private_offer_cannot_publish_after_native_admission(setup):
+    factory,calls,*_=setup;entered=threading.Event();release=threading.Event();outcomes=[]
+    controller=factory(write_admission=lambda _:True)
+    original=controller._flow_factory
+    def flow_factory(*args,**kwargs):
+        flow=original(*args,**kwargs);private_offer=flow.private_offer
+        def held_offer():
+            entered.set();assert release.wait(2);return private_offer()
+        flow.private_offer=held_offer;return flow
+    controller._flow_factory=flow_factory
+    def opening():
+        try:controller.open('task',1,SESSION,['0'])
+        except PreparationConflict:outcomes.append('refused')
+    caller=threading.Thread(target=opening);caller.start();assert entered.wait(2)
+    controller.cancel(SESSION);release.set();caller.join(2)
+    assert not caller.is_alive() and outcomes==['refused']
+    assert controller.shutdown() and controller.status()['status']=='CLOSED'
+    assert not any(name=='primitive' for name,_ in calls)
