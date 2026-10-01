@@ -43,6 +43,16 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 .diagnostics-dialog pre{max-height:48vh;overflow:auto;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .diagnostics-actions{display:flex;justify-content:flex-end;gap:8px}.diagnostics-actions button{min-height:36px}
 .preparation-checks{list-style:none;margin:12px 0;padding:0}.preparation-checks li{display:flex;justify-content:space-between;gap:14px;border-bottom:1px solid #e2e8f0;padding:9px 0;font-size:13px;line-height:1.5}.preparation-checks strong{color:#475569;text-align:right;min-width:0;overflow-wrap:anywhere}.preparation-checks .missing{color:#9a3412}.preparation-manual{font-size:13px;line-height:1.7;padding-left:22px}.preparation-dialog h3{font-size:15px;margin:20px 0 8px}.preparation-dialog a{display:inline-block;min-height:44px;padding:12px 0;color:#1d4ed8}.preparation-dialog .diagnostics-actions{position:sticky;bottom:-22px;background:white;padding:12px 0}.preparation-dialog .diagnostics-actions button{min-height:44px}
+/* Private approval controls remain readable and touchable inside the same dialog. */
+.preparation-dialog button{min-height:44px;line-height:1.4;padding:10px 14px;white-space:normal;text-align:left}
+.preparation-native-step{border:1px solid #d7dce2;border-radius:12px;padding:16px;margin:16px 0;background:#f8fafc}
+.preparation-native-step h3{margin:0 0 10px}.preparation-native-step p{overflow-wrap:anywhere}
+.preparation-native-step label{display:grid;grid-template-columns:20px minmax(0,1fr);gap:10px;align-items:start;font-size:14px;line-height:1.6;margin:14px 0}
+.preparation-native-step input[type=checkbox]{width:20px;height:20px;margin:2px 0 0}
+.preparation-native-step button:not([hidden]){display:block;margin-top:12px}
+.preparation-dialog .preparation-secondary{background:#f1f5f9;color:#334155;border:1px solid #cbd5e1}
+#preparation-review-hide{margin-top:14px}#preparation-native-status{min-height:20px}
+@media(max-width:600px){.preparation-native-step{padding:12px}.preparation-native-step button{width:100%}}
 .preparation-checks label{display:flex;align-items:center;gap:8px;min-height:28px;margin:0}.preparation-checks input[type=checkbox]{width:18px;height:18px;flex:0 0 auto;margin:0}
 #session-expired{margin:0;padding:16px 22px;background:#fff7ed;color:#9a3412;border-bottom:1px solid #fed7aa;line-height:1.5}
 .toast{position:fixed;right:22px;bottom:88px;max-width:420px;background:#111;color:#fff;padding:11px 14px;border-radius:10px;box-shadow:0 10px 30px #0003;display:none;z-index:20;font-size:13px;line-height:1.45}
@@ -187,25 +197,27 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
       <section id="preparation-review" hidden aria-label="此任务的私密拟填写内容">
         <p>以下是此任务原资料的实际值与明确匹配的官网选项，仅在本机显示。尚未发送到官网，也没有授权填写。不能明确匹配的项目留给本人核对，不会猜测。</p>
         <ul id="preparation-review-fields" class="preparation-checks"></ul>
-        <p>可勾选拟填写项，再只读核对当前官网表单。勾选不授权发送资料。自动填写仍等待本机浏览器与人工接管验收；身份证、岗位2、附件上传、验证码、协议和最终提交不在拟填写内容中。</p>
-        <button id="preparation-site-check" type="button" disabled>只读核对当前官网（不填写）</button>
+        <p>勾选要核对的常规资料。只读检查不会发送个人资料；填写前还会检查本机条件并请你确认。身份证、岗位2、验证码、协议和最终提交由本人处理，简历上传单独确认。</p>
+        <button id="preparation-site-check" class="preparation-secondary" type="button" disabled>只读核对当前官网（不填写）</button>
         <p id="preparation-site-status" role="status"></p>
         <button id="preparation-native-open" type="button" disabled>检查受控填写条件</button>
         <p id="preparation-native-status" role="status"></p>
-        <section id="preparation-native-consent" hidden aria-label="填写与简历上传分别确认">
+        <section id="preparation-native-consent" class="preparation-native-step" hidden aria-label="填写与简历上传分别确认">
+          <h3>确认本次填写</h3>
           <p id="preparation-native-warning"></p>
-          <label><input id="preparation-fill-consent" type="checkbox">我已核对上方勾选的实际值，同意仅将这些常规资料填写到启云方本岗位</label>
+          <label><span id="preparation-fill-choice"></span>我已核对上方勾选的实际值，同意仅将这些常规资料填写到启云方本岗位</label>
           <button id="preparation-fill-approve" type="button" disabled>确认本次填写</button>
           <button id="preparation-resume-review" type="button" hidden disabled>单独核对本次简历上传</button>
-          <div id="preparation-resume-consent" hidden>
+          <div id="preparation-resume-consent" class="preparation-native-step" hidden>
+            <h3>确认简历上传</h3>
             <p id="preparation-resume-detail"></p>
             <p>仅上传当前任务绑定的原始 PDF 或 DOCX，最多 4 MiB，并遵守官网更低的限制；不转换文件。上传回包不证明附件留存成功。</p>
-            <label><input id="preparation-upload-consent" type="checkbox">我同意将这份原始简历上传到武汉启云方科技有限公司</label>
+            <label><span id="preparation-upload-choice"></span>我同意将这份原始简历上传到武汉启云方科技有限公司</label>
             <button id="preparation-upload-approve" type="button" disabled>确认这份简历上传</button>
           </div>
           <p>以上确认均不授权证件、验证码、协议或最终提交。关闭、隐藏资料或更换任务会结束本次准备，结果不明时不会自动重试。</p>
         </section>
-        <button id="preparation-review-hide" type="button">隐藏个人值</button>
+        <button id="preparation-review-hide" class="preparation-secondary" type="button">隐藏个人值</button>
       </section>
       <a id="preparation-source" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">尝试打开已核对的官方页面</a>
       <p>官网地址：<span id="preparation-source-address">https://www.qiyunfang.com/h-col-124.html</span><br>如本机窗口无法打开链接，请在自己的浏览器打开这个官网地址。</p>
@@ -653,16 +665,17 @@ preparationSiteCheck.onclick=async()=>{
 };
 const nativeOpen=document.getElementById('preparation-native-open'),nativeStatus=document.getElementById('preparation-native-status'),
   nativeConsent=document.getElementById('preparation-native-consent'),nativeWarning=document.getElementById('preparation-native-warning'),
-  fillConsent=document.getElementById('preparation-fill-consent'),fillApprove=document.getElementById('preparation-fill-approve'),
+  fillConsent=makeNativeChoice('preparation-fill-consent'),fillApprove=document.getElementById('preparation-fill-approve'),
   resumeReview=document.getElementById('preparation-resume-review'),resumeConsent=document.getElementById('preparation-resume-consent'),
-  resumeDetail=document.getElementById('preparation-resume-detail'),uploadConsent=document.getElementById('preparation-upload-consent'),
+  resumeDetail=document.getElementById('preparation-resume-detail'),uploadConsent=makeNativeChoice('preparation-upload-consent'),
   uploadApprove=document.getElementById('preparation-upload-approve');
+function makeNativeChoice(id){const input=document.createElement('input');input.type='checkbox';input.id=id;return input;}
 let nativeRequest=null,nativeOffer=null,nativeUploadOffer=null,nativePoll=null,nativeExpiry=null,nativeBusy=false;
 function nativeBase(request){return {request_id:request.request_id,task_id:request.task_id,expected_revision:request.expected_revision};}
 function cancelNativePreparation(){
   const request=nativeRequest;nativeRequest=nativeOffer=nativeUploadOffer=null;nativeBusy=false;
   if(nativePoll)clearTimeout(nativePoll);if(nativeExpiry)clearTimeout(nativeExpiry);nativePoll=nativeExpiry=null;
-  nativeConsent.hidden=true;resumeConsent.hidden=true;resumeReview.hidden=true;
+  nativeConsent.hidden=true;resumeConsent.hidden=true;resumeReview.hidden=true;fillConsent.remove();uploadConsent.remove();
   fillConsent.checked=uploadConsent.checked=false;fillConsent.disabled=uploadConsent.disabled=false;
   fillApprove.disabled=uploadApprove.disabled=resumeReview.disabled=nativeOpen.disabled=true;
   nativeWarning.textContent=resumeDetail.textContent=nativeStatus.textContent='';
@@ -720,7 +733,8 @@ nativeOpen.onclick=async()=>{
     const result=await nativeCall('open',request,{selected_ids:selectedIds,profile_version:privatePreparationValues.profile_version,
       resume_version:privatePreparationValues.resume_version});
     if(!nativeCurrent(request))return;if(!validNativeOffer(result,request,selected))throw new Error();
-    nativeOffer={nonce:result.nonce,scope_sha:result.scope_sha};nativeConsent.hidden=false;
+    nativeOffer={nonce:result.nonce,scope_sha:result.scope_sha};
+    document.getElementById('preparation-fill-choice').append(fillConsent);nativeConsent.hidden=false;
     nativeWarning.textContent='请再次核对上方勾选的实际值。确认后会向武汉启云方科技有限公司的应用实施工程师（武汉）表单填写这些常规资料；输入本身可能传送资料。这不是最终提交。';
     nativeStatus.textContent='条件与当前表单已核对，等待你单独确认本次填写。';
     nativeDeadline(request,result.expires_in_seconds);nativeWatch(request);
@@ -759,7 +773,8 @@ resumeReview.onclick=async()=>{
       ||material.byte_count<1||material.byte_count>4*1024*1024
       ||material.destination_filename!==(material.kind==='resume_pdf'?'resume.pdf':'resume.docx')
       ||!Number.isInteger(result.expires_in_seconds)||result.expires_in_seconds<1||result.expires_in_seconds>120)throw new Error();
-    nativeBusy=false;nativeUploadOffer={nonce:result.nonce,scope_sha:result.scope_sha};resumeConsent.hidden=false;
+    nativeBusy=false;nativeUploadOffer={nonce:result.nonce,scope_sha:result.scope_sha};
+    document.getElementById('preparation-upload-choice').append(uploadConsent);resumeConsent.hidden=false;
     resumeDetail.textContent='接收方：武汉启云方科技有限公司；原文件类型：'+(material.kind==='resume_pdf'?'PDF':'DOCX')
       +'；大小：'+material.byte_count+' 字节；发送文件名：'+material.destination_filename+'；本机版本：'+material.resume_sha256;
     nativeDeadline(request,result.expires_in_seconds);

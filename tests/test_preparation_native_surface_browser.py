@@ -48,6 +48,7 @@ def test_native_fill_is_separate_explicit_consent_and_cleared_on_hide(preparatio
         page.locator('#preparation-native-consent').scroll_into_view_if_needed()
         page.screenshot(path=str(directory/'preparation-native-consent.png'))
     expect(page.locator('#preparation-fill-approve')).to_be_disabled()
+    expect(page.locator('#preparation-resume-review')).to_be_hidden()
     assert [action for action,_ in calls]==['open']
     assert CANARY not in json.dumps(calls)
     page.locator('#preparation-fill-consent').check()
@@ -112,4 +113,21 @@ def test_resume_upload_requires_its_own_explicit_confirmation(preparation_ui):
     expect(page.locator('#preparation-native-status')).to_contain_text('网站是否实际保留附件尚未验证')
     expect(page.locator('#preparation-upload-approve')).to_be_disabled()
     assert len([action for action,_ in calls if action=='approve-resume'])==1
+    assert observed['errors']==[] and observed['external']==[]
+
+
+@pytest.mark.parametrize('width',[375,800])
+def test_private_confirmation_touch_targets_and_narrow_layout(preparation_ui,width):
+    page,observed=preparation_ui;page.set_viewport_size({'width':width,'height':900})
+    install(page,observed)
+    panel=page.locator('#preparation-native-consent');expect(panel).to_be_visible()
+    panel.scroll_into_view_if_needed()
+    bounds=panel.bounding_box();assert bounds['x']>=0 and bounds['x']+bounds['width']<=width
+    button=page.locator('#preparation-fill-approve').bounding_box();assert button['height']>=44
+    label=page.locator('#preparation-fill-choice').locator('..').bounding_box()
+    assert label['width']<=bounds['width'] and label['height']>=20
+    assert page.locator('#preparation-dialog').evaluate('(node)=>node.scrollWidth<=node.clientWidth')
+    if os.environ.get('JAE_UI_SCREENSHOT_DIR'):
+        directory=Path(os.environ['JAE_UI_SCREENSHOT_DIR']);directory.mkdir(parents=True,exist_ok=True)
+        page.screenshot(path=str(directory/f'preparation-native-{width}.png'))
     assert observed['errors']==[] and observed['external']==[]
