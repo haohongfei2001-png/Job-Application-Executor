@@ -8,7 +8,7 @@ import pytest
 from executor.adapters.generic_web import GenericWebAdapter
 from executor.application import ApplicationExecutor
 from executor.forms import FillPlan, FormObservation, FormObservationError
-from executor.models import (ApplicationStage, FieldResolution, ResolutionStatus,
+from executor.models import (ApplicationPlan, ApplicationStage, FieldResolution, ResolutionStatus,
                              WebField)
 from executor.autonomy.worker import outcome
 from executor.autonomy.queue import TaskQueue, TaskSpec
@@ -120,19 +120,21 @@ def test_form_observation_error_after_write_never_reaches_ready(tmp_path, monkey
 
     class FailsAfterWrite(GenericWebAdapter):
         observations = 0
+        written_value = None
 
         def observe_form(self):
             self.observations += 1
             if self.observations > 1:
+                type(self).written_value = self.page.locator("#name").input_value()
                 raise FormObservationError("synthetic redraw evaluate failed")
             return super().observe_form()
 
     monkeypatch.setattr("executor.application.adapter_for_url",
                         lambda url: FailsAfterWrite(url))
-    plan = runner.run(max_pages=1)
-    assert plan.stage == ApplicationStage.BLOCKED
-    assert plan.metadata["form_observation"] == "ERROR"
-    assert outcome(plan) == ("BLOCKED", "form_observation_unavailable")
+    from executor.browser import BrowserOwnershipError
+    with pytest.raises(BrowserOwnershipError, match="form structure outcome unknown"):
+        runner.run(max_pages=1)
+    assert FailsAfterWrite.written_value == "Synthetic Person"
 
 
 @pytest.mark.parametrize("blocker", [
@@ -572,3 +574,700 @@ def test_form_observation_and_fill_plan_do_not_expose_values_in_receipts():
         FillPlan.bind(observation, [FieldResolution(
             field_id="other", selector="#other", label="Other",
             status=ResolutionStatus.RESOLVED, value="x")])
+
+
+@pytest.mark.parametrize(("control", "event", "revert", "value"), [
+    ("<input id='first'>", "input", "node.value='';", "CANARY_PERSON"),
+    ("<input id='first'>", "input",
+     "requestAnimationFrame(()=>node.value='');", "CANARY_PERSON"),
+    ("<input id='first'>", "input",
+     "node.outerHTML='<input id=first>';", "CANARY_PERSON"),
+    ("<input id='first'>", "input",
+     "node.outerHTML='<textarea id=first>CANARY_PERSON</textarea>';", "CANARY_PERSON"),
+    ("<input id='first'>", "input",
+     "node.insertAdjacentHTML('afterend','<input id=first value=CANARY_PERSON>');", "CANARY_PERSON"),
+    ("<input id='first' type='checkbox'>", "click",
+     "node.checked=false;", True),
+    ("<input id='first' type='checkbox'>", "click",
+     "requestAnimationFrame(()=>node.checked=false);", True),
+    ("<select id='first'><option value=''>Choose</option>"
+     "<option value='yes'>Synthetic Choice</option></select>", "change",
+     "requestAnimationFrame(()=>node.selectedIndex=0);", "Synthetic Choice"),
+])
+def test_native_field_unknown_readback_stops_before_the_next_write(
+    tmp_path, control, event, revert, value
+):
+    from executor.browser import BrowserOwnershipError
+
+    html = tmp_path / "unknown-readback.html"
+    html.write_text("<!doctype html><body>" + control
+        + "<input id='next'><button id='submit' type='button'>Submit</button>"
+        + "<script>window.submits=0;window.nextWrites=0;"
+        + "document.querySelector('#submit').onclick=()=>window.submits++;"
+        + "document.querySelector('#next').oninput=()=>window.nextWrites++;"
+        + "document.querySelector('#first').addEventListener(" + json.dumps(event)
+        + ", event=>{const node=event.currentTarget;" + revert + "});</script>",
+        encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown") as caught:
+            adapter.apply_resolutions([
+                FieldResolution(field_id="first", selector="#first", label="First",
+                    status=ResolutionStatus.RESOLVED, value=value),
+                FieldResolution(field_id="next", selector="#next", label="Next",
+                    status=ResolutionStatus.RESOLVED, value="NEVER_WRITTEN"),
+            ])
+        assert "CANARY_PERSON" not in str(caught.value)
+        assert adapter.page.locator("#next").input_value() == ""
+        assert adapter.page.evaluate("window.nextWrites") == 0
+        assert adapter.page.evaluate("window.submits") == 0
+
+
+@pytest.mark.parametrize("rejection", ["selection", "option_value"])
+def test_select_expected_target_is_frozen_before_delayed_page_rejection(
+    tmp_path, monkeypatch, rejection
+):
+    from executor.browser import BrowserOwnershipError
+
+    html = tmp_path / "select-delayed-rejection.html"
+    html.write_text("""<!doctype html><body>
+      <select id='first'><option value=''>Choose</option>
+        <option value='yes'>Synthetic Choice</option></select>
+      <input id='next'><button id='submit' type='button'>Submit</button>
+      <script>window.nextWrites=0;window.submits=0;
+        document.querySelector('#next').oninput=()=>window.nextWrites++;
+        document.querySelector('#submit').onclick=()=>window.submits++;
+        window.rejectChoice=kind=>new Promise(resolve=>requestAnimationFrame(()=>{
+          const node=document.querySelector('#first');
+          if(kind==='selection') node.selectedIndex=0;
+          else node.options[1].value='rejected';
+          resolve();
+        }));
+      </script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        select = adapter._fill_select
+
+        def reject_after_primitive(element, value, *, prewrite=None):
+            target = select(element, value, prewrite=prewrite)
+            # Force the precise interleaving from the hosted browser failure:
+            # selection returns, then the page rejects it before outer readback.
+            adapter.page.evaluate("kind => window.rejectChoice(kind)", rejection)
+            return target
+
+        monkeypatch.setattr(adapter, "_fill_select", reject_after_primitive)
+        with pytest.raises(BrowserOwnershipError, match="field write outcome unknown"):
+            adapter.apply_resolutions([
+                FieldResolution(field_id="first", selector="#first", label="First",
+                    status=ResolutionStatus.RESOLVED, value="Synthetic Choice"),
+                FieldResolution(field_id="next", selector="#next", label="Next",
+                    status=ResolutionStatus.RESOLVED, value="NEVER_WRITTEN"),
+            ])
+        assert adapter.page.locator("#next").input_value() == ""
+        assert adapter.page.evaluate("window.nextWrites") == 0
+        assert adapter.page.evaluate("window.submits") == 0
+
+
+def test_retained_native_control_values_get_only_dom_readback_evidence(tmp_path):
+    html = tmp_path / "retained-controls.html"
+    html.write_text("""<!doctype html><body>
+        <input id='name'><input id='accepted' type='checkbox'>
+        <select id='city'><option value=''>Choose</option>
+        <option value='a'>Synthetic City</option></select>
+        <input id='month' type='month'>
+        <button id='submit' type='button' onclick='window.submits++'>Submit</button>
+        <script>window.submits=0;window.writes=0;
+        for(const node of document.querySelectorAll('input,select'))
+            node.addEventListener('input',()=>window.writes++);
+        </script>""", encoding="utf-8")
+    resolutions = [
+        FieldResolution(field_id=name, selector="#" + name, label=name,
+                        status=ResolutionStatus.RESOLVED, value=value)
+        for name, value in [("name", "CANARY_PERSON"), ("accepted", True),
+                            ("city", "Synthetic City"), ("month", "2026-09")]
+    ]
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions(resolutions)
+        assert len(actions) == 4
+        assert all(action["ok"] and action["observed"] == "DOM_READBACK"
+                   for action in actions)
+        assert "CANARY_PERSON" not in json.dumps(actions)
+        assert "server" not in json.dumps(actions)
+        writes = adapter.page.evaluate("window.writes")
+        second = adapter.apply_resolutions(resolutions)
+        assert all(action["observed"] == "DOM_READBACK" for action in second)
+        # Native text, month and checkbox no-op paths avoid duplicate effects.
+        # select_option may dispatch input for its already matching selection.
+        assert adapter.page.locator("#name").input_value() == "CANARY_PERSON"
+        assert adapter.page.locator("#month").input_value() == "2026-09"
+        assert adapter.page.evaluate("window.writes") <= writes + 1
+        assert adapter.page.evaluate("window.submits") == 0
+
+
+def test_reactive_replacement_retaining_the_same_control_contract_is_readable(tmp_path):
+    html = tmp_path / "retained-reactive.html"
+    html.write_text("""<!doctype html><body><input id='name'>
+      <script>document.querySelector('#name').oninput=event=>{
+        const replacement=event.currentTarget.cloneNode();
+        replacement.value=event.currentTarget.value;
+        event.currentTarget.replaceWith(replacement);
+      };</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="name", selector="#name", label="Name",
+            status=ResolutionStatus.RESOLVED, value="Synthetic")])
+        assert actions[0]["ok"] is True
+        assert actions[0]["observed"] == "DOM_READBACK"
+
+
+def test_worker_retains_unknown_attempt_when_native_field_reverts(tmp_path, monkeypatch):
+    from executor.autonomy.worker import Worker
+
+    runner, html = _runner(tmp_path, monkeypatch, """
+      <label>姓名<input id='name' name='full_name' required></label>
+      <input id='later' name='email'><button type='button'>Submit application</button>
+      <script>document.querySelector('#name').oninput=event=>event.currentTarget.value='';</script>
+    """)
+    queue = TaskQueue(tmp_path / "runtime")
+    task = queue.enqueue(TaskSpec(
+        company="Synthetic", role="Engineer", target_url=html.as_uri(),
+        profile_ref=str(runner.profile_path)))
+    worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+    assert worker.run_once() is True
+    blocked = queue.get(task["task_id"])
+    assert blocked["stage"] == "BLOCKED"
+    assert blocked["blocker"] == "browser_ownership_unknown"
+    assert queue.run_attempts(task["task_id"])[0]["outcome"] == "UNKNOWN_OUTCOME"
+    with pytest.raises(ValueError, match="read-only reconciliation"):
+        queue.resume(task["task_id"])
+
+
+def _collection_limit_page(case):
+    name = "<label>姓名<input id='name' name='full_name' required></label>"
+    submit = "<button type='button' onclick='window.submits++'>Submit application</button>"
+    counters = """<script>window.submits=0;window.writes=0;window.starts=0;
+      document.addEventListener('input',()=>window.writes++);</script>"""
+    if case == "field_overflow":
+        controls = name + "".join(f"<input id='extra-{i}'>" for i in range(350))
+    elif case == "hidden_prefix":
+        controls = "".join(
+            f"<input id='hidden-{i}' style='display:none'>" for i in range(350)) + name
+    elif case == "option_overflow":
+        controls = name + "<select id='choice'>" + "".join(
+            f"<option value='{i}'>PRIVATE_OPTION_CANARY_{i}</option>"
+            for i in range(201)) + "</select>"
+    else:
+        raise AssertionError("unknown fixture")
+    return controls + submit + counters
+
+
+@pytest.mark.parametrize("case", ["field_overflow", "hidden_prefix", "option_overflow"])
+def test_partial_form_collection_blocks_before_any_application_effect(
+        tmp_path, monkeypatch, case):
+    runner, html = _runner(tmp_path, monkeypatch, _collection_limit_page(case))
+
+    class NoPartialEffects(GenericWebAdapter):
+        def apply_resolutions(self, _resolutions):
+            pytest.fail("partial collection must block before field writes")
+
+        def start_application(self):
+            pytest.fail("partial collection must not infer an empty entry page")
+
+        def save_draft(self):
+            pytest.fail("partial collection must not trigger draft save")
+
+        def advance(self):
+            pytest.fail("partial collection must not trigger navigation")
+
+    with NoPartialEffects(html.as_uri()) as adapter:
+        observation = adapter.observe_form()
+        assert observation.collection_complete is False
+        assert observation.unsafe_structure
+        assert len(observation.fields) <= 350
+        assert len(adapter.page.locator("input,select").all()) == (
+            2 if case == "option_overflow" else 351)
+        if case == "hidden_prefix":
+            assert observation.fields == ()
+            assert adapter.page.locator("#name").is_visible()
+        if case == "option_overflow":
+            assert adapter.page.locator("#choice option").count() == 201
+        summary = json.dumps(observation.safe_summary())
+        assert "PRIVATE_OPTION_CANARY" not in summary
+        with pytest.raises(ValueError, match="supported unique"):
+            FillPlan.bind(observation, [])
+        with pytest.raises(FormObservationError, match="collection limit"):
+            adapter.discover_fields()
+        assert adapter.page.evaluate("[window.writes,window.submits,window.starts]") == [0, 0, 0]
+
+    monkeypatch.setattr("executor.application.adapter_for_url",
+                        lambda url: NoPartialEffects(url))
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "form structure unsupported or incomplete"
+    assert "form_collection_limit_exceeded" in plan.metadata["capability_limitations"]
+    assert plan.metadata["form_observation"]["collection_complete"] is False
+    assert plan.fields == []
+
+
+def test_collection_at_exact_limits_preserves_full_snapshot_and_dom_readback(tmp_path):
+    html = tmp_path / "at-limits.html"
+    options = "".join(
+        f"<option value='{i}'>Synthetic Option {i}</option>" for i in range(200))
+    controls = "".join(f"<input id='extra-{i}'>" for i in range(349))
+    html.write_text("<!doctype html><body>" + controls
+        + "<select id='choice'>" + options + "</select>"
+        + "<script>window.writes=0;document.addEventListener('input',()=>window.writes++);</script>",
+        encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        observed = adapter.observe_form()
+        assert observed.collection_complete is True
+        assert len(observed.fields) == 350
+        choice = next(field for field in observed.fields if field.selector == "#choice")
+        assert len(choice.options) == 200
+        assert choice.options[-1] == "Synthetic Option 199"
+        resolutions = [FieldResolution(
+            field_id="choice", selector="#choice", label="choice",
+            status=ResolutionStatus.RESOLVED, value="Synthetic Option 199")]
+        assert FillPlan.bind(observed, resolutions).actions == tuple(resolutions)
+        actions = adapter.apply_resolutions(resolutions)
+        assert actions[0]["ok"] is True
+        assert actions[0]["observed"] == "DOM_READBACK"
+        assert adapter.page.locator("#choice").input_value() == "199"
+        assert adapter.page.evaluate("window.writes") == 1
+
+
+def test_redraw_exceeding_collection_limit_stops_remaining_writes(tmp_path):
+    html = tmp_path / "collection-redraw.html"
+    html.write_text("""<!doctype html><body><input id='first'><input id='later'>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.laterWrites=0;window.submits=0;
+      document.querySelector('#later').addEventListener('input',()=>window.laterWrites++);
+      document.querySelector('#first').oninput=()=>{
+        for(let i=0;i<349;i++){
+          const node=document.createElement('input');node.id='new-'+i;
+          document.body.appendChild(node);
+        }
+      };</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        before = adapter.observe_form()
+        assert before.collection_complete is True
+        resolutions = [
+            FieldResolution(field_id=key, selector="#" + key, label=key,
+                            status=ResolutionStatus.RESOLVED, value=value)
+            for key, value in [("first", "Synthetic"), ("later", "NEVER_WRITTEN")]
+        ]
+        from executor.browser import BrowserOwnershipError
+
+        evidence = []
+        adapter.field_action_begin = lambda field_id, selector, **kwargs: (
+            evidence.append((field_id, "INTENT_RECORDED")) or field_id)
+        adapter.field_action_finish = lambda action_id, status: evidence.append(
+            (action_id, status))
+        adapter.field_readbacks_invalidate = lambda: evidence.append(
+            ("batch", "READBACKS_REVOKED"))
+        with pytest.raises(BrowserOwnershipError, match="form structure outcome unknown"):
+            adapter.apply_resolutions(resolutions)
+        # The first real write/readback happened before the incomplete redraw;
+        # its evidence is revoked rather than returning a partially proven batch.
+        assert evidence == [("first", "INTENT_RECORDED"),
+                            ("first", "DOM_READBACK_UNVERIFIED"),
+                            ("batch", "READBACKS_REVOKED")]
+        assert adapter.page.locator("#first").input_value() == "Synthetic"
+        assert adapter.page.locator("input").count() == 351
+        assert adapter.page.locator("#later").input_value() == ""
+        assert adapter.page.evaluate("[window.laterWrites,window.submits]") == [0, 0]
+        after = adapter.observe_form()
+        assert after.collection_complete is False
+        assert after.structure_digest != before.structure_digest
+        plan = ApplicationPlan(
+            execution_id="collection-redraw", target_url=html.as_uri(), site_id="generic_web")
+        assert adapter.validate(plan).ok is False
+        with pytest.raises(FormObservationError, match="collection limit"):
+            adapter.apply_resolutions(resolutions[1:])
+
+
+def test_partial_observation_cannot_inherit_complete_observation_digest():
+    field = WebField(field_id="name", selector="#name", label="PRIVATE_LABEL_CANARY",
+                     input_type="text", current_value="PRIVATE_VALUE_CANARY")
+    complete = FormObservation.from_fields("https://synthetic.example.test", "epoch", [field])
+    partial = FormObservation.from_fields(
+        "https://synthetic.example.test", "epoch", [field], collection_complete=False)
+    assert complete.structure_digest != partial.structure_digest
+    assert complete.safe_summary()["collection_complete"] is True
+    assert partial.safe_summary()["collection_complete"] is False
+    assert partial.unsafe_structure
+    summary = json.dumps(partial.safe_summary())
+    assert "PRIVATE_LABEL_CANARY" not in summary
+    assert "PRIVATE_VALUE_CANARY" not in summary
+
+
+@pytest.mark.parametrize("restriction", ["option", "optgroup", "aria"])
+def test_disabled_native_choice_never_dispatches_selection(tmp_path, restriction):
+    option = "<option id='blocked' value='city'>Synthetic City</option>"
+    if restriction == "option":
+        option = option.replace("id='blocked'", "id='blocked' disabled")
+    elif restriction == "optgroup":
+        option = "<optgroup label='Unavailable' disabled>" + option + "</optgroup>"
+    else:
+        option = option.replace("id='blocked'", "id='blocked' aria-disabled='true'")
+    html = tmp_path / "unavailable-native.html"
+    html.write_text("<!doctype html><body><label>City<select id='city'>"
+        "<option value=''>Choose</option>" + option + "</select></label>"
+        "<script>window.choices=0;document.querySelector('#city').onchange="
+        "()=>window.choices++;</script>", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert actions == [{"field_id": "city", "ok": False,
+                            "reason": "no_matching_select_option"}]
+        assert adapter.page.locator("#city").input_value() == ""
+        assert adapter.page.evaluate("window.choices") == 0
+
+
+def test_native_choice_disabled_at_ownership_boundary_is_rechecked(tmp_path):
+    html = tmp_path / "native-choice-redraw.html"
+    html.write_text("""<!doctype html><body><select id='city'>
+      <option value=''>Choose</option><option id='target' value='city'>Synthetic City</option>
+      </select><script>window.choices=0;document.querySelector('#city').onchange=
+      ()=>window.choices++;</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        choice = adapter.page.locator("#city")
+        assert adapter.page.locator("#target").is_enabled()
+        adapter.mutation_guard = lambda: adapter.page.locator("#target").evaluate(
+            "e=>e.disabled=true")
+        assert adapter._fill_select(choice, "Synthetic City") is None
+        assert choice.input_value() == ""
+        assert adapter.page.evaluate("window.choices") == 0
+
+
+@pytest.mark.parametrize("restriction", ["option", "listbox", "fieldset"])
+def test_disabled_aria_choice_never_dispatches_option_click(tmp_path, restriction):
+    option_attr = "aria-disabled='true'" if restriction == "option" else ""
+    listbox_attr = "aria-disabled='true'" if restriction == "listbox" else ""
+    option = ("<button type='button' role='option' id='target' " + option_attr
+        + " onclick=\"window.choices++;document.querySelector('#city').innerText="
+          "this.innerText\">Synthetic City</button>")
+    if restriction == "fieldset":
+        option = "<fieldset disabled>" + option + "</fieldset>"
+    html = tmp_path / "unavailable-aria.html"
+    html.write_text("<!doctype html><body><div id='city' role='combobox' "
+        "aria-controls='cities' tabindex='0' onclick=\"document.querySelector('#cities').hidden=false\">Choose</div>"
+        "<div id='cities' role='listbox' hidden " + listbox_attr + ">" + option
+        + "</div><script>window.choices=0;</script>", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert actions == [{"field_id": "city", "ok": False,
+                            "reason": "combobox_exact_choice_unavailable"}]
+        assert adapter.page.locator("#city").inner_text() == "Choose"
+        assert adapter.page.evaluate("window.choices") == 0
+
+
+def test_aria_choice_disabled_after_open_never_dispatches_selection(tmp_path):
+    html = tmp_path / "aria-choice-redraw.html"
+    html.write_text("""<!doctype html><body>
+      <div id='city' role='combobox' aria-controls='cities' tabindex='0'
+           onclick="document.querySelector('#cities').hidden=false">Choose</div>
+      <div id='cities' role='listbox' hidden>
+        <div id='target' role='option' onclick="window.choices++;
+          document.querySelector('#city').innerText=this.innerText">Synthetic City</div>
+      </div><script>window.choices=0;</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        def redraw():
+            if adapter.page.locator("#cities").is_visible():
+                adapter.page.locator("#target").evaluate(
+                    "e=>e.setAttribute('aria-disabled','true')")
+        adapter.mutation_guard = redraw
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert actions == [{"field_id": "city", "ok": False,
+                            "reason": "combobox_exact_choice_unavailable"}]
+        assert adapter.page.locator("#city").inner_text() == "Choose"
+        assert adapter.page.evaluate("window.choices") == 0
+
+
+@pytest.mark.parametrize("component", ["native", "aria"])
+def test_disabled_duplicate_label_does_not_disambiguate_a_choice(tmp_path, component):
+    if component == "native":
+        body = """<select id='city'><option value=''>Choose</option>
+          <option value='first' disabled>Synthetic City</option>
+          <option value='second'>Synthetic City</option></select>"""
+        reason = "no_matching_select_option"
+    else:
+        body = """<div id='city' role='combobox' aria-controls='cities'
+          tabindex='0'>Choose</div><div id='cities' role='listbox'>
+          <div role='option' aria-disabled='true'>Synthetic City</div>
+          <div role='option' onclick="window.choices++;
+            document.querySelector('#city').innerText=this.innerText">Synthetic City</div></div>"""
+        reason = "combobox_exact_choice_unavailable"
+    html = tmp_path / "ambiguous-disabled.html"
+    html.write_text("<!doctype html><body>" + body
+        + "<script>window.choices=0;document.addEventListener('change',()=>window.choices++);</script>",
+        encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        actions = adapter.apply_resolutions([FieldResolution(
+            field_id="city", selector="#city", label="City",
+            status=ResolutionStatus.RESOLVED, value="Synthetic City")])
+        assert actions == [{"field_id": "city", "ok": False, "reason": reason}]
+        if component == "native":
+            assert adapter.page.locator("#city").input_value() == ""
+        else:
+            assert adapter.page.locator("#city").inner_text() == "Choose"
+        assert adapter.page.evaluate("window.choices") == 0
+
+
+@pytest.mark.parametrize("collision", ["selector", "field_id", "mixed_status", "empty_selector", "empty_id"])
+def test_fill_plan_refuses_ambiguous_complete_action_identity_without_private_error(collision):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    observed = FormObservation.from_fields("https://synthetic.example.test/form", "epoch", [
+        WebField(field_id="first", selector="#first", current_value=full),
+        WebField(field_id="later", selector="#later", current_value=full + "PRIVATE_SECOND"),
+    ])
+    actions = [
+        FieldResolution(field_id="first", selector="#first", label="PRIVATE_LABEL",
+                        status=ResolutionStatus.RESOLVED, value=full),
+        FieldResolution(field_id="later", selector="#later", label="PRIVATE_LABEL",
+                        status=ResolutionStatus.RESOLVED, value=full + "PRIVATE_SECOND"),
+    ]
+    if collision in {"selector", "mixed_status"}:
+        actions[1].selector = actions[0].selector
+    if collision == "field_id":
+        actions[1].field_id = actions[0].field_id
+    if collision == "mixed_status":
+        actions[1].status = ResolutionStatus.UNRESOLVED
+    if collision == "empty_selector":
+        actions[1].selector = ""
+    if collision == "empty_id":
+        actions[1].field_id = ""
+    with pytest.raises(ValueError) as refused:
+        FillPlan.bind(observed, actions)
+    assert str(refused.value) == "fill plan requires unique field identity"
+    assert full == actions[0].value
+    assert actions[1].value == full + "PRIVATE_SECOND"
+    assert "PRIVATE_" not in str(refused.value)
+    assert "不要删除" not in str(refused.value)
+
+
+@pytest.mark.parametrize("collision", ["selector", "field_id"])
+def test_fill_plan_refuses_duplicate_observed_identity_even_for_one_selected_action(collision):
+    fields = [WebField(field_id="first", selector="#first"),
+              WebField(field_id="later", selector="#later")]
+    setattr(fields[1], collision, getattr(fields[0], collision))
+    observed = FormObservation.from_fields("https://synthetic.example.test/form", "epoch", fields)
+    action = FieldResolution(field_id="first", selector="#first", label="Name",
+                             status=ResolutionStatus.RESOLVED, value="Synthetic")
+    with pytest.raises(ValueError, match="^fill plan requires unique field identity$"):
+        FillPlan.bind(observed, [action])
+
+
+@pytest.mark.parametrize("collision", ["selector", "field_id", "mixed_status"])
+def test_actual_browser_duplicate_fill_batch_dispatches_no_write_or_journal_intent(tmp_path, collision):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    html = tmp_path / "duplicate-plan.html"
+    html.write_text("""<!doctype html><body>
+      <label>First<textarea id='first'></textarea></label>
+      <label>Later<textarea id='later'></textarea></label>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.writes=0;window.submits=0;
+        document.addEventListener('input',()=>window.writes++);
+        document.addEventListener('change',()=>window.writes++);</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        fields = adapter.discover_fields()
+        assert len(fields) == 2
+        actions = [FieldResolution(field_id=field.field_id, selector=field.selector, label=field.label,
+                    status=ResolutionStatus.RESOLVED, value=full + "\nPRIVATE_" + str(i))
+                   for i, field in enumerate(fields)]
+        if collision in {"selector", "mixed_status"}:
+            actions[1].selector = actions[0].selector
+        else:
+            actions[1].field_id = actions[0].field_id
+        if collision == "mixed_status":
+            actions[1].status = ResolutionStatus.UNRESOLVED
+        journal = []
+        adapter.field_action_begin = lambda *args, **kwargs: journal.append("UNEXPECTED_INTENT")
+        result = adapter.apply_resolutions(actions)
+        assert result == [{"field_id": item.field_id, "ok": False,
+                           "reason": "ambiguous_fill_plan_identity"} for item in actions]
+        assert all(len(item.value) > len(full) for item in actions)
+        assert adapter.page.locator("#first").input_value() == ""
+        assert adapter.page.locator("#later").input_value() == ""
+        assert adapter.page.evaluate("window.writes") == 0
+        assert adapter.page.evaluate("window.submits") == 0
+        assert journal == []
+        assert "PRIVATE_" not in json.dumps(result)
+        assert "不要删除" not in json.dumps(result)
+
+
+def test_actual_browser_unique_full_fill_plan_preserves_both_complete_control_values(tmp_path):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    html = tmp_path / "unique-plan.html"
+    html.write_text("""<!doctype html><body>
+      <textarea id='first' aria-label='First'></textarea>
+      <textarea id='later' aria-label='Later'></textarea>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.submits=0;</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        observed = adapter.observe_form()
+        values = [full + "\nPRIVATE_FIRST", full + "\nPRIVATE_SECOND"]
+        actions = [FieldResolution(field_id=field.field_id, selector=field.selector, label=field.label,
+                    status=ResolutionStatus.RESOLVED, value=values[i])
+                   for i, field in enumerate(observed.fields)]
+        assert FillPlan.bind(observed, actions).actions == tuple(actions)
+        results = adapter.apply_resolutions(actions)
+        assert len(results) == 2
+        assert all(item["ok"] is True and item["observed"] == "DOM_READBACK" for item in results)
+        assert adapter.page.locator("#first").input_value() == values[0]
+        assert adapter.page.locator("#later").input_value() == values[1]
+        assert adapter.page.evaluate("window.submits") == 0
+        assert "PRIVATE_" not in json.dumps(results)
+
+
+@pytest.mark.parametrize("reactive", [False, True])
+def test_real_executor_ambiguous_resolution_batch_blocks_before_initial_or_reactive_child_writes(
+        tmp_path, monkeypatch, reactive):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    body = "<label>First<textarea id='first'></textarea></label>"
+    if not reactive:
+        body += "<label>Later<textarea id='later'></textarea></label>"
+    body += "<button type='button' onclick='window.submits++'>Submit application</button>"
+    body += """<script>window.writes=0;window.childWrites=0;window.submits=0;
+      document.addEventListener('input',event=>{
+        window.writes++;if(event.target.id!=='first')window.childWrites++;
+      });</script>"""
+    if reactive:
+        body += """<script>document.querySelector('#first').addEventListener('input',()=>{
+          if(document.querySelector('#later'))return;
+          for(const id of ['later','last']){
+            const label=document.createElement('label');label.textContent=id;
+            const field=document.createElement('textarea');field.id=id;
+            label.append(field);document.body.append(label);
+          }
+        });</script>"""
+    runner, html = _runner(tmp_path, monkeypatch, body)
+    observed_exit = {}
+    applied_batches = []
+
+    class ObservedExit(GenericWebAdapter):
+        def apply_resolutions(self, resolutions):
+            # Observe admission without replacing any native write or readback.
+            batch = list(resolutions)
+            applied_batches.append([item.selector for item in batch])
+            return super().apply_resolutions(batch)
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            observed_exit.update(self.page.evaluate("""() => ({
+              writes:window.writes,childWrites:window.childWrites,submits:window.submits,
+              values:[...document.querySelectorAll('textarea')].map(node=>node.value)
+            })"""))
+            return super().__exit__(exc_type, exc_value, traceback)
+
+    monkeypatch.setattr("executor.application.adapter_for_url", lambda url: ObservedExit(url))
+
+    def resolve(field):
+        collision = not reactive or field.selector != "#first"
+        return FieldResolution(field_id="duplicate" if collision else field.field_id,
+                               selector=field.selector, label=field.label,
+                               status=ResolutionStatus.RESOLVED, value=full)
+    monkeypatch.setattr(runner.resolver, "resolve", resolve)
+    plan = runner.run(max_pages=1)
+    assert plan.stage == ApplicationStage.BLOCKED
+    assert plan.metadata["block_reason"] == "fill plan identity unverified"
+    assert plan.metadata["capability_limitations"] == ["ambiguous_fill_plan_identity"]
+    assert observed_exit["submits"] == 0
+    assert observed_exit["childWrites"] == 0
+    if reactive:
+        assert applied_batches == [["#first"]]
+        # The complete 1,000-line native textarea insertion emits 2,000 input
+        # events. Admission is one parent batch; no child batch may execute.
+        assert observed_exit["writes"] == 2000
+        assert observed_exit["values"] == [full, "", ""]
+    else:
+        assert applied_batches == []
+        assert observed_exit["writes"] == 0
+        assert observed_exit["values"] == ["", ""]
+    assert plan.submit_authorized is False
+    assert "PRIVATE_" not in json.dumps(plan.metadata)
+    assert "不要删除" not in json.dumps(plan.metadata)
+
+
+@pytest.mark.parametrize("gap", ["observed_selector", "observed_field_id", "missing_target", "missing_unresolved"])
+def test_direct_fill_admits_complete_observation_before_any_partial_native_write(tmp_path, monkeypatch, gap):
+    full = "".join(f"第{i}段：完整值🧭，不要删除否定词。\n" for i in range(1000))
+    retained = [full + "\nPRIVATE_RETAINED_FIRST", full + "\nPRIVATE_RETAINED_SECOND"]
+    intended = [full + "\nPRIVATE_INTENDED_FIRST", full + "\nPRIVATE_INTENDED_SECOND"]
+    html = tmp_path / "complete-observation.html"
+    html.write_text("""<!doctype html><body>
+      <label>First<textarea id='first'></textarea></label>
+      <label>Later<textarea id='later'></textarea></label>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.writes=0;window.submits=0;
+        document.addEventListener('input',()=>window.writes++);
+        document.addEventListener('change',()=>window.writes++);</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.page.evaluate("""values => {
+          document.querySelector('#first').value=values[0];
+          document.querySelector('#later').value=values[1];
+        }""", retained)
+        fields = adapter.discover_fields()
+        assert len(fields) == 2
+        resolutions = [FieldResolution(field_id=field.field_id, selector=field.selector, label=field.label,
+            status=ResolutionStatus.RESOLVED, value=intended[i]) for i, field in enumerate(fields)]
+        if gap.startswith("observed_"):
+            attribute = gap.removeprefix("observed_")
+            setattr(fields[1], attribute, getattr(fields[0], attribute))
+            monkeypatch.setattr(adapter, "discover_fields", lambda: fields)
+            reason = "ambiguous_fill_plan_identity"
+        else:
+            resolutions[1].selector = "#missing-current-target"
+            if gap == "missing_unresolved":
+                resolutions[1].status = ResolutionStatus.UNRESOLVED
+            reason = "unobserved_fill_plan_field"
+        journal = []
+        adapter.field_action_begin = lambda *args, **kwargs: journal.append("UNEXPECTED_INTENT")
+        result = adapter.apply_resolutions(resolutions)
+        assert result == [{"field_id": item.field_id, "ok": False, "reason": reason}
+                          for item in resolutions]
+        assert [item.value for item in resolutions] == intended
+        assert adapter.page.locator("#first").input_value() == retained[0]
+        assert adapter.page.locator("#later").input_value() == retained[1]
+        assert adapter.page.evaluate("window.writes") == 0
+        assert adapter.page.evaluate("window.submits") == 0
+        assert journal == []
+        assert "PRIVATE_" not in json.dumps(result)
+        assert "不要删除" not in json.dumps(result)
+
+
+def test_repeated_native_target_refuses_whole_batch_with_legacy_code_and_full_values(tmp_path):
+    full = "".join(f"第{i}段：完整保留🧭，不要删除否定词。\n" for i in range(1000))
+    retained = [full + "\nPRIVATE_FIRST", full + "\nPRIVATE_REPEAT_A", full + "\nPRIVATE_REPEAT_B"]
+    html = tmp_path / "native-repeat.html"
+    html.write_text("""<!doctype html><body>
+      <label>First<textarea id='first'></textarea></label>
+      <label>Repeated<textarea name='repeat'></textarea></label>
+      <label>Repeated<textarea name='repeat'></textarea></label>
+      <button type='button' onclick='window.submits++'>Submit application</button>
+      <script>window.writes=0;window.submits=0;
+        document.addEventListener('input',()=>window.writes++);
+        document.addEventListener('change',()=>window.writes++);</script>""", encoding="utf-8")
+    with GenericWebAdapter(html.as_uri()) as adapter:
+        adapter.page.locator("textarea").evaluate_all(
+            "(elements,values)=>elements.forEach((e,i)=>e.value=values[i])", retained)
+        fields = adapter.discover_fields()
+        assert len(fields) == 3
+        assert fields[1].selector == fields[2].selector
+        resolutions = [FieldResolution(field_id=field.field_id, selector=field.selector,
+            label=field.label, status=ResolutionStatus.RESOLVED, value=full + "\nPRIVATE_INTENDED")
+            for field in fields[:2]]
+        intents = []
+        adapter.field_action_begin = lambda *args, **kwargs: intents.append("UNEXPECTED_INTENT")
+        adapter.field_action_finish = lambda *args, **kwargs: intents.append("UNEXPECTED_FINISH")
+        result = adapter.apply_resolutions(resolutions)
+        assert result == [{"field_id": item.field_id, "ok": False,
+                          "reason": "ambiguous_or_missing_locator"} for item in resolutions]
+        assert adapter.page.locator("textarea").evaluate_all(
+            "elements=>elements.map(e=>e.value)") == retained
+        assert adapter.page.evaluate("[window.writes,window.submits]") == [0, 0]
+        assert intents == []
+        assert "PRIVATE_" not in json.dumps(result)
+        assert "不要删除" not in json.dumps(result)

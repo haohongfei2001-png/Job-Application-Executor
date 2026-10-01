@@ -1170,3 +1170,154 @@ def test_model_selected_oppo_resume_also_retargets_landing(tmp_path, monkeypatch
     assert q.get(oppo["task_id"])["spec"]["target_url"] == candidate.job_url
     assert q.get(oppo["task_id"])["stage"] == "DISCOVERED"
     assert q.get(other["task_id"])["stage"] == "NEEDS_USER_ACTION"
+
+
+def _unverified_local_binding_request(role="Original Role"):
+    from executor.discovery.core import DiscoveryRequest, DiscoveryResult
+    request = DiscoveryRequest(company="Synthetic Co", role=role,
+                               source_url="https://careers.example.test/shared-form")
+    discovery = DiscoveryResult("UNSUPPORTED", (), None, "unknown", "no_official_site_contract")
+    return request, discovery
+
+
+@pytest.mark.parametrize("changed", ["role", "profile", "company"])
+def test_local_form_duplicate_preserves_original_binding_and_reports_difference(tmp_path, changed):
+    from dataclasses import replace
+    q, worker, provider, manager = controller(tmp_path, ManagerTurn(reply="Synthetic unused provider reply", decisions=[]))
+    request, discovery = _unverified_local_binding_request()
+    first = manager.commit_local_form(request, discovery)
+    assert first["task_binding"] == "requested"
+    original = q.get(first["task_id"])
+    events = q.events()
+    if changed == "profile":
+        manager.settings["profile_path"] = str(tmp_path / "PRIVATE_DIFFERENT_PROFILE.json")
+    else:
+        request = replace(request, **{changed: "PRIVATE_DIFFERENT_" + changed})
+    second = manager.commit_local_form(request, discovery)
+    assert second["task_id"] == first["task_id"]
+    assert second["task_binding"] == "existing_different"
+    assert q.get(first["task_id"]) == original
+    assert q.events() == events and len(q.tasks()) == 1
+    assert original["spec"]["live_authorized"] is False
+    assert original["spec"]["target_verified"] is False
+    assert provider.seen is None
+
+
+def test_local_form_exact_repeat_is_idempotent_and_keeps_revision(tmp_path):
+    q, _, provider, manager = controller(tmp_path, ManagerTurn(reply="Synthetic unused provider reply", decisions=[]))
+    request, discovery = _unverified_local_binding_request()
+    first = manager.commit_local_form(request, discovery)
+    before, events = q.get(first["task_id"]), q.events()
+    second = manager.commit_local_form(request, discovery)
+    assert second == first
+    assert second["task_binding"] == "requested"
+    assert q.get(first["task_id"]) == before and q.events() == events
+    assert len(q.tasks()) == 1 and provider.seen is None
+
+
+@pytest.mark.parametrize("same_spec", [False, True])
+def test_concurrent_local_forms_keep_one_original_task_and_truthful_binding(tmp_path, same_spec):
+    from concurrent.futures import ThreadPoolExecutor
+    q, _, provider, manager = controller(tmp_path, ManagerTurn(reply="Synthetic unused provider reply", decisions=[]))
+    barrier = threading.Barrier(4)
+    def create(index):
+        request, discovery = _unverified_local_binding_request(
+            "Same Role" if same_spec else "Synthetic Role " + str(index))
+        barrier.wait(timeout=5)
+        return manager.commit_local_form(request, discovery)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(create, range(4)))
+    assert len({result["task_id"] for result in results}) == 1
+    task = q.tasks()[0]
+    assert len(q.tasks()) == 1
+    assert task["revision"] == results[0]["revision"]
+    assert task["spec"]["live_authorized"] is False
+    if same_spec:
+        assert {result["task_binding"] for result in results} == {"requested"}
+    else:
+        assert [result["task_binding"] for result in results].count("requested") == 1
+        assert [result["task_binding"] for result in results].count("existing_different") == 3
+    assert provider.seen is None
+
+
+def test_authenticated_local_form_reply_exposes_only_binding_enum_not_private_spec(tmp_path, monkeypatch):
+    import http.client
+    q, worker, _, manager = controller(tmp_path, ManagerTurn(reply="Synthetic unused provider reply", decisions=[]))
+    request, discovery = _unverified_local_binding_request()
+    first = manager.commit_local_form(request, discovery)
+    before, events = q.get(first["task_id"]), q.events()
+    manager.settings["profile_path"] = str(tmp_path / "PRIVATE_CHANGED_PROFILE.json")
+    monkeypatch.setattr(manager, "prepare_local_form", lambda *a, **kw: (request, discovery))
+    supervisor = Supervisor(q, worker=worker, manager=manager, token="x" * 40)
+    server = create_server(supervisor, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    session = supervisor.consume_ui_ticket(supervisor.issue_ui_ticket())
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    try:
+        connection.request("POST", "/ui/api/tasks", body=json.dumps({"company":"Synthetic Co", "role":"Original Role"}),
+            headers={"Content-Type":"application/json", "Cookie":"application_executor_session="+session})
+        response = connection.getresponse()
+        raw = response.read().decode()
+        assert response.status == 200
+        result = json.loads(raw)
+        assert set(result) == {"task_id", "revision", "task_binding", "discovery"}
+        assert result["task_binding"] == "existing_different" and result["task_id"] == first["task_id"]
+        assert "PRIVATE_CHANGED_PROFILE" not in raw and str(tmp_path) not in raw and "profile_ref" not in raw
+        assert q.get(first["task_id"]) == before and q.events() == events
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_chat_discovery_cannot_certify_an_old_unverified_duplicate_binding(tmp_path):
+    from executor.discovery.core import DiscoveryRequest, DiscoveryResult, VerifiedJobTarget
+    q, _, provider, manager = controller(tmp_path, ManagerTurn(reply="Synthetic unused provider reply", decisions=[]))
+    url = "https://careers.example.test/shared-form?jobId=role-1"
+    original = q.enqueue(TaskSpec(company="Synthetic Co", role="Original Role", target_url=url,
+        tenant="synthetic-campus", job_id="role-1", campaign="campus",
+        profile_ref=manager.settings["profile_path"], live_authorized=False, target_verified=False))
+    before, events = q.get(original["task_id"]), q.events()
+    target = VerifiedJobTarget(employer="Synthetic Co", tenant="synthetic-campus", job_id="role-1",
+        campaign="campus", title="New Public Title", location="Synthetic City", employment_type="campus",
+        detail_url=url, platform="fixture", source_chain=("https://careers.example.test/",),
+        allowed_navigation_hosts=("careers.example.test",), evidence_digest="a" * 64)
+    result = manager.finish_chat_discovery((DiscoveryRequest("Synthetic Co", "New Public Title"),
+        DiscoveryResult("VERIFIED", (), target, "complete")))
+    assert result["actions"][0]["task_id"] == original["task_id"]
+    assert result["actions"][0]["task_binding"] == "existing_different"
+    assert result["actions"][0]["resolved_target"] is False
+    assert "保留原岗位、资料和授权" in result["reply"]
+    assert "已找到并核验唯一岗位" not in result["reply"]
+    assert q.get(original["task_id"]) == before and q.events() == events
+    assert provider.seen is None
+
+
+def test_unverified_local_form_retains_public_qualifiers_without_overwriting_duplicate(tmp_path):
+    from dataclasses import replace
+    q, _, _, manager = controller(tmp_path, ManagerTurn(reply="Synthetic unused provider reply", decisions=[]))
+    request, discovery = _unverified_local_binding_request()
+    request = replace(request, location="Wuhan", campaign="Campus 2027", employment_type="Graduate")
+    first = manager.commit_local_form(request, discovery)
+    original = q.get(first["task_id"])
+    assert original["spec"]["location"] == "Wuhan"
+    assert original["spec"]["campaign"] == "Campus 2027"
+    assert original["spec"]["employment_type"] == "Graduate"
+    assert original["spec"]["target_verified"] is False
+    assert original["spec"]["live_authorized"] is False
+    second = manager.commit_local_form(replace(request, location="Different City"), discovery)
+    assert second["task_id"] == first["task_id"] and second["task_binding"] == "existing_different"
+    assert q.get(first["task_id"]) == original
+
+
+def test_direct_unsupported_chat_discovery_does_not_claim_target_verification(tmp_path):
+    q, _, provider, manager = controller(tmp_path, ManagerTurn(reply="Synthetic unused provider reply", decisions=[]))
+    prepared = _unverified_local_binding_request()
+    result = manager.finish_chat_discovery(prepared)
+    assert result["actions"][0]["resolved_target"] is False
+    assert result["actions"][0]["task_binding"] == "requested"
+    assert "待核验任务已保留" in result["reply"] and "不会自动写入" in result["reply"]
+    assert "已找到并核验" not in result["reply"]
+    assert q.tasks()[0]["spec"]["live_authorized"] is False and provider.seen is None

@@ -21,7 +21,8 @@ def collect_live_preflight(
     profile_loadable: bool | None = None,
 ) -> dict[str, Any]:
     """Read-only readiness check for a real local application E2E run."""
-    settings = settings or load_settings()
+    if settings is None:
+        settings = load_settings()
     mode = (browser_mode_value or browser.browser_mode()).strip().casefold()
     live_mode = mode not in {"test", "isolated", "headless"}
 

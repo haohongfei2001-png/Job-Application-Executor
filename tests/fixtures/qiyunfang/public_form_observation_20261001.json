@@ -1,0 +1,1915 @@
+{
+  "source_url": "https://www.qiyunfang.com/h-col-124.html",
+  "root_selector": "#popupLevelWrap #module1567 .m_siteform .form_container",
+  "root_count": 1,
+  "source_script_urls": [
+    "https://1-ss-sys.huaweicloudsite.cn/js/comm/SWFUpload2v/jquery.uploadify.min.js?v=202307101206",
+    "https://1-ss-sys.huaweicloudsite.cn/js/dist/libs/city2.min.js?v=202407171154",
+    "//zz.bdstatic.com/linksubmit/push.js",
+    "https://1-ss-sys.huaweicloudsite.cn/js/dist/svg.min.js?v=202506121459",
+    "https://1-ss-sys.huaweicloudsite.cn/js/dist/libs/imageEffect.min.js?v=202506121459",
+    "https://1-ss-sys.huaweicloudsite.cn/js/dist/libs/photoSlide.min.js?v=202407171154",
+    "//1-ss-sys.huaweicloudsite.cn/js/comm/vue/vue-2.7.14.min.js?v=202310161432",
+    "//1-ss-sys.huaweicloudsite.cn/js/dist/libs/comMethods.min.js?v=202407171154",
+    "//1-ss-sys.huaweicloudsite.cn/js/dist/libs/jzUtils.min.js?v=202506121459",
+    "//1-ss-sys.huaweicloudsite.cn/js/comm/polyfill.min.js?v=202307101206",
+    "//jzfe-sys.huaweicloudsite.cn/dist/jz/request/jzRequest.min.js?v=202506121719",
+    "//jzfe-sys.huaweicloudsite.cn/dist/jz/utils/jzUtils.min.js?v=202506121754",
+    "//jzfe-sys.huaweicloudsite.cn/dist/jz/biz-shared/bizShared.min.js?v=202608251625",
+    "//1-ss-sys.huaweicloudsite.cn/js/comm/jquery/jquery-core.min.js?v=202307101206",
+    "//1-ss-sys.huaweicloudsite.cn/js/comm/jquery/jquery-mousewheel.min.js?v=202307101206",
+    "//1-ss-sys.huaweicloudsite.cn/js/dist/frontend.min.js?v=202506121459",
+    "//1-ss-sys.huaweicloudsite.cn/js/comm/jquery/jquery-ui-core.min.js?v=202307101206",
+    "//1-ss-sys.huaweicloudsite.cn/js/dist/partitionSite.min.js?v=202511071120",
+    "//jzfe-sys.huaweicloudsite.cn/dist/jz/locale/2052.min.js?v=202607211512",
+    "//1-ss-sys.huaweicloudsite.cn/js/dist/site.min.js?v=202506121459",
+    "//1-ss-sys.huaweicloudsite.cn/js/dist/module.min.js?v=202506121459"
+  ],
+  "roots": [
+    {
+      "connected": true,
+      "control_count": 90,
+      "direct_child_field_ids": [
+        "0",
+        "4",
+        "5",
+        "12",
+        "2",
+        "14",
+        "6",
+        "20",
+        "7",
+        "19",
+        "15",
+        "16",
+        "8",
+        "13",
+        "17",
+        "11",
+        "ValidateCode",
+        "protocol",
+        "Submit"
+      ],
+      "native_form_count": 0,
+      "visible": true,
+      "fields": [
+        {
+          "controls": [
+            {
+              "applicant_value_empty": true,
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": "100",
+              "name": null,
+              "placeholder": "",
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "text",
+              "visible": true
+            }
+          ],
+          "data_type": "0",
+          "field_id": "0",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "姓名"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "applicant_value_empty": true,
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": "100",
+              "name": null,
+              "placeholder": "",
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "text",
+              "visible": true
+            }
+          ],
+          "data_type": "0",
+          "field_id": "4",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "电话号码"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "applicant_value_empty": true,
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": "50",
+              "name": null,
+              "placeholder": "",
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "text",
+              "visible": true
+            }
+          ],
+          "data_type": "9",
+          "field_id": "5",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "邮箱号码"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "applicant_value_empty": true,
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": "18",
+              "name": null,
+              "placeholder": "",
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "text",
+              "visible": true
+            }
+          ],
+          "data_type": "10",
+          "field_id": "12",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "身份证号码"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R2",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "男"
+              ],
+              "id": "M1567R2I0",
+              "public_option_value": "男"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R2",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "女"
+              ],
+              "id": "M1567R2I1",
+              "public_option_value": "女"
+            }
+          ],
+          "data_type": "2",
+          "field_id": "2",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "性别"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R14",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "本科"
+              ],
+              "id": "M1567R14I0",
+              "public_option_value": "本科"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R14",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "硕士"
+              ],
+              "id": "M1567R14I1",
+              "public_option_value": "硕士"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R14",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "博士"
+              ],
+              "id": "M1567R14I2",
+              "public_option_value": "博士"
+            }
+          ],
+          "data_type": "2",
+          "field_id": "14",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "最高学历"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "applicant_value_empty": true,
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": "100",
+              "name": null,
+              "placeholder": "最高学历院校",
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "text",
+              "visible": true
+            }
+          ],
+          "data_type": "0",
+          "field_id": "6",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "毕业院校"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "applicant_value_empty": true,
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": "100",
+              "name": null,
+              "placeholder": "最高学历学院",
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "text",
+              "visible": true
+            }
+          ],
+          "data_type": "0",
+          "field_id": "20",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "学院"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "applicant_value_empty": true,
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": "100",
+              "name": null,
+              "placeholder": "最高学历专业",
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "text",
+              "visible": true
+            }
+          ],
+          "data_type": "0",
+          "field_id": "7",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "专业"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R19",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "2026年"
+              ],
+              "id": "M1567R19I0",
+              "public_option_value": "2026年"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R19",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "2027年"
+              ],
+              "id": "M1567R19I1",
+              "public_option_value": "2027年"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R19",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "2028年"
+              ],
+              "id": "M1567R19I2",
+              "public_option_value": "2028年"
+            }
+          ],
+          "data_type": "2",
+          "field_id": "19",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "毕业时间"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R15",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "CET-4"
+              ],
+              "id": "M1567R15I0",
+              "public_option_value": "CET-4"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R15",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "CET-6"
+              ],
+              "id": "M1567R15I1",
+              "public_option_value": "CET-6"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R15",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "IELTS"
+              ],
+              "id": "M1567R15I2",
+              "public_option_value": "IELTS"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R15",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "TOEFL"
+              ],
+              "id": "M1567R15I3",
+              "public_option_value": "TOEFL"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R15",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "其他"
+              ],
+              "id": "M1567R15I4",
+              "public_option_value": "其他"
+            }
+          ],
+          "data_type": "2",
+          "field_id": "15",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "英语证书情况"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "applicant_value_empty": true,
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": "100",
+              "name": null,
+              "placeholder": "",
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "text",
+              "visible": true
+            }
+          ],
+          "data_type": "0",
+          "field_id": "16",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": false,
+          "submit_text": null,
+          "title_spans": [
+            "英语考级分数"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI应用工程师（武汉）"
+              ],
+              "id": "M1567R8I0",
+              "public_option_value": "AI应用工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI模型工程师（武汉）"
+              ],
+              "id": "M1567R8I1",
+              "public_option_value": "AI模型工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI算法工程师（武汉/深圳）"
+              ],
+              "id": "M1567R8I2",
+              "public_option_value": "AI算法工程师（武汉/深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI Agent工程师（武汉）"
+              ],
+              "id": "M1567R8I3",
+              "public_option_value": "AI Agent工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "算法工程师-布局布线（武汉）"
+              ],
+              "id": "M1567R8I4",
+              "public_option_value": "算法工程师-布局布线（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "算法工程师-安全方向 （武汉/深圳）"
+              ],
+              "id": "M1567R8I5",
+              "public_option_value": "算法工程师-安全方向 （武汉/深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "智能排程算法工程师-博士（深圳）"
+              ],
+              "id": "M1567R8I6",
+              "public_option_value": "智能排程算法工程师-博士（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "视觉算法工程师-博士（深圳）"
+              ],
+              "id": "M1567R8I7",
+              "public_option_value": "视觉算法工程师-博士（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI for Fab算法工程师-博士（深圳）"
+              ],
+              "id": "M1567R8I8",
+              "public_option_value": "AI for Fab算法工程师-博士（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "软件开发工程师（武汉/深圳）"
+              ],
+              "id": "M1567R8I9",
+              "public_option_value": "软件开发工程师（武汉/深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "测试工程师（武汉）"
+              ],
+              "id": "M1567R8I10",
+              "public_option_value": "测试工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "渗透测试工程师（武汉）"
+              ],
+              "id": "M1567R8I11",
+              "public_option_value": "渗透测试工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "数字后端设计工程师（成都）"
+              ],
+              "id": "M1567R8I12",
+              "public_option_value": "数字后端设计工程师（成都）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "模拟版图工程师（成都）"
+              ],
+              "id": "M1567R8I13",
+              "public_option_value": "模拟版图工程师（成都）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "模拟设计工程师（成都）"
+              ],
+              "id": "M1567R8I14",
+              "public_option_value": "模拟设计工程师（成都）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "数字前端设计工程师（成都）"
+              ],
+              "id": "M1567R8I15",
+              "public_option_value": "数字前端设计工程师（成都）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "初级资料开发工程师（武汉）"
+              ],
+              "id": "M1567R8I16",
+              "public_option_value": "初级资料开发工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "运维SRE工程师（武汉/深圳)"
+              ],
+              "id": "M1567R8I17",
+              "public_option_value": "运维SRE工程师（武汉/深圳)"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "服务交付工程师（武汉）"
+              ],
+              "id": "M1567R8I18",
+              "public_option_value": "服务交付工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "应用实施工程师（武汉）"
+              ],
+              "id": "M1567R8I19",
+              "public_option_value": "应用实施工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI数字化工程师（武汉）"
+              ],
+              "id": "M1567R8I20",
+              "public_option_value": "AI数字化工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "客户服务与支持工程师（武汉）"
+              ],
+              "id": "M1567R8I21",
+              "public_option_value": "客户服务与支持工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "运营运维工程师（武汉）"
+              ],
+              "id": "M1567R8I22",
+              "public_option_value": "运营运维工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "客户经理（深圳）"
+              ],
+              "id": "M1567R8I23",
+              "public_option_value": "客户经理（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "合同商务专员（武汉）"
+              ],
+              "id": "M1567R8I24",
+              "public_option_value": "合同商务专员（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "品牌营销专员（深圳）"
+              ],
+              "id": "M1567R8I25",
+              "public_option_value": "品牌营销专员（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "HR（武汉）"
+              ],
+              "id": "M1567R8I26",
+              "public_option_value": "HR（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "文秘（武汉）"
+              ],
+              "id": "M1567R8I27",
+              "public_option_value": "文秘（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "法务专员（武汉）"
+              ],
+              "id": "M1567R8I28",
+              "public_option_value": "法务专员（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "财经专员（武汉）"
+              ],
+              "id": "M1567R8I29",
+              "public_option_value": "财经专员（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R8",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "采购经理（武汉/深圳）"
+              ],
+              "id": "M1567R8I30",
+              "public_option_value": "采购经理（武汉/深圳）"
+            }
+          ],
+          "data_type": "2",
+          "field_id": "8",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "投递岗位1"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI应用工程师（武汉）"
+              ],
+              "id": "M1567R13I0",
+              "public_option_value": "AI应用工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI模型工程师（武汉）"
+              ],
+              "id": "M1567R13I1",
+              "public_option_value": "AI模型工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI算法工程师（武汉/深圳）"
+              ],
+              "id": "M1567R13I2",
+              "public_option_value": "AI算法工程师（武汉/深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI Agent工程师（武汉）"
+              ],
+              "id": "M1567R13I3",
+              "public_option_value": "AI Agent工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "算法工程师-布局布线（武汉）"
+              ],
+              "id": "M1567R13I4",
+              "public_option_value": "算法工程师-布局布线（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "算法工程师-安全方向 （武汉/深圳）"
+              ],
+              "id": "M1567R13I5",
+              "public_option_value": "算法工程师-安全方向 （武汉/深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "智能排程算法工程师-博士（深圳）"
+              ],
+              "id": "M1567R13I6",
+              "public_option_value": "智能排程算法工程师-博士（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "视觉算法工程师-博士（深圳）"
+              ],
+              "id": "M1567R13I7",
+              "public_option_value": "视觉算法工程师-博士（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI for Fab算法工程师-博士（深圳）"
+              ],
+              "id": "M1567R13I8",
+              "public_option_value": "AI for Fab算法工程师-博士（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "软件开发工程师（武汉/深圳）"
+              ],
+              "id": "M1567R13I9",
+              "public_option_value": "软件开发工程师（武汉/深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "测试工程师（武汉）"
+              ],
+              "id": "M1567R13I10",
+              "public_option_value": "测试工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "渗透测试工程师（武汉）"
+              ],
+              "id": "M1567R13I11",
+              "public_option_value": "渗透测试工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "数字后端设计工程师（成都）"
+              ],
+              "id": "M1567R13I12",
+              "public_option_value": "数字后端设计工程师（成都）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "模拟版图工程师（成都）"
+              ],
+              "id": "M1567R13I13",
+              "public_option_value": "模拟版图工程师（成都）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "模拟设计工程师（成都）"
+              ],
+              "id": "M1567R13I14",
+              "public_option_value": "模拟设计工程师（成都）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "数字前端设计工程师（成都）"
+              ],
+              "id": "M1567R13I15",
+              "public_option_value": "数字前端设计工程师（成都）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "初级资料开发工程师（武汉）"
+              ],
+              "id": "M1567R13I16",
+              "public_option_value": "初级资料开发工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "运维SRE工程师（武汉/深圳)"
+              ],
+              "id": "M1567R13I17",
+              "public_option_value": "运维SRE工程师（武汉/深圳)"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "服务交付工程师（武汉）"
+              ],
+              "id": "M1567R13I18",
+              "public_option_value": "服务交付工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "应用实施工程师（武汉）"
+              ],
+              "id": "M1567R13I19",
+              "public_option_value": "应用实施工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "AI数字化工程师（武汉）"
+              ],
+              "id": "M1567R13I20",
+              "public_option_value": "AI数字化工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "客户服务与支持工程师（武汉）"
+              ],
+              "id": "M1567R13I21",
+              "public_option_value": "客户服务与支持工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "运营运维工程师（武汉）"
+              ],
+              "id": "M1567R13I22",
+              "public_option_value": "运营运维工程师（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "客户经理（深圳）"
+              ],
+              "id": "M1567R13I23",
+              "public_option_value": "客户经理（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "合同商务专员（武汉）"
+              ],
+              "id": "M1567R13I24",
+              "public_option_value": "合同商务专员（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "品牌营销专员（深圳）"
+              ],
+              "id": "M1567R13I25",
+              "public_option_value": "品牌营销专员（深圳）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "HR（武汉）"
+              ],
+              "id": "M1567R13I26",
+              "public_option_value": "HR（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "文秘（武汉）"
+              ],
+              "id": "M1567R13I27",
+              "public_option_value": "文秘（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "法务专员（武汉）"
+              ],
+              "id": "M1567R13I28",
+              "public_option_value": "法务专员（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "财经专员（武汉）"
+              ],
+              "id": "M1567R13I29",
+              "public_option_value": "财经专员（武汉）"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R13",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "radio",
+              "visible": true,
+              "associated_labels": [
+                "采购经理（武汉/深圳）"
+              ],
+              "id": "M1567R13I30",
+              "public_option_value": "采购经理（武汉/深圳）"
+            }
+          ],
+          "data_type": "2",
+          "field_id": "13",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": false,
+          "submit_text": null,
+          "title_spans": [
+            "投递岗位2"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R17",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "checkbox",
+              "visible": true,
+              "associated_labels": [
+                "武汉"
+              ],
+              "id": "M1567R17I0",
+              "public_option_value": "武汉"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R17",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "checkbox",
+              "visible": true,
+              "associated_labels": [
+                "深圳"
+              ],
+              "id": "M1567R17I1",
+              "public_option_value": "深圳"
+            },
+            {
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "name": "M1567R17",
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "checkbox",
+              "visible": true,
+              "associated_labels": [
+                "成都"
+              ],
+              "id": "M1567R17I2",
+              "public_option_value": "成都"
+            }
+          ],
+          "data_type": "3",
+          "field_id": "17",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": false,
+          "submit_text": null,
+          "title_spans": [
+            "期望工作城市（若岗位涉及多城市可选）"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "id": "",
+              "name": null,
+              "public_button_value": "选择文件",
+              "type": "button",
+              "visible": true
+            },
+            {
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "maxlength": null,
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "accept": "image/jpeg,image/jpeg,image/png,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/html,application/vnd.openxmlformats-officedocument.presentationml.presentation,.rar,.",
+              "file_occupancy": "unverified_files_property_unavailable",
+              "id": "select_btn_1",
+              "input_value_empty": true,
+              "name": "fileselect[]",
+              "style": "visibility:hidden;width:72px;",
+              "type": "file",
+              "visible": false
+            }
+          ],
+          "data_type": "7",
+          "field_id": "11",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "附件简历"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "applicant_value_empty": true,
+              "associated_labels": [],
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": "4",
+              "name": null,
+              "placeholder": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "text",
+              "visible": true
+            }
+          ],
+          "data_type": "ValidateCode",
+          "field_id": "ValidateCode",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": true,
+          "submit_text": null,
+          "title_spans": [
+            "验证码"
+          ],
+          "visible": true
+        },
+        {
+          "controls": [
+            {
+              "associated_labels": [],
+              "checked": false,
+              "disabled": false,
+              "formaction": null,
+              "id": "",
+              "maxlength": null,
+              "name": null,
+              "placeholder": null,
+              "public_option_value": null,
+              "readonly": false,
+              "required": false,
+              "tag": "input",
+              "type": "checkbox",
+              "visible": true
+            }
+          ],
+          "data_type": "protocol",
+          "field_id": "protocol",
+          "protocol_text": "我已经阅读并同意",
+          "protocol_title": "《隐私保护协议》",
+          "required_marker": false,
+          "submit_text": null,
+          "title_spans": [],
+          "visible": true
+        },
+        {
+          "controls": [],
+          "data_type": "Submit",
+          "field_id": "Submit",
+          "protocol_text": null,
+          "protocol_title": null,
+          "required_marker": false,
+          "submit_text": "提交",
+          "title_spans": [],
+          "visible": true
+        }
+      ]
+    }
+  ],
+  "observed_at": "2026-10-01T08:40:15Z",
+  "capture_method": "Read-only DOM observation in dot cloud browser; empty application popup opened through target listing apply link. No applicant data entered; no upload, CAPTCHA interaction, consent or submit.",
+  "independence": "Captured from live DOM separately from repository constants. Losslessly factored during text transport, expanded in this file. Repository code was not used to generate field records.",
+  "limitations": [
+    "FileList property is unavailable in this restricted read-only browser inspector. File occupancy is unverified; file input value emptiness and displayed unselected state were observed.",
+    "Public script URLs are DOM src attributes, preserving protocol-relative spelling. No event-handler absence or no-submit safety certification follows from this schema."
+  ]
+}

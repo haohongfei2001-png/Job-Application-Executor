@@ -5,43 +5,12 @@ import fcntl
 import json
 import os
 import re
-import subprocess
-import sys
+import stat
 import tempfile
-import time
 from pathlib import Path
 
 from .queue import TaskQueue
-
-
-EXPECTED_REMOTE = re.compile(
-    r"^(?:https://github\.com/|git@github\.com:)"
-    r"haohongfei2001-png/Job-Application-Executor(?:\.git)?$"
-)
-
-
-def _run(
-    repo: Path,
-    args: list[str],
-    *,
-    timeout: int = 120,
-    check: bool = True,
-) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    return subprocess.run(
-        args,
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=check,
-        env=env,
-    )
-
-
-def _git(repo: Path, *args: str, timeout: int = 20) -> str:
-    return _run(repo, ["git", *args], timeout=timeout).stdout.strip()
+from .release import is_packaged_source
 
 
 def _state_path(runtime: Path) -> Path:
@@ -56,9 +25,6 @@ def write_update_state(
     new_version: str = "",
     reason: str = "",
 ) -> None:
-    root = Path(runtime).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    root.chmod(0o700)
     allowed = {
         "idle",
         "checking",
@@ -71,6 +37,17 @@ def write_update_state(
     }
     if status not in allowed:
         raise ValueError("invalid update status")
+    root = Path(runtime).expanduser().absolute()
+    if any(part.is_symlink() for part in (root, *root.parents)):
+        raise ValueError("state_invalid")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if any(part.is_symlink() for part in (root, *root.parents)):
+        raise ValueError("state_invalid")
+    root_info = root.stat(follow_symlinks=False)
+    if (not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid != os.geteuid()
+            or root_info.st_mode & 0o077):
+        raise ValueError("state_invalid")
     safe_reason = reason if re.fullmatch(r"[a-z_]{0,80}", reason or "") else "update_failed"
     payload = {
         "status": status,
@@ -90,66 +67,93 @@ def write_update_state(
             delete=False,
         ) as handle:
             temp_path = Path(handle.name)
-            os.chmod(temp_path, 0o600)
+            os.fchmod(handle.fileno(), 0o600)
             json.dump(payload, handle, ensure_ascii=False)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
-        path.chmod(0o600)
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink(missing_ok=True)
 
 
-def read_update_state(runtime: str | Path) -> dict:
-    path = _state_path(Path(runtime).expanduser().resolve())
-    if not path.is_file():
-        return {"status": "idle", "old_version": "", "new_version": "", "reason": ""}
+def _read_update_state_bytes(runtime: str | Path) -> bytes | None:
+    """Pin the legacy status authority without following a private path alias."""
+    root = Path(runtime).expanduser().absolute()
+    if any(part.is_symlink() for part in (root, *root.parents)):
+        raise ValueError("state_invalid")
     try:
-        data = json.loads(path.read_text())
-    except Exception:
-        return {"status": "failed", "old_version": "", "new_version": "", "reason": "state_invalid"}
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    try:
+        directory_info = os.fstat(directory)
+        if (not stat.S_ISDIR(directory_info.st_mode)
+                or directory_info.st_uid != os.geteuid()):
+            raise ValueError("state_invalid")
+        try:
+            descriptor = os.open("update-state.json",
+                                 os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 dir_fd=directory)
+        except FileNotFoundError:
+            descriptor = None
+        if descriptor is None:
+            data = None
+        else:
+            with os.fdopen(descriptor, "rb") as handle:
+                before = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                        or before.st_uid != os.geteuid() or before.st_size > 8192):
+                    raise ValueError("state_invalid")
+                data = handle.read(8193)
+                after = os.fstat(handle.fileno())
+                visible = os.stat("update-state.json", dir_fd=directory,
+                                  follow_symlinks=False)
+                if (len(data) > 8192 or (before.st_dev, before.st_ino)
+                        != (after.st_dev, after.st_ino)
+                        or (before.st_dev, before.st_ino)
+                        != (visible.st_dev, visible.st_ino)
+                        or after.st_size != before.st_size):
+                    raise ValueError("state_invalid")
+        if any(part.is_symlink() for part in (root, *root.parents)):
+            raise ValueError("state_invalid")
+        visible_root = root.stat(follow_symlinks=False)
+        if ((visible_root.st_dev, visible_root.st_ino)
+                != (directory_info.st_dev, directory_info.st_ino)):
+            raise ValueError("state_invalid")
+        return data
+    finally:
+        os.close(directory)
+
+
+def read_update_state(runtime: str | Path) -> dict:
+    invalid = {"status": "failed", "old_version": "", "new_version": "",
+               "reason": "state_invalid"}
+    idle = {"status": "idle", "old_version": "", "new_version": "", "reason": ""}
+    try:
+        raw = _read_update_state_bytes(runtime)
+        if raw is None:
+            return idle
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return invalid
     if not isinstance(data, dict):
-        return {"status": "failed", "old_version": "", "new_version": "", "reason": "state_invalid"}
+        return invalid
     status = str(data.get("status") or "")
     if status not in {
-        "idle",
-        "checking",
-        "up_to_date",
-        "updating",
-        "restarting",
-        "restart_required",
-        "success",
-        "failed",
+        "idle", "checking", "up_to_date", "updating", "restarting",
+        "restart_required", "success", "failed",
     }:
         status = "failed"
+    old_version = data.get("old_version")
+    new_version = data.get("new_version")
+    reason = data.get("reason", "")
     return {
         "status": status,
-        "old_version": str(data.get("old_version") or "")[:12],
-        "new_version": str(data.get("new_version") or "")[:12],
-        "reason": str(data.get("reason") or "")[:80],
+        "old_version": old_version if isinstance(old_version, str) and re.fullmatch(r"[0-9a-fA-F]{1,12}", old_version) else "",
+        "new_version": new_version if isinstance(new_version, str) and re.fullmatch(r"[0-9a-fA-F]{1,12}", new_version) else "",
+        "reason": reason if isinstance(reason, str) and re.fullmatch(r"[a-z_]{0,80}", reason) else "state_invalid",
     }
-
-
-def repository_update_preconditions(repo_root: str | Path) -> dict:
-    repo = Path(repo_root).expanduser().resolve()
-    try:
-        branch = _git(repo, "branch", "--show-current")
-        dirty = _git(repo, "status", "--porcelain", "--untracked-files=no")
-        remote = _git(repo, "remote", "get-url", "origin")
-        head = _git(repo, "rev-parse", "HEAD")
-    except Exception:
-        return {"ok": False, "reason": "git_state_unavailable"}
-
-    if branch != "main":
-        return {"ok": False, "reason": "not_on_main"}
-    if dirty:
-        return {"ok": False, "reason": "tracked_changes_present"}
-    if not EXPECTED_REMOTE.fullmatch(remote):
-        return {"ok": False, "reason": "unexpected_origin"}
-    if not re.fullmatch(r"[0-9a-fA-F]{40}", head):
-        return {"ok": False, "reason": "invalid_head"}
-    return {"ok": True, "head": head}
 
 
 def _tasks_safe_for_update(tasks: list[dict], *, now: float | None = None) -> tuple[bool, str]:
@@ -187,6 +191,8 @@ def _tasks_safe_for_update(tasks: list[dict], *, now: float | None = None) -> tu
 def safe_to_update(supervisor) -> tuple[bool, str]:
     if supervisor.worker.active:
         return False, "worker_active"
+    if supervisor.queue.preparation_in_flight():
+        return False, "preparation_context_unclosed"
     return _tasks_safe_for_update(
         supervisor.queue.tasks(),
         now=supervisor.queue.clock(),
@@ -196,6 +202,8 @@ def safe_to_update(supervisor) -> tuple[bool, str]:
 def runtime_safe_to_update(runtime: str | Path) -> tuple[bool, str]:
     try:
         queue = TaskQueue(Path(runtime).expanduser().resolve())
+        if queue.preparation_in_flight():
+            return False, "preparation_context_unclosed"
         return _tasks_safe_for_update(queue.tasks(), now=queue.clock())
     except Exception:
         return False, "runtime_state_unavailable"
@@ -271,392 +279,25 @@ def reconciled_update_state(runtime: str | Path) -> dict:
 
 
 def spawn_update(
-    *,
-    repo_root: str | Path,
-    runtime: str | Path,
-    port: int,
+    *, repo_root: str | Path, runtime: str | Path, port: int,
     python_executable: str | None = None,
 ) -> dict:
-    repo = Path(repo_root).expanduser().resolve()
-    runtime_path = Path(runtime).expanduser().resolve()
-    lock_fd = acquire_update_lock(runtime_path)
-    if lock_fd is None:
-        return {"ok": False, "status": "denied", "reason": "update_in_progress"}
-    try:
-        pre = repository_update_preconditions(repo)
-        if not pre.get("ok"):
-            return {"ok": False, "status": "denied", "reason": pre["reason"]}
-
-        previous = read_update_state(runtime_path)
-        restart_only = previous.get("status") == "restart_required"
-        write_update_state(
-            runtime_path,
-            "restarting" if restart_only else "checking",
-            old_version=pre["head"],
-            new_version=pre["head"] if restart_only else "",
-        )
-        log = runtime_path / "updater.log"
-        runtime_path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with log.open("ab") as stream:
-            log.chmod(0o600)
-            subprocess.Popen(
-                [
-                    python_executable or sys.executable,
-                    "-m",
-                    "executor.autonomy.updater",
-                    "--repo",
-                    str(repo),
-                    "--runtime",
-                    str(runtime_path),
-                    "--port",
-                    str(port),
-                    "--lock-fd",
-                    str(lock_fd),
-                    *(["--restart-only"] if restart_only else []),
-                ],
-                cwd=repo,
-                stdin=subprocess.DEVNULL,
-                stdout=stream,
-                stderr=stream,
-                start_new_session=True,
-                pass_fds=(lock_fd,),
-            )
-        return {
-            "ok": True,
-            "status": "started",
-            "old_version": pre["head"][:12],
-        }
-    except Exception:
-        write_update_state(
-            runtime_path,
-            "failed",
-            reason="update_launch_failed",
-        )
-        return {"ok": False, "status": "denied", "reason": "update_launch_failed"}
-    finally:
-        os.close(lock_fd)
-
-
-def _restart_service(
-    repo: Path,
-    runtime_path: Path,
-    port: int,
-    python: str,
-    *,
-    old_version: str,
-    new_version: str,
-) -> int:
-    write_update_state(
-        runtime_path,
-        "restarting",
-        old_version=old_version,
-        new_version=new_version,
-    )
-
-    try:
-        stop = subprocess.run(
-            [
-                python,
-                "-m",
-                "executor.autonomy.cli",
-                "--runtime",
-                str(runtime_path),
-                "--port",
-                str(port),
-                "stop",
-            ],
-            cwd=repo,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=20,
-        )
-    except subprocess.TimeoutExpired:
-        write_update_state(
-            runtime_path,
-            "restart_required",
-            old_version=old_version,
-            new_version=new_version,
-            reason="service_restart_timeout",
-        )
-        return 1
-    except Exception:
-        write_update_state(
-            runtime_path,
-            "restart_required",
-            old_version=old_version,
-            new_version=new_version,
-            reason="service_restart_failed",
-        )
-        return 1
-
-    if stop.returncode != 0:
-        write_update_state(
-            runtime_path,
-            "restart_required",
-            old_version=old_version,
-            new_version=new_version,
-            reason="service_stop_failed",
-        )
-        return 1
-
-    try:
-        start = subprocess.run(
-            [
-                python,
-                "-m",
-                "executor.autonomy.cli",
-                "--runtime",
-                str(runtime_path),
-                "--port",
-                str(port),
-                "start",
-            ],
-            cwd=repo,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=20,
-        )
-    except subprocess.TimeoutExpired:
-        write_update_state(
-            runtime_path,
-            "restart_required",
-            old_version=old_version,
-            new_version=new_version,
-            reason="service_restart_timeout",
-        )
-        return 1
-    except Exception:
-        write_update_state(
-            runtime_path,
-            "restart_required",
-            old_version=old_version,
-            new_version=new_version,
-            reason="service_restart_failed",
-        )
-        return 1
-
-    if start.returncode != 0:
-        write_update_state(
-            runtime_path,
-            "restart_required",
-            old_version=old_version,
-            new_version=new_version,
-            reason="service_start_failed",
-        )
-        return 1
-
-    write_update_state(
-        runtime_path,
-        "success",
-        old_version=old_version,
-        new_version=new_version,
-    )
-    try:
-        subprocess.Popen(
-            [
-                python,
-                "-m",
-                "executor.autonomy.cli",
-                "--runtime",
-                str(runtime_path),
-                "--port",
-                str(port),
-                "ui",
-            ],
-            cwd=repo,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception:
-        pass
-    return 0
+    """Read-only compatibility response; never start the checkout writer."""
+    reason = ("packaged_update_not_ready" if is_packaged_source(repo_root)
+              else "legacy_update_retired")
+    return {"ok": False, "status": "denied", "reason": reason}
 
 
 def perform_update(
-    repo_root: str | Path,
-    runtime: str | Path,
-    port: int,
-    *,
-    python_executable: str | None = None,
-    restart_only: bool = False,
+    repo_root: str | Path, runtime: str | Path, port: int, *,
+    python_executable: str | None = None, restart_only: bool = False,
 ) -> int:
-    repo = Path(repo_root).expanduser().resolve()
-    runtime_path = Path(runtime).expanduser().resolve()
-    python = python_executable or sys.executable
+    """The historical public engine entry is retired before any state I/O."""
+    return 1
 
-    safe, safety_reason = runtime_safe_to_update(runtime_path)
-    if not safe:
-        write_update_state(runtime_path, "failed", reason=safety_reason)
-        return 1
 
-    pre = repository_update_preconditions(repo)
-    if not pre.get("ok"):
-        write_update_state(runtime_path, "failed", reason=pre["reason"])
-        return 1
-    old = pre["head"]
-    write_update_state(
-        runtime_path,
-        "restarting" if restart_only else "checking",
-        old_version=old,
-        new_version=old if restart_only else "",
-    )
-    git_mutation_started = False
-
-    try:
-        if restart_only:
-            return _restart_service(
-                repo,
-                runtime_path,
-                port,
-                python,
-                old_version=old,
-                new_version=old,
-            )
-
-        _run(
-            repo,
-            [
-                "git",
-                "-c",
-                "http.version=HTTP/1.1",
-                "fetch",
-                "--prune",
-                "origin",
-                "main",
-            ],
-            timeout=120,
-        )
-        remote = _git(repo, "rev-parse", "origin/main")
-        if not re.fullmatch(r"[0-9a-fA-F]{40}", remote):
-            raise RuntimeError("invalid remote head")
-
-        refreshed = repository_update_preconditions(repo)
-        if not refreshed.get("ok"):
-            write_update_state(
-                runtime_path,
-                "failed",
-                old_version=old,
-                new_version=remote,
-                reason=refreshed["reason"],
-            )
-            return 1
-        if refreshed.get("head") != old:
-            write_update_state(
-                runtime_path,
-                "failed",
-                old_version=old,
-                new_version=remote,
-                reason="repository_changed_during_update",
-            )
-            return 1
-
-        if remote == old:
-            write_update_state(
-                runtime_path,
-                "up_to_date",
-                old_version=old,
-                new_version=remote,
-            )
-            return 0
-
-        safe, safety_reason = runtime_safe_to_update(runtime_path)
-        if not safe:
-            write_update_state(
-                runtime_path,
-                "failed",
-                old_version=old,
-                new_version=remote,
-                reason=safety_reason,
-            )
-            return 1
-
-        ancestor = _run(
-            repo,
-            ["git", "merge-base", "--is-ancestor", old, remote],
-            timeout=20,
-            check=False,
-        )
-        if ancestor.returncode != 0:
-            write_update_state(
-                runtime_path,
-                "failed",
-                old_version=old,
-                new_version=remote,
-                reason="fast_forward_required",
-            )
-            return 1
-
-        final_repo = repository_update_preconditions(repo)
-        if not final_repo.get("ok"):
-            write_update_state(
-                runtime_path,
-                "failed",
-                old_version=old,
-                new_version=remote,
-                reason=final_repo["reason"],
-            )
-            return 1
-        if final_repo.get("head") != old:
-            write_update_state(
-                runtime_path,
-                "failed",
-                old_version=old,
-                new_version=remote,
-                reason="repository_changed_during_update",
-            )
-            return 1
-        if _git(repo, "rev-parse", "origin/main") != remote:
-            write_update_state(
-                runtime_path,
-                "failed",
-                old_version=old,
-                new_version=remote,
-                reason="remote_changed_during_update",
-            )
-            return 1
-
-        write_update_state(
-            runtime_path,
-            "updating",
-            old_version=old,
-            new_version=remote,
-        )
-        git_mutation_started = True
-        _run(repo, ["git", "merge", "--ff-only", "origin/main"], timeout=60)
-
-        new_head = _git(repo, "rev-parse", "HEAD")
-        if new_head != remote:
-            raise RuntimeError("head mismatch after update")
-
-        return _restart_service(
-            repo,
-            runtime_path,
-            port,
-            python,
-            old_version=old,
-            new_version=new_head,
-        )
-    except subprocess.TimeoutExpired:
-        post_mutation = git_mutation_started or restart_only
-        write_update_state(
-            runtime_path,
-            "restart_required" if post_mutation else "failed",
-            old_version=old,
-            reason="update_timeout",
-        )
-        return 1
-    except Exception:
-        post_mutation = git_mutation_started or restart_only
-        write_update_state(
-            runtime_path,
-            "restart_required" if post_mutation else "failed",
-            old_version=old,
-            reason="update_failed",
-        )
-        return 1
-
+# The checkout Git update engine is intentionally absent from shipped source.
+# Historical behavior remains in tests/historical_updater_fixture.py only.
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
@@ -667,28 +308,10 @@ def main(argv=None) -> int:
     parser.add_argument("--restart-only", action="store_true")
     args = parser.parse_args(argv)
 
-    owned_lock = None
-    if args.lock_fd is None:
-        owned_lock = acquire_update_lock(args.runtime)
-        if owned_lock is None:
-            return 1
-    else:
-        try:
-            os.fstat(args.lock_fd)
-        except OSError:
-            return 1
-
-    try:
-        time.sleep(0.8)
-        return perform_update(
-            args.repo,
-            args.runtime,
-            args.port,
-            restart_only=args.restart_only,
-        )
-    finally:
-        if owned_lock is not None:
-            os.close(owned_lock)
+    # Even an inherited lock or --restart-only invocation cannot re-enable the
+    # retired CLI. Argument parsing is compatibility-only: no runtime creation,
+    # lock claim, checkout operation, service stop/start or applicant read.
+    return 1
 
 
 if __name__ == "__main__":

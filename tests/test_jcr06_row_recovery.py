@@ -715,3 +715,178 @@ def test_executor_certified_education_and_project_contracts_use_distinct_journal
     finally:
         projects.shutdown()
         projects.server_close()
+
+
+@pytest.mark.parametrize("kind", ["add", "delete", "reorder"])
+@pytest.mark.parametrize("fault", ["value", "site_id", "managed", "extra", "removed"])
+def test_row_effect_requires_full_durable_inventory_preservation(tmp_path, row_site, monkeypatch, kind, fault):
+    server, driver = row_site
+    private = "PRIVATE_UNRELATED_ROW_" + ("完整履历。\n" * 1000)
+    server.rows = [
+        {"record_id": rid, "site_row_id": "private-site-" + rid,
+         "values": {"school": private if rid == "A" else "B School"}, "managed": True}
+        for rid in ("A", "B")]
+    server.revision = 2
+    desired = (DesiredRow("A", {"school": private}), DesiredRow("B", {"school": "B School"}))
+    delete_ids = frozenset()
+    if kind == "add":
+        desired += (DesiredRow("C", {"school": "C School"}),)
+        method = "add_row"
+    elif kind == "delete":
+        desired = desired[:1]
+        delete_ids = frozenset({"B"})
+        method = "delete_row"
+    else:
+        desired = tuple(reversed(desired))
+        method = "reorder_rows"
+    original = getattr(driver, method)
+
+    def corrupt(*args):
+        original(*args)  # A real independent HTTP commit happened.
+        row = next(row for row in server.rows if row["record_id"] == "A")
+        if fault == "value":
+            row["values"]["school"] = "PRIVATE_CHANGED_UNRELATED_ROW"
+        elif fault == "site_id":
+            row["site_row_id"] = "private-replaced-site"
+        elif fault == "managed":
+            row["managed"] = False
+        elif fault == "extra":
+            server.rows.append({"record_id": "OTHER", "site_row_id": "private-extra-site",
+                                "values": {"school": "PRIVATE_EXTRA"}, "managed": True})
+        else:
+            server.rows.remove(row)
+
+    monkeypatch.setattr(driver, method, corrupt)
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    with pytest.raises(RowOutcomeUnknown, match="replay disabled") as refused:
+        reconciler(driver, journal, guard=lambda: None).reconcile(desired, delete_ids=delete_ids)
+    assert len(journal.pending()) == 1
+    pending = journal.pending()[0]
+    preimage = journal.pending_inventory(pending[0])
+    assert preimage is not None
+    assert all(len(value) == 64 for row in json.loads(preimage) for value in row[:3])
+    assert all(row[3] is True for row in json.loads(preimage))
+    assert (server.add_count, server.delete_count, server.reorder_count) == (
+        int(kind == "add"), int(kind == "delete"), int(kind == "reorder"))
+    with pytest.raises(RowOutcomeUnknown, match="replay disabled"):
+        reconciler(driver, RowActionJournal(journal.path, scope=SCOPE)).reconcile_pending_read_only()
+    assert RowActionJournal(journal.path, scope=SCOPE).pending() == (pending,)
+    assert (server.add_count, server.delete_count, server.reorder_count) == (
+        int(kind == "add"), int(kind == "delete"), int(kind == "reorder"))
+    assert "PRIVATE_" not in str(refused.value)
+    disk = journal.path.read_bytes()
+    assert private.encode() not in disk
+    assert b"private-site-" not in disk and b"private-replaced-site" not in disk
+
+
+@pytest.mark.parametrize("bad", [
+    (DesiredRow("A", {"school": "A"}), DesiredRow("", {"school": "B"})),
+    (DesiredRow("A", {"school": "A"}), DesiredRow("B", {"school": True})),
+    (DesiredRow("A", {"school": "A"}), DesiredRow("B", {"": "B"})),
+    (DesiredRow("A", {"school": "A"}), DesiredRow("A", {"school": "B"})),
+    (DesiredRow("A", {"school": "A"}), object()),
+    [DesiredRow("A", {"school": "A"})],
+])
+def test_entire_canonical_collection_is_validated_before_any_driver_read(tmp_path, monkeypatch, bad):
+    class NoDriver:
+        def read_rows(self):
+            pytest.fail("malformed later record cannot admit any driver read or write")
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    for operation in ("reconcile", "verify_rows_read_only"):
+        with pytest.raises(RowReconciliationBlocked, match="canonical row identity ambiguous"):
+            getattr(reconciler(NoDriver(), journal, guard=lambda: None), operation)(bad)
+    assert journal.pending() == ()
+
+
+def test_row_canonical_values_are_frozen_before_async_driver_effect(tmp_path, row_site, monkeypatch):
+    server, driver = row_site
+    values = {"school": "FULL_ORIGINAL_SCHOOL"}
+    desired = (DesiredRow("A", values),)
+    original_read = driver.read_rows
+    original_add = driver.add_row
+
+    def read():
+        values["school"] = "CALLER_CHANGED_AFTER_ADMISSION"
+        return original_read()
+
+    def add(row):
+        with pytest.raises(TypeError):
+            row.values["school"] = "DRIVER_CHANGED_AFTER_ADMISSION"
+        original_add(row)
+
+    monkeypatch.setattr(driver, "read_rows", read)
+    monkeypatch.setattr(driver, "add_row", add)
+    journal = RowActionJournal(tmp_path / "private" / "rows.sqlite3", scope=SCOPE)
+    receipt = reconciler(driver, journal, guard=lambda: None).reconcile(desired)
+    assert receipt.add_count == 1
+    assert server.rows[0]["values"] == {"school": "FULL_ORIGINAL_SCHOOL"}
+    assert values["school"] == "CALLER_CHANGED_AFTER_ADMISSION"
+    assert journal.pending() == ()
+    assert b"FULL_ORIGINAL_SCHOOL" not in journal.path.read_bytes()
+
+
+@pytest.mark.parametrize("kind", ["add", "delete", "reorder"])
+@pytest.mark.parametrize("collateral_change", [False, True])
+def test_full_row_preimage_survives_real_process_crash_without_replay(
+        tmp_path, row_site, kind, collateral_change):
+    server, driver = row_site
+    server.rows = [{"record_id": rid, "site_row_id": "private-site-" + rid,
+                    "values": {"school": rid + " School"}, "managed": True}
+                   for rid in ("A", "B")]
+    server.revision = 2
+    journal_path = tmp_path / "private" / "rows.sqlite3"
+    child = subprocess.run([sys.executable, "-c", """
+import hashlib, json, os, sys, urllib.request
+from executor.forms import DesiredRow, RowActionJournal, RowInventory, RowReconciler, SiteRow
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+        separators=(',', ':')).encode()).hexdigest()
+kind, path, base = sys.argv[1:]
+class Driver:
+    capabilities = frozenset({'add','delete','reorder'})
+    def read_rows(self):
+        result = json.load(urllib.request.urlopen(base + '/rows'))
+        return RowInventory(result['revision'], result['complete'], tuple(
+            SiteRow(row['record_id'], row['site_row_id'], digest(row['values']), row['managed'])
+            for row in result['rows']), result['target_sha256'], result['draft_id_digest'])
+    def post(self, endpoint, payload):
+        request = urllib.request.Request(base + endpoint, data=json.dumps(payload).encode(),
+            headers={'Content-Type':'application/json'}, method='POST')
+        urllib.request.urlopen(request).read()
+        os._exit(23)
+    def add_row(self, row):
+        self.post('/add', {'record_id':row.record_id,'values':dict(row.values)})
+    def delete_row(self, site):
+        self.post('/delete', {'site_row_id':site})
+    def reorder_rows(self, ids):
+        self.post('/reorder', {'record_ids':ids})
+desired = tuple(DesiredRow(rid, {'school':rid+' School'}) for rid in ('A','B'))
+deletes = frozenset()
+if kind == 'add':
+    desired += (DesiredRow('C', {'school':'C School'}),)
+elif kind == 'delete':
+    desired, deletes = desired[:1], frozenset({'B'})
+else:
+    desired = tuple(reversed(desired))
+journal = RowActionJournal(path, scope='synthetic-ats/task-one/draft-one')
+RowReconciler(Driver(), journal, target_sha256=digest('synthetic-target'),
+    draft_id_digest=digest('synthetic-draft'), mutation_guard=lambda:None).reconcile(
+    desired, delete_ids=deletes)
+""", kind, str(journal_path), driver.base], capture_output=True, timeout=15)
+    assert child.returncode == 23, child.stderr.decode(errors="replace")
+    journal = RowActionJournal(journal_path, scope=SCOPE)
+    pending = journal.pending()
+    assert len(pending) == 1 and journal.pending_inventory(pending[0][0]) is not None
+    counts = (server.add_count, server.delete_count, server.reorder_count)
+    if collateral_change:
+        server.rows[0]["values"]["school"] = "PRIVATE_COLLATERAL_AFTER_CRASH"
+        with pytest.raises(RowOutcomeUnknown, match="replay disabled"):
+            reconciler(driver, journal).reconcile_pending_read_only()
+        assert journal.pending() == pending
+    else:
+        observed = reconciler(driver, journal).reconcile_pending_read_only()
+        assert observed.revision == 3
+        assert journal.pending() == ()
+    assert (server.add_count, server.delete_count, server.reorder_count) == counts
+    assert b"private-site-" not in journal_path.read_bytes()
+    assert b"PRIVATE_COLLATERAL" not in journal_path.read_bytes()

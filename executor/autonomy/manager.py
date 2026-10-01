@@ -18,6 +18,7 @@ from ..settings import load_settings
 from ..profile import DEFAULT_ALIASES
 from ..evidence import BOOL_KEYS
 from ..target_resolver import is_oppo_campus_landing, resolve_known_landing
+from . import profile_editor
 from .queue import TaskQueue, TaskSpec
 
 
@@ -128,7 +129,7 @@ class DeepSeekManagerProvider:
     """Semantic manager. It can propose only typed high-level decisions."""
 
     def __init__(self, settings: dict[str, Any] | None = None):
-        self.settings = settings or load_settings()
+        self.settings = settings if settings is not None else load_settings()
         # Reuse the existing DeepSeek configuration and Keychain lookup without
         # duplicating or persisting credentials.
         self.client = DeepSeekMapper(self.settings)
@@ -438,7 +439,7 @@ class ManagerController:
     ):
         self.queue = queue
         self.worker = worker
-        self.settings = settings or load_settings()
+        self.settings = settings if settings is not None else load_settings()
         self._provider = provider
 
     @property
@@ -449,7 +450,24 @@ class ManagerController:
             self._provider = DeepSeekManagerProvider(self.settings)
         return self._provider
 
+    def reload_configured_provider(self) -> DeepSeekManagerProvider:
+        """Supervisor owns serialization/admission; failed reload leaves no stale client."""
+        self._provider = None
+        return self.provider
+
+    def loaded_provider_state(self) -> dict[str, Any]:
+        """Observe loaded state without triggering lazy credential initialization."""
+        if self._provider is None:
+            return {"state": "not_loaded", "available": False}
+        try:
+            available = self._provider.available is True
+        except Exception:
+            return {"state": "unavailable", "available": False}
+        return {"state": "available" if available else "unavailable",
+                "available": available}
+
     def state(self) -> dict[str, Any]:
+        provider = self.loaded_provider_state()
         tasks = [safe_task_view(task) for task in self.queue.tasks()]
         counts: dict[str, int] = {}
         for task in tasks:
@@ -457,16 +475,28 @@ class ManagerController:
         return {
             "tasks": tasks,
             "counts": counts,
-            "manager_available": bool(
-                self._provider.available if self._provider is not None else True
+            "manager_available": (
+                provider["state"] == "not_loaded" or provider["available"] is True
             ),
             "final_click_actor": "user",
         }
 
     def _profile_ref(self) -> str:
+        if getattr(self, "_profile_selection_uncertain", False):
+            raise RuntimeError("profile_selection_reconciliation_required")
         value = self.settings.get("profile_path")
         if not isinstance(value, str) or not value.strip():
             raise ValueError("profile_path is not configured")
+        if profile_editor.is_managed_profile_path(value):
+            try:
+                # A restart loses the memory fence, not the need to prove the
+                # selected version and its editor-owned resume before admission.
+                current, _view = profile_editor.editor_state()
+                if current.get("profile_path") != value:
+                    raise profile_editor.EditorConflict()
+            except Exception:
+                self._profile_selection_uncertain = True
+                raise RuntimeError("profile_selection_reconciliation_required") from None
         return value
 
     def prepare_local_form(self, company: str, role: str, target_url: str = "", *,
@@ -499,8 +529,7 @@ class ManagerController:
                 target_source_chain=list(target.source_chain),
                 profile_ref=self._profile_ref(), live_authorized=False,
             )
-            task = self.queue.enqueue(spec)
-            return {**task, "discovery": result.public_dict()}
+            return self._enqueue_local_form(spec, result)
         if (result.status != "UNSUPPORTED" or result.reason != "no_official_site_contract"
                 or not request.source_url or selected_candidate_id):
             return {"discovery": result.public_dict()}
@@ -510,12 +539,22 @@ class ManagerController:
             company=request.company,
             role=request.role,
             target_url=request.source_url,
+            location=request.location, campaign=request.campaign,
+            employment_type=request.employment_type,
             profile_ref=self._profile_ref(),
             # JCR-03 owns verified target identity. A user-supplied URL alone
             # is not yet sufficient evidence for automatic external writes.
             live_authorized=False,
         )
-        return {**self.queue.enqueue(spec), "discovery": result.public_dict()}
+        return self._enqueue_local_form(spec, result)
+
+    def _enqueue_local_form(self, spec: TaskSpec, discovery: DiscoveryResult) -> dict[str, Any]:
+        # Exact-target deduplication must keep the original task/profile and
+        # authority. Explain a different retained binding without exposing the
+        # private reference or pretending the new form replaced the old task.
+        task = self.queue.enqueue(spec)
+        binding = "requested" if task["spec"] == spec.model_dump() else "existing_different"
+        return {**task, "discovery": discovery.public_dict(), "task_binding": binding}
 
     def create_from_local_form(self, company: str, role: str, target_url: str = "", *,
                                location: str = "", campaign: str = "",
@@ -545,9 +584,17 @@ class ManagerController:
         result = discovered["discovery"]
         status = result["status"]
         if "task_id" in discovered:
-            reply = "已找到并核验唯一岗位，任务已加入；开始准备前仍会检查运行授权。"
+            retained = discovered.get("task_binding") == "existing_different"
+            verified = discovered["spec"].get("target_verified") is True
+            reply = ("同一目标已有任务，仍保留原岗位、资料和授权；本次没有替换或启动任务，请查看原任务卡片。"
+                     if retained else
+                     "已找到并核验唯一岗位，任务已保留在列表中；开始准备前仍会检查运行授权。"
+                     if verified else
+                     "待核验任务已保留在列表中；不会自动写入招聘网站，请先核对任务卡片。")
             action = {"action": "CREATE_TASK", "status": "accepted",
-                      "task_id": discovered["task_id"], "resolved_target": True}
+                      "task_id": discovered["task_id"],
+                      "resolved_target": verified,
+                      "task_binding": discovered.get("task_binding", "requested")}
         elif status == "AMBIGUOUS":
             labels = "；".join(
                 f"{item['title']}（{item['location'] or '地点未注明'}、"

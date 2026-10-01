@@ -10,7 +10,7 @@ class SnapshotPage:
 
     def evaluate(self, _script):
         self.evaluate_calls += 1
-        return [
+        return {"fields": [
             {
                 "fieldId": "name",
                 "selector": "#name",
@@ -37,7 +37,7 @@ class SnapshotPage:
                 "section": "个人信息",
                 "selectedText": "上海市",
             },
-        ]
+        ], "complete": True}
 
 
 def test_discover_fields_uses_single_dom_snapshot():

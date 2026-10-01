@@ -59,8 +59,9 @@ class SyntheticATS(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/apply-multipage" or self.path == "/apply-second":
-            second = self.path == "/apply-second"
+        route = self.path.split("?", 1)[0]
+        if route == "/apply-multipage" or route == "/apply-second":
+            second = route == "/apply-second"
             if second:
                 self.server.page_two_reads += 1
             field = "email" if second else "full_name"
@@ -85,7 +86,7 @@ class SyntheticATS(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path.startswith("/apply"):
+        if route.startswith("/apply"):
             body = b'''<!doctype html><meta charset="utf-8"><body>
               <label>Full name <input id="name" name="full_name" required></label>
               <label>Email <input id="email" name="email" type="email" required></label>
@@ -263,5 +264,500 @@ def test_multipage_navigation_requires_independent_draft_readback(tmp_path, monk
         assert ats.page_two_reads == 0
         assert ats.submit_count == 0
     finally:
+        ats.shutdown()
+        ats.server_close()
+
+
+def test_one_hundred_golden_ui_to_browser_tasks_have_independent_server_drafts(
+    tmp_path, monkeypatch
+):
+    """Run the real local UI, queue and browser path for 100 distinct jobs."""
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
+    ats.draft, ats.submit_count, ats.revision = {}, 0, 0
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        profile = tmp_path / "golden-profile.json"
+        expected = {}
+        target = f"http://127.0.0.1:{ats.server_port}/apply?postId=golden-000"
+
+        class GoldenAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                if (plan.target_url != target or actual["draft"] != expected
+                        or actual["revision"] < 2):
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "revision": actual["revision"]}
+
+            def observe_review_draft(self, plan):
+                return _review_snapshot(self, plan, ats, account=expected["email"])
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: GoldenAdapter(url))
+        proposal = Proposal(target)
+        queue = TaskQueue(tmp_path / "golden-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(profile)},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+        results = {}
+        for seed in range(100):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                      f"?postId=golden-{seed:03d}")
+            proposal.target_url = target
+            profile = tmp_path / f"golden-profile-{seed:03d}.json"
+            manager.settings["profile_path"] = str(profile)
+            expected = {
+                "full_name": f"Synthetic Applicant {seed:03d}",
+                "email": f"applicant{seed:03d}@example.test",
+            }
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {"value": expected["full_name"],
+                                       "confidence": 1.0},
+                "identity.email": {"value": expected["email"],
+                                   "confidence": 1.0},
+            }}), encoding="utf-8")
+            ats.draft, ats.revision = {}, 0
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert task_id not in results
+            assert worker.run_once(), seed
+            actual = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert actual["draft"] == expected, seed
+            assert actual["revision"] >= 2, seed
+            assert actual["submit_count"] == 0, seed
+            task = queue.get(task_id)
+            assert task["stage"] == "READY_TO_SUBMIT", seed
+            assert task["spec"]["target_url"] == target, seed
+            results[task_id] = (target, dict(actual["draft"]))
+        assert len(results) == 100
+        assert len({item[0] for item in results.values()}) == 100
+        assert len({item[1]["email"] for item in results.values()}) == 100
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
+
+
+
+def test_two_queued_ui_tasks_keep_their_original_profiles_after_manager_changes(
+    tmp_path, monkeypatch
+):
+    """A later UI choice cannot retarget an already queued applicant."""
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
+    ats.draft, ats.submit_count, ats.revision = {}, 0, 0
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        first_target = f"http://127.0.0.1:{ats.server_port}/apply?postId=queued-000"
+        expected_by_target = {}
+
+        class QueuedAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                expected = expected_by_target[plan.target_url]
+                if actual["draft"] != expected or actual["revision"] < 2:
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "revision": actual["revision"]}
+
+            def observe_review_draft(self, plan):
+                account = expected_by_target[plan.target_url]["email"]
+                return _review_snapshot(self, plan, ats, account=account)
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: QueuedAdapter(url))
+        proposal = Proposal(first_target)
+        queue = TaskQueue(tmp_path / "queued-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(tmp_path / "not-yet-selected.json")},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+
+        task_targets = {}
+        for seed in range(2):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                      f"?postId=queued-{seed:03d}")
+            profile = tmp_path / f"queued-profile-{seed:03d}.json"
+            expected_by_target[target] = {
+                "full_name": f"Queued Applicant {seed:03d}",
+                "email": f"queued{seed:03d}@example.test",
+            }
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {
+                    "value": expected_by_target[target]["full_name"],
+                    "confidence": 1.0},
+                "identity.email": {
+                    "value": expected_by_target[target]["email"],
+                    "confidence": 1.0},
+            }}), encoding="utf-8")
+            manager.settings["profile_path"] = str(profile)
+            proposal.target_url = target
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert task_id not in task_targets
+            task = queue.get(task_id)
+            assert task["spec"]["target_url"] == target
+            assert task["spec"]["profile_ref"] == str(profile)
+            task_targets[task_id] = target
+
+        # The manager's mutable current choice is deliberately invalid by the
+        # time either queued task runs; each worker must use its task snapshot.
+        manager.settings["profile_path"] = str(tmp_path / "missing-profile.json")
+        # Restart the durable service before any queued browser work begins.
+        # The old manager choice must not become the new worker's applicant.
+        queue = TaskQueue(tmp_path / "queued-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        remaining = set(task_targets)
+        for _ in range(2):
+            ats.draft, ats.revision = {}, 0
+            assert worker.run_once()
+            newly_ready = [
+                task_id for task_id in remaining
+                if queue.get(task_id)["stage"] == "READY_TO_SUBMIT"
+            ]
+            assert len(newly_ready) == 1
+            task_id = newly_ready[0]
+            target = task_targets[task_id]
+            actual = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert actual["draft"] == expected_by_target[target]
+            assert actual["revision"] >= 2
+            assert actual["submit_count"] == 0
+            remaining.remove(task_id)
+
+        assert not remaining
+        reopened = TaskQueue(tmp_path / "queued-runtime")
+        for task_id, target in task_targets.items():
+            task = reopened.get(task_id)
+            assert task["stage"] == "READY_TO_SUBMIT"
+            assert task["spec"]["target_url"] == target
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
+
+
+def test_repeated_server_draft_corruption_blocks_twenty_ui_tasks(
+    tmp_path, monkeypatch
+):
+    """A real browser fill cannot become READY after server draft divergence."""
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
+    ats.draft, ats.submit_count, ats.revision = {}, 0, 0
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        profile = tmp_path / "fault-profile.json"
+        expected = {}
+        target = f"http://127.0.0.1:{ats.server_port}/apply?postId=fault-000"
+        corrupted = set()
+
+        class CorruptDraftAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                if plan.target_url != target or actual["draft"] != expected:
+                    return None
+                # Simulate a conflicting committed server write after browser
+                # filling. The independent draft oracle must reject this task.
+                ats.draft["email"] = "conflict@example.test"
+                ats.revision += 1
+                corrupted.add(target)
+                return None
+
+            def observe_review_draft(self, plan):
+                raise AssertionError("corrupt server draft must not reach READY review")
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: CorruptDraftAdapter(url))
+        proposal = Proposal(target)
+        queue = TaskQueue(tmp_path / "fault-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(profile)},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+        blocked = set()
+        for seed in range(20):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                      f"?postId=fault-{seed:03d}")
+            proposal.target_url = target
+            profile = tmp_path / f"fault-profile-{seed:03d}.json"
+            manager.settings["profile_path"] = str(profile)
+            expected = {
+                "full_name": f"Synthetic Fault Applicant {seed:03d}",
+                "email": f"fault{seed:03d}@example.test",
+            }
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {"value": expected["full_name"],
+                                       "confidence": 1.0},
+                "identity.email": {"value": expected["email"],
+                                   "confidence": 1.0},
+            }}), encoding="utf-8")
+            ats.draft, ats.revision = {}, 0
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert worker.run_once(), seed
+            assert target in corrupted, seed
+            actual = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert actual["draft"]["full_name"] == expected["full_name"], seed
+            assert actual["draft"]["email"] == "conflict@example.test", seed
+            assert actual["submit_count"] == 0, seed
+            task = queue.get(task_id)
+            assert task["stage"] == "BLOCKED", seed
+            assert task["blocker"] == "draft_persistence_unverified", seed
+            blocked.add(task_id)
+        assert len(blocked) == 20
+        assert len(corrupted) == 20
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
+
+
+def test_repeated_acknowledged_but_unsaved_drafts_block_twenty_ui_tasks(
+    tmp_path, monkeypatch
+):
+    """An HTTP 204 acknowledgement without a committed draft is never READY."""
+    class SilentLossATS(SyntheticATS):
+        def do_POST(self):
+            if self.path == "/draft":
+                self.server.draft_attempts += 1
+            return super().do_POST()
+
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SilentLossATS)
+    ats.draft, ats.submit_count, ats.revision = {}, 0, 0
+    ats.accept_draft, ats.draft_attempts = False, 0
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        profile = tmp_path / "silent-loss-profile.json"
+        target = f"http://127.0.0.1:{ats.server_port}/apply?postId=loss-000"
+        checked = set()
+
+        class SilentLossAdapter(GenericWebAdapter):
+            def verify_draft_persistence(self, plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                if (plan.target_url == target and actual["draft"] == {}
+                        and actual["revision"] == 0
+                        and ats.draft_attempts >= 2):
+                    checked.add(target)
+                return None
+
+            def observe_review_draft(self, plan):
+                raise AssertionError("uncommitted server draft must not reach READY review")
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: SilentLossAdapter(url))
+        proposal = Proposal(target)
+        queue = TaskQueue(tmp_path / "silent-loss-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(profile)},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+        blocked = set()
+        for seed in range(20):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply"
+                      f"?postId=loss-{seed:03d}")
+            proposal.target_url = target
+            profile = tmp_path / f"silent-loss-profile-{seed:03d}.json"
+            manager.settings["profile_path"] = str(profile)
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {
+                    "value": f"Synthetic Unsaved Applicant {seed:03d}",
+                    "confidence": 1.0},
+                "identity.email": {
+                    "value": f"unsaved{seed:03d}@example.test",
+                    "confidence": 1.0},
+            }}), encoding="utf-8")
+            ats.draft, ats.revision, ats.draft_attempts = {}, 0, 0
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert worker.run_once(), seed
+            assert target in checked, seed
+            assert ats.draft_attempts >= 2, seed
+            actual = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert actual["draft"] == {}, seed
+            assert actual["revision"] == 0, seed
+            assert actual["submit_count"] == 0, seed
+            task = queue.get(task_id)
+            assert task["stage"] == "BLOCKED", seed
+            assert task["blocker"] == "draft_persistence_unverified", seed
+            blocked.add(task_id)
+        assert len(blocked) == 20
+        assert len(checked) == 20
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
+        ats.shutdown()
+        ats.server_close()
+
+
+def test_one_hundred_distinct_multipage_ui_tasks_require_each_server_draft_receipt(
+    tmp_path, monkeypatch
+):
+    """Second synthetic form mechanism: page advance and final draft readback."""
+    ats = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticATS)
+    ats.draft, ats.submit_count, ats.revision, ats.page_two_reads = {}, 0, 0, 0
+    ats.accept_draft = True
+    threading.Thread(target=ats.serve_forever, daemon=True).start()
+    local = None
+    try:
+        profile = tmp_path / "multipage-profile.json"
+        expected = {}
+        target = f"http://127.0.0.1:{ats.server_port}/apply-multipage?postId=multi-000"
+
+        class MultiPageGoldenAdapter(GenericWebAdapter):
+            safe_advance_certified = True
+
+            def verify_draft_persistence(self, plan):
+                actual = json.load(urllib.request.urlopen(
+                    f"http://127.0.0.1:{ats.server_port}/oracle"))
+                page_draft = {"full_name": expected["full_name"]}
+                if self.page.url.endswith("/apply-second"):
+                    page_draft["email"] = expected["email"]
+                if (actual["draft"] != page_draft
+                        or actual["revision"] < len(page_draft)):
+                    return None
+                return {"verified": True, "level": "server_readback",
+                        "revision": actual["revision"]}
+
+            def observe_review_draft(self, plan):
+                return _review_snapshot(self, plan, ats, account=expected["email"])
+
+        monkeypatch.setattr("executor.application.adapter_for_url",
+                            lambda url: MultiPageGoldenAdapter(url))
+        proposal = Proposal(target)
+        queue = TaskQueue(tmp_path / "multipage-runtime")
+        worker = Worker(queue, settings={"deepseek": {"enabled": False}})
+        manager = ManagerController(
+            queue, worker, provider=proposal,
+            settings={"profile_path": str(profile)},
+        )
+        supervisor = Supervisor(queue, worker=worker, manager=manager)
+        local = create_server(supervisor, port=0)
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{local.server_port}"
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        browser.open(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket()).read()
+        ready = {}
+        for seed in range(100):
+            target = (f"http://127.0.0.1:{ats.server_port}/apply-multipage"
+                      f"?postId=multi-{seed:03d}")
+            proposal.target_url = target
+            profile = tmp_path / f"multipage-profile-{seed:03d}.json"
+            manager.settings["profile_path"] = str(profile)
+            expected = {
+                "full_name": f"Synthetic Multipage Applicant {seed:03d}",
+                "email": f"multi{seed:03d}@example.test",
+            }
+            profile.write_text(json.dumps({"fields": {
+                "identity.full_name": {"value": expected["full_name"],
+                                       "confidence": 1.0},
+                "identity.email": {"value": expected["email"],
+                                   "confidence": 1.0},
+            }}), encoding="utf-8")
+            ats.draft, ats.revision, ats.page_two_reads = {}, 0, 0
+            request = urllib.request.Request(
+                base + "/ui/api/chat",
+                data=json.dumps({"message": "请申请 " + target}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            response = json.loads(browser.open(request).read())
+            assert response["actions"][0]["status"] == "accepted", seed
+            task_id = response["actions"][0]["task_id"]
+            assert worker.run_once(), seed
+            actual = json.load(urllib.request.urlopen(
+                f"http://127.0.0.1:{ats.server_port}/oracle"))
+            assert actual["draft"] == expected, seed
+            assert actual["revision"] >= 2, seed
+            assert ats.page_two_reads >= 1, seed
+            assert actual["submit_count"] == 0, seed
+            task = queue.get(task_id)
+            assert task["stage"] == "READY_TO_SUBMIT", seed
+            assert task["spec"]["target_url"] == target, seed
+            ready[task_id] = target
+        assert len(ready) == 100
+        # An independent browser draft must not overwrite the durable task
+        # identity or READY state of any earlier applicant in the batch.
+        reopened = TaskQueue(tmp_path / "multipage-runtime")
+        for task_id, original_target in ready.items():
+            retained = reopened.get(task_id)
+            assert retained["stage"] == "READY_TO_SUBMIT", task_id
+            assert retained["spec"]["target_url"] == original_target, task_id
+        assert ats.submit_count == 0
+    finally:
+        if local is not None:
+            local.shutdown()
+            local.server_close()
         ats.shutdown()
         ats.server_close()

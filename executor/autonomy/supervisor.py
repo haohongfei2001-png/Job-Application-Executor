@@ -7,43 +7,29 @@ import secrets
 import threading
 import time
 from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from .. import browser
+from .. import browser, settings
+from .profile_setup import profile_setup_state, select_profile
+from . import profile_editor
+from .task_preparation import parse_preparation_query, prepare_task
+from .preparation_review import review_preparation
+from .preparation_session import PrivatePreparationSessions
 from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
+from .loopback_http import LoopbackHTTPServer
 from .manager import ManagerController, safe_task_view
 from .queue import TaskQueue, TaskSpec, private_dir
+from .runtime_paths import local_token
+from .release import is_packaged_source, read_release_identity
 from .updater import reconciled_update_state, safe_to_update, spawn_update
 from .worker import Worker
 
 
 UI_COOKIE = "application_executor_session"
-
-
-def local_token(root):
-    token = os.getenv("APPLICATION_EXECUTOR_LOCAL_TOKEN")
-    if token:
-        if len(token) < 32:
-            raise ValueError("local auth token must have at least 32 characters")
-        return token
-    path = private_dir(root) / "auth.token"
-    if not path.exists():
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(secrets.token_urlsafe(32))
-        except FileExistsError:
-            pass
-    if path.is_symlink() or path.stat().st_mode & 0o077:
-        raise ValueError("private token permissions required")
-    token = path.read_text().strip()
-    if len(token) < 32:
-        raise ValueError("invalid private auth token")
-    return token
 
 
 class Supervisor:
@@ -53,11 +39,126 @@ class Supervisor:
         if len(self.token) < 32:
             raise ValueError("local auth token too short")
         self.manager = manager or ManagerController(queue, self.worker)
+        self.release_identity = read_release_identity(Path(__file__).resolve().parents[2])
         self._ui_lock = threading.RLock()
         self._mutation_lock = threading.RLock()
         self._command_lock = threading.RLock()
+        self._provider_refresh_revision = 0
         self._ui_tickets: dict[str, float] = {}
         self._ui_sessions: dict[str, float] = {}
+        self._service_instance = secrets.token_urlsafe(32)
+        self._service_port = None
+        self._service_stop_requested = False
+        self.preparation_sessions = PrivatePreparationSessions(queue,self.valid_ui_session,self.mutation_fenced)
+
+    def configure_profile(self, text, expected_version):
+        current = select_profile(text, expected_version)
+        # TaskSpec holds its own immutable profile_ref; only future tasks change.
+        self.manager.settings = current
+        self.worker.settings = current
+        return {"settings_version": settings.settings_version(current),
+                "profile_selected": True, "submit_capability": False}
+
+    def profile_editor_state(self):
+        _current, view = profile_editor.editor_state()
+        return {**view, "admission_status": "reconciliation_required" if getattr(
+            self.manager, "_profile_selection_uncertain", False) else "ready"}
+
+    def configure_profile_editor(self, metadata, resume):
+        with self._command_lock:
+            if getattr(self.manager, "_profile_selection_uncertain", False):
+                raise profile_editor.EditorConflict()
+            try:
+                current, view = profile_editor.save_profile(metadata, resume)
+            except profile_editor.PublicationUncertain as failure:
+                # A settings directory fsync failure is not a rollback. Only a
+                # proven selection can replace the in-memory FUTURE-task binding.
+                self.manager._profile_selection_uncertain = failure.current is None
+                if failure.current is not None:
+                    self.manager.settings = failure.current
+                    self.worker.settings = failure.current
+                raise
+            self.manager.settings = current
+            self.worker.settings = current
+            self.manager._profile_selection_uncertain = False
+            return {**view, "save_status": "saved", "admission_status": "ready"}
+
+    def reconcile_profile_editor(self):
+        with self._command_lock:
+            try:
+                current, view = profile_editor.editor_state()
+            except Exception:
+                self.manager._profile_selection_uncertain = True
+                raise profile_editor.EditorConflict() from None
+            self.manager.settings = current
+            self.worker.settings = current
+            self.manager._profile_selection_uncertain = False
+            return {**view, "reconciliation_status": "reconciled", "admission_status": "ready"}
+
+    def load_configured_provider(self):
+        """Explicit credential initialization, no model call or task mutation.
+
+        Serialize with manager conversations so two foreground requests cannot
+        acquire credentials twice or replace an already loaded client.
+        """
+        with self._command_lock:
+            try:
+                if self.manager.loaded_provider_state()["state"] == "not_loaded":
+                    self._advance_provider_revision()
+                self.manager.provider
+                state = self.manager.loaded_provider_state()
+                loaded = state["state"] != "not_loaded"
+                status = state["state"]
+            except Exception:
+                loaded, status = False, "unavailable"
+            return {"provider_state": status,
+                    "provider_state_basis": "loaded_configuration",
+                    "loaded": loaded, "final_click_actor": "user",
+                    "submit_capability": False}
+
+
+    def _advance_provider_revision(self):
+        if self._provider_refresh_revision >= 9007199254740991:
+            raise RuntimeError("provider refresh exhausted")
+        self._provider_refresh_revision += 1
+
+    def provider_refresh_state(self):
+        """Value-free loaded-configuration observation; never acquire credentials."""
+        with self._command_lock:
+            state = self.manager.loaded_provider_state()["state"]
+            return {"configuration_version": settings.settings_version(self.manager.settings),
+                    "refresh_revision": self._provider_refresh_revision,
+                    "provider_state": state,
+                    "provider_state_basis": "loaded_configuration",
+                    "final_click_actor": "user", "submit_capability": False}
+
+    def refresh_configured_provider(self, expected_version, expected_revision):
+        """Explicit serialized reacquisition of existing configured credentials.
+
+        No model request, credential-store write, settings edit or task action.
+        Consume the observation before attempting acquisition, including failure.
+        """
+        if (not isinstance(expected_version, str) or len(expected_version) != 64
+                or any(c not in "0123456789abcdef" for c in expected_version)
+                or type(expected_revision) is not int
+                or not 0 <= expected_revision < 9007199254740991):
+            raise ValueError("invalid provider refresh observation")
+        with self._mutation_lock:
+            with self._command_lock:
+                if (self.mutation_fenced() or self.worker.active is not None
+                        or settings.settings_version(self.manager.settings) != expected_version
+                        or self._provider_refresh_revision != expected_revision
+                        or self.manager.loaded_provider_state()["state"] == "not_loaded"):
+                    raise RuntimeError("provider refresh conflict")
+                self._advance_provider_revision()
+                try:
+                    self.manager.reload_configured_provider()
+                    if self.manager.loaded_provider_state()["state"] == "not_loaded":
+                        raise ValueError("provider not loaded")
+                    status = "refreshed"
+                except Exception:
+                    status = "failed"
+                return {**self.provider_refresh_state(), "refresh_status": status}
 
     def _expire_ui(self):
         now = time.monotonic()
@@ -97,6 +198,11 @@ class Supervisor:
     def ui_state(self):
         state = self.manager.state()
         for task in state.get("tasks", []):
+            if task.get("stage") == "NEEDS_USER_INPUT":
+                task["question_context"] = (
+                    self.worker.question_context(task["task_id"], task["revision"])
+                    or {"status": "unavailable", "items": []})
+                continue
             if task.get("stage") == "READY_TO_SUBMIT":
                 queue_task = self.queue.get(task["task_id"])
                 spec = queue_task.get("spec") or {}
@@ -170,6 +276,7 @@ class Supervisor:
             "ok": True,
             "worker_active": self.worker.active,
             "update": reconciled_update_state(self.queue.root),
+            "ui_context": self.queue.task_view_context(),
             **state,
         }
 
@@ -183,8 +290,28 @@ class Supervisor:
         from .consumer import humanize_preflight
         from .preflight import collect_live_preflight
 
-        result = collect_live_preflight(supervisor_running=True)
-        return {**result, "message": humanize_preflight(result)}
+        # Read the same loaded provider/settings used by tasks. A periodic GUI
+        # check must not construct another provider or prompt for Keychain access.
+        try:
+            provider = self.manager.loaded_provider_state()
+            state = provider["state"]
+            if state not in {"available", "unavailable", "not_loaded"}:
+                raise ValueError("provider_state_invalid")
+            available = state == "available" and provider["available"] is True
+        except Exception:
+            state, available = "unavailable", False
+        result = collect_live_preflight(
+            settings=self.manager.settings, supervisor_running=True,
+            deepseek_available=available,
+        )
+        if state == "not_loaded":
+            result["remediation"] = [
+                "load_provider_on_user_request" if code == "configure_deepseek_key" else code
+                for code in result["remediation"]
+            ]
+        return {**result, "provider_state": state,
+                "provider_state_basis": "loaded_configuration",
+                "message": humanize_preflight(result)}
 
     def observe_task(self, tid: str):
         task = self.queue.get(tid)
@@ -193,10 +320,23 @@ class Supervisor:
             "user_paused_from_unknown_outcome", "user_paused_from_browser_ownership_unknown",
         }:
             raise ValueError("task is not waiting for read-only reconciliation")
+        before = self.queue.recovery_snapshot(tid, expected_revision=task["revision"])
         observed = browser.observe_bound_draft(
-            task["spec"]["target_url"], self.queue.browser_binding(tid)
+            task["spec"]["target_url"], before["binding"]
         )
-        return {"ok": True, "task_id": tid, **observed}
+        # An observation can yield to cancellation, a late field outcome or a
+        # changed owned-document binding. Do not publish a mixed old/new result.
+        after = self.queue.recovery_snapshot(tid, expected_revision=before["revision"])
+        if after != before:
+            raise ValueError("recovery observation changed")
+        return {"ok": True, "task_id": tid, **observed,
+                "revision": before["revision"],
+                "field_actions": before["field_actions"],
+                "run_attempts": before["run_attempts"],
+                "journal_scope": "recorded_local_intents_only",
+                "server_persistence_verified": False,
+                "draft_identity_verified": False,
+                "replay_allowed": False, "submit_capability": False}
 
     def observe_submission(self, tid: str):
         """Inspect the already-owned task tab after a possible human submit."""
@@ -256,8 +396,51 @@ class Supervisor:
             "server_verified": submission["server_verified"],
         }
 
+    def service_identity(self):
+        if type(self._service_port) is not int or not 0 < self._service_port < 65536:
+            raise RuntimeError("service identity unavailable")
+        return {"pid": os.getpid(), "port": self._service_port,
+                "instance": self._service_instance}
+
+    def stop_service(self, data, *, defer_stop=False):
+        # This internal bearer-only route has no task or final-click authority.
+        if (type(data) is not dict or set(data) != {"pid", "port", "instance"}
+                or type(data["pid"]) is not int or type(data["port"]) is not int
+                or type(data["instance"]) is not str or not data["instance"].isascii()
+                or not 32 <= len(data["instance"]) <= 128
+                or not all(c.isalnum() or c in "_-" for c in data["instance"])):
+            raise ValueError("invalid service identity")
+        with self._mutation_lock:
+            with self._command_lock:
+                if (data["pid"] != os.getpid() or data["port"] != self._service_port
+                        or not hmac.compare_digest(data["instance"], self._service_instance)):
+                    return {"ok": False, "reason": "service_identity_changed"}
+                if self._service_stop_requested:
+                    return {"ok": True, "stopping": True}
+                if self.mutation_fenced():
+                    return {"ok": False, "reason": "update_in_progress"}
+                safe, reason = safe_to_update(self)
+                if not safe:
+                    return {"ok": False, "reason": reason}
+                # Serialize against all task/fact/config admission before the
+                # existing worker safe-checkpoint stop flag can be observed.
+                self._service_stop_requested = True
+                self.preparation_sessions.revoke_all()
+                # HTTP retirement sends its acknowledgement before releasing the
+                # worker. The admission fence is already active under both locks.
+                if not defer_stop:
+                    self.worker.stop_event.set()
+                return {"ok": True, "stopping": True}
+
     def update_state(self):
         return reconciled_update_state(self.queue.root)
+
+    def retire_for_shutdown(self):
+        """Fence new mutations before waiting for disposable owners to close."""
+        with self._mutation_lock:
+            with self._command_lock:
+                self._service_stop_requested=True
+                self.preparation_sessions.revoke_all()
 
     def update_in_progress(self) -> bool:
         return self.update_state().get("status") in {
@@ -267,7 +450,7 @@ class Supervisor:
         }
 
     def mutation_fenced(self) -> bool:
-        return self.update_state().get("status") in {
+        return self._service_stop_requested or self.update_state().get("status") in {
             "checking",
             "updating",
             "restarting",
@@ -289,6 +472,16 @@ class Supervisor:
                         "status": "denied",
                         "reason": "update_in_progress",
                     }
+                # A packaged release has no trusted Git checkout. Until the
+                # staged release updater is ready, never route it to the old
+                # in-place Git writer.
+                if (self.release_identity.get("status") == "verified"
+                        or is_packaged_source(Path(__file__).resolve().parents[2])):
+                    return {
+                        "ok": False,
+                        "status": "denied",
+                        "reason": "packaged_update_not_ready",
+                    }
                 safe, reason = safe_to_update(self)
                 if not safe:
                     return {
@@ -296,11 +489,14 @@ class Supervisor:
                         "status": "denied",
                         "reason": reason,
                     }
-                return spawn_update(
-                    repo_root=Path(__file__).resolve().parents[2],
-                    runtime=self.queue.root,
-                    port=port,
-                )
+                # Consumer admission is read-only for the retired checkout
+                # writer. Keep busy/task/OTP fences, but never launch a Git
+                # mutation or a second task-state writer from the application.
+                return {
+                    "ok": False,
+                    "status": "denied",
+                    "reason": "legacy_update_retired",
+                }
 
     def run_local_command(self, command: CommandEnvelope):
         # Serialize admission with the updater's final safety check and spawn.
@@ -319,14 +515,21 @@ class Supervisor:
         with self._command_lock:
             if self.mutation_fenced():
                 raise RuntimeError("update in progress")
+            if self.queue.get(task_id)["revision"] != revision:
+                raise RuntimeError("stale task revision")
+            context = self.worker.question_context(task_id, revision)
+            if not context or field_key not in {item["key"] for item in context["items"]}:
+                raise ValueError("current site question context required")
             updated = self.worker.user_input(task_id, {field_key: value},
                                              expected_revision=revision,
                                              remember=remember)
             return {"status": "accepted", "task": safe_task_view(updated)}
 
-    def dispatch(self, method, path, data):
+    def dispatch(self, method, path, data, *, defer_stop=False):
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
+        if method == "POST" and parts == ["v1", "service-stop"]:
+            return self.stop_service(data, defer_stop=defer_stop)
         if method == "POST" and parts == ["v1", "commands"]:
             return self._dispatch_unlocked(method, path, data)
         if method == "POST" and parts != ["v1", "ui-ticket"]:
@@ -338,8 +541,12 @@ class Supervisor:
     def _dispatch_unlocked(self, method, path, data):
         parsed = urlsplit(path)
         parts = parsed.path.strip("/").split("/")
+        if method == "GET" and parts == ["v1", "service-identity"]:
+            return self.service_identity()
         if method == "GET" and parts == ["health"]:
-            return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user"}
+            return {"ok": True, "worker_active": self.worker.active, "final_click_actor": "user",
+                    "loaded_source_sha256": self.release_identity.get("source_sha256", "")
+                    if self.release_identity.get("status") == "verified" else ""}
         if method == "GET" and parts == ["v1", "tasks"]:
             return {"tasks": self.queue.tasks()}
         if method == "GET" and len(parts) == 3 and parts[:2] == ["v1", "commands"]:
@@ -454,13 +661,18 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
             morsel = cookie.get(UI_COOKIE)
             return morsel.value if morsel else ""
 
-        def _read_json(self):
+        def _read_json(self, *, limit=65536, strict=False):
             size = int(self.headers.get("Content-Length", "0"))
-            if size < 0 or size > 65536 or self.headers.get("Transfer-Encoding"):
+            if size < 0 or size > limit or self.headers.get("Transfer-Encoding"):
                 raise ValueError("invalid request size")
             if self.command == "POST" and self.headers.get_content_type() != "application/json":
                 raise ValueError("JSON required")
-            data = json.loads(self.rfile.read(size)) if size else {}
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                raise ValueError("incomplete request")
+            data = json.loads(raw, object_pairs_hook=settings._object,
+                              parse_constant=settings._constant) if strict and size else (
+                                  json.loads(raw) if size else {})
             if not isinstance(data, dict):
                 raise ValueError("object required")
             return data
@@ -494,7 +706,7 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
             if is_ui:
                 if not supervisor.valid_ui_session(self._cookie_session()):
                     if parsed.path == "/ui":
-                        self._send_html(401, "<h1>AI 投递经理</h1><p>请从本地 CLI 重新打开面板。</p>")
+                        self._send_html(401, "<h1>AI 投递经理</h1><p>面板会话已失效，请重新打开 AI 投递经理。已有任务不会自动重试，最终提交仍由你本人完成。</p>")
                     else:
                         self._send_json(401, {"error": "ui_session_required"})
                     return
@@ -508,6 +720,110 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/state":
                         self._send_json(200, supervisor.ui_state())
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/preparation-review":
+                        if parsed.fragment:
+                            raise ValueError("invalid preparation request")
+                        task_id, revision = parse_preparation_query(parsed.query)
+                        self._send_json(200, review_preparation(supervisor.queue, task_id, revision))
+                        return
+                    if parsed.path in {'/ui/api/preparation-session/open','/ui/api/preparation-session/cancel','/ui/api/preparation-session/status'}:
+                        if self.command!='POST' or parsed.query or parsed.fragment:
+                            raise ValueError('invalid preparation session request')
+                        if origin != expected_origin:
+                            self._send_json(403, {'error':'local_origin_required'})
+                            return
+                        data=self._read_json(limit=4096,strict=True)
+                        action=parsed.path.rsplit('/',1)[1]
+                        callback=getattr(supervisor.preparation_sessions,action)
+                        self._send_json(200,callback(data,self._cookie_session()))
+                        return
+                    native_actions={'open':'open_native','approve-fill':'approve_fill',
+                                    'review-resume':'review_resume','approve-resume':'approve_resume',
+                                    'status':'native_status','cancel':'cancel'}
+                    if parsed.path.startswith('/ui/api/native-preparation/'):
+                        action=parsed.path.removeprefix('/ui/api/native-preparation/')
+                        if action not in native_actions:
+                            self._send_json(404,{'error':'not_found'});return
+                        if self.command!='POST' or parsed.query or parsed.fragment:
+                            raise ValueError('invalid native preparation request')
+                        if origin!=expected_origin:
+                            self._send_json(403,{'error':'local_origin_required'});return
+                        data=self._read_json(limit=4096,strict=True)
+                        from ..preparation.native_admission import NativeAdmissionUnavailable
+                        try:
+                            callback=getattr(supervisor.preparation_sessions,native_actions[action])
+                            result=callback(data,self._cookie_session())
+                        except NativeAdmissionUnavailable:
+                            self._send_json(409,{'error':'native_preparation_runtime_not_admitted',
+                                                 'submit_capability':False});return
+                        self._send_json(200,result);return
+                    if self.command == "GET" and parsed.path == "/ui/api/task-preparation":
+                        if parsed.fragment:
+                            raise ValueError("invalid preparation request")
+                        task_id, revision = parse_preparation_query(parsed.query)
+                        self._send_json(200, prepare_task(supervisor.queue, task_id, revision))
+                        return
+                    if parsed.path in {"/ui/api/profile-editor", "/ui/api/profile-editor/reconcile"}:
+                        if parsed.query or parsed.fragment:
+                            raise profile_editor.EditorInvalid()
+                        if self.command == "GET" and parsed.path == "/ui/api/profile-editor":
+                            self._send_json(200, supervisor.profile_editor_state())
+                            return
+                        if self.command == "POST":
+                            if origin != expected_origin:
+                                self._send_json(403, {"error": "local_origin_required"})
+                                return
+                            if parsed.path.endswith("/reconcile"):
+                                profile_editor.read_reconcile_request(self.headers, self.rfile)
+                                try:
+                                    result = supervisor.run_mutation(supervisor.reconcile_profile_editor)
+                                except profile_editor.EditorConflict:
+                                    self._send_json(409, {"error": "reconciliation_required",
+                                                         "submit_capability": False})
+                                    return
+                            else:
+                                metadata, resume = profile_editor.read_save_request(self.headers, self.rfile)
+                                result = supervisor.run_mutation(lambda: supervisor.configure_profile_editor(metadata, resume))
+                            self._send_json(200, result)
+                            return
+                    if self.command == "GET" and parsed.path == "/ui/api/profile-setup":
+                        self._send_json(200, profile_setup_state())
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/profile-setup":
+                        if origin != expected_origin:
+                            self._send_json(403, {"error": "local_origin_required"})
+                            return
+                        data = self._read_json(limit=2 * 1024 * 1024, strict=True)
+                        if set(data) != {"profile_json", "expected_settings_version"}:
+                            raise ValueError("invalid profile envelope")
+                        result = supervisor.run_mutation(lambda: supervisor.configure_profile(
+                            data["profile_json"], data["expected_settings_version"]))
+                        self._send_json(200, result)
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/provider-load":
+                        if origin != expected_origin:
+                            self._send_json(403, {"error": "local_origin_required"})
+                            return
+                        data = self._read_json(strict=True)
+                        if data:
+                            raise ValueError("invalid provider load envelope")
+                        result = supervisor.run_mutation(supervisor.load_configured_provider)
+                        self._send_json(200, result)
+                        return
+                    if self.command == "GET" and parsed.path == "/ui/api/provider-refresh":
+                        self._send_json(200, supervisor.provider_refresh_state())
+                        return
+                    if self.command == "POST" and parsed.path == "/ui/api/provider-refresh":
+                        if origin != expected_origin:
+                            self._send_json(403, {"error": "local_origin_required"})
+                            return
+                        data = self._read_json(strict=True)
+                        if set(data) != {"expected_settings_version", "expected_refresh_revision"}:
+                            raise ValueError("invalid provider refresh envelope")
+                        result = supervisor.refresh_configured_provider(
+                            data["expected_settings_version"], data["expected_refresh_revision"])
+                        self._send_json(200, result)
                         return
                     if self.command == "GET" and parsed.path == "/ui/api/readiness":
                         self._send_json(200, supervisor.readiness())
@@ -537,6 +853,14 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         result = supervisor.begin_update(self.server.server_address[1])
                         self._send_json(200 if result.get("ok") else 409, result)
                         return
+                    if self.command == "POST" and parsed.path == "/ui/api/task-view-context":
+                        data = self._read_json()
+                        if set(data) != {"task_id", "expected_revision"}:
+                            raise ValueError("invalid task view envelope")
+                        result = supervisor.run_mutation(lambda: supervisor.queue.remember_task_view(
+                            data["task_id"], expected_revision=data["expected_revision"]))
+                        self._send_json(200, result)
+                        return
                     if self.command == "POST" and parsed.path == "/ui/api/chat":
                         data = self._read_json()
                         if set(data) != {"message"}:
@@ -565,6 +889,8 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         response = {"discovery": result.get("discovery")}
                         if "task_id" in result:
                             response.update(task_id=result["task_id"], revision=result["revision"])
+                            if result.get("task_binding") in {"requested", "existing_different"}:
+                                response["task_binding"] = result["task_binding"]
                         self._send_json(200, response)
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/human-submission":
@@ -623,7 +949,11 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         self._send_json(200, result)
                         return
                     self._send_json(404, {"error": "not_found"})
-                except (ValueError, TypeError):
+                except profile_editor.PublicationUncertain as failure:
+                    self._send_json(409, {"error": "publication_uncertain",
+                                         "reconciliation_status": "reconciled" if failure.current is not None else "required",
+                                         "submit_capability": False})
+                except (ValueError, TypeError, UnicodeError, RecursionError):
                     self._send_json(400, {"error": "invalid_request"})
                 except RuntimeError:
                     self._send_json(409, {"error": "state_conflict"})
@@ -638,7 +968,8 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                 elif not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + supervisor.token):
                     status, result = 401, {"error": "unauthorized"}
                 else:
-                    result = supervisor.dispatch(self.command, self.path, self._read_json())
+                    result = supervisor.dispatch(
+                        self.command, self.path, self._read_json(), defer_stop=True)
             except KeyError:
                 status, result = 404, {"error": "not_found"}
             except (ValueError, TypeError):
@@ -647,11 +978,24 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                 status, result = 409, {"error": "state_conflict"}
             except Exception:
                 status, result = 500, {"error": "internal_error"}
-            self._send_json(status, result)
+            retire_after_response = (
+                self.command == "POST" and parsed.path == "/v1/service-stop"
+                and status == 200 and type(result) is dict and result.get("ok") is True
+            )
+            try:
+                self._send_json(status, result)
+                if retire_after_response:
+                    self.wfile.flush()
+            finally:
+                # Even a disconnected client cannot leave admission permanently
+                # fenced; the worker stops only after the response write attempt.
+                if retire_after_response:
+                    supervisor.worker.stop_event.set()
 
         do_GET = handle_request
         do_POST = handle_request
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = LoopbackHTTPServer((host, port), Handler)
     server.daemon_threads = True
+    supervisor._service_port = server.server_address[1]
     return server

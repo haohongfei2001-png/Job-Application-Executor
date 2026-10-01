@@ -617,6 +617,14 @@ class ApplicationExecutor:
             if callable(verify):
                 verify()
         adapter.mutation_guard = guarded_browser_mutation
+        # Daemon field intents use its existing task journal and coarse run
+        # fence. Direct CLI audit stores do not acquire a second task authority.
+        if callable(getattr(self.audit, "begin_field_action", None)):
+            adapter.field_action_begin = self.audit.begin_field_action
+            adapter.field_action_finish = self.audit.finish_field_action
+            invalidate = getattr(self.audit, "invalidate_field_readbacks", None)
+            if callable(invalidate):
+                adapter.field_readbacks_invalidate = invalidate
         adapter.existing_browser_only = self.existing_browser_only
         adapter.browser_binding_get = getattr(self, "browser_binding_get", None)
         adapter.browser_binding_set = getattr(self, "browser_binding_set", None)
@@ -741,16 +749,20 @@ class ApplicationExecutor:
                         page_index, "authentication_field",
                         "authentication field requires the dedicated human or in-memory channel",
                     )
-                if not fields and adapter.start_application():
+                if (not fields and (observation is None or observation.collection_complete is True)
+                        and adapter.start_application()):
                     self.audit.record_action({"type": "start_application", "page_index": page_index})
                     continue
                 if observation and (((observation.rows and not getattr(
                         adapter, "repeated_rows_certified", False))
+                                     or observation.collection_complete is not True
                                      or observation.unsupported_component_count
                                      or observation.ambiguous_selector_count
                                      or observation.ambiguous_row_count) or (
                         not fields and adapter.final_submit_control())):
                     limitations = []
+                    if observation.collection_complete is not True:
+                        limitations.append("form_collection_limit_exceeded")
                     if observation.rows and not getattr(adapter, "repeated_rows_certified", False):
                         limitations.append("repeated_rows_without_canonical_binding")
                     if observation.unsupported_component_count:
@@ -777,7 +789,14 @@ class ApplicationExecutor:
                     self.audit.save_plan(self.plan)
                     return self.plan
                 if observation:
-                    FillPlan.bind(observation, resolutions)
+                    try:
+                        FillPlan.bind(observation, resolutions)
+                    except ValueError:
+                        self.plan.stage = ApplicationStage.BLOCKED
+                        self.plan.metadata["block_reason"] = "fill plan identity unverified"
+                        self.plan.metadata["capability_limitations"] = ["ambiguous_fill_plan_identity"]
+                        self.audit.save_plan(self.plan)
+                        return self.plan
                 self.plan.metadata["current_page_selectors"] = [item.selector for item in resolutions]
                 self.plan.fields.extend(resolutions)
                 self.plan.unresolved_fields.extend([
@@ -812,14 +831,22 @@ class ApplicationExecutor:
                             self.audit.save_plan(self.plan)
                             return self.plan
                         self.plan.metadata["form_observation"] = updated.safe_summary()
-                        if (updated.unsupported_component_count or updated.ambiguous_selector_count
+                        if (updated.collection_complete is not True
+                                or updated.unsupported_component_count or updated.ambiguous_selector_count
                                 or updated.ambiguous_row_count):
                             break
                         added = [field for field in updated.fields if field.selector not in known]
                         if not added:
                             break
                         new_resolutions = self._resolve_page(added)
-                        FillPlan.bind(updated, new_resolutions)
+                        try:
+                            FillPlan.bind(updated, new_resolutions)
+                        except ValueError:
+                            self.plan.stage = ApplicationStage.BLOCKED
+                            self.plan.metadata["block_reason"] = "fill plan identity unverified"
+                            self.plan.metadata["capability_limitations"] = ["ambiguous_fill_plan_identity"]
+                            self.audit.save_plan(self.plan)
+                            return self.plan
                         self.plan.fields.extend(new_resolutions)
                         self.plan.unresolved_fields.extend(item for item in new_resolutions
                             if item.status in {ResolutionStatus.UNRESOLVED,

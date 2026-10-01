@@ -13,6 +13,7 @@ from .base import SiteAdapter
 from ..browser import BrowserOwnershipError, connect, owned_page_after_action, page_document_epoch, page_target_id
 from ..field_classifier import is_final_submit, is_initial_apply, is_next
 from ..forms import FormObservation, FormObservationError, ObservedRow
+from ..forms.observation import unique_fill_identity
 from ..models import (
     ApplicationPlan,
     FieldResolution,
@@ -68,6 +69,55 @@ ACCOUNT_OR_DESTRUCTIVE_RE = re.compile(
     r"create\s+(?:an?\s+)?account|delete|remove|destroy|deactivate",
     re.I,
 )
+
+
+# Question/row identity excludes current values and option lists: an explicitly
+# declared parent may redraw child choices without changing the child question.
+FIELD_CONTRACT_SCRIPT = r"""e => {
+  const clean = text => (text || '').replace(/\s+/g, ' ').trim();
+  const prompt = node => {
+    if (!node || node.matches('input, textarea, select, [role="combobox"], [role="listbox"], [role="option"]'))
+      return '';
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll('input, textarea, select, [role="combobox"], [role="listbox"], [role="option"]')
+      .forEach(control => control.remove());
+    return clean(clone.textContent);
+  };
+  const labelledBy = clean(e.getAttribute('aria-labelledby')).split(' ').filter(Boolean);
+  const row = e.closest('[data-record-id], [data-row-id]');
+  const rowAttribute = row?.hasAttribute('data-record-id') ? 'data-record-id' : 'data-row-id';
+  return [e.tagName.toLowerCase(), e.getAttribute('type'), e.id,
+    e.getAttribute('name'), e.getAttribute('role'), e.getAttribute('aria-label'),
+    e.getAttribute('placeholder'), [...(e.labels || [])].map(prompt),
+    labelledBy.map(id => [id, prompt(document.getElementById(id))]),
+    !!e.required || e.getAttribute('aria-required') === 'true', !!e.multiple,
+    e.getAttribute('data-depends-on') || '', e.getAttribute('aria-controls') || '',
+    row ? [rowAttribute, row.getAttribute(rowAttribute) || ''] : []];
+}"""
+
+
+# Mutation admission is separate from question identity and applicant values.
+# Native options do not have their own rendered box; their select ancestry does.
+CONTROL_ADMISSION_SCRIPT = r"""e => {
+  if (!e.isConnected || e.ownerDocument !== document || e.matches(':disabled')
+      || e.readOnly || e.closest('[aria-disabled="true"],[aria-readonly="true"]'))
+    return false;
+  for (let node = e; node; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (node.hidden || node.inert || node.getAttribute('aria-hidden') === 'true'
+        || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
+        || Number(style.opacity) === 0 || style.contentVisibility === 'hidden')
+      return false;
+  }
+  return true;
+}"""
+
+
+def _control_contract_digest(contract) -> str:
+    if not isinstance(contract, list):
+        return ""
+    return hashlib.sha256(json.dumps(
+        contract, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 class GenericWebAdapter(SiteAdapter):
@@ -145,7 +195,8 @@ class GenericWebAdapter(SiteAdapter):
     @staticmethod
     def _visible(locator) -> bool:
         try:
-            return locator.is_visible() and locator.is_enabled()
+            return (locator.is_visible() and locator.is_enabled()
+                    and locator.evaluate(CONTROL_ADMISSION_SCRIPT) is True)
         except Exception:
             return False
 
@@ -163,6 +214,12 @@ class GenericWebAdapter(SiteAdapter):
         return loc
 
     def discover_fields(self) -> list[WebField]:
+        fields, complete = self._discover_form_snapshot()
+        if not complete:
+            raise FormObservationError("form collection limit exceeded")
+        return fields
+
+    def _discover_form_snapshot(self) -> tuple[list[WebField], bool]:
         """Snapshot the whole form in one browser round-trip.
 
         The previous implementation crossed the Playwright boundary repeatedly for
@@ -215,7 +272,13 @@ class GenericWebAdapter(SiteAdapter):
             return '';
           };
 
-          return [...document.querySelectorAll(selector)].slice(0, 350).map((e, index) => {
+          const controlContract = __FIELD_CONTRACT_SCRIPT__;
+          const controls = [...document.querySelectorAll(selector)];
+          // Limits bound metadata cost, never certify a silently partial form.
+          // Count before visibility filtering because ordinal locators use that order.
+          const complete = controls.length <= 350 && !controls.some(e =>
+            visible(e) && e.tagName.toLowerCase() === "select" && e.options.length > 200);
+          const fields = controls.slice(0, 350).map((e, index) => {
             const tag = e.tagName.toLowerCase();
             const inputType = e.getAttribute('role') === 'combobox' ? 'combobox'
               : (e.getAttribute('type') || tag).toLowerCase();
@@ -247,6 +310,7 @@ class GenericWebAdapter(SiteAdapter):
               tag,
               inputType,
               label: hint(e),
+              contract: controlContract(e),
               required: !!e.required || e.getAttribute('aria-required') === 'true',
               current,
               options,
@@ -263,13 +327,18 @@ class GenericWebAdapter(SiteAdapter):
               section: section(e),
             };
           }).filter(x => x.visible);
-        }"""
+          return {fields, complete};
+        }""".replace("__FIELD_CONTRACT_SCRIPT__", FIELD_CONTRACT_SCRIPT)
         try:
-            snapshot = self.page.evaluate(script) or []
+            result = self.page.evaluate(script)
+            if (not isinstance(result, dict) or not isinstance(result.get("fields"), list)
+                    or type(result.get("complete")) is not bool):
+                raise ValueError("invalid form snapshot")
+            snapshot = result["fields"]
         except Exception:
             raise FormObservationError("field observation unavailable") from None
 
-        return [
+        fields = [
             WebField(
                 field_id=item["fieldId"],
                 selector=item["selector"],
@@ -293,14 +362,16 @@ class GenericWebAdapter(SiteAdapter):
                          str(item.get("rowToken") or "")).encode()).hexdigest()[:20]
                         if item.get("rowToken") else "",
                     "row_identity_proven": bool(item.get("rowUnique")),
+                    "control_contract": _control_contract_digest(item.get("contract")),
                 },
             )
             for item in snapshot
         ]
+        return fields, result["complete"]
 
     def observe_form(self) -> FormObservation:
         """Read form structure separately from any intended fill actions."""
-        fields = self.discover_fields()
+        fields, complete = self._discover_form_snapshot()
         try:
             signals = self.page.evaluate(r"""() => {
               const visible = e => {
@@ -365,6 +436,7 @@ class GenericWebAdapter(SiteAdapter):
         return FormObservation.from_fields(
             self.page.url, epoch, fields,
             rows=rows, dependencies=dependencies,
+            collection_complete=complete,
             hidden_required_count=int(signals.get("hiddenRequired") or 0),
             unsupported_component_count=int(signals.get("unsupported") or 0),
             ambiguous_selector_count=ambiguous,
@@ -415,9 +487,18 @@ class GenericWebAdapter(SiteAdapter):
             return False
         return 1 <= int(text[5:7]) <= 12
 
-    def _fill_select(self, element, value) -> bool:
-        if element.get_attribute("multiple") is not None:
+    @staticmethod
+    def _choice_enabled(element) -> bool:
+        """Read native and inherited admission again at each mutation boundary."""
+        try:
+            return (element.is_enabled()
+                    and element.evaluate(CONTROL_ADMISSION_SCRIPT) is True)
+        except Exception:
             return False
+
+    def _fill_select(self, element, value, *, prewrite=None) -> tuple[str, int] | None:
+        if element.get_attribute("multiple") is not None:
+            return None
         candidates = value if isinstance(value, list) else [value]
         expanded = []
         for candidate in candidates:
@@ -428,9 +509,11 @@ class GenericWebAdapter(SiteAdapter):
             else:
                 expanded.append(candidate)
         opts = element.locator("option")
+        if opts.count() > 200:
+            return None
         normalized = [str(x).strip().casefold().removesuffix("市") for x in expanded]
         if not normalized or any(not target for target in normalized):
-            return False
+            return None
         matches = []
         for i in range(opts.count()):
             opt = opts.nth(i)
@@ -440,14 +523,56 @@ class GenericWebAdapter(SiteAdapter):
             if any(target in hay for target in normalized):
                 matches.append(i)
         if len(matches) != 1:
-            return False
+            return None
+        # Freeze the intended option before dispatching change/input. A reactive
+        # page may revert between the primitive and the later render readback;
+        # its observed value must never redefine the expected result.
+        choice = opts.nth(matches[0])
+        expected = (choice.evaluate("e => e.value"), matches[0])
+        expected_label = (choice.inner_text() or "").strip()
+        # Freeze the native option effect separately from the question contract.
+        # Parent redraws before this primitive remain supported; changes during
+        # the ownership callback cannot redefine an already selected intention.
+        option_contract_script = """e => [...e.options].map(o => [
+          o.value, o.label, o.textContent, !!o.disabled,
+          o.parentElement?.tagName.toLowerCase() === 'optgroup' && !!o.parentElement.disabled,
+          !!o.closest('[aria-disabled="true"]')
+        ])"""
+        option_contract = element.evaluate(option_contract_script)
         getattr(self, "mutation_guard", lambda: None)()
+        if (not self._choice_enabled(element) or not self._choice_enabled(choice)
+                or choice.evaluate("e => e.value") != expected[0]
+                or (choice.inner_text() or "").strip() != expected_label):
+            return None
+        if callable(prewrite):
+            prewrite()
+        # Read the whole bounded option contract atomically after the callback
+        # and before change/input dispatch, including effective disabled groups.
+        allowed = element.evaluate(r"""(e, expected) => {
+          const admitted = __CONTROL_ADMISSION_SCRIPT__;
+          if (!admitted(e) || e.options.length > 200) return false;
+          const current = [...e.options].map(o => [
+            o.value, o.label, o.textContent, !!o.disabled,
+            o.parentElement?.tagName.toLowerCase() === 'optgroup' && !!o.parentElement.disabled,
+          !!o.closest('[aria-disabled="true"]')
+          ]);
+          if (JSON.stringify(current) !== JSON.stringify(expected.options)) return false;
+          const choice = e.options[expected.index];
+          return !!choice && admitted(choice)
+            && !(choice.parentElement?.tagName.toLowerCase() === 'optgroup' && choice.parentElement.disabled)
+            && choice.value === expected.value
+            && (choice.innerText || choice.textContent || '').trim() === expected.label;
+        }""".replace("__CONTROL_ADMISSION_SCRIPT__", CONTROL_ADMISSION_SCRIPT),
+           {"options": option_contract, "index": expected[1],
+                "value": expected[0], "label": expected_label})
+        if allowed is not True:
+            return None
         element.select_option(index=matches[0])
         if not element.evaluate("(e, index) => e.selectedIndex === index", matches[0]):
             raise BrowserOwnershipError("select choice outcome unknown")
-        return True
+        return expected
 
-    def _fill_combobox(self, element, selector: str, value) -> bool:
+    def _fill_combobox(self, element, selector: str, value, *, prewrite=None) -> bool:
         if not isinstance(value, (str, int, float)):
             return False
         target = str(value).strip()
@@ -456,12 +581,45 @@ class GenericWebAdapter(SiteAdapter):
         controlled_id = element.get_attribute("aria-controls")
         if not controlled_id:
             return False
+        # Native label activation can dispatch a companion control's click
+        # when a non-labelable ARIA widget is nested in that label. Opening the
+        # widget must not implicitly choose an option or other external action.
+        def companion_label_activation(control):
+            return control.evaluate("""e => {
+              for (let label = e.closest('label'); label;
+                   label = label.parentElement?.closest('label')) {
+                if (label.control && label.control !== e) return true;
+              }
+              return false;
+            }""") is True
+        def native_click_effect(control):
+            # ARIA roles do not remove native submit/reset/navigation defaults.
+            # Read effective DOM properties, including an external form owner.
+            return control.evaluate("""e => {
+              const tag = e.tagName.toLowerCase(), type = (e.type || '').toLowerCase();
+              if (tag === 'button') return !!e.form && type !== 'button';
+              if (tag === 'input') return ['submit', 'image', 'reset'].includes(type);
+              return (tag === 'a' || tag === 'area') && e.hasAttribute('href');
+            }""") is True
+        if companion_label_activation(element) or native_click_effect(element):
+            return False
         listbox = self.page.locator(f'[id={json.dumps(controlled_id)}][role="listbox"]')
         if listbox.count() != 1:
             return False
         getattr(self, "mutation_guard", lambda: None)()
+        if not self._choice_enabled(element):
+            return False
+        if callable(prewrite):
+            prewrite()
+        # Ownership/prewrite callbacks can reactively change label.control.
+        # Recheck the actual activation shape at the primitive boundary.
+        if (not self._choice_enabled(element) or companion_label_activation(element)
+                or native_click_effect(element)):
+            return False
         element.click()
         choices = listbox.locator('[role="option"]')
+        if choices.count() > 200:
+            return False
         exact = [choices.nth(index) for index in range(choices.count())
                  if choices.nth(index).is_visible()
                  and (choices.nth(index).get_attribute("aria-label") or
@@ -469,6 +627,64 @@ class GenericWebAdapter(SiteAdapter):
         if len(exact) != 1:
             return False
         getattr(self, "mutation_guard", lambda: None)()
+        if (not exact[0].is_visible() or not self._choice_enabled(exact[0])
+                or (exact[0].get_attribute("aria-label") or
+                    exact[0].inner_text()).strip() != target):
+            return False
+        # An option locator's ordinal and text are not stable across ownership
+        # callbacks. Freeze observable option effect data before that callback,
+        # then recheck the complete bounded live list immediately before click.
+        option_effect_script = r"""o => {
+          const admitted = __CONTROL_ADMISSION_SCRIPT__;
+          const style = getComputedStyle(o), rect = o.getBoundingClientRect();
+          return [admitted(o), o.tagName.toLowerCase(), o.id, o.getAttribute('role'),
+            o.getAttribute('type'), o.getAttribute('aria-label'),
+            (o.innerText || '').trim(), o.textContent, o.value ?? null,
+            o.getAttribute('data-value'), o.form?.id || '',
+            !!o.disabled || o.matches(':disabled'),
+            !!o.closest('[aria-disabled="true"]'), style.display, style.visibility,
+            rect.width > 0 && rect.height > 0];
+        }"""
+        option_effect_script = option_effect_script.replace(
+            "__CONTROL_ADMISSION_SCRIPT__", CONTROL_ADMISSION_SCRIPT)
+        option_contract = listbox.evaluate(r"""e => {
+          const optionEffect = __ARIA_OPTION_EFFECT__;
+          const options = [...e.querySelectorAll('[role="option"]')];
+          return options.length <= 200 ? options.map(optionEffect) : null;
+        }""".replace(
+            "__ARIA_OPTION_EFFECT__", option_effect_script))
+        if option_contract is None:
+            return False
+        if callable(prewrite):
+            prewrite()
+        if (not self._choice_enabled(element) or companion_label_activation(element)
+                or native_click_effect(element)
+                or companion_label_activation(exact[0]) or native_click_effect(exact[0])):
+            return False
+        allowed = exact[0].evaluate(r"""(e, expected) => {
+          const admitted = __CONTROL_ADMISSION_SCRIPT__;
+          const optionEffect = __ARIA_OPTION_EFFECT__;
+          const boxes = [...document.querySelectorAll(
+            '[id=' + JSON.stringify(expected.id) + '][role="listbox"]')];
+          if (boxes.length !== 1 || !boxes[0].contains(e)
+              || e.closest('[role="listbox"]') !== boxes[0]) return false;
+          const box = boxes[0], options = [...box.querySelectorAll('[role="option"]')];
+          if (options.length > 200
+              || JSON.stringify(options.map(optionEffect)) !== JSON.stringify(expected.options))
+            return false;
+          const exact = options.filter(o => {
+            const style = getComputedStyle(o), rect = o.getBoundingClientRect();
+            return style.display !== 'none' && !['hidden','collapse'].includes(style.visibility)
+              && rect.width > 0 && rect.height > 0
+              && (o.getAttribute('aria-label') || o.innerText || '').trim() === expected.target;
+          });
+          return exact.length === 1 && exact[0] === e && admitted(e);
+        }""".replace(
+            "__ARIA_OPTION_EFFECT__", option_effect_script).replace(
+            "__CONTROL_ADMISSION_SCRIPT__", CONTROL_ADMISSION_SCRIPT),
+            {"id": controlled_id, "target": target, "options": option_contract})
+        if allowed is not True:
+            return False
         exact[0].click()
         self.await_form_render()
         selected = self._locate(selector)
@@ -479,12 +695,59 @@ class GenericWebAdapter(SiteAdapter):
             raise BrowserOwnershipError("combobox selection outcome unknown")
         return True
 
+    def _collection_complete_now(self) -> bool:
+        """Read current bounds without labels, values, secrets or side effects."""
+        try:
+            return self.page.evaluate(r"""() => {
+              const controls = [...document.querySelectorAll(
+                'input:not([type="hidden"]), textarea, select, [role="combobox"]:not(input):not(textarea):not(select)')];
+              if (controls.length > 350) return false;
+              return !controls.some(e => {
+                if (e.tagName.toLowerCase() !== 'select' || e.options.length <= 200)
+                  return false;
+                const style = getComputedStyle(e), rect = e.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden'
+                  && (rect.width > 0 || rect.height > 0 || e.getClientRects().length > 0)
+                  && !e.disabled && e.getAttribute('aria-disabled') !== 'true';
+              });
+            }""") is True
+        except Exception:
+            raise FormObservationError("form collection bounds unavailable") from None
+
     def apply_resolutions(self, resolutions: Iterable[FieldResolution]) -> list[dict]:
+        # A changed/missing observation must not turn an earlier uncertain
+        # native write into an ordinary admission refusal or a replay.
+        if getattr(self, "_field_outcome_unknown", False):
+            if getattr(self, "_field_collection_limit_unknown", False):
+                raise FormObservationError("form collection limit exceeded after uncertain redraw")
+            raise BrowserOwnershipError("field write outcome unknown")
+        getattr(self, "mutation_guard", lambda: None)()
         resolutions = list(resolutions)
+        # Reject the whole ambiguous batch before discovery, write intent or
+        # input/change dispatch. Never deduplicate to silently choose a value.
+        if not unique_fill_identity(resolutions):
+            return [{"field_id": item.field_id, "ok": False,
+                     "reason": "ambiguous_fill_plan_identity"} for item in resolutions]
         # Explicit site dependency metadata permits a bounded parent-first
         # order. The child locator is resolved after the parent's redraw.
         # Missing or cyclic dependencies are unsupported, never guessed.
-        observed_by_selector = {item.selector: item for item in self.discover_fields()}
+        observed_fields = tuple(self.discover_fields())
+        # Admission must retain the complete current observation before a dict
+        # projection can collapse it or a later missing target can partially
+        # fill earlier controls. Direct callers receive the same finite floor.
+        if not unique_fill_identity(observed_fields):
+            # Preserve the established native-locator refusal for repeated
+            # controls. Pure metadata identity collisions retain the plan code.
+            reason = "ambiguous_fill_plan_identity"
+            if any(self._locate(item.selector, item.label).count() != 1
+                   for item in resolutions):
+                reason = "ambiguous_or_missing_locator"
+            return [{"field_id": item.field_id, "ok": False,
+                     "reason": reason} for item in resolutions]
+        observed_by_selector = {item.selector: item for item in observed_fields}
+        if any(item.selector not in observed_by_selector for item in resolutions):
+            return [{"field_id": item.field_id, "ok": False,
+                     "reason": "unobserved_fill_plan_field"} for item in resolutions]
         by_selector = {item.selector: item for item in resolutions}
         ordered: list[FieldResolution] = []
         pending = list(resolutions)
@@ -513,6 +776,95 @@ class GenericWebAdapter(SiteAdapter):
                 completed.add(item.selector)
                 pending.remove(item)
         actions: list[dict] = []
+        # Keep complete successful control readbacks in memory for this one
+        # document/batch. Later reactive writes must not silently invalidate
+        # earlier evidence. Values never enter the operational journal.
+        signature = FIELD_CONTRACT_SCRIPT
+        document_epoch = page_document_epoch(self.page)
+        retained = []
+
+        def read_value(element, kind):
+            if kind == "checked":
+                return element.is_checked()
+            if kind == "combobox":
+                return str(element.evaluate(
+                    "e => e.value ?? e.getAttribute('aria-valuetext') ?? (e.innerText || '').trim()")).strip()
+            if kind == "select":
+                return (element.input_value(), element.evaluate("e => e.selectedIndex"))
+            return str(element.input_value() or "")
+
+        def verify_retained():
+            if not retained:
+                return
+            try:
+                getattr(self, "mutation_guard", lambda: None)()
+                # Read the complete retained set atomically in one browser
+                # round-trip, avoiding quadratic CDP traffic on large forms.
+                kept = self.page.evaluate(r"""({epoch, controls, selector}) => {
+                  if (String(performance.timeOrigin) !== epoch) return false;
+                  const controlContract = __FIELD_CONTRACT_SCRIPT__;
+                  const admitted = __CONTROL_ADMISSION_SCRIPT__;
+                  const ordinal = [...document.querySelectorAll(selector)];
+                  for (const [path, identity, kind, expected] of controls) {
+                    let matches;
+                    if (path.startsWith('__field_index__:')) {
+                      const index = path.slice('__field_index__:'.length);
+                      if (!/^[0-9]+$/.test(index)) return false;
+                      matches = ordinal[Number(index)] ? [ordinal[Number(index)]] : [];
+                    } else {
+                      try { matches = [...document.querySelectorAll(path)]; }
+                      catch (_) { return false; }
+                    }
+                    if (matches.length !== 1) return false;
+                    const e = matches[0], rect = e.getBoundingClientRect();
+                    if (!admitted(e) || !(rect.width > 0 && rect.height > 0)) return false;
+                    const signature = controlContract(e);
+                    if (JSON.stringify(signature) !== JSON.stringify(identity)) return false;
+                    const actual = kind === 'checked' ? e.checked
+                      : kind === 'combobox' ? String(e.value ?? e.getAttribute('aria-valuetext')
+                          ?? (e.innerText || '').trim()).trim()
+                      : kind === 'select' ? [e.value, e.selectedIndex] : String(e.value || '');
+                    if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
+                  }
+                  return true;
+                }""".replace("__FIELD_CONTRACT_SCRIPT__", FIELD_CONTRACT_SCRIPT).replace(
+                    "__CONTROL_ADMISSION_SCRIPT__", CONTROL_ADMISSION_SCRIPT),
+                   {"epoch": document_epoch, "controls": retained,
+                       "selector": VISIBLE_FIELD_SELECTOR})
+                if kept is not True:
+                    raise BrowserOwnershipError("retained field readback changed")
+            except Exception:
+                self._field_outcome_unknown = True
+                invalidate = getattr(self, "field_readbacks_invalidate", None)
+                if callable(invalidate):
+                    invalidate()
+                raise BrowserOwnershipError("retained field outcome unknown") from None
+
+        def verify_form_structure():
+            if not retained:
+                return
+            # Reactive controls may expose an opaque form after a successful
+            # DOM readback. No next write or returned batch may inherit that proof.
+            try:
+                current_form = self.observe_form()
+                # Reuse the complete/unique structural floor of FillPlan.
+                # A last-field redraw can exceed collection limits without
+                # a following prewrite check; no partial/ambiguous snapshot
+                # may retain the earlier batch as observed.
+                if current_form.collection_complete is not True:
+                    self._field_collection_limit_unknown = True
+                if (current_form.collection_complete is not True
+                        or current_form.unsupported_component_count
+                        or current_form.ambiguous_selector_count
+                        or current_form.ambiguous_row_count):
+                    raise FormObservationError("unsupported redraw")
+            except Exception:
+                self._field_outcome_unknown = True
+                invalidate = getattr(self, "field_readbacks_invalidate", None)
+                if callable(invalidate):
+                    invalidate()
+                raise BrowserOwnershipError("form structure outcome unknown") from None
+
         for resolution in ordered:
             getattr(self, "mutation_guard", lambda: None)()
             if resolution.status != ResolutionStatus.RESOLVED:
@@ -527,6 +879,12 @@ class GenericWebAdapter(SiteAdapter):
                 continue
             if dependency:
                 self.await_form_render()
+            verify_retained()
+            if not self._collection_complete_now():
+                actions.append({"field_id": resolution.field_id, "ok": False,
+                                "reason": "form_collection_limit_exceeded"})
+                break
+            verify_form_structure()
             element = self._locate(resolution.selector, resolution.label)
             if element.count() != 1:
                 actions.append({"field_id": resolution.field_id, "ok": False,
@@ -535,10 +893,38 @@ class GenericWebAdapter(SiteAdapter):
             if not self._visible(element):
                 actions.append({"field_id": resolution.field_id, "ok": False, "reason": "not visible"})
                 continue
+            def verify_target_contract():
+                # Bind to the initial batch observation, before any intent and
+                # again at each primitive after ownership/journal callbacks.
+                # Same selector alone does not preserve question/row meaning.
+                try:
+                    expected = observed.metadata.get("control_contract") if observed else ""
+                    current = self._locate(resolution.selector)
+                    if (not expected or page_document_epoch(self.page) != document_epoch
+                            or current.count() != 1 or not self._visible(current)
+                            or _control_contract_digest(
+                                current.evaluate(FIELD_CONTRACT_SCRIPT)) != expected):
+                        raise BrowserOwnershipError("field contract changed")
+                except Exception:
+                    if retained:
+                        self._field_outcome_unknown = True
+                        invalidate = getattr(self, "field_readbacks_invalidate", None)
+                        if callable(invalidate):
+                            invalidate()
+                    raise BrowserOwnershipError("field contract outcome unknown") from None
+
+            verify_target_contract()
+            action_id = None
             try:
                 input_type = (element.get_attribute("type") or element.evaluate("e=>e.tagName.toLowerCase()")).lower()
                 tag = element.evaluate("e=>e.tagName.toLowerCase()")
                 value = resolution.value
+                # Identity is captured without applicant values. A reactive
+                # replacement may retain the control contract, but an ordinal
+                # shift, relabel or type change cannot inherit its write proof.
+                signature_script = signature
+                control_signature = element.evaluate(signature_script)
+                expected_readback = None
                 if input_type == "file":
                     # A browser file input only proves that a local file was
                     # selected. Generic sites provide no trustworthy upload
@@ -547,36 +933,88 @@ class GenericWebAdapter(SiteAdapter):
                     actions.append({"field_id": resolution.field_id, "ok": False,
                                     "reason": "upload_receipt_unsupported"})
                     continue
-                elif input_type == "combobox" or element.get_attribute("role") == "combobox":
-                    if not self._fill_combobox(element, resolution.selector, value):
+                elif not self._date_precision_supported(value, input_type):
+                    actions.append({"field_id": resolution.field_id, "ok": False,
+                                    "reason": "date_precision_unsupported"})
+                    continue
+                else:
+                    begin = getattr(self, "field_action_begin", None)
+                    finish = getattr(self, "field_action_finish", None)
+                    if callable(begin) != callable(finish):
+                        raise BrowserOwnershipError("field journal unavailable")
+                    if callable(begin):
+                        action_id = begin(resolution.field_id, resolution.selector,
+                                          document_epoch=page_document_epoch(self.page))
+                verify_target_contract()
+                if input_type == "combobox" or element.get_attribute("role") == "combobox":
+                    if not self._fill_combobox(element, resolution.selector, value,
+                                               prewrite=verify_target_contract):
+                        if action_id is not None:
+                            raise BrowserOwnershipError("combobox outcome unknown")
                         actions.append({"field_id": resolution.field_id, "ok": False,
                                         "reason": "combobox_exact_choice_unavailable"})
                         continue
+                    expected_readback = ("combobox", str(value).strip())
                 elif tag == "select":
                     getattr(self, "mutation_guard", lambda: None)()
-                    if not self._fill_select(element, value):
+                    selected_target = self._fill_select(element, value,
+                                                        prewrite=verify_target_contract)
+                    if selected_target is None:
+                        if action_id is not None:
+                            raise BrowserOwnershipError("select outcome unknown")
                         actions.append({"field_id": resolution.field_id, "ok": False, "reason": "no_matching_select_option"})
                         continue
+                    expected_readback = ("select", selected_target)
                 elif input_type in {"checkbox", "radio"}:
                     desired = bool(value)
+                    expected_readback = ("checked", desired)
                     if element.is_checked() != desired:
                         getattr(self, "mutation_guard", lambda: None)()
+                        verify_target_contract()
                         element.click()
                 else:
-                    if not self._date_precision_supported(value, input_type):
-                        actions.append({"field_id": resolution.field_id, "ok": False,
-                                        "reason": "date_precision_unsupported"})
-                        continue
                     desired = self._control_text(value, input_type, resolution.label)
                     current = str(element.input_value() or "")
+                    expected_readback = ("value", desired)
                     if current != desired:
                         getattr(self, "mutation_guard", lambda: None)()
+                        verify_target_contract()
                         element.fill(desired)
-                actions.append({"field_id": resolution.field_id, "ok": True, "source": resolution.source})
+                # A primitive returning does not prove that the page kept its
+                # value. Observe the newly rendered control before another field
+                # writes; this remains DOM evidence, never a server-save receipt.
+                self.await_form_render()
+                getattr(self, "mutation_guard", lambda: None)()
+                current_element = self._locate(resolution.selector)
+                if (current_element.count() != 1 or not self._visible(current_element)
+                        or current_element.evaluate(signature_script) != control_signature):
+                    raise BrowserOwnershipError("field readback identity unknown")
+                kind, expected = expected_readback
+                actual = read_value(current_element, kind)
+                if actual != expected:
+                    raise BrowserOwnershipError("field readback outcome unknown")
+                verify_retained()
+                if action_id is not None:
+                    self.field_action_finish(action_id, "DOM_READBACK_UNVERIFIED")
+                retained.append((resolution.selector, control_signature, kind, expected))
+                actions.append({"field_id": resolution.field_id, "ok": True,
+                                "source": resolution.source, "observed": "DOM_READBACK"})
             except Exception:
+                self._field_outcome_unknown = True
+                # Failure to observe this write also prevents retaining the
+                # earlier batch as verified DOM state. Revoke evidence only;
+                # the coarse run and unknown intents still forbid replay.
+                if retained:
+                    invalidate = getattr(self, "field_readbacks_invalidate", None)
+                    if callable(invalidate):
+                        invalidate()
+                if action_id is not None:
+                    self.field_action_finish(action_id, "UNKNOWN_OUTCOME")
                 # The primitive may have reached the page before Playwright
                 # reported failure. Do not turn that uncertainty into a retry.
                 raise BrowserOwnershipError("field write outcome unknown") from None
+        verify_retained()
+        verify_form_structure()
         return actions
 
     def validate(self, plan: ApplicationPlan) -> ValidationResult:

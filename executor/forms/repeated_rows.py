@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
+from types import MappingProxyType
 
 
 class RowReconciliationBlocked(RuntimeError):
@@ -101,6 +102,7 @@ class RowActionJournal:
         os.close(descriptor)
         os.chmod(self.path, 0o600)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS row_scope (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1), digest TEXT NOT NULL
             )""")
@@ -116,6 +118,9 @@ class RowActionJournal:
                 after_revision INTEGER,
                 outcome TEXT NOT NULL CHECK(outcome IN ('ATTEMPTED','OBSERVED_SUCCESS'))
             )""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(row_actions)")}
+            if "before_inventory" not in columns:
+                db.execute("ALTER TABLE row_actions ADD COLUMN before_inventory TEXT")
 
     @contextmanager
     def _connect(self):
@@ -136,8 +141,16 @@ class RowActionJournal:
         with self._connect() as db:
             return db.execute("SELECT MAX(after_revision) FROM row_actions").fetchone()[0]
 
+    def pending_inventory(self, action_id: str) -> str | None:
+        with self._connect() as db:
+            row = db.execute("SELECT before_inventory FROM row_actions "
+                             "WHERE action_id=? AND outcome='ATTEMPTED'", (action_id,)).fetchone()
+            if row is None:
+                raise RowReconciliationBlocked("row action journal changed")
+            return row[0]
+
     def begin(self, kind: str, record_key: str, target_digest: str,
-              before_revision: int) -> str:
+              before_revision: int, *, before_inventory: str | None = None) -> str:
         action_id = uuid.uuid4().hex
         with self._connect() as db:
             # Serialize the pending check and intent write across processes.
@@ -148,8 +161,10 @@ class RowActionJournal:
             latest = db.execute("SELECT MAX(after_revision) FROM row_actions").fetchone()[0]
             if latest is not None and before_revision < latest:
                 raise RowReconciliationBlocked("row inventory is stale after a prior write")
-            db.execute("INSERT INTO row_actions VALUES (?,?,?,?,?,NULL,'ATTEMPTED')",
-                       (action_id, kind, record_key, target_digest, before_revision))
+            db.execute("""INSERT INTO row_actions
+                (action_id,kind,record_key,target_digest,before_revision,after_revision,outcome,before_inventory)
+                VALUES (?,?,?,?,?,NULL,'ATTEMPTED',?)""",
+                       (action_id, kind, record_key, target_digest, before_revision, before_inventory))
         return action_id
 
     def observed(self, action_id: str, revision: int) -> None:
@@ -200,7 +215,7 @@ class RowReconciler:
     @staticmethod
     def _postcondition(kind: str, record_key: str, target_digest: str,
                        before_revision: int, inventory: RowInventory) -> bool:
-        if inventory.revision <= before_revision:
+        if inventory.revision <= before_revision or any(not row.managed for row in inventory.rows):
             return False
         if kind == "reorder":
             return _digest(tuple(row.record_id for row in inventory.rows)) == target_digest
@@ -211,10 +226,70 @@ class RowReconciler:
             return not matches
         return False
 
+    @staticmethod
+    def _canonical_rows(desired, delete_ids=frozenset()):
+        # Freeze every canonical value before the first driver read or intent.
+        try:
+            if (type(desired) is not tuple or type(delete_ids) is not frozenset
+                    or any(not isinstance(row, DesiredRow) or type(row.record_id) is not str
+                           or not row.record_id or not isinstance(row.values, Mapping)
+                           or any(type(k) is not str or not k or type(v) is not str
+                                  for k, v in row.values.items()) for row in desired)
+                    or any(type(rid) is not str or not rid for rid in delete_ids)):
+                raise ValueError
+            frozen = tuple(DesiredRow(row.record_id, MappingProxyType(dict(row.values)))
+                           for row in desired)
+            ids = tuple(row.record_id for row in frozen)
+            if len(set(ids)) != len(ids) or delete_ids.intersection(ids):
+                raise ValueError
+            return frozen
+        except Exception:
+            raise RowReconciliationBlocked("canonical row identity ambiguous") from None
+
+    @staticmethod
+    def _inventory_binding(inventory):
+        # Durable full-collection preimage contains only digests and booleans.
+        return json.dumps([[_digest(row.record_id), _digest(row.site_row_id),
+                            row.values_digest, row.managed] for row in inventory.rows],
+                          separators=(",", ":"))
+
+    @classmethod
+    def _preserves_inventory(cls, kind, record_key, before_inventory, after):
+        try:
+            before = json.loads(before_inventory)
+            if (type(before) is not list
+                    or any(type(row) is not list or len(row) != 4
+                           or any(type(value) is not str or not re.fullmatch(r"[0-9a-f]{64}", value)
+                                  for value in row[:3])
+                           or row[3] is not True for row in before)
+                    or len({row[0] for row in before}) != len(before)
+                    or len({row[1] for row in before}) != len(before)):
+                return False
+            old = {row[0]: row for row in before}
+            current = {row[0]: row for row in json.loads(cls._inventory_binding(after))}
+            expected = set(old)
+            if kind == "add":
+                if record_key in expected:
+                    return False
+                expected.add(record_key)
+            elif kind == "delete":
+                if record_key not in expected:
+                    return False
+                expected.remove(record_key)
+            elif kind != "reorder":
+                return False
+            return (set(current) == expected
+                    and all(current[key] == old[key] for key in expected.intersection(old)))
+        except Exception:
+            return False
+
     def _settle_pending(self, inventory: RowInventory) -> None:
         for action_id, kind, record_key, target_digest, before_revision in self.journal.pending():
             if not self._postcondition(kind, record_key, target_digest,
                                        before_revision, inventory):
+                raise RowOutcomeUnknown("row write outcome unknown; replay disabled")
+            preimage = self.journal.pending_inventory(action_id)
+            if preimage is not None and not self._preserves_inventory(kind, record_key, preimage, inventory):
                 raise RowOutcomeUnknown("row write outcome unknown; replay disabled")
             self.journal.observed(action_id, inventory.revision)
 
@@ -229,6 +304,7 @@ class RowReconciler:
 
     def verify_rows_read_only(self, desired: tuple[DesiredRow, ...]) -> RowInventory:
         """Reobserve the complete canonical collection before final readiness."""
+        desired = self._canonical_rows(desired)
         inventory = self.reconcile_pending_read_only()
         if (tuple(row.record_id for row in inventory.rows) !=
                 tuple(row.record_id for row in desired)
@@ -244,8 +320,9 @@ class RowReconciler:
         if self.mutation_guard is None:
             raise RowReconciliationBlocked("row mutation guard unavailable")
         self.mutation_guard()
+        preimage = self._inventory_binding(before)
         action_id = self.journal.begin(kind, _digest(record_id), target_digest,
-                                       before.revision)
+                                       before.revision, before_inventory=preimage)
         # The lease may have been revoked while the intent was committed.
         # Leave that intent pending for read-only recovery; never call site.
         self.mutation_guard()
@@ -258,18 +335,16 @@ class RowReconciler:
         except RowReconciliationBlocked:
             raise RowOutcomeUnknown("row write outcome unknown; replay disabled") from None
         if not self._postcondition(kind, _digest(record_id), target_digest,
-                                   before.revision, after):
+                                   before.revision, after) or not self._preserves_inventory(
+                                       kind, _digest(record_id), preimage, after):
             raise RowOutcomeUnknown("row write outcome unknown; replay disabled")
         self.journal.observed(action_id, after.revision)
         return after
 
     def reconcile(self, desired: tuple[DesiredRow, ...], *,
                   delete_ids: frozenset[str] = frozenset()) -> RowReceipt:
+        desired = self._canonical_rows(desired, delete_ids)
         ids = tuple(row.record_id for row in desired)
-        if (any(not rid for rid in ids) or len(set(ids)) != len(ids)
-                or any(not rid for rid in delete_ids)
-                or delete_ids.intersection(ids)):
-            raise RowReconciliationBlocked("canonical row identity ambiguous")
         inventory = self.reconcile_pending_read_only()
         by_id = {row.record_id: row for row in inventory.rows}
         unknown = set(by_id) - set(ids) - set(delete_ids)
@@ -303,7 +378,9 @@ class RowReconciler:
             inventory = self._act("reorder", "", target, inventory,
                                   lambda: self.driver.reorder_rows(ids))
             reorders += 1
+            by_id = {row.record_id: row for row in inventory.rows}
         if (tuple(row.record_id for row in inventory.rows) != ids
+                or any(not row.managed for row in inventory.rows)
                 or any(by_id[row.record_id].values_digest != row.values_digest
                        for row in desired)):
             raise RowReconciliationBlocked("final row inventory differs from canonical records")

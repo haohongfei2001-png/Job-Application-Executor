@@ -12,6 +12,17 @@ class FormObservationError(RuntimeError):
     """The page structure could not be read; no empty form may be inferred."""
 
 
+def unique_fill_identity(items: Iterable[WebField | FieldResolution]) -> bool:
+    """One action per complete field identity; no private values in errors."""
+    selected = tuple(items)
+    selectors = [item.selector for item in selected]
+    identities = [item.field_id for item in selected]
+    return (all(isinstance(value, str) and value.strip()
+                for value in selectors + identities)
+            and len(set(selectors)) == len(selectors)
+            and len(set(identities)) == len(identities))
+
+
 @dataclass(frozen=True)
 class ObservedRow:
     section: str
@@ -30,6 +41,7 @@ class FormObservation:
     sections: tuple[str, ...] = ()
     rows: tuple[ObservedRow, ...] = ()
     dependencies: tuple[tuple[str, str], ...] = ()
+    collection_complete: bool = True
     hidden_required_count: int = 0
     unsupported_component_count: int = 0
     ambiguous_selector_count: int = 0
@@ -52,7 +64,8 @@ class FormObservation:
         row_structure = [(row.section, row.row_key, row.field_selectors,
                           row.identity_proven) for row in kwargs.get("rows", ())]
         digest = hashlib.sha256(json.dumps(
-            [page_url, document_epoch, structure, row_structure], ensure_ascii=False,
+            [page_url, document_epoch, structure, row_structure,
+             kwargs.get("collection_complete", True) is True], ensure_ascii=False,
             separators=(",", ":")).encode()).hexdigest()
         sections = tuple(dict.fromkeys(
             str(item.metadata.get("section") or "") for item in items
@@ -67,7 +80,8 @@ class FormObservation:
 
     @property
     def unsafe_structure(self) -> bool:
-        return bool(self.hidden_required_count or self.unsupported_component_count
+        return bool(self.collection_complete is not True
+                    or self.hidden_required_count or self.unsupported_component_count
                     or self.ambiguous_selector_count or self.ambiguous_row_count)
 
     def safe_summary(self) -> dict:
@@ -75,6 +89,7 @@ class FormObservation:
         return {
             "observation_digest": self.structure_digest,
             "field_count": len(self.fields),
+            "collection_complete": self.collection_complete is True,
             "section_count": len(self.sections),
             "row_count": len(self.rows),
             "hidden_required_count": self.hidden_required_count,
@@ -98,13 +113,17 @@ class FillPlan:
     def bind(cls, observation: FormObservation,
              actions: Iterable[FieldResolution]) -> "FillPlan":
         selected = tuple(actions)
+        if (not unique_fill_identity(observation.fields)
+                or not unique_fill_identity(selected)):
+            raise ValueError("fill plan requires unique field identity")
         observed = {item.selector for item in observation.fields}
         if any(action.selector not in observed for action in selected):
             raise ValueError("fill plan references unobserved field")
         # Hidden required controls may become visible after a parent choice.
         # They must be re-observed before readiness, but should not prevent a
         # proven unique parent control from being filled.
-        if (observation.unsupported_component_count or observation.ambiguous_selector_count
+        if (observation.collection_complete is not True
+                or observation.unsupported_component_count or observation.ambiguous_selector_count
                 or observation.ambiguous_row_count):
             raise ValueError("fill plan requires supported unique form structure")
         return cls(observation.structure_digest, selected)
