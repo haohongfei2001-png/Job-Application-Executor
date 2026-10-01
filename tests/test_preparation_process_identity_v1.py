@@ -95,3 +95,12 @@ def test_capture_rejects_same_user_browser_outside_own_driver_tree(monkeypatch):
     monkeypatch.setattr(p,'_browser_pid',lambda _:123)
     pw=SimpleNamespace(_impl_obj=SimpleNamespace(_connection=SimpleNamespace(_transport=SimpleNamespace(_proc=SimpleNamespace(pid=234)))))
     with pytest.raises(p.ProcessIdentityUnknown):p.OwnedProcessIdentity.capture(pw,object())
+
+
+def test_os_only_callback_guard_never_issues_browser_rpc(monkeypatch):
+    value=record();owned=p.OwnedProcessIdentity(copy.deepcopy(value));mapping={part['pid']:part for part in value.values()}
+    monkeypatch.setattr(p,'_browser_pid',lambda _:pytest.fail('browser RPC during synchronous callback'))
+    monkeypatch.setattr(p,'_snapshot',lambda pid:copy.deepcopy(mapping.get(pid)))
+    assert owned.verify_os()==owned.process_sha
+    mapping.pop(234)
+    with pytest.raises(p.ProcessIdentityUnknown):owned.verify_os()

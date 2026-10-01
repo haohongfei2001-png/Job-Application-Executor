@@ -113,6 +113,8 @@ class PreparationFlow:
                 # this preparation-only controller cannot silently coexist.
                 if db.execute('SELECT 1 FROM preparation_final_requests WHERE preparation_nonce_sha=?',
                               (self.permit['nonce_sha'],)).fetchone():raise PreparationConflict()
+                if db.execute("SELECT 1 FROM preparation_resume_uploads WHERE preparation_nonce_sha=? AND outcome='UNKNOWN_OUTCOME'",
+                              (self.permit['nonce_sha'],)).fetchone():raise PreparationConflict()
             fence();self.authority._session(self.session)
             if self._still_authorized() is not True:raise PreparationConflict()
         return True

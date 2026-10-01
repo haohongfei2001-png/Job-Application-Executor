@@ -75,7 +75,19 @@ class PreparationFinalJournal:
             raise PreparationConflict()
 
     def _rows(self,db):
-        return _prepared_task(db,self.permit,self.attempt_id)
+        task=_prepared_task(db,self.permit,self.attempt_id)
+        upload=db.execute('SELECT * FROM preparation_resume_uploads WHERE preparation_nonce_sha=?',
+                          (self.permit['nonce_sha'],)).fetchone()
+        if upload is not None or self.permit['resume'].get('version') is not None:
+            if (upload is None or upload['outcome']!='RETURNED_UNVERIFIED' or upload['selection_attempted']!=1
+                    or upload['attempt_id']!=self.attempt_id or upload['task_id']!=self.permit['task_id']
+                    or upload['task_revision']!=self.permit['task_revision']
+                    or upload['resume_sha']!=self.permit['resume']['version']):raise PreparationConflict()
+            stages=db.execute('SELECT ordinal,outcome FROM preparation_resume_stages WHERE upload_intent_sha=? ORDER BY ordinal',
+                              (upload['intent_sha'],)).fetchall()
+            if ([stage['ordinal'] for stage in stages]!=[0,1,2]
+                    or any(stage['outcome']!='RETURNED_UNVERIFIED' for stage in stages)):raise PreparationConflict()
+        return task
 
     def _material_matches(self,report):
         if report['profile']['version']!=self.permit['profile_sha'] or report['resume']!=self.permit['resume']:

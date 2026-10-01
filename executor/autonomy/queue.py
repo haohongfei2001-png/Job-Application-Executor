@@ -206,6 +206,21 @@ class TaskQueue:
                     scope_sha TEXT NOT NULL, outcome TEXT NOT NULL
                     CHECK(outcome IN ('ATTEMPTED','RETURNED_UNVERIFIED','UNKNOWN_OUTCOME')),
                     created REAL NOT NULL, updated REAL NOT NULL)''')
+                db.execute('''CREATE TABLE IF NOT EXISTS preparation_resume_uploads (
+                    intent_sha TEXT PRIMARY KEY, preparation_nonce_sha TEXT NOT NULL UNIQUE,
+                    attempt_id TEXT NOT NULL, task_id TEXT NOT NULL, task_revision INTEGER NOT NULL,
+                    resume_sha TEXT NOT NULL, scope_sha TEXT NOT NULL, outcome TEXT NOT NULL
+                    CHECK(outcome IN ('ATTEMPTED','RETURNED_UNVERIFIED','UNKNOWN_OUTCOME')),
+                    selection_attempted INTEGER NOT NULL DEFAULT 0 CHECK(selection_attempted IN (0,1)),
+                    created REAL NOT NULL, updated REAL NOT NULL)''')
+                if 'selection_attempted' not in {row[1] for row in db.execute('PRAGMA table_info(preparation_resume_uploads)')}:
+                    db.execute('ALTER TABLE preparation_resume_uploads ADD COLUMN selection_attempted INTEGER NOT NULL DEFAULT 0 CHECK(selection_attempted IN (0,1))')
+                db.execute('''CREATE TABLE IF NOT EXISTS preparation_resume_stages (
+                    stage_sha TEXT PRIMARY KEY, upload_intent_sha TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK(ordinal IN (0,1,2)), outcome TEXT NOT NULL
+                    CHECK(outcome IN ('ATTEMPTED','RETURNED_UNVERIFIED','UNKNOWN_OUTCOME')),
+                    created REAL NOT NULL, updated REAL NOT NULL,
+                    UNIQUE(upload_intent_sha,ordinal))''')
                 db.execute("INSERT OR IGNORE INTO task_view_context VALUES(1,NULL,0)")
             self.path.chmod(0o600)
 

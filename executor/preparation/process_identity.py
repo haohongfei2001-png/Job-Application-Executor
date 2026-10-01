@@ -133,6 +133,18 @@ class OwnedProcessIdentity:
             return cls(record)
         except Exception:raise ProcessIdentityUnknown() from None
 
+    def verify_os(self):
+        """OS-only live check for synchronous request callbacks; no CDP RPC.
+
+        The owner must establish native browser/document binding before arming
+        and recheck it after the native primitive. This method preserves only
+        the previously captured process identities, not a current DOM snapshot.
+        """
+        record=_validate(self.record)
+        for expected in record.values():
+            if _snapshot(expected['pid'])!=expected:raise ProcessIdentityUnknown()
+        return digest(record)
+
     def verify(self,browser):
         record=_validate(self.record)
         if _browser_pid(browser)!=record['browser']['pid']:raise ProcessIdentityUnknown()

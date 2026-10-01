@@ -105,6 +105,11 @@ def _material(queue, task_id, revision):
         fence()
 
 
+def _retire_resume_requests(db, nonce_sha, now):
+    db.execute("UPDATE preparation_resume_stages SET outcome='UNKNOWN_OUTCOME',updated=? WHERE upload_intent_sha IN (SELECT intent_sha FROM preparation_resume_uploads WHERE preparation_nonce_sha=?) AND outcome='ATTEMPTED'",(now,nonce_sha))
+    db.execute("UPDATE preparation_resume_uploads SET outcome='UNKNOWN_OUTCOME',updated=? WHERE preparation_nonce_sha=? AND outcome='ATTEMPTED'",(now,nonce_sha))
+
+
 def _marker_bytes(nonce_sha, binding):
     return json.dumps({"nonce_sha": nonce_sha, "browser": binding},
                       sort_keys=True, separators=(",", ":")).encode("ascii")
@@ -379,6 +384,8 @@ class PreparationAuthority:
                         or {action["field_sha256"] for action in actions} != expected
                         or any(action["outcome"] != "DOM_READBACK_UNVERIFIED" for action in actions)):
                     outcome = "UNKNOWN_OUTCOME"
+            if outcome == "UNKNOWN_OUTCOME":
+                _retire_resume_requests(db, permit["nonce_sha"], now)
             if outcome == "UNKNOWN_OUTCOME" and row["attempt_id"]:
                 db.execute("UPDATE field_actions SET outcome='UNKNOWN_OUTCOME',updated=? WHERE attempt_id=?", (now, row["attempt_id"]))
                 db.execute("UPDATE run_attempts SET outcome='UNKNOWN_OUTCOME',updated=? WHERE attempt_id=? AND owner=?", (now, row["attempt_id"], permit["owner"]))
@@ -442,6 +449,7 @@ class PreparationAuthority:
                     raise PreparationConflict()
                 now = self.queue.clock()
                 if record is not None:
+                    _retire_resume_requests(db, nonce_sha, now)
                     db.execute("UPDATE preparation_approvals SET outcome='UNKNOWN_OUTCOME',context_closed=1,updated=? WHERE nonce_sha=?", (now, nonce_sha))
                     db.execute("UPDATE preparation_final_requests SET outcome='UNKNOWN_OUTCOME',updated=? WHERE preparation_nonce_sha=? AND outcome='ATTEMPTED'", (now, nonce_sha))
                     db.execute("UPDATE tasks SET owner=NULL,lease_until=NULL,updated=? WHERE task_id=? AND owner=?", (now, record["task_id"], record["owner"]))

@@ -1,6 +1,7 @@
 """Disposable browser owner. No CDP adoption or final-send method.
 
-Only audited public GETs can be fetched by a separate API client and fulfilled.
+Only finite public resources and two canonical read-only bootstrap POSTs can
+be fetched by the separate API client and fulfilled during public preflight.
 The native browser's proxy can never forward traffic, even if routing disappears.
 Live UI admission remains disabled until resource/lifecycle gates are complete.
 """
