@@ -36,9 +36,12 @@ STATIC_STEP = (
 )
 
 
-PREPARATION_STEP = '      - name: Anonymous preparation kernel and controller-death oracle\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n          JAE_UI_SCREENSHOT_DIR: ${{ runner.temp }}/jae-preparation-ui\n        run: python -m pytest -q -s tests/test_qiyunfang_preparation_v1.py tests/test_preparation_review_v1.py tests/test_preparation_authority_v1.py tests/test_preparation_authority_browser.py tests/test_preparation_review_browser.py tests/test_qiyunfang_preparation_browser.py tests/test_preparation_lifecycle_browser.py\n'
-PREPARATION_MAC_STEP = "      - name: Anonymous preparation early Mac oracle\n        if: matrix.suite == 'native_integration'\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q -s tests/test_qiyunfang_preparation_v1.py tests/test_preparation_review_v1.py tests/test_preparation_authority_v1.py tests/test_preparation_authority_browser.py tests/test_preparation_review_browser.py tests/test_qiyunfang_preparation_browser.py tests/test_preparation_lifecycle_browser.py\n"
+PREPARATION_STEP = '      - name: Anonymous preparation kernel and controller-death oracle\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n          JAE_UI_SCREENSHOT_DIR: ${{ runner.temp }}/jae-preparation-ui\n        run: python -m pytest -q -s tests/test_qiyunfang_preparation_v1.py tests/test_preparation_review_v1.py tests/test_preparation_authority_v1.py tests/test_preparation_authority_browser.py tests/test_preparation_review_browser.py tests/test_qiyunfang_preparation_browser.py tests/test_preparation_network_fence_v1.py tests/test_preparation_network_fence_browser.py tests/test_preparation_lifecycle_browser.py\n'
+PREPARATION_MAC_STEP = "      - name: Anonymous preparation early Mac oracle\n        if: matrix.suite == 'native_integration'\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q -s tests/test_qiyunfang_preparation_v1.py tests/test_preparation_review_v1.py tests/test_preparation_authority_v1.py tests/test_preparation_authority_browser.py tests/test_preparation_review_browser.py tests/test_qiyunfang_preparation_browser.py tests/test_preparation_network_fence_v1.py tests/test_preparation_network_fence_browser.py tests/test_preparation_lifecycle_browser.py\n"
 
+
+PUBLIC_PROBE_STEP = '      - name: Observe public Qiyunfang preflight without applicant data\n        timeout-minutes: 2\n        run: python scripts/probe_qiyunfang_preflight.py --output "$RUNNER_TEMP/jae-qiyunfang-public-preflight.json"\n'
+PUBLIC_PROBE_ARTIFACT = '      - name: Retain value-free public preflight diagnostic\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: jae-qiyunfang-public-preflight-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/jae-qiyunfang-public-preflight.json\n          if-no-files-found: ignore\n          retention-days: 3\n'
 
 def event(sha=SHA, label=None, *, draft=True, fork=False, action="labeled"):
     return {
@@ -233,6 +236,9 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 if name == "foundation":
                     self.assertEqual(protected.count(PREPARATION_STEP), 1)
                     protected = protected.replace(PREPARATION_STEP, "", 1)
+                    self.assertEqual(protected.count(PUBLIC_PROBE_STEP),1)
+                    self.assertEqual(protected.count(PUBLIC_PROBE_ARTIFACT),1)
+                    protected = protected.replace(PUBLIC_PROBE_STEP,"",1).replace(PUBLIC_PROBE_ARTIFACT,"",1)
                     self.assertEqual(protected.count(STATIC_STEP), 1)
                     protected = protected.replace(STATIC_STEP, "", 1)
                     private_review_path = "            ${{ runner.temp }}/jae-preparation-ui/preparation-private-review.png\n"

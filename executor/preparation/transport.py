@@ -10,8 +10,9 @@ import hashlib
 from urllib.parse import urlsplit
 
 from .qiyunfang import CONTRACT_URL
+from .resources import OBSERVED_STATIC_RESOURCES
 
-PUBLIC_RESOURCES = frozenset({
+PUBLIC_RESOURCES = OBSERVED_STATIC_RESOURCES | frozenset({
     CONTRACT_URL,
     "https://1-ss-sys.huaweicloudsite.cn/js/dist/site.min.js?v=202506121459",
     "https://1-ss-sys.huaweicloudsite.cn/js/dist/module.min.js?v=202506121459",
@@ -30,7 +31,7 @@ SCRIPT_DIGESTS = {
     "https://1-ss-sys.huaweicloudsite.cn/js/dist/site.min.js?v=202506121459":
         "d9e0a901236460425c9cef8a16bc06614b9336347f0384c420d840162b630da3",
 }
-PUBLIC_HOSTS = frozenset({"www.qiyunfang.com", "1-ss-sys.huaweicloudsite.cn", "jzfe-sys.huaweicloudsite.cn"})
+PUBLIC_HOSTS = frozenset({"www.qiyunfang.com", "1-ss-sys.huaweicloudsite.cn", "jzfe-sys.huaweicloudsite.cn", "2-ss-sys.huaweicloudsite.cn", "jzs-sys.huaweicloudsite.cn"})
 
 
 class PreparationTransport:
@@ -43,7 +44,8 @@ class PreparationTransport:
     WebSocket mock is not an adversarial-script/worker network sandbox.
     No method reopens the gate or grants final-submit authority.
     """
-    def __init__(self):
+    def __init__(self, *, public_fetch=None):
+        self.public_fetch = public_fetch
         self.phase = "READ_ONLY"
         self.blocked = 0
         self.installed = False
@@ -59,7 +61,7 @@ class PreparationTransport:
                     and parsed.hostname in PUBLIC_HOSTS and parsed.netloc == parsed.hostname
                     and not parsed.username and not parsed.password and not parsed.fragment
                     and request.post_data is None
-                    and not any(term in path for term in ("siteform_h.jsp", "membermodifysubmit", "upload"))
+                    and not any(term in path for term in ("siteform_h.jsp", "membermodifysubmit"))
                     and "cmd=" not in parsed.query.lower())
         except (ValueError, AttributeError, TypeError):
             return False
@@ -86,7 +88,6 @@ class PreparationTransport:
         # connect_to_server() is called. Drop messages locally and return;
         # close() here nests closePage/frame.evaluate with no timeout.
         route.on_message(lambda _message: None)
-        route.on_close(lambda *_args: None)
 
     @staticmethod
     def _abort(route):
@@ -112,7 +113,8 @@ class PreparationTransport:
         try:
             # Never let the HTTP client or browser carry permission across a
             # redirect chain. Public content must be returned directly.
-            response = route.fetch(max_redirects=0, max_retries=0, timeout=15000)
+            response = (self.public_fetch(request.url) if self.public_fetch is not None
+                        else route.fetch(max_redirects=0, max_retries=0, timeout=15000))
             if 300 <= response.status < 400 or self.phase != "READ_ONLY":
                 self.blocked += 1
                 self._abort(route)

@@ -224,7 +224,8 @@ def test_websocket_and_popup_callbacks_never_nest_browser_rpc():
                             on_message=lambda callback:callbacks.update(message=callback),
                             on_close=lambda callback:callbacks.update(close=callback))
     gate=PreparationTransport();gate._websocket(route)
-    callbacks['message']('SYNTHETIC_CANARY');callbacks['close'](1000,'')
+    callbacks['message']('SYNTHETIC_CANARY')
+    assert 'close' not in callbacks  # Playwright1.63 can omit close code on disposal
     gate.context=SimpleNamespace(pages=[object(),object()])
     gate._page_created(SimpleNamespace(close=forbidden))
     assert gate.blocked==2

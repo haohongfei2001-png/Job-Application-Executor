@@ -1,7 +1,8 @@
 """Controller-death oracle using synthetic loopback data and an independent server.
 
 No existing desktop browser or applicant profile is ever attached. This checks a
-fresh Playwright-created context, including CDP dispose-on-detach, on CI hosts.
+fresh Playwright-created contexts on CI hosts. Unproxied CDP is a retained
+unsafe comparator after a real synthetic escape on macOS in run36848193941.
 """
 from __future__ import annotations
 
@@ -22,6 +23,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from playwright.sync_api import sync_playwright
 
+class KnownUnsafeTransportEscape(AssertionError):
+    """Only a verified independent-recipient escape is expected in comparator."""
+
+
 CANARY = "SYNTHETIC_LIFECYCLE_CANARY"
 HTML = b'''<!doctype html><input id="ordinary"><script>
 ordinary.addEventListener('input',()=>{
@@ -34,19 +39,26 @@ ordinary.addEventListener('input',()=>{
 CONTROLLER = r'''
 import json,sys,time
 from playwright.sync_api import sync_playwright
-url,phase,cdp=sys.argv[1:]
+url,phase,cdp,fence=sys.argv[1:]
+from executor.preparation.network_fence import DenyOnlyProxy
+proxy=DenyOnlyProxy().__enter__() if fence=="deny" else None
 with sync_playwright() as pw:
- browser=pw.chromium.connect_over_cdp(cdp) if cdp else pw.chromium.launch(headless=True)
+ browser=pw.chromium.connect_over_cdp(cdp) if cdp else pw.chromium.launch(headless=True,**(proxy.browser_options() if proxy else {}))
  context=browser.new_context(service_workers='block')
  def guard(route):
   if route.request.url==url:
-   route.continue_();return
+   if proxy:
+    import urllib.request
+    with urllib.request.urlopen(url,timeout=3) as response:body=response.read()
+    route.fulfill(status=200,content_type="text/html",body=body)
+   else:route.continue_()
+   return
   if phase=='pending' and route.request.url.endswith('/submit-fetch'):
    print(json.dumps({'event':'pending'}),flush=True)
    while True:time.sleep(1)
   route.abort()
  context.route('**/*',guard)
- context.route_web_socket('**/*',lambda route:route.close())
+ context.route_web_socket('**/*',lambda route:None)
  page=context.new_page();page.goto(url,wait_until='domcontentloaded')
  page.locator('#ordinary').fill('SYNTHETIC_LIFECYCLE_CANARY')
  print(json.dumps({'event':'ready'}),flush=True)
@@ -78,9 +90,13 @@ def live_known(known):
     return {p: current[p] for p, row in known.items() if p in current and current[p][2] == row[2] and not current[p][1].startswith('Z')}
 
 
-@pytest.mark.parametrize("transport", ["launch", "cdp_fresh"])
+@pytest.mark.parametrize("transport,failure", [
+    ("launch_deny", "controller"), ("launch_deny", "driver"),
+    ("launch", "controller"),
+    pytest.param("cdp_fresh", "controller", marks=pytest.mark.xfail(raises=KnownUnsafeTransportEscape, reason="known unsafe pending-route escape: CI36848193941 Mac")),
+])
 @pytest.mark.parametrize("phase", ["armed", "pending"])
-def test_controller_sigkill_never_releases_delayed_requests(transport, phase, tmp_path):
+def test_controller_sigkill_never_releases_delayed_requests(transport, failure, phase, tmp_path):
     received = []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
@@ -115,7 +131,7 @@ def test_controller_sigkill_never_releases_delayed_requests(transport, phase, tm
                 except OSError:
                     if time.monotonic() >= deadline: pytest.fail("test CDP browser did not start")
                     time.sleep(.05)
-        process = subprocess.Popen([sys.executable, "-u", "-c", CONTROLLER, url, phase, cdp],
+        process = subprocess.Popen([sys.executable, "-u", "-c", CONTROLLER, url, phase, cdp, "deny" if transport=="launch_deny" else "none"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
         selector.register(process.stdout, selectors.EVENT_READ)
         expected = "pending" if phase == "pending" else "ready"
@@ -131,16 +147,24 @@ def test_controller_sigkill_never_releases_delayed_requests(transport, phase, tm
         known = descendants(process.pid)
         assert len(known) > 1, "Playwright driver process was not observed"
         if external: known.update(descendants(external.pid))
-        os.kill(process.pid, signal.SIGKILL); process.wait(timeout=5)
+        if failure == "driver":
+            drivers = [pid for pid,row in known.items() if row[0] == process.pid and 'node' in row[2].lower()]
+            assert len(drivers) == 1, "unique Node driver was not independently observed"
+            os.kill(drivers[0], signal.SIGKILL)
+        else:
+            os.kill(process.pid, signal.SIGKILL); process.wait(timeout=5)
         # Retain the full longest timer window; an unchanged early sample is
         # not evidence that a delayed callback can never escape after detach.
         time.sleep(7)
-        assert not [item for item in received if item[1].startswith('/submit-')], "request escaped after controller death"
+        escaped = [item for item in received if item[1].startswith('/submit-')]
+        if escaped and transport == 'cdp_fresh':
+            raise KnownUnsafeTransportEscape('independent server observed escaped synthetic request')
+        assert not escaped, "request escaped after controller death"
         if cdp:
             with urllib.request.urlopen(cdp + "/json/list", timeout=2) as response: targets = json.load(response)
             assert not any(target.get("url") == url for target in targets), "fresh preparation context survived detach"
         else:
-            assert not live_known(known), "launched driver/browser survived controller death"
+            assert not {pid:row for pid,row in live_known(known).items() if pid!=process.pid}, "launched driver/browser survived transport death"
     finally:
         if process and process.poll() is None:
             known.update(descendants(process.pid)); process.kill(); process.wait(timeout=5)

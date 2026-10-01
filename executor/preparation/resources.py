@@ -1,0 +1,40 @@
+"""Exact public script/stylesheet DOM URLs observed in the empty public page.
+
+Scripts: independent capture2026-10-01T08:40:15Z; styles: read-only dot cloud
+browser observation2026-10-01T10:21Z. No resource here grants a form endpoint,
+applicant upload or final request. Runtime hash completeness is still a gate.
+"""
+OBSERVED_STATIC_RESOURCES = frozenset({
+    'https://1-ss-sys.huaweicloudsite.cn/js/comm/SWFUpload2v/jquery.uploadify.min.js?v=202307101206',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/libs/city2.min.js?v=202407171154',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/svg.min.js?v=202506121459',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/libs/imageEffect.min.js?v=202506121459',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/libs/photoSlide.min.js?v=202407171154',
+    'https://1-ss-sys.huaweicloudsite.cn/js/comm/vue/vue-2.7.14.min.js?v=202310161432',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/libs/comMethods.min.js?v=202407171154',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/libs/jzUtils.min.js?v=202506121459',
+    'https://1-ss-sys.huaweicloudsite.cn/js/comm/polyfill.min.js?v=202307101206',
+    'https://jzfe-sys.huaweicloudsite.cn/dist/jz/request/jzRequest.min.js?v=202506121719',
+    'https://jzfe-sys.huaweicloudsite.cn/dist/jz/utils/jzUtils.min.js?v=202506121754',
+    'https://jzfe-sys.huaweicloudsite.cn/dist/jz/biz-shared/bizShared.min.js?v=202608251625',
+    'https://1-ss-sys.huaweicloudsite.cn/js/comm/jquery/jquery-core.min.js?v=202307101206',
+    'https://1-ss-sys.huaweicloudsite.cn/js/comm/jquery/jquery-mousewheel.min.js?v=202307101206',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/frontend.min.js?v=202506121459',
+    'https://1-ss-sys.huaweicloudsite.cn/js/comm/jquery/jquery-ui-core.min.js?v=202307101206',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/partitionSite.min.js?v=202511071120',
+    'https://jzfe-sys.huaweicloudsite.cn/dist/jz/locale/2052.min.js?v=202607211512',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/site.min.js?v=202506121459',
+    'https://1-ss-sys.huaweicloudsite.cn/js/dist/module.min.js?v=202506121459',
+    'https://2-ss-sys.huaweicloudsite.cn/css/dist/styles/siteBase2.min.css?v=202506121459',
+    'https://2-ss-sys.huaweicloudsite.cn/css/dist/styles/base2.min.css?v=202506121459',
+    'https://2-ss-sys.huaweicloudsite.cn/css/dist/module.min.css?v=202506121459',
+    'https://jzs-sys.huaweicloudsite.cn/822/fkTheme.min.css?v=20210928182422&aid=50002009&wid=0&isNavV2=true&isBannerV2=true',
+    'https://2-ss-sys.huaweicloudsite.cn/css/dist/styles/themeMixin.min.css?v=202312121718',
+    'https://jzs-sys.huaweicloudsite.cn/3205/fkNav.min.css?v=20210928182422&aid=50002009&wid=0',
+    'https://2-ss-sys.huaweicloudsite.cn/css/dist/styles/newSearchBoxStyle.min.css?v=202407171154',
+    'https://2-ss-sys.huaweicloudsite.cn/css/dist/styles/floatBtn1.min.css?v=202506121459',
+    'https://www.qiyunfang.com/jzcusstyle.jsp?id=124&colId=124&extId=0&_csw=0&clientSupportWebp=true',
+    'https://jzfe-sys.huaweicloudsite.cn/dist/jz/biz-shared/bizShared.min.css?v=202608251625',
+    'https://2-ss-sys.huaweicloudsite.cn/css/dist/styles/datepicker.min.css?v=202407171154',
+    'https://2-ss-sys.huaweicloudsite.cn/css/dist/styles/fontsIco.min.css?v=202506121459',
+})

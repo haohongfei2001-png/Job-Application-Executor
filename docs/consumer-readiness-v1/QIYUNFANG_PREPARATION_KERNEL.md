@@ -88,3 +88,12 @@ cloud shell because Chromium's process-singleton socket is denied, including the
 supported escalated invocation. Do not count those tests as passed until the
 corresponding hosted CI evidence exists. All prior account/draft/recovery safety
 assertions remain selected and unchanged.
+
+## Lifecycle correction
+
+The later72c2292 Mac run observed an actual synthetic pending-request escape
+from a fresh CDP context after controller death. See
+`receipts/QIYUNFANG-72C2-CDP-COUNTEREXAMPLE.md`. The historical green run is not a
+certificate for raw CDP. New session code refuses raw CDP and tests a permanent
+deny-only browser proxy plus a separate finite public-GET broker. Live admission
+and final forwarding remain disabled.

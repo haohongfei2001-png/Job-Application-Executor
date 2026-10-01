@@ -73,6 +73,14 @@ results must be reported separately; local Chromium startup remains unavailable.
 The owned live-process verifier, runtime UI approval/session bridge, complete
 resource admission, additional transport/driver-death coverage and a human-only
 final-request handoff remain required before enabling real applicant filling.
-Final ID/CAPTCHA/request bodies must remain opaque/transient on the browser side;
-app review/logs must not mirror those payloads. Real user-data tests and final
+Final ID/CAPTCHA/request bodies must never be projected to AI/model, app review,
+logs, telemetry or persistence. A future exact human-request forward may use
+opaque transient bytes in local Playwright transport; it must not explicitly
+read/parse protected values or promise renderer-only retention. Real user-data tests and final
 submission remain separate from this engineering work.
+
+Fresh-CDP preparation is now explicitly unsupported after the pending-route
+escape recorded in `receipts/QIYUNFANG-72C2-CDP-COUNTEREXAMPLE.md`. Read-only CDP
+context inventory remains useful observation, not a lifecycle safety guarantee.
+The replacement disposable deny-proxy owner is still unregistered pending its
+exact native transport and public-resource tests.
