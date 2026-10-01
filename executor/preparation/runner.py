@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 
 from .qiyunfang import (CONTRACT_URL, ROOT, OBSERVE_ROOT, ROUTINE_FIELDS,
-                       ContractChanged, validate_observation, _text)
+                       ContractChanged, validate_observation, _text, digest)
 
 
 class PreparationKernel:
@@ -22,7 +22,7 @@ class PreparationKernel:
         self.actions = []
 
     def _fence(self):
-        self.guard()
+        self.guard(self.plan_sha)
         self.transport.require_sealed()
         if (self.page.is_closed() or self.page.url != CONTRACT_URL
                 or len(self.page.context.pages) != 1 or len(self.page.frames) != 1
@@ -60,6 +60,7 @@ class PreparationKernel:
                   or len(value) != len(set(value))):
                 raise ValueError("invalid preparation plan")
         plan = copy.deepcopy(plan)
+        self.plan_sha = digest(plan)
         if self.page.locator(ROOT).count() != 1:
             raise ContractChanged()
         self.root = self.page.locator(ROOT).element_handle()

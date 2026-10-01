@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import html
 import json
 import os
@@ -61,6 +62,16 @@ def replica(script=""):
             ''.join(rows) + '</div></div></div></div><script>' + script + '</script>')
 
 
+@pytest.fixture(autouse=True)
+def bounded_browser_oracle(request):
+    print("PREPARATION_TEST_START " + request.node.nodeid, flush=True)
+    faulthandler.dump_traceback_later(60, exit=True)
+    try: yield
+    finally:
+        print("PREPARATION_TEST_FINISH " + request.node.nodeid, flush=True)
+        faulthandler.cancel_dump_traceback_later()
+
+
 @pytest.fixture
 def server():
     class Handler(BaseHTTPRequestHandler):
@@ -87,7 +98,10 @@ def browser():
             kwargs["executable_path"] = os.environ["JAE_TEST_CHROMIUM"]
         b = p.chromium.launch(**kwargs)
         try: yield b
-        finally: b.close()
+        finally:
+            print("PREPARATION_BROWSER_CLOSE_START", flush=True)
+            b.close()
+            print("PREPARATION_BROWSER_CLOSE_FINISH", flush=True)
 
 
 @contextlib.contextmanager
@@ -102,13 +116,16 @@ def session(browser, script=""):
     context.unroute(q.CONTRACT_URL, bootstrap)
     guard.seal()
     try: yield page, guard
-    finally: context.close()
+    finally:
+        print("PREPARATION_CONTEXT_CLOSE_START", flush=True)
+        context.close()
+        print("PREPARATION_CONTEXT_CLOSE_FINISH", flush=True)
 
 
 def test_complete_routine_plan_retains_protected_controls_and_never_becomes_ready(browser):
     with session(browser) as (page, guard):
         journal = Journal()
-        runner = PreparationKernel(page, guard, lambda: None, journal)
+        runner = PreparationKernel(page, guard, lambda _plan_sha: None, journal)
         plan = [{"field_id": "0", "value": "Synthetic Applicant"}, {"field_id": "5", "value": "synthetic@example.test"},
                 {"field_id": "8", "value": q.CONTRACT_ROLE}, {"field_id": "17", "value": ["武汉", "成都"]}]
         result = runner.run(plan)
@@ -138,7 +155,7 @@ def test_field_effect_transports_are_denied_and_independent_server_receives_noth
     }
     script = 'document.querySelector(\'[data-formid="0"] input\').addEventListener("input",()=>{' + attacks[attack] + '});'
     with session(browser, script) as (page, guard):
-        journal = Journal(); runner = PreparationKernel(page, guard, lambda: None, journal)
+        journal = Journal(); runner = PreparationKernel(page, guard, lambda _plan_sha: None, journal)
         try: runner.run([{"field_id": "0", "value": "SYNTHETIC_CANARY"}])
         except Exception: pass
         # Delayed side effects must remain blocked after kernel returns too.
@@ -159,7 +176,7 @@ def test_late_field_redraw_or_protected_mutation_stops_later_writes(browser, mut
     with session(browser, script) as (page, guard):
         journal = Journal()
         with pytest.raises(q.ContractChanged):
-            PreparationKernel(page, guard, lambda: None, journal).run([
+            PreparationKernel(page, guard, lambda _plan_sha: None, journal).run([
                 {"field_id": "0", "value": "Synthetic"}, {"field_id": "5", "value": "synthetic@example.test"},
                 {"field_id": "8", "value": q.CONTRACT_ROLE}])
         assert not page.locator('#M1567R8I19').is_checked()
@@ -171,7 +188,7 @@ def test_invalid_later_plan_is_rejected_before_first_write(browser):
     with session(browser) as (page, guard):
         journal = Journal()
         with pytest.raises(ValueError):
-            PreparationKernel(page, guard, lambda: None, journal).run([
+            PreparationKernel(page, guard, lambda _plan_sha: None, journal).run([
                 {"field_id": "0", "value": "Synthetic"}, {"field_id": "5", "value": "x" * 51}])
         assert journal.events == []
         assert page.locator('[data-formid="0"] input').input_value() == ""

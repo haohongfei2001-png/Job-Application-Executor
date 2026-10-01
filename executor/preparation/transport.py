@@ -39,7 +39,8 @@ class PreparationTransport:
     Install on a newly-created dedicated context before creating its first page;
     it is not safe to retrofit this onto a persistent or shared user context.
     READ_ONLY permits HTTPS GET public assets only, aborts redirects and every
-    form endpoint. SEALED permits no outbound HTTP or WebSocket request at all.
+    form endpoint. SEALED refuses routed HTTP and page WebSocket requests. This page-level
+    WebSocket mock is not an adversarial-script/worker network sandbox.
     No method reopens the gate or grants final-submit authority.
     """
     def __init__(self):
@@ -72,15 +73,20 @@ class PreparationTransport:
         context.on("page", self._page_created)
 
     def _page_created(self, page):
-        # The one initial page is legitimate. _route refuses popup navigations
-        # before fetch; this event separately closes any extra page.
+        # _route refuses popup navigations before fetch. Do not close a page
+        # synchronously inside an event callback: that can nest an unbounded
+        # browser RPC during the current primitive. The owner closes the whole
+        # dedicated context after the next fence refuses its extra page.
         if len(self.context.pages) != 1:
             self.blocked += 1
-            page.close()
 
     def _websocket(self, route):
         self.blocked += 1
-        route.close()
+        # Playwright-routed sockets are nonconnecting mocks until explicitly
+        # connect_to_server() is called. Drop messages locally and return;
+        # close() here nests closePage/frame.evaluate with no timeout.
+        route.on_message(lambda _message: None)
+        route.on_close(lambda *_args: None)
 
     def _route(self, route):
         request = route.request

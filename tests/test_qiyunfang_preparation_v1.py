@@ -213,3 +213,18 @@ def test_driver_constants_match_independently_captured_public_controls():
             assert (row['controls'][0]['placeholder'] or '') == field.placeholder
     file_control = next(item for item in observed if item['field_id'] == '11')['controls'][1]
     assert file_control['file_occupancy'] == 'unverified_files_property_unavailable'
+
+
+def test_websocket_and_popup_callbacks_never_nest_browser_rpc():
+    from types import SimpleNamespace
+    from executor.preparation.transport import PreparationTransport
+    callbacks = {}
+    def forbidden(*_, **__):pytest.fail('nested browser RPC in routing callback')
+    route = SimpleNamespace(close=forbidden, connect_to_server=forbidden,
+                            on_message=lambda callback:callbacks.update(message=callback),
+                            on_close=lambda callback:callbacks.update(close=callback))
+    gate=PreparationTransport();gate._websocket(route)
+    callbacks['message']('SYNTHETIC_CANARY');callbacks['close'](1000,'')
+    gate.context=SimpleNamespace(pages=[object(),object()])
+    gate._page_created(SimpleNamespace(close=forbidden))
+    assert gate.blocked==2
