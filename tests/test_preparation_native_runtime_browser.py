@@ -40,19 +40,26 @@ def test_headed_installed_chrome_two_mib_controller_and_single_upload(tmp_path,n
     original.test_private_controller_preserves_two_mib_docx_and_one_upload_authority(tmp_path)
 
 
-def test_current_owned_native_browser_proves_its_own_capabilities_without_private_material():
-    from executor.preparation.native_admission import NativePreparationAdmission
-    assert NativePreparationAdmission.available()
-    with DisposablePreparationSession(headless=False,channel='chrome') as owner:
-        original=owner.context
-        from executor.preparation.native_selfcheck import check_owned_native_browser
-        try:receipt=check_owned_native_browser(owner)
+def test_current_owned_native_browser_proves_its_own_capabilities_without_private_material(monkeypatch):
+    from executor.preparation import native_admission as module
+    NativePreparationAdmission=module.NativePreparationAdmission
+    real_check=module.check_owned_native_browser
+    def observed_check(*args,**kwargs):
+        try:receipt=real_check(*args,**kwargs)
         except Exception as error:
             print('NATIVE_SELF_CHECK_DIAGNOSTIC '+json.dumps(getattr(error,'diagnostic',{}),sort_keys=True),flush=True)
             raise
-        assert receipt['protocols']==['http','https','ws','wss']
+        print('NATIVE_SELF_CHECK_PROOF '+json.dumps(receipt['proof_by_protocol'],sort_keys=True),flush=True)
+        return receipt
+    # Observe the real checker once; do not perform a redundant standalone
+    # probe before admission or extend the existing60s browser-test bound.
+    monkeypatch.setattr(module,'check_owned_native_browser',observed_check)
+    assert NativePreparationAdmission.available()
+    with DisposablePreparationSession(headless=False,channel='chrome') as owner:
+        original=owner.context
         admission=NativePreparationAdmission()
         assert admission.admit(owner) is True
+        assert admission._receipt['protocols']==['http','https','ws','wss']
         assert admission._receipt['temporary_context_closed'] is True
         assert admission._receipt['external_recipient_used'] is False
         assert admission._receipt['applicant_data_used'] is False

@@ -56,7 +56,9 @@ def owner(fault=None):
                 else:
                     url=target.replace('http','ws',1)
                     self.context.events['Network.webSocketCreated']({'requestId':'id','url':url})
-                    self.context.events['Network.webSocketHandshakeResponseReceived']({'requestId':'id','response':{'status':403}})
+                    if fault=='native_tunnel_text':
+                        self.context.events['Network.webSocketFrameError']({'requestId':'id','errorMessage':'Establishing a tunnel via proxy server failed.'})
+                    else:self.context.events['Network.webSocketHandshakeResponseReceived']({'requestId':'id','response':{'status':403}})
             if fault=='late_native':self.pending_native=emit_native
             elif fault!='no_native_evidence':emit_native()
             if fault=='escape':
@@ -176,3 +178,25 @@ def test_receiver_thread_start_failure_closes_listener_without_admission(monkeyp
     value=owner()
     with pytest.raises(RuntimeError,match='synthetic thread allocation'):check_owned_native_browser(value)
     assert len(servers)==1 and servers[0].socket.fileno()==-1 and value.browser.probes==[]
+
+
+def test_exact_chromium_proxy_tunnel_text_is_a_scoped_native_error():
+    value=owner('native_tunnel_text')
+    receipt=check_owned_native_browser(value)
+    assert receipt['protocols']==['http','https','ws','wss']
+    assert receipt['native_proxy_blocked'] is True and value.proxy.denied_connections==4
+    for mode in ('websocket','websocket_tls'):
+        assert receipt['proof_by_protocol'][mode]['proof']==['native_proxy_failure']
+        assert 'net::ERR_TUNNEL_CONNECTION_FAILED' in receipt['proof_by_protocol'][mode]['native_observations']
+
+
+@pytest.mark.parametrize('message',[
+    'net::ERR_CONNECTION_RESET', 'Error in connection establishment: net::ERR_CONNECTION_CLOSED',
+    'WebSocket opening handshake was canceled', 'WebSocket opening handshake timed out',
+    'Establishing a tunnel via proxy server failed',
+    'Untrusted prefix Establishing a tunnel via proxy server failed.',
+    'Establishing a tunnel via proxy server failed. Untrusted suffix',
+])
+def test_generic_and_near_match_websocket_errors_do_not_establish_proxy_proof(message):
+    from executor.preparation.native_selfcheck import native_proxy_error_code
+    assert native_proxy_error_code(message) is None

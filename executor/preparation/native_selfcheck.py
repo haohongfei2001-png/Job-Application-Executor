@@ -18,6 +18,20 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+# Chromium's FailureMessageFromNetError special-cases this exact native text
+# for ERR_TUNNEL_CONNECTION_FAILED. It is not a generic connection refusal.
+# https://github.com/chromium/chromium/blob/d7d74add46d2971946a3ade2a5b990e3e30dfd4a/net/websockets/websocket_stream.cc#L266-L276
+_CHROMIUM_PROXY_TUNNEL_MESSAGE = 'Establishing a tunnel via proxy server failed.'
+_PROXY_ERRORS = frozenset({'net::ERR_PROXY_CONNECTION_FAILED','net::ERR_TUNNEL_CONNECTION_FAILED'})
+
+
+def native_proxy_error_code(message):
+    if message == _CHROMIUM_PROXY_TUNNEL_MESSAGE:return 'net::ERR_TUNNEL_CONNECTION_FAILED'
+    for code in _PROXY_ERRORS:
+        if message in {code,'Error in connection establishment: '+code}:return code
+    return None
+
+
 class NativeSelfCheckFailed(RuntimeError):
     def __init__(self,code='native_preparation_self_check_failed',diagnostic=None):
         super().__init__(code)
@@ -83,8 +97,8 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True, clock=tim
         context.route(bootstrap,bootstrap_only)
         page.goto(bootstrap,timeout=3000)
         context.unroute(bootstrap,bootstrap_only)
-        evidence={};socket_urls={};native_observations={}
-        proxy_errors={'net::ERR_PROXY_CONNECTION_FAILED','net::ERR_TUNNEL_CONNECTION_FAILED'}
+        evidence={};socket_urls={};native_observations={};proofs={}
+        proxy_errors=_PROXY_ERRORS
         def response_seen(response):
             if response.url in evidence:
                 native_observations[response.url].append('http_status_'+str(response.status))
@@ -108,9 +122,10 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True, clock=tim
                 if status==403:evidence[url].append('proxy_websocket_403')
         def socket_error(event):
             url=socket_urls.get(event.get('requestId'));message=event.get('errorMessage','')
+            proxy_code=native_proxy_error_code(message)
             if url:
-                native_observations[url].extend(re.findall(r'net::ERR_[A-Z_]+',message) or ['unclassified_websocket_error'])
-            if url and (any(message.endswith(error) for error in proxy_errors) or 'Unexpected response code: 403' in message):
+                native_observations[url].extend([proxy_code] if proxy_code else re.findall(r'net::ERR_[A-Z_]+',message) or ['unclassified_websocket_error'])
+            if url and (proxy_code is not None or 'Unexpected response code: 403' in message):
                 evidence[url].append('native_proxy_failure')
         cdp.on('Network.webSocketCreated',socket_created)
         cdp.on('Network.webSocketHandshakeResponseReceived',socket_response)
@@ -161,6 +176,7 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True, clock=tim
                      'receiver_connections':len(connections),'revoked':still_authorized() is not True,
                      'success_budget_exceeded':clock()-probe_start>12,'overall_budget_exceeded':clock()-start>90,
                      'setup_ms':int((probe_start-start)*1000),'probe_elapsed_ms':int((clock()-probe_start)*1000)})
+            proofs[mode]={'proof':list(evidence[native_url]),'native_observations':native_observations[native_url][:8]}
         if owner.proxy.verify_launch(browser) is not True or owner.identity.verify(browser)!=identity:
             raise NativeSelfCheckFailed()
     except BaseException:
@@ -190,5 +206,5 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True, clock=tim
     return {'schema':'native-loopback-self-check-v1','process_sha':identity,
             'browser_version':browser.version,'control_reachable':True,
             'native_proxy_blocked':True,'temporary_context_closed':True,
-            'protocols':['http','https','ws','wss'],
+            'protocols':['http','https','ws','wss'],'proof_by_protocol':proofs,
             'external_recipient_used':False,'applicant_data_used':False}
