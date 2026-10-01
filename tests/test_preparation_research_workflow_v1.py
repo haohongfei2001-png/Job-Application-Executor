@@ -37,4 +37,19 @@ class PreparationResearchWorkflowTests(unittest.TestCase):
             self.assertNotIn(forbidden,SOURCE)
 
 
+
+
+class NativeDiagnosticScopeTests(unittest.TestCase):
+    def test_native_diagnostic_is_bounded_and_keeps_existing_research_gate(self):
+        self.assertIn('  native_selfcheck_diagnostic:\n',SOURCE)
+        probe=SOURCE.split('  native_selfcheck_diagnostic:\n',1)[1]
+        self.assertIn('runs-on: macos-latest',probe)
+        self.assertIn('timeout-minutes: 7',probe)
+        self.assertIn('persist-credentials: false',probe)
+        self.assertIn('APPLICATION_EXECUTOR_BROWSER_MODE: isolated',probe)
+        self.assertIn('tests/test_preparation_native_runtime_browser.py -k current_owned_native_browser',probe)
+        self.assertIn('  preparation_validation:\n',SOURCE.split('  native_selfcheck_diagnostic:\n',1)[0])
+        for forbidden in ('secrets.','continue-on-error','write-all','workflow_dispatch','profiles/'):
+            self.assertNotIn(forbidden,probe)
+
 if __name__=='__main__':unittest.main()

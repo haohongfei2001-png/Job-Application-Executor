@@ -1,5 +1,6 @@
 """Synthetic local controls and fake browser semantics; not native evidence."""
 import http.client
+import time
 from urllib.parse import urlsplit
 from types import SimpleNamespace
 import pytest
@@ -39,18 +40,25 @@ def owner(fault=None):
     class Page:
         def __init__(self,context):self.context=context;self.events={}
         def on(self,name,fn):self.events[name]=fn
+        def wait_for_timeout(self,ms):
+            pending=getattr(self,'pending_native',None)
+            if pending:self.pending_native=None;pending()
+            time.sleep(ms/1000)
         def set_default_timeout(self,ms):assert ms==3000
         def goto(self,url,timeout):assert timeout==3000 and '/bootstrap/' in url
         def evaluate(self,script,data):
             assert self.context.routes==[]
             assert data['mode'] in {'fetch','fetch_tls','websocket','websocket_tls'}
-            if fault!='no_native_evidence':
+            def emit_native():
+                target=data['target']+('/other' if fault=='wrong_native_url' else '')
                 if data['mode'].startswith('fetch'):
-                    self.events['response'](SimpleNamespace(url=data['target'],status=403))
+                    self.events['response'](SimpleNamespace(url=target,status=403))
                 else:
-                    url=data['target'].replace('http','ws',1)
+                    url=target.replace('http','ws',1)
                     self.context.events['Network.webSocketCreated']({'requestId':'id','url':url})
                     self.context.events['Network.webSocketHandshakeResponseReceived']({'requestId':'id','response':{'status':403}})
+            if fault=='late_native':self.pending_native=emit_native
+            elif fault!='no_native_evidence':emit_native()
             if fault=='escape':
                 target=urlsplit(data['target']);connection=http.client.HTTPConnection(target.hostname,target.port,timeout=2)
                 try:connection.request('POST',target.path,body='SYNTHETIC');response=connection.getresponse();response.read()
@@ -74,7 +82,7 @@ def test_selfcheck_observes_local_positive_and_native_negative_then_closes_only_
     assert value.browser.contexts==[original] and value.browser.probes[0].closed
     assert value.proxy.denied_connections==4
 
-@pytest.mark.parametrize('fault',['escape','no_proxy_observation','no_native_evidence','cancel','timeout','wrong_response','identity','proxy','cleanup'])
+@pytest.mark.parametrize('fault',['escape','no_proxy_observation','no_native_evidence','wrong_native_url','cancel','timeout','wrong_response','identity','proxy','cleanup'])
 def test_uncertain_or_escaping_probe_cannot_admit_and_always_attempts_cleanup(fault):
     value=owner(fault)
     with pytest.raises(NativeSelfCheckFailed):check_owned_native_browser(value,still_authorized=lambda:value.authorized)
@@ -109,3 +117,9 @@ def test_failed_selfcheck_never_creates_admission(monkeypatch):
     monkeypatch.setattr(admission,'check_owned_native_browser',unavailable)
     gate=admission.NativePreparationAdmission()
     assert gate.admit(owner()) is False and gate._owner is None and gate._receipt is None
+
+
+def test_native_event_delivered_after_evaluate_is_pumped_before_admission():
+    value=owner('late_native')
+    result=check_owned_native_browser(value)
+    assert result['native_proxy_blocked'] is True and value.proxy.denied_connections==4

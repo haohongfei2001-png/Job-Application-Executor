@@ -11,6 +11,7 @@ timeout/revocation. It is not a claim that a hung renderer can be preempted here
 from __future__ import annotations
 
 import http.client
+import re
 import secrets
 import threading
 import time
@@ -18,7 +19,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class NativeSelfCheckFailed(RuntimeError):
-    def __init__(self,code='native_preparation_self_check_failed'): super().__init__(code)
+    def __init__(self,code='native_preparation_self_check_failed',diagnostic=None):
+        super().__init__(code)
+        self.diagnostic=diagnostic or {}
 
 
 def check_owned_native_browser(owner, *, still_authorized=lambda:True):
@@ -76,21 +79,33 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True):
         context.route(bootstrap,bootstrap_only)
         page.goto(bootstrap,timeout=3000)
         context.unroute(bootstrap,bootstrap_only)
-        evidence={};socket_urls={}
+        evidence={};socket_urls={};native_observations={}
         proxy_errors={'net::ERR_PROXY_CONNECTION_FAILED','net::ERR_TUNNEL_CONNECTION_FAILED'}
         def response_seen(response):
-            if response.url in evidence and response.status==403:evidence[response.url].append('proxy_http_403')
+            if response.url in evidence:
+                native_observations[response.url].append('http_status_'+str(response.status))
+                if response.status==403:evidence[response.url].append('proxy_http_403')
         def request_failed(request):
-            if request.url in evidence and request.failure in proxy_errors:evidence[request.url].append('native_proxy_failure')
+            if request.url in evidence:
+                code=request.failure
+                native_observations[request.url].append(code if isinstance(code,str) and re.fullmatch(r'net::ERR_[A-Z_]+',code) else 'unclassified_failure')
+                if code in proxy_errors:evidence[request.url].append('native_proxy_failure')
         page.on('response',response_seen);page.on('requestfailed',request_failed)
         cdp=context.new_cdp_session(page);cdp.send('Network.enable')
         def socket_created(event):
-            if event.get('url') in evidence:socket_urls[event.get('requestId')]=event['url']
+            if event.get('url') in evidence:
+                socket_urls[event.get('requestId')]=event['url']
+                native_observations[event['url']].append('websocket_created')
         def socket_response(event):
             url=socket_urls.get(event.get('requestId'))
-            if url and event.get('response',{}).get('status')==403:evidence[url].append('proxy_websocket_403')
+            if url:
+                status=event.get('response',{}).get('status')
+                native_observations[url].append('websocket_status_'+str(status) if type(status) is int else 'unclassified_status')
+                if status==403:evidence[url].append('proxy_websocket_403')
         def socket_error(event):
             url=socket_urls.get(event.get('requestId'));message=event.get('errorMessage','')
+            if url:
+                native_observations[url].extend(re.findall(r'net::ERR_[A-Z_]+',message) or ['unclassified_websocket_error'])
             if url and (any(message.endswith(error) for error in proxy_errors) or 'Unexpected response code: 403' in message):
                 evidence[url].append('native_proxy_failure')
         cdp.on('Network.webSocketCreated',socket_created)
@@ -104,7 +119,7 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True):
             target=base+'/blocked-'+mode+'/'+nonce
             if mode.endswith('_tls'):target=target.replace('http:','https:',1)
             native_url=target.replace('http','ws',1) if mode.startswith('websocket') else target
-            evidence[native_url]=[]
+            evidence[native_url]=[];native_observations[native_url]=[]
             result=page.evaluate('''async ({mode,target})=>{
               if(mode.startsWith('fetch')){
                 const control=new AbortController();let expired=false;
@@ -121,11 +136,24 @@ def check_owned_native_browser(owner, *, still_authorized=lambda:True):
                 socket.onopen=()=>finish('escaped');socket.onerror=()=>finish('blocked');
               });
             }''',{'mode':mode,'target':target})
+            # CDP network events and the evaluate reply use separate delivery
+            # paths. Pump until the scoped proof arrives, never infer it from
+            # a fulfilled JS promise or an unrelated global denial.
+            observe_until=min(start+12,time.monotonic()+.5)
+            while not evidence[native_url] and time.monotonic()<observe_until:
+                if still_authorized() is not True or len(connections)!=1:break
+                page.wait_for_timeout(10)
             if (result not in ({'kind':'blocked'},{'kind':'response','status':403})
                     or owner.proxy.denied_connections<=denied or not evidence[native_url]
                     or unexpected or len(connections)!=1 or still_authorized() is not True
                     or time.monotonic()-start>12):
-                raise NativeSelfCheckFailed('native_selfcheck_'+mode+'_unverified')
+                raise NativeSelfCheckFailed('native_selfcheck_'+mode+'_unverified',
+                    {'protocol':mode,'outcome':result.get('kind') if result.get('kind') in {'blocked','response','timeout','escaped'} else 'invalid',
+                     'response_status':result.get('status') if type(result.get('status')) is int else None,
+                     'native_observations':native_observations[native_url][:8],
+                     'scoped_proof':bool(evidence[native_url]),'proxy_denial_seen':owner.proxy.denied_connections>denied,
+                     'receiver_connections':len(connections),'revoked':still_authorized() is not True,
+                     'success_budget_exceeded':time.monotonic()-start>12})
         if owner.proxy.verify_launch(browser) is not True or owner.identity.verify(browser)!=identity:
             raise NativeSelfCheckFailed()
     except BaseException:

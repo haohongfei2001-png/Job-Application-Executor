@@ -55,3 +55,27 @@ jobs:
           path: ${{ runner.temp }}/jae-preparation-ui/preparation-site-check.png
           if-no-files-found: ignore
           retention-days: 3
+
+  native_selfcheck_diagnostic:
+    # A single bounded synthetic probe for native-event diagnosis. This is not
+    # the complete preparation gate; all original research cases remain above.
+    runs-on: macos-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pinned test dependencies and official Chrome
+        run: |
+          python -m pip install -r requirements.txt
+          if [ ! -f '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' ]; then
+            python -m playwright install chrome
+          fi
+      - name: Observe synthetic native proxy proof without applicant material
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q -s tests/test_preparation_native_runtime_browser.py -k current_owned_native_browser

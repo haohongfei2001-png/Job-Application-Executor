@@ -46,7 +46,10 @@ def test_current_owned_native_browser_proves_its_own_capabilities_without_privat
     with DisposablePreparationSession(headless=False,channel='chrome') as owner:
         original=owner.context
         from executor.preparation.native_selfcheck import check_owned_native_browser
-        receipt=check_owned_native_browser(owner)
+        try:receipt=check_owned_native_browser(owner)
+        except Exception as error:
+            print('NATIVE_SELF_CHECK_DIAGNOSTIC '+json.dumps(getattr(error,'diagnostic',{}),sort_keys=True),flush=True)
+            raise
         assert receipt['protocols']==['http','https','ws','wss']
         admission=NativePreparationAdmission()
         assert admission.admit(owner) is True
