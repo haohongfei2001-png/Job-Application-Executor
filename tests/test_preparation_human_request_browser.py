@@ -109,8 +109,9 @@ def test_exact_request_opaque_forward_preserves_fresh_session_cookie_and_no_repl
         ledger.close();server.shutdown();server.server_close();thread.join()
 
 
-@pytest.mark.parametrize('encoding',['multipart_file','multipart_slice','binary_chunk'])
-def test_native_file_request_is_refused_and_raw_transport_is_characterized(tmp_path,monkeypatch,encoding):
+@pytest.mark.parametrize('input_mode',['disk','memory'])
+@pytest.mark.parametrize('encoding',['multipart_file','multipart_slice','multipart_full_slice','binary_chunk'])
+def test_native_file_request_is_refused_and_raw_transport_is_characterized(tmp_path,monkeypatch,encoding,input_mode):
     """Refusal test plus diagnostic, never certification of a resume uploader.
 
     The independent receiver proves the native positive control contains the
@@ -127,7 +128,9 @@ def test_native_file_request_is_refused_and_raw_transport_is_characterized(tmp_p
       let body=file.slice(0,file.size,'application/octet-stream');
       if(location.hash.startsWith('#multipart')){
         body=new FormData();body.append('fixture','synthetic');
-        body.append('file',location.hash==='#multipart_slice'?file.slice(0,Math.floor(file.size/2)):file,file.name);
+        const value=location.hash==='#multipart_slice'?file.slice(0,Math.floor(file.size/2),file.type):
+          location.hash==='#multipart_full_slice'?file.slice(0,file.size,file.type):file;
+        body.append('file',value,file.name);
       }
       fetch('/upload',{method:'POST',body}).then(()=>{document.body.dataset.done='yes'},()=>{document.body.dataset.done='refused'});
     };</script>'''
@@ -141,20 +144,23 @@ def test_native_file_request_is_refused_and_raw_transport_is_characterized(tmp_p
             if content_type.startswith('multipart/form-data;'):
                 message=BytesParser(policy=policy.default).parsebytes(
                     ('Content-Type: '+content_type+'\r\nMIME-Version: 1.0\r\n\r\n').encode()+body)
-                files=[part.get_payload(decode=True) for part in message.iter_parts() if part.get_filename()=='synthetic_resume.pdf']
-                value=files[0] if len(files)==1 else None
-            else:value=body
-            received.append((self.path,value))
+                files=[(part.get_payload(decode=True),part.get_content_type()) for part in message.iter_parts()
+                       if part.get_filename()=='synthetic_resume.pdf']
+                value,mime=files[0] if len(files)==1 else (None,None)
+            else:value,mime=body,content_type
+            received.append((self.path,value,mime))
             self.send_response(204);self.end_headers()
     server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     base=f'http://127.0.0.1:{server.server_port}'
     file=tmp_path/'synthetic_resume.pdf';file.write_bytes(binary)
     expected=binary[:len(binary)//2] if encoding=='multipart_slice' else binary
+    expected_mime='application/pdf' if encoding.startswith('multipart') else 'application/octet-stream'
     def choose_and_send(page):
-        # Disk-backed input matters: in-memory FilePayload objects can hide the
-        # protocol limitation of an actual native selected file.
-        page.locator('#file').set_input_files(str(file))
+        # Characterize separately: disk-backed native selection and an exact
+        # in-memory FilePayload represent different browser upload primitives.
+        page.locator('#file').set_input_files(str(file) if input_mode=='disk' else
+            {'name':file.name,'mimeType':'application/pdf','buffer':binary})
         page.locator('#send').click()
     try:
         with sync_playwright() as pw:
@@ -165,7 +171,7 @@ def test_native_file_request_is_refused_and_raw_transport_is_characterized(tmp_p
             try:
                 page=native.new_page();page.goto(base+'/#'+encoding);choose_and_send(page)
                 page.wait_for_function("document.body.dataset.done==='yes'")
-                assert received==[('/upload',expected)],'native binary fixture did not reach independent recipient intact'
+                assert received==[('/upload',expected,expected_mime)],'native binary fixture did not reach independent recipient intact'
             finally:native.close()
             received.clear()
             with DenyOnlyProxy() as proxy:
@@ -213,8 +219,9 @@ def test_native_file_request_is_refused_and_raw_transport_is_characterized(tmp_p
                         held[1].fulfill(response=response)
                     finally:response.dispose()
                     assert len(received)==1 and received[0][0]=='/upload'
-                    print('UPLOAD_CHARACTERIZATION '+json.dumps({'encoding':encoding,
+                    print('UPLOAD_CHARACTERIZATION '+json.dumps({'encoding':encoding,'input_mode':input_mode,
                         'native_control_exact':True,'raw_request_binary_exact':received[0][1]==expected,
+                        'raw_request_mime_exact':received[0][2]==expected_mime,
                         'production_upload_admitted':False}),flush=True)
                 finally:context.close();client.dispose();browser.close()
     finally:server.shutdown();server.server_close();thread.join()
