@@ -106,7 +106,10 @@ class CaptchaImageBroker:
         self._target=target;self._state='REQUESTED'
         self._check('REQUESTED')
         image.evaluate('(image,url)=>{if(image.tagName!=="IMG")throw new Error();image.src=url;}',target)
-        while self._state=='REQUESTED' and self._clock()<self._deadline:
+        # Playwright may resume this caller while its route callback is still
+        # awaiting the opaque fetch/fulfill. Both states are in flight; neither
+        # grants readiness or a second request. Keep the original deadline.
+        while self._state in {'REQUESTED','ATTEMPTED'} and self._clock()<self._deadline:
             self._guard();self.page.wait_for_timeout(25)
         self._check('RETURNED')
         while not image.evaluate('image=>image.complete&&image.naturalWidth>0'):

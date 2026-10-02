@@ -116,6 +116,36 @@ def test_load_refreshes_only_verified_owned_image_and_never_reads_answer(fixture
     with pytest.raises(PreparationConflict):broker.load()
 
 
+@pytest.mark.parametrize('finish',['returned','cancelled','expired','unavailable'])
+def test_load_waits_for_suspended_route_callback_without_renewing_deadline(fixture,finish):
+    broker,request,_,_,calls,clock,_,page,_=fixture
+    broker._state='IDLE';pumps=[]
+    class Image:
+        def count(self):return 1
+        def get_attribute(self,name):assert name=='src';return request.url
+        def evaluate(self,script,*args):
+            if args:
+                # Real Playwright can yield the caller after starting a route
+                # callback, before its APIRequestContext fetch has returned.
+                broker._state='ATTEMPTED';broker._attempts=1
+                return None
+            assert broker._state=='RETURNED'
+            return True
+    def pump(milliseconds):
+        assert milliseconds==25 and broker._state=='ATTEMPTED'
+        pumps.append(broker._deadline)
+        if finish=='returned':broker._state='RETURNED'
+        elif finish=='cancelled':broker.close()
+        elif finish=='unavailable':broker._state='UNAVAILABLE'
+        else:clock[0]=broker._deadline
+    page.locator=lambda _:Image();page.wait_for_timeout=pump
+    if finish=='returned':assert broker.load()['status']=='CAPTCHA_DISPLAYED'
+    else:
+        with pytest.raises(PreparationConflict):broker.load()
+    assert pumps==[21.0] and broker._deadline==21.0
+    assert broker._attempts==1 and 'fetch' not in calls
+
+
 @pytest.mark.parametrize('url',['https://evil.test/','https://www.qiyunfang.com/h-col-124.html#x'])
 def test_fixed_production_owner_gate_has_no_other_site_scope(url):
     from executor.preparation.private_child import approved_qiyunfang_owner
