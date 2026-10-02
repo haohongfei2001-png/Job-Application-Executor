@@ -26,12 +26,66 @@ from test_preparation_final_journal_v1 import rows
 from test_preparation_request_classifier_browser import body
 from test_qiyunfang_preparation_browser import replica
 
-pytestmark = pytest.mark.skipif(
+NATIVE_MAC = pytest.mark.skipif(
     sys.platform != 'darwin', reason='Real headed Chrome/private native child requires hosted Mac')
 
 SESSION = 'SYNTHETIC_PRIVATE_REVIEW_SESSION_' + 's' * 32
 APPLICANT = 'SYNTHETIC_PRIVATE_REVIEW_APPLICANT'
 CANARY = 'SYNTHETIC_PRIVATE_REVIEW_PROTECTED_CANARY'
+
+
+FIXED_BOOTSTRAP = ('import sys;sys.path.insert(0,sys.argv[1]);'
+                   'from executor.preparation.private_child import worker_main;'
+                   'worker_main([int(x) for x in sys.argv[2:]])')
+
+
+def fixture_popen(real_popen, replacement, launches):
+    """Intercept only the known private child, never independent OS probes."""
+    prefix = [sys.executable, '-I', '-B', '-c', FIXED_BOOTSTRAP,
+              str(Path(private.__file__).resolve().parents[2])]
+
+    def launch(args, **options):
+        matched = (isinstance(args, (list, tuple)) and len(args) == 11
+                   and list(args[:6]) == prefix
+                   and all(isinstance(fd, str) and fd.isdecimal() for fd in args[6:])
+                   and tuple(map(int, args[6:])) == options.get('pass_fds'))
+        if not matched:
+            return real_popen(args, **options)
+        launches.append(tuple(args))
+        replacement_args = list(args)
+        replacement_args[4] = replacement
+        return real_popen(replacement_args, **options)
+
+    return launch
+
+
+def test_fixture_bootstrap_does_not_rewrite_independent_process_probes():
+    calls = []
+    launches = []
+    sentinel = object()
+
+    def real(args, **options):
+        calls.append((args, options))
+        return sentinel
+
+    launch = fixture_popen(real, 'SYNTHETIC_FIXTURE_BOOTSTRAP', launches)
+    ps = ['ps', '-ww', '-p', '123', '-o', 'uid=', '-o', 'ppid=',
+          '-o', 'lstart=', '-o', 'stat=', '-o', 'command=']
+    options = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE, 'text': True}
+    assert launch(ps, **options) is sentinel
+    assert calls[-1][0] is ps and calls[-1][1] == options
+    assert ps[4] == '-o' and launches == []
+    command = [sys.executable, '-I', '-B', '-c', FIXED_BOOTSTRAP,
+               str(Path(private.__file__).resolve().parents[2]), '10', '11', '12', '13', '14']
+    child_options = {'pass_fds': (10, 11, 12, 13, 14), 'close_fds': True}
+    assert launch(command, **child_options) is sentinel
+    assert calls[-1][0] == command[:4] + ['SYNTHETIC_FIXTURE_BOOTSTRAP'] + command[5:]
+    assert calls[-1][1] == child_options and launches == [tuple(command)]
+    assert command[4] == FIXED_BOOTSTRAP
+    near_match = list(command)
+    near_match[4] += ';pass'
+    assert launch(near_match, **child_options) is sentinel
+    assert calls[-1][0] is near_match and len(launches) == 1
 
 # This code is reachable only through the test's replacement of the fixed -c
 # bootstrap. Production receives neither fixture paths nor decision selectors.
@@ -150,6 +204,7 @@ def eventually(predicate, timeout=20):
     raise AssertionError('Synthetic native-child evidence did not arrive before deadline')
 
 
+@NATIVE_MAC
 @pytest.mark.parametrize('decision', ['accept', 'cancel', 'revoke', 'redirect', 'lost_response', 'post_confirm_mutation'])
 def test_private_human_review_exact_request_or_zero_and_closed_owner(
         tmp_path, monkeypatch, capfd, decision):
@@ -216,16 +271,13 @@ def test_private_human_review_exact_request_or_zero_and_closed_owner(
     tests = Path(__file__).parent.resolve()
     launches = []
 
-    def launch(args, **options):
-        launches.append(tuple(args))
-        args = list(args)
-        args[4] = ('import sys;sys.path.insert(0,sys.argv[1]);'
+    replacement = ('import sys;sys.path.insert(0,sys.argv[1]);'
                    'sys.path.insert(0,' + repr(str(tests)) + ');'
                    'sys.path.insert(0,' + repr(str(tmp_path)) + ');'
                    'from private_review_fixture import make;'
                    'from executor.preparation.private_child import worker_main;'
                    'worker_main([int(x) for x in sys.argv[2:]],controller_factory=make)')
-        return real_popen(args, **options)
+    launch = fixture_popen(real_popen, replacement, launches)
 
     monkeypatch.setattr(private.subprocess, 'Popen', launch)
     allowed = [True]
