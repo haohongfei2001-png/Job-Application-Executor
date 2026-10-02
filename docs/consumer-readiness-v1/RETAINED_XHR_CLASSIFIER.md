@@ -69,4 +69,4 @@ cancel, post-confirmation edit, redirect and response loss. Native human events
 and process binding remain explicit fixtures; no physical-human provenance is
 inferred. Before confirmation there is no consumed final slot and no server
 request; after an attempted transmission the durable slot cannot be refunded.
-These new composed cases require their own exact-head execution.
+Exact composed-test head `9f05431781d09dae20e952575ad606db7f8a7f6b` passed [run 36958977187](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36958977187): all 169 cases on each of Linux and Mac, followed by a compatible unarmed actual empty-public-form bootstrap. The five composed outcomes ran successfully; all native-human/process-binding fixture limits above remain.
