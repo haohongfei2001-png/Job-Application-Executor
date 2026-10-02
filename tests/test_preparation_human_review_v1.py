@@ -8,7 +8,7 @@ from test_preparation_controller_v1 import setup,opened
 from test_preparation_authority_v1 import fixture,SESSION
 
 
-def test_production_default_has_no_interception_or_forwarding_capability():
+def test_default_constructor_has_no_interception_or_forwarding_capability():
     class Owner:
         @property
         def context(self):raise AssertionError('Unavailable handoff must not install a route')

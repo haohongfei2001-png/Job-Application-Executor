@@ -94,12 +94,12 @@ def test_failed_initial_seal_cannot_be_retried_after_repair():
     with pytest.raises(ChangeEpochConflict):watch.seal()
 
 
-def test_only_owner_coordinator_composes_classifier_and_live_forwarding_stays_disabled():
+def test_only_owner_coordinator_composes_classifier_with_fixed_approved_site_gate():
     from pathlib import Path
     root=Path(__file__).resolve().parents[1]
     for path in (root/'executor').rglob('*.py'):
-        # The sole owner-thread composition is now wired, but production
-        # constructs it with unavailable forwarding admission (checked below).
+        # The sole owner-thread composition is wired. Production may supply
+        # only the fixed approved-site capability checked below.
         if path.relative_to(root).as_posix() in {'executor/preparation/change_epoch.py',
                 'executor/preparation/request_classifier.py','executor/preparation/human_review.py'}:continue
         source=path.read_text()
@@ -120,7 +120,15 @@ def test_only_owner_coordinator_composes_classifier_and_live_forwarding_stays_di
     child=ast.parse((root/'executor/preparation/private_child.py').read_text())
     constructions=[node for node in ast.walk(child) if isinstance(node,ast.Call)
                    and isinstance(node.func,ast.Name) and node.func.id=='HumanReviewCoordinator']
-    assert len(constructions)==1 and len(constructions[0].args)==2 and constructions[0].keywords==[]
+    assert len(constructions)==1 and len(constructions[0].args)==2
+    kw={item.arg:item.value for item in constructions[0].keywords}
+    assert len(constructions[0].keywords)==3 and set(kw)=={'forwarding_admission','captcha_factory','keep_terminal'}
+    gate=kw['forwarding_admission']
+    assert isinstance(gate,ast.Lambda) and isinstance(gate.body,ast.Call)
+    assert isinstance(gate.body.func,ast.Name) and gate.body.func.id=='approved_qiyunfang_owner'
+    assert len(gate.body.args)==1 and isinstance(gate.body.args[0],ast.Name) and gate.body.args[0].id=='owner' and gate.body.keywords==[]
+    assert isinstance(kw['captcha_factory'],ast.Name) and kw['captcha_factory'].id=='CaptchaImageBroker'
+    assert isinstance(kw['keep_terminal'],ast.Constant) and kw['keep_terminal'].value is True
     owner,admission=constructions[0].args
     assert isinstance(owner,ast.Name) and owner.id=='owner'
     assert (isinstance(admission,ast.Attribute) and admission.attr=='admit'

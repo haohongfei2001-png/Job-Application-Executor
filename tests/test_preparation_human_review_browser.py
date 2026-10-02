@@ -7,6 +7,7 @@ recipient, or physical-human claim is involved.
 from __future__ import annotations
 
 import json
+import base64
 from pathlib import Path
 import subprocess
 import socket
@@ -94,7 +95,7 @@ import json
 from pathlib import Path
 from executor.autonomy.queue import TaskQueue
 from executor.autonomy import task_preparation
-from executor.preparation import observation,runner,request_classifier,human_request,final_journal,human_review
+from executor.preparation import observation,runner,request_classifier,human_request,final_journal,human_review,captcha_image
 from executor.preparation.controller import PreparationController
 from executor.preparation.flow import PreparationFlow
 from executor.preparation.session import DisposablePreparationSession
@@ -106,14 +107,16 @@ CONFIG = json.loads(Path(__file__).with_suffix('.json').read_text())
 BASE = CONFIG['base']
 PROOF = Path(CONFIG['proof'])
 GATE = Path(CONFIG['gate'])
-for module in (task_preparation, observation, runner, request_classifier, human_request, human_review):
+for module in (task_preparation, observation, runner, request_classifier, human_request, human_review, captcha_image):
     if hasattr(module, 'CONTRACT_URL'): module.CONTRACT_URL = BASE + '/'
 for module in (request_classifier, human_request, final_journal, human_review):
     if hasattr(module, 'FINAL_URL'): module.FINAL_URL = BASE + '/final'
 
+captcha_image.CAPTCHA_ORIGIN = BASE
+
 def make(root, valid):
     queue = TaskQueue(root)
-    evidence = {'native_admitted': False, 'opened': [], 'closed': [], 'fixture_decision': False, 'post_confirm_mutation': False}
+    evidence = {'native_admitted': False, 'opened': [], 'closed': [], 'fixture_decision': False, 'post_confirm_mutation': False, 'terminal_view_visible':False, 'terminal_denial_exercised':False}
     def save():
         temporary = PROOF.with_suffix('.tmp')
         temporary.write_text(json.dumps(evidence))
@@ -128,7 +131,8 @@ def make(root, valid):
             assert receipt['protocols'] == ['http', 'https', 'ws', 'wss']
             evidence['native_admitted'] = True
             evidence['process_sha'] = owner.identity.process_sha
-            super().__init__(owner, admission.admit, forwarding_admission=lambda: True)
+            super().__init__(owner, admission.admit, forwarding_admission=lambda: True,
+                captcha_factory=captcha_image.CaptchaImageBroker,keep_terminal=CONFIG['decision']=='accept_keep')
             self.fixture_owner = owner
             self.fixture_started = False
             self.fixture_observing = False
@@ -171,6 +175,25 @@ def make(root, valid):
                         evidence['post_confirm_mutation'] = True
                         save()
             return super().tick()
+        def terminal_tick(self):
+            result=super().terminal_tick()
+            if not evidence['terminal_denial_exercised']:
+                self.fixture_page.evaluate("""base=>{
+                    const readback=document.createElement('div');readback.id='human-readback';
+                    readback.textContent='SYNTHETIC_RETURNED_FOR_HUMAN_READBACK';document.body.append(readback);
+                    fetch(base+'/late-post',{method:'POST',body:'SYNTHETIC_DENIED'}).catch(()=>{});
+                    const image=document.createElement('img');image.src=base+'/late-image';document.body.append(image);
+                    const captcha=document.querySelector('.validatecode_img');
+                    const old=Number(new URL(captcha.src).search.slice(1).split('&')[0]);
+                    captcha.src=base+'/validateCode.jsp?'+((old+1)%1000)+'&vCodeId=15676';
+                    const form=document.createElement('form');form.method='POST';form.action=base+'/late-form';
+                    document.body.append(form);form.submit();
+                }""",BASE)
+                self.fixture_page.wait_for_timeout(100)
+                evidence['terminal_view_visible']=self.fixture_page.locator('#human-readback').is_visible()
+                evidence['terminal_denial_exercised']=True;save()
+            return result
+
         def close(self):
             result = super().close()
             save()
@@ -205,12 +228,14 @@ def eventually(predicate, timeout=20):
 
 
 @NATIVE_MAC
-@pytest.mark.parametrize('decision', ['accept', 'cancel', 'revoke', 'redirect', 'lost_response', 'post_confirm_mutation'])
+@pytest.mark.parametrize('decision', ['accept', 'accept_keep', 'cancel', 'revoke', 'redirect', 'lost_response', 'post_confirm_mutation'])
 def test_private_human_review_exact_request_or_zero_and_closed_owner(
         tmp_path, monkeypatch, capfd, decision):
     received = []
     gets = []
-    html = replica().encode()
+    # The image belongs to the independently captured form root, not a sibling.
+    html = replica().replace('<div class="form_item"', '<img class="validatecode_img" src="/validateCode.jsp?0&amp;vCodeId=15676"><div class="form_item"',1).encode()
+    bitmap=base64.b64decode('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7')
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -218,13 +243,18 @@ def test_private_human_review_exact_request_or_zero_and_closed_owner(
 
         def do_GET(self):
             gets.append(self.path)
-            assert self.path == '/'
+            if self.path=='/':payload=html;mime='text/html; charset=UTF-8'
+            else:
+                import re
+                assert re.fullmatch(r'/validateCode\.jsp\?[0-9]{1,3}&vCodeId=15676',self.path)
+                assert self.headers.get('Cookie')=='session=SYNTHETIC_REVIEW_SESSION'
+                payload=bitmap;mime='image/gif'
             self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=UTF-8')
+            self.send_header('Content-Type',mime)
             self.send_header('Set-Cookie', 'session=SYNTHETIC_REVIEW_SESSION; HttpOnly; SameSite=Lax; Path=/')
-            self.send_header('Content-Length', str(len(html)))
+            self.send_header('Content-Length', str(len(payload)))
             self.end_headers()
-            self.wfile.write(html)
+            self.wfile.write(payload)
 
         def do_POST(self):
             received.append((self.path, self.rfile.read(int(self.headers['Content-Length'])),
@@ -314,13 +344,24 @@ def test_private_human_review_exact_request_or_zero_and_closed_owner(
         # capable of confirming a real request in production.
         gate.touch()
         if decision != 'revoke':
-            expected = ('RETURNED_UNVERIFIED' if decision == 'accept' else
+            expected = ('RETURNED_UNVERIFIED' if decision in {'accept','accept_keep'} else
                         'UNKNOWN_OUTCOME' if decision in {'redirect', 'lost_response'} else 'CANCELLED')
             def finished():
                 status = owner.status()
                 public_results.append(status)
                 return status if status.get('final_status') == expected else None
             eventually(finished)
+        if decision=='accept_keep':
+            held=owner.status();public_results.append(held)
+            assert held['status']=='HUMAN_RESULT' and owner._process.poll() is None
+            eventually(lambda:json.loads(proof.read_text()).get('terminal_denial_exercised'))
+            attempts=len(received)
+            time.sleep(.25)
+            assert owner.status()['status']=='HUMAN_RESULT' and len(received)==attempts==1
+            from executor.preparation.authority import PreparationConflict
+            with pytest.raises(PreparationConflict):owner.approve(offer['nonce'],offer['scope_sha'],SESSION,approve_transmission=True)
+            with pytest.raises(PreparationConflict):owner.approve_resume('SYNTHETIC','a'*64,SESSION,approve_upload=True)
+            with pytest.raises(PreparationConflict):owner.begin_human_review(SESSION)
         assert owner.shutdown(timeout=25)
         public_results.append(owner.status())
         assert owner.status()['status'] == 'CLOSED'
@@ -328,19 +369,21 @@ def test_private_human_review_exact_request_or_zero_and_closed_owner(
         assert not queue.preparation_in_flight()
         assert len(checks) > before
         evidence = json.loads(proof.read_text())
+        if decision=='accept_keep':
+            assert evidence['terminal_view_visible'] is True and evidence['terminal_denial_exercised'] is True
         identity = OwnedProcessIdentity.load(queue.root, evidence['process_sha'])
         assert identity.absence() == {'status': 'ABSENT', 'process_sha': evidence['process_sha']}
         if decision != 'revoke':
             assert evidence['closed'] == [{'result': decision != 'cancel', 'frameId': opening['frameId']}]
         assert evidence['post_confirm_mutation'] is (decision == 'post_confirm_mutation')
-        assert gets == ['/']  # No follow-up redirect navigation or retry.
-        attempted = decision in {'accept', 'redirect', 'lost_response'}
+        assert len(gets)==2 and gets[0]=='/' and gets[1].startswith('/validateCode.jsp?')  # No follow-up redirect navigation or retry.
+        attempted = decision in {'accept','accept_keep', 'redirect', 'lost_response'}
         assert received == ([('/final', expected_body.encode(), 'session=SYNTHETIC_REVIEW_SESSION',
                               'SYNTHETIC_TOKEN')] if attempted else [])
         final_rows = rows(queue)
         assert len(final_rows) == (1 if attempted else 0)
         if attempted:
-            assert final_rows[0]['outcome'] == ('RETURNED_UNVERIFIED' if decision == 'accept' else 'UNKNOWN_OUTCOME')
+            assert final_rows[0]['outcome'] == ('RETURNED_UNVERIFIED' if decision in {'accept','accept_keep'} else 'UNKNOWN_OUTCOME')
         assert profile.read_bytes() == original_profile
         exposed = json.dumps(public_results + final_rows + queue.field_actions(task['task_id'])
                              + queue.run_attempts(task['task_id'])) + ''.join(capfd.readouterr())

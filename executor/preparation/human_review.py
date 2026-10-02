@@ -1,14 +1,16 @@
-"""Owner-thread human-final coordination; live forwarding is unavailable.
+"""Owner-thread coordination for the explicitly approved fixed-site channel.
 
 This joins the existing retained request, native event and durable one-slot
-components. Production constructs it with no forwarding admission. Only a
-synthetic fixture can supply its own internal admission; no HTTP/IPC/environment
-value selects it. Parent commands can start review, never confirm or send.
+components. The constructor defaults to no admission; production supplies only the fixed
+Qiyunfang owner gate. No HTTP/IPC/environment value selects a destination or
+confirms a request. Parent commands can start review, never confirm or send.
 """
 from __future__ import annotations
 
 import threading
-from .authority import PreparationConflict
+import time
+from .authority import PreparationConflict,_material
+from .final_journal import _prepared_task
 from .request_classifier import RetainedXHRClassifier
 from .human_request import OpaqueHumanRequest, FINAL_URL
 from .final_journal import PreparationFinalJournal
@@ -19,16 +21,18 @@ TERMINAL=frozenset({'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME','CANCELLED'})
 class HumanReviewCoordinator:
     def __repr__(self):return '<HumanReviewCoordinator>'
 
-    def __init__(self,owner,native_admission,*,forwarding_admission=lambda:False):
+    def __init__(self,owner,native_admission,*,forwarding_admission=lambda:False,
+                 captcha_factory=None,keep_terminal=False):
         self._thread=threading.get_ident()
         self.owner=owner;self.native_admission=native_admission
         self._admit=forwarding_admission
         self._state='UNAVAILABLE';self.flow=None
         self.classifier=self.journal=self.bridge=self.cdp=None
         self._route=None;self._request=None;self._frame_id=None
-        self._closed=False
-        # Default production does not install an interception route or change
-        # any live allowlist. It exposes the actual outstanding acceptance gate.
+        self._closed=False;self._captcha_factory=captcha_factory;self._captcha=None
+        self.keep_terminal=keep_terminal is True
+        # Default construction installs no route. The production owner supplies
+        # the reviewed, explicitly approved fixed-site capability separately.
         if self._admit() is True:
             if owner.context.pages or native_admission(owner) is not True:raise PreparationConflict()
             self.classifier=RetainedXHRClassifier(owner.context)
@@ -53,6 +57,16 @@ class HumanReviewCoordinator:
             raise PreparationConflict()
         flow.review_fence()
         self.flow=flow
+        if self._captcha_factory is not None:
+            self._state='DISPLAYING_CAPTCHA'
+            self._captcha=self._captcha_factory(self.owner,flow.page,self._captcha_guard)
+            displayed=self._captcha.load()
+            if displayed.get('status')!='CAPTCHA_DISPLAYED':raise PreparationConflict()
+            flow.review_fence()
+            deadline=time.monotonic()+3
+            while self.classifier._inflight:
+                if time.monotonic()>=deadline or flow._still_authorized() is not True:raise PreparationConflict()
+                flow.page.wait_for_timeout(25)
         self.classifier.arm()
         self.cdp=self.owner.context.new_cdp_session(flow.page)
         self.cdp.send('Page.enable')
@@ -61,6 +75,43 @@ class HumanReviewCoordinator:
         self.cdp.on('Page.javascriptDialogClosed',self._closing)
         flow.page.on('dialog',self._dialog)
         self._state='MANUAL_REVIEW_ACTIVE'
+        return self.status()
+
+    def _captcha_guard(self):
+        # Route callback guard: OS, parent IPC and original material/DB only.
+        # No renderer RPC while the browser is waiting on its image request.
+        flow=self.flow
+        if (self._closed or self._state!='DISPLAYING_CAPTCHA' or flow is None
+                or self.classifier.invalid or flow._still_authorized() is not True
+                or self.owner.identity.verify_os()!=flow.binding['process_sha']):raise PreparationConflict()
+        flow.authority._session(flow.session)
+        if flow.authority.active.get(flow.permit['nonce_sha'])!=flow.permit:raise PreparationConflict()
+        with _material(flow.authority.queue,flow.permit['task_id'],flow.permit['task_revision']) as (_,report,_,fence):
+            if report['profile']['version']!=flow.permit['profile_sha'] or report['resume']!=flow.permit['resume']:
+                raise PreparationConflict()
+            with flow.authority.queue.tx() as db:_prepared_task(db,flow.permit,flow.journal.attempt_id)
+            fence()
+        if flow._still_authorized() is not True or self._state!='DISPLAYING_CAPTCHA':raise PreparationConflict()
+
+    def terminal_tick(self):
+        """Readback window only: no renderer reads, field authority or replay."""
+        self._owner()
+        if (not self.keep_terminal or self._state not in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME'}
+                or self._closed or self.flow._still_authorized() is not True
+                or self.owner.identity.verify_os()!=self.flow.binding['process_sha']
+                or self.owner.context.pages!=[self.flow.page] or self.flow.page.is_closed()):raise PreparationConflict()
+        self.owner.transport.require_sealed()
+        self.flow.authority._session(self.flow.session)
+        flow=self.flow
+        with _material(flow.authority.queue,flow.permit['task_id'],flow.permit['task_revision']) as (_,report,_,fence):
+            if report['profile']['version']!=flow.permit['profile_sha'] or report['resume']!=flow.permit['resume']:
+                raise PreparationConflict()
+            with flow.authority.queue.tx() as db:
+                _prepared_task(db,flow.permit,flow.journal.attempt_id)
+                row=db.execute('SELECT outcome FROM preparation_final_requests WHERE preparation_nonce_sha=?',
+                               (flow.permit['nonce_sha'],)).fetchone()
+                if row is None or row['outcome'] not in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME'}:raise PreparationConflict()
+            fence()
         return self.status()
 
     def _invalidate(self):
@@ -75,7 +126,8 @@ class HumanReviewCoordinator:
         if self._state!='MANUAL_REVIEW_ACTIVE' or self._route is not None:
             try:route.abort('blockedbyclient')
             except Exception:pass
-            self._invalidate();return
+            if self._state not in TERMINAL:self._invalidate()
+            return
         self._route=route;self._request=route.request
 
     def _opening(self,event):
@@ -138,6 +190,7 @@ class HumanReviewCoordinator:
         self._owner()
         if self._closed:return
         self._closed=True
+        if self._captcha is not None:self._captcha.close()
         if self.bridge is not None and self._state not in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME'}:
             self.bridge.cancel()
         elif self._route is not None and self.bridge is None:
