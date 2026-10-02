@@ -27,6 +27,7 @@ def probe():
         'status':'PUBLIC_EPOCH_UNVERIFIED',
         'stage':'FRESH_SESSION',
         'observer_installed':False,
+        'observer_reason':'UNOBSERVED',
         'public_form_matched':False,
         'network_sealed':False,
         'epoch_sealed':False,
@@ -40,6 +41,7 @@ def probe():
     result['browser_target']='installed_chrome_headless_linux' if channel else 'bundled_headless_mac'
     try:
         with DisposablePreparationSession(headless=True,channel=channel) as owner:
+            observer=None
             try:
                 result['stage']='PRE_DOCUMENT_INSTALL'
                 observer=PreDocumentChangeEpoch(owner.context)
@@ -63,6 +65,7 @@ def probe():
                 result['stage']='CLOSE_OWNED_SESSION'
             except Exception:
                 result['status']='EMPTY_PUBLIC_FORM_UNSUPPORTED'
+                if observer is not None:result['observer_reason']=observer.diagnostic()
         result['closure_proven']=True
     except Exception:
         # Never print the exception, raw URL, request body, DOM or source bytes.
@@ -78,7 +81,7 @@ def main(argv=None):
     try:
         result=probe()
         args.output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
-        print(json.dumps({'status':result['status'],'stage':result['stage'],
+        print(json.dumps({'status':result['status'],'stage':result['stage'],'observer_reason':result['observer_reason'],
                           'live_enabled':False,'final_action_enabled':False}))
     finally:faulthandler.cancel_dump_traceback_later()
     return 0

@@ -38,7 +38,7 @@ SCRIPT = r"""options => {
   const addedNodes = descriptor(MutationRecord.prototype,'addedNodes').get;
   const removedNodes = descriptor(MutationRecord.prototype,'removedNodes').get;
   const MAX = Number.MAX_SAFE_INTEGER;
-  let epoch = 0, invalid = false, sealed = false, root = null, controls = [];
+  let epoch = 0, invalid = false, sealed = false, root = null, controls = [], reason = 'NONE';
   const watched = [], chains = [];
   const nativeControls = [['INPUT',HTMLInputElement.prototype],['TEXTAREA',HTMLTextAreaElement.prototype],
     ['SELECT',HTMLSelectElement.prototype],['BUTTON',HTMLButtonElement.prototype]];
@@ -50,7 +50,7 @@ SCRIPT = r"""options => {
     return result;
   };
   const bump = () => { if (epoch >= MAX) invalid = true; else epoch += 1; };
-  const damage = () => { invalid = true; bump(); };
+  const damage = (code='INTEGRITY_CHANGED') => { if (reason === 'NONE') reason=code; invalid = true; bump(); };
   const hasRealm = node => {
     if (apply(nodeType,node,[]) !== 1) return false;
     const tag = apply(tagName,node,[]);
@@ -64,8 +64,8 @@ SCRIPT = r"""options => {
         if (sealed) bump();
         if (apply(recordType,record,[]) !== 'childList') continue;
         const added = apply(addedNodes,record,[]), removed = apply(removedNodes,record,[]);
-        for (let j=0; j<length(added); j++) if (hasRealm(apply(item,added,[j]))) damage();
-        for (let j=0; j<length(removed); j++) if (hasRealm(apply(item,removed,[j]))) damage();
+        for (let j=0; j<length(added); j++) if (hasRealm(apply(item,added,[j]))) damage('EXTRA_REALM');
+        for (let j=0; j<length(removed); j++) if (hasRealm(apply(item,removed,[j]))) damage('EXTRA_REALM');
       }
     } catch (_) { damage(); }
   };
@@ -84,7 +84,7 @@ SCRIPT = r"""options => {
   define(globalThis,'globalThis',globalBinding); track(globalThis,'globalThis',globalBinding);
   const wrapSetter = (proto,name) => {
     const original = descriptor(proto,name);
-    if (!original || typeof original.set !== 'function' || !original.configurable) { damage(); return; }
+    if (!original || typeof original.set !== 'function' || !original.configurable) { damage('SETTER_UNAVAILABLE'); return; }
     const setter = function(value) {
       // A radio peer outside the root can silently uncheck an inside control.
       // Record all native control writes, without reading the argument or value.
@@ -104,9 +104,9 @@ SCRIPT = r"""options => {
   wrapSetter(HTMLOptionElement.prototype,'defaultSelected');
   const wrapMethod = (proto,name,alwaysInvalid=false) => {
     const original = descriptor(proto,name);
-    if (!original || typeof original.value !== 'function' || !original.configurable) { damage(); return; }
+    if (!original || typeof original.value !== 'function' || !original.configurable) { damage('METHOD_UNAVAILABLE'); return; }
     const method = function(...args) {
-      if (alwaysInvalid) damage(); else if (sealed) bump();
+      if (alwaysInvalid) damage(alwaysInvalid); else if (sealed) bump();
       return apply(original.value,this,args);
     };
     const current = {value:method,writable:false,enumerable:original.enumerable,configurable:false};
@@ -118,18 +118,20 @@ SCRIPT = r"""options => {
   wrapMethod(HTMLTextAreaElement.prototype,'setRangeText');
   wrapMethod(HTMLFormElement.prototype,'reset');
   // These can discard listeners or hide new realms from document observation.
-  wrapMethod(Document.prototype,'open',true);
-  wrapMethod(Element.prototype,'attachShadow',true);
-  wrapMethod(globalThis,'open',true);
+  wrapMethod(Document.prototype,'open','DOCUMENT_REPLACED');
+  wrapMethod(Element.prototype,'attachShadow','SHADOW_REALM');
+  wrapMethod(globalThis,'open','NEW_WINDOW');
   const reflectionWrite = target => {
-    if (sealed) { damage(); return; }
+    if (sealed) { damage('POST_SEAL_REFLECTION'); return; }
     // Before sealing, page code may define normal object properties. Native
     // instrumentation/prototype mutations are unsupported even if restored.
-    for (let i=0; i<chains.length; i++) if (target === chains[i][0]) { damage(); return; }
+    for (let i=0; i<chains.length; i++) if (target === chains[i][0]) {
+      damage(target === globalThis ? 'GLOBAL_REFLECTION' : target === Object || target === Reflect ? 'INTRINSIC_REFLECTION' : 'PROTOTYPE_REFLECTION'); return;
+    }
   };
   const wrapReflection = (proto,name) => {
     const original = descriptor(proto,name);
-    if (!original || typeof original.value !== 'function' || !original.configurable) { damage(); return; }
+    if (!original || typeof original.value !== 'function' || !original.configurable) { damage('METHOD_UNAVAILABLE'); return; }
     const method = function(...args) { reflectionWrite(args[0]); return apply(original.value,this,args); };
     const current = {value:method,writable:false,enumerable:original.enumerable,configurable:false};
     define(proto,name,current); track(proto,name,current);
@@ -174,7 +176,7 @@ SCRIPT = r"""options => {
           own(current,'configurable') !== own(expected,'configurable') || own(current,'enumerable') !== own(expected,'enumerable')) damage();
     }
     for (let i=0; i<chains.length; i++) if (getPrototype(chains[i][0]) !== chains[i][1]) damage();
-    if (nodes('iframe,frame,object,embed').length) damage();
+    if (nodes('iframe,frame,object,embed').length) damage('EXTRA_REALM');
     if (sealed) {
       const roots = nodes(rootSelector);
       if (roots.length !== 1 || roots[0] !== root) damage();
@@ -182,12 +184,12 @@ SCRIPT = r"""options => {
       if (current.length !== controls.length) damage();
       for (let i=0; i<controls.length; i++) {
         if (current[i] !== controls[i]) damage();
-        for (let j=0; j<inputNames.length; j++) if (descriptor(controls[i],inputNames[j])) damage();
+        for (let j=0; j<inputNames.length; j++) if (descriptor(controls[i],inputNames[j])) damage('CONTROL_OVERRIDE');
         const extraNames = ['selectedIndex','setRangeText','stepUp','stepDown','reset'];
-        for (let j=0; j<extraNames.length; j++) if (descriptor(controls[i],extraNames[j])) damage();
+        for (let j=0; j<extraNames.length; j++) if (descriptor(controls[i],extraNames[j])) damage('CONTROL_OVERRIDE');
         const tag = apply(tagName,controls[i],[]);
         for (let j=0; j<nativeControls.length; j++) {
-          if (nativeControls[j][0] === tag && getPrototype(controls[i]) !== nativeControls[j][1]) damage();
+          if (nativeControls[j][0] === tag && getPrototype(controls[i]) !== nativeControls[j][1]) damage('CONTROL_PROTOTYPE');
         }
       }
     }
@@ -215,10 +217,14 @@ SCRIPT = r"""options => {
   // Public read/seal calls cannot reset the epoch or clear invalidation. Early
   // hostile sealing can deny service only; the native owner refuses resealing.
   if (descriptor(globalThis,key)) return;
-  define(globalThis,key,{value:freeze({snapshot,seal}),writable:false,configurable:false});
+  define(globalThis,key,{value:freeze({snapshot,seal,diagnostic:()=>reason}),writable:false,configurable:false});
 }
 """
 
+
+DIAGNOSTIC_REASONS = frozenset({'NONE','INTEGRITY_CHANGED','EXTRA_REALM','SETTER_UNAVAILABLE',
+    'METHOD_UNAVAILABLE','DOCUMENT_REPLACED','SHADOW_REALM','NEW_WINDOW','POST_SEAL_REFLECTION',
+    'GLOBAL_REFLECTION','INTRINSIC_REFLECTION','PROTOTYPE_REFLECTION','CONTROL_OVERRIDE','CONTROL_PROTOTYPE'})
 
 class ChangeEpochConflict(RuntimeError):
     def __init__(self):
@@ -285,6 +291,14 @@ class PreDocumentChangeEpoch:
             return result
         except Exception:
             self._conflict()
+
+    def diagnostic(self):
+        """Finite research reason only. Never clears invalidation or grants trust."""
+        try:
+            if self.page is None or self.page.is_closed():return 'UNAVAILABLE'
+            value=self.page.evaluate('key => globalThis[key].diagnostic()',self.key)
+            return value if type(value) is str and value in DIAGNOSTIC_REASONS else 'UNAVAILABLE'
+        except Exception:return 'UNAVAILABLE'
 
     def seal(self):
         try:

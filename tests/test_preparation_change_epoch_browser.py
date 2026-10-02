@@ -162,3 +162,11 @@ def test_writable_global_alias_cannot_forge_a_healthy_native_read(watched):
     }''',{'key':observer.key,'epoch':observer.baseline})
     with pytest.raises(ChangeEpochConflict):observer.unchanged()
     with pytest.raises(ChangeEpochConflict):observer.unchanged()
+
+
+def test_reason_diagnostic_never_exports_protected_descriptor_data(watched):
+    page,observer=watched
+    page.evaluate("Object.defineProperty(document.querySelector('#field'),'value',{get(){throw Error('PRIVATE_REASON_CANARY')},configurable:true})")
+    with pytest.raises(ChangeEpochConflict):observer.unchanged()
+    assert observer.diagnostic()=='POST_SEAL_REFLECTION'
+    with pytest.raises(ChangeEpochConflict):observer.unchanged()

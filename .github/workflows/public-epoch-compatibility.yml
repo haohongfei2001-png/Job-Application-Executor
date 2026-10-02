@@ -28,7 +28,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m playwright install --with-deps chromium
       - name: Verify finite no-authority probe contract
-        run: python -m pytest -q tests/test_public_change_epoch_probe_v1.py tests/test_preparation_change_epoch_v1.py
+        run: python -m pytest -q tests/test_public_change_epoch_probe_v1.py tests/test_preparation_change_epoch_v1.py tests/test_preparation_change_epoch_browser.py
       - name: Observe the public empty form without applicant material
         timeout-minutes: 2
         run: python scripts/probe_qiyunfang_change_epoch.py --output "$RUNNER_TEMP/jae-public-epoch.json"

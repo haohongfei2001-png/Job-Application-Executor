@@ -27,6 +27,7 @@ def install(monkeypatch,fail=None):
         def __init__(self,context):step('install_before_page')
         def seal(self):step('epoch_seal')
         def unchanged(self):step('epoch_unchanged')
+        def diagnostic(self):return 'INTEGRITY_CHANGED'
     def open_form(owner):
         step('open_empty_public_form')
         return SimpleNamespace(page=SimpleNamespace(wait_for_timeout=lambda ms:step('wait_2000') if ms==2000 else pytest.fail('unbounded wait')))
@@ -64,7 +65,7 @@ def test_cli_artifact_and_stdout_contain_only_finite_no_authority_report(monkeyp
     install(monkeypatch);output=tmp_path/'public-probe.json'
     assert probe.main(['--output',str(output)])==0
     value=json.loads(output.read_text());stdout=json.loads(capfd.readouterr().out)
-    assert stdout=={'status':'EMPTY_PUBLIC_FORM_COMPATIBLE','stage':'CLOSE_OWNED_SESSION',
+    assert stdout=={'status':'EMPTY_PUBLIC_FORM_COMPATIBLE','stage':'CLOSE_OWNED_SESSION','observer_reason':'UNOBSERVED',
                     'live_enabled':False,'final_action_enabled':False}
     assert all(type(item) in {bool,str} for item in value.values())
 
