@@ -1,8 +1,10 @@
 # Exact opaque human-request transport prototype
 
-Status: **unregistered and not live-enabled**. No generic runner, model, Resume,
-OTP, v1 or UI HTTP route imports or invokes this component. It is a narrow
-transport/state-machine prototype, not the missing final-action authority.
+Status: **private-child integration, not live-enabled**. The bounded owner/controller
+path is documented in [human-review integration](HUMAN_REVIEW_INTEGRATION.md).
+Production forwarding admission remains unavailable; generic runner, model, Resume,
+OTP and v1 routes cannot invoke a final operation. A local review request is not
+final-action authority.
 
 `OpaqueHumanRequest` retains one concrete paused form-urlencoded POST Request.
 It never reads/parses its body, serializes the Request, or projects protected

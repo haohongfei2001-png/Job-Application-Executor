@@ -23,11 +23,14 @@ class PreparationController:
 
     def __init__(self,task_queue,session_valid,*,owner_factory=DisposablePreparationSession,
                  flow_factory=prepare_public_flow,write_admission=lambda owner:False,
-                 resume_factory=ResumeUploadFlow,upload_admission=lambda owner:False,clock=time.monotonic):
+                 resume_factory=ResumeUploadFlow,upload_admission=lambda owner:False,
+                 human_review_factory=None,clock=time.monotonic):
         self.authority=PreparationAuthority(task_queue,session_valid=session_valid,clock=clock)
         self._session_valid=session_valid;self._owner_factory=owner_factory;self._flow_factory=flow_factory
         self._write_admission=write_admission;self._clock=clock
         self._resume_factory=resume_factory;self._upload_admission=upload_admission
+        self._human_factory=human_review_factory;self._human=None;self._human_active=False
+        self._final_status='UNAVAILABLE'
         self._commands=queue.Queue(maxsize=2);self._lock=threading.RLock();self._revoked=threading.Event()
         self._thread=None;self._owner=self._flow=None;self._session=None
         self._entry_failed=False
@@ -39,7 +42,7 @@ class PreparationController:
         with self._lock:
             return {'status':self._state,'field_count':self._fields,'submit_capability':False,
                     'live_write_available':self._write_available,
-                    'resume_status':self._resume_status,
+                    'resume_status':self._resume_status,'final_status':self._final_status,
                     'remaining_seconds':max(0,int(self._deadline-self._clock())) if self._deadline else 0}
 
     def _alive(self):
@@ -100,6 +103,14 @@ class PreparationController:
             future=self._enqueue('approve_resume',(nonce,scope_sha));self._state='UPLOADING_RESUME'
         return self._await(future,90)
 
+    def begin_human_review(self,session):
+        """Enter review only; there is deliberately no confirm/send method."""
+        with self._lock:
+            if (self._state!='PREPARED_UNVERIFIED' or self._human_active
+                    or session!=self._session or not self._alive()):raise PreparationConflict()
+            future=self._enqueue('begin_human_review',None);self._state='STARTING_HUMAN_REVIEW'
+        return self._await(future,30)
+
     def shutdown(self,timeout=5):
         self._revoked.set()
         with self._lock:
@@ -118,6 +129,9 @@ class PreparationController:
         self._revoked.set()
         with self._lock:self._state='UNKNOWN_OUTCOME';self._write_available=False
         retired=True
+        if self._human is not None:
+            try:self._human.close();self._final_status=self._human.status()['status']
+            except BaseException:retired=False;self._final_status='UNKNOWN_OUTCOME'
         if self._resume is not None:
             try:self._resume._retire()
             except BaseException:retired=False
@@ -151,7 +165,10 @@ class PreparationController:
                             pages=self._owner.context.pages
                             if len(pages)!=1:break
                             pages[0].wait_for_timeout(25)
-                            if self._flow is not None and self._clock()>=self._next_review_fence:
+                            if self._human_active:
+                                self._final_status=self._human.tick()['status']
+                                if self._final_status in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME','CANCELLED'}:break
+                            elif self._flow is not None and self._clock()>=self._next_review_fence:
                                 self._flow.review_fence();self._next_review_fence=self._clock()+1
                                 if self._state=='RESUME_OFFERED':self._resume.private_offer()
                         except Exception:break
@@ -170,6 +187,7 @@ class PreparationController:
                         # UI never advertises time already spent on self-check.
                         available=self._write_admission(self._owner) is True
                         if not self._alive():raise PreparationConflict()
+                        if self._human_factory is not None:self._human=self._human_factory(self._owner)
                         self._flow=self._flow_factory(self.authority,self._owner,task_id=task_id,revision=revision,
                             session=self._session,selected_ids=selected_ids,still_authorized=self._alive)
                         if not self._alive():raise PreparationConflict()
@@ -215,6 +233,18 @@ class PreparationController:
                             if not self._alive() or self._clock()>=self._review_deadline:raise PreparationConflict()
                             self._state='PREPARED_UNVERIFIED';self._resume_status='RETURNED_UNVERIFIED'
                             self._deadline=self._review_deadline
+                        future.set_result(result)
+                    elif command=='begin_human_review':
+                        if not self._alive():raise PreparationConflict()
+                        if self._human is None:
+                            result={'status':'UNAVAILABLE','reason':'PHYSICAL_NATIVE_AND_SITE_ACCEPTANCE_PENDING',
+                                    'submit_capability':False,'automatic_retry':False,'server_application_verified':False}
+                        else:result=self._human.begin(self._flow)
+                        if not self._alive():raise PreparationConflict()
+                        with self._lock:
+                            self._final_status=result['status'];self._state='PREPARED_UNVERIFIED'
+                            if result['status']=='MANUAL_REVIEW_ACTIVE':
+                                self._human_active=True;self._state='HUMAN_REVIEW';self._write_available=False
                         future.set_result(result)
                     else:raise PreparationConflict()
                 except BaseException:

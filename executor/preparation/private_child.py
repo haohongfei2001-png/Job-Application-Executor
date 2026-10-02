@@ -24,7 +24,8 @@ _SAFE_ENV = frozenset({'HOME','PATH','TMPDIR','TMP','TEMP','LANG','LC_ALL','LC_C
     'SYSTEMROOT','WINDIR','SSL_CERT_FILE','SSL_CERT_DIR','REQUESTS_CA_BUNDLE',
     'CURL_CA_BUNDLE','NODE_EXTRA_CA_CERTS','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY',
     'NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy'})
-_OPERATIONS = frozenset({'open','approve','review_resume','approve_resume','status','shutdown'})
+_FINAL_STATUS=frozenset({'UNAVAILABLE','AVAILABLE','MANUAL_REVIEW_ACTIVE','RETURNED_UNVERIFIED','UNKNOWN_OUTCOME','CANCELLED'})
+_OPERATIONS = frozenset({'open','approve','review_resume','approve_resume','begin_human_review','status','shutdown'})
 
 
 def private_environment(environ):
@@ -108,7 +109,7 @@ class PrivatePreparationChild:
         self._revoked = threading.Event()
         self._closed = False
         self._status_cache={'status':'IDLE','submit_capability':False,'field_count':0,
-            'live_write_available':False,'resume_status':'NOT_REVIEWED','remaining_seconds':0}
+            'live_write_available':False,'resume_status':'NOT_REVIEWED','final_status':'UNAVAILABLE','remaining_seconds':0}
         self._sequence = 0
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -219,7 +220,7 @@ class PrivatePreparationChild:
             if self._closed or (self._revoked.is_set() and operation!='shutdown'):
                 raise PreparationConflict()
             states={'open':'OPENING','approve':'PREPARING','review_resume':'REVIEWING_RESUME',
-                    'approve_resume':'UPLOADING_RESUME'}
+                    'approve_resume':'UPLOADING_RESUME','begin_human_review':'STARTING_HUMAN_REVIEW'}
             if operation in states:self._status_cache['status']=states[operation]
             self._sequence+=1
             _send(self._command,{'seq':self._sequence,'op':operation,'args':args,'kwargs':kwargs})
@@ -239,6 +240,10 @@ class PrivatePreparationChild:
                                           field_count=result.get('field_count',0))
             elif operation=='review_resume':self._status_cache.update(status='RESUME_OFFERED',resume_status='OFFERED')
             elif operation=='approve_resume':self._status_cache.update(status='PREPARED_UNVERIFIED',resume_status='RETURNED_UNVERIFIED')
+            elif operation=='begin_human_review':
+                self._status_cache['final_status']=result.get('status','UNAVAILABLE')
+                self._status_cache['status']='PREPARED_UNVERIFIED'
+                if result.get('status')=='MANUAL_REVIEW_ACTIVE':self._status_cache['status']='HUMAN_REVIEW'
             return result
         except BaseException:
             self._revoke_child();raise PreparationConflict() from None
@@ -260,6 +265,9 @@ class PrivatePreparationChild:
     def approve_resume(self, nonce, scope_sha, session, *, approve_upload):
         return self._call('approve_resume',[nonce,scope_sha,session],{'approve_upload':approve_upload},95)
 
+    def begin_human_review(self, session):
+        return self._call('begin_human_review',[session],{},35)
+
     def cancel(self, session):
         if session!=self._session: raise PreparationConflict()
         self._revoke_child()
@@ -267,17 +275,17 @@ class PrivatePreparationChild:
 
     def status(self):
         if self._closed:return {'status':'CLOSED','submit_capability':False,'field_count':0,
-            'live_write_available':False,'resume_status':'NOT_REVIEWED','remaining_seconds':0}
+            'live_write_available':False,'resume_status':'NOT_REVIEWED','final_status':self._status_cache.get('final_status','UNAVAILABLE'),'remaining_seconds':0}
         if self._revoked.is_set() or self._process.poll() is not None:
             return {'status':'UNKNOWN_OUTCOME','submit_capability':False,'field_count':0,
-                    'live_write_available':False,'resume_status':'UNKNOWN_OUTCOME','remaining_seconds':0}
+                    'live_write_available':False,'resume_status':'UNKNOWN_OUTCOME','final_status':self._status_cache.get('final_status','UNAVAILABLE'),'remaining_seconds':0}
         result=self._call('status',[],{},3)
         if result.get('status')=='CLOSED':
             # A closed browser is not yet a retired/reaped child. Do not let the
             # manager replace this proxy until the exact shutdown proof + exit.
             self._revoke_child()
             return {'status':'UNKNOWN_OUTCOME','submit_capability':False,'field_count':0,
-                    'live_write_available':False,'resume_status':'UNKNOWN_OUTCOME','remaining_seconds':0}
+                    'live_write_available':False,'resume_status':'UNKNOWN_OUTCOME','final_status':self._status_cache.get('final_status','UNAVAILABLE'),'remaining_seconds':0}
         return result
 
     def shutdown(self, timeout=5):
@@ -290,7 +298,12 @@ class PrivatePreparationChild:
             if self._closed:return True
             remaining=deadline-time.monotonic()
             if remaining<=0:return False
-            proven=self._call('shutdown',[],{'timeout':remaining},remaining)
+            receipt=self._call('shutdown',[],{'timeout':remaining},remaining)
+            if (type(receipt) is not dict or set(receipt)!={'context_closed','final_status'}
+                    or receipt['final_status'] not in _FINAL_STATUS):return False
+            self._status_cache['final_status']=(receipt['final_status'] if receipt['final_status'] in
+                {'UNAVAILABLE','RETURNED_UNVERIFIED','UNKNOWN_OUTCOME','CANCELLED'} else 'UNKNOWN_OUTCOME')
+            proven=receipt['context_closed']
             remaining=max(.01,deadline-time.monotonic())
             self._process.wait(timeout=remaining)
             if proven is not True or self._process.returncode!=0:return False
@@ -310,9 +323,11 @@ def _native_controller(root, valid):
     if not NativePreparationAdmission.available():raise NativeAdmissionUnavailable()
     queue=TaskQueue(root)
     admission=NativePreparationAdmission(still_authorized=lambda:controller._alive())
+    from .human_review import HumanReviewCoordinator
     controller=PreparationController(queue,valid,
         owner_factory=lambda:DisposablePreparationSession(headless=False,channel='chrome'),
-        write_admission=admission.admit,upload_admission=admission.admit)
+        write_admission=admission.admit,upload_admission=admission.admit,
+        human_review_factory=lambda owner:HumanReviewCoordinator(owner,admission.admit))
     return controller
 
 
@@ -372,6 +387,10 @@ def worker_main(fds, *, controller_factory=_native_controller):
                     result=getattr(controller,operation)(*message['args'],**message['kwargs'])
                     if revoked.is_set() and operation!='shutdown':raise PreparationConflict()
                 else:raise PreparationConflict()
+                if operation=='shutdown':
+                    final_status=controller.status().get('final_status','UNAVAILABLE')
+                    if final_status not in _FINAL_STATUS:final_status='UNKNOWN_OUTCOME'
+                    result={'context_closed':result is True,'final_status':final_status}
                 _send(responses,{'seq':expected,'ok':True,'result':result})
                 if operation=='shutdown':return
             except BaseException:

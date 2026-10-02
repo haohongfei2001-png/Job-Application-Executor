@@ -47,7 +47,7 @@ class Controller:
   return {'status':self.state,'submit_capability':False,'field_count':1}
  def status(self):
   if (self.root/'natural_close').exists():self.shutdown()
-  return {'status':self.state,'submit_capability':False}
+  return {'status':self.state,'submit_capability':False,'final_status':'RETURNED_UNVERIFIED' if (self.root/'final_returned').exists() else 'UNAVAILABLE'}
  def shutdown(self,timeout=5):
   if (self.root/'unknown').exists():self.state='UNKNOWN_OUTCOME';return False
   self.closed=True;self.state='CLOSED';(self.root/'closed').touch();return True
@@ -310,3 +310,12 @@ def test_partial_pipe_allocation_releases_only_its_own_descriptors(monkeypatch):
     for pair in created:
         for fd in pair:
             with pytest.raises(OSError):os.fstat(fd)
+
+
+def test_shutdown_acknowledges_terminal_status_without_prior_poll(child):
+    make,root,_=child;owner=make();owner.open('task',1,SESSION,['0'])
+    owner._status_cache['final_status']='MANUAL_REVIEW_ACTIVE'
+    (root/'final_returned').touch()
+    assert owner.shutdown(timeout=3)
+    assert owner.status()['status']=='CLOSED'
+    assert owner.status()['final_status']=='RETURNED_UNVERIFIED'
