@@ -55,6 +55,60 @@ def test_native_offer_separates_review_from_explicit_fill(setup):
     with pytest.raises(PreparationConflict):sessions.approve_fill(consent,SESSION)
 
 
+@pytest.mark.parametrize('interrupt',[None,'cancel','retire','profile'])
+def test_native_open_waits_for_cancelled_owner_outside_lock_and_rechecks_scope(setup,interrupt):
+    import threading
+    from pathlib import Path
+    sessions,data,calls=native(setup)
+    sessions.open(data,SESSION);previous=sessions.active['controller']
+    joining=threading.Event();release=threading.Event();results=[]
+    def shutdown(timeout):
+        if timeout==0:
+            previous.state='UNKNOWN_OUTCOME';return False
+        assert timeout==10 and not sessions.lock._is_owned()
+        joining.set();assert release.wait(2)
+        previous.state='CLOSED';return True
+    previous.shutdown=shutdown
+    sessions.cancel(close_data(data),SESSION)
+    replacement={**data,'request_id':'b'*32}
+    def opening():
+        try:results.append(sessions.open_native(replacement,SESSION)['mode'])
+        except PreparationConflict:results.append('REFUSED')
+    thread=threading.Thread(target=opening);thread.start();assert joining.wait(2)
+    assert [row[0] for row in calls]==['open']
+    if interrupt=='cancel':sessions.cancel(close_data(replacement),SESSION)
+    elif interrupt=='retire':sessions.revoke_all()
+    elif interrupt=='profile':
+        Path(sessions.queue.get(data['task_id'])['spec']['profile_ref']).write_text('{"fields":{}}')
+    release.set();thread.join(2);assert not thread.is_alive()
+    assert results==['PRIVATE_NATIVE_FILL_OFFER' if interrupt is None else 'REFUSED']
+    assert [row[0] for row in calls]==(['open','open'] if interrupt is None else ['open'])
+    assert not any(row[0]=='fill' for row in calls)
+
+
+@pytest.mark.parametrize('result',[False,None,True])
+def test_unknown_or_inconsistent_cleanup_never_launches_replacement(setup,result):
+    sessions,data,calls=native(setup);sessions.open(data,SESSION)
+    previous=sessions.active['controller'];joins=[]
+    def shutdown(timeout):
+        joins.append(timeout);previous.state='UNKNOWN_OUTCOME';return result
+    previous.shutdown=shutdown;sessions.cancel(close_data(data),SESSION)
+    with pytest.raises(PreparationConflict):sessions.open_native({**data,'request_id':'b'*32},SESSION)
+    assert joins==[0,10] and [row[0] for row in calls]==['open']
+
+
+@pytest.mark.parametrize('cancelled,other_session',[(False,False),(True,True)])
+def test_native_open_cannot_retire_uncancelled_or_other_session_owner(setup,cancelled,other_session):
+    sessions,data,calls=native(setup);sessions.open(data,SESSION)
+    previous=sessions.active['controller'];joins=[]
+    previous.shutdown=lambda timeout:joins.append(timeout)
+    if cancelled:sessions.cancel(close_data(data),SESSION)
+    session='other_session_'+'s'*40 if other_session else SESSION
+    sessions.session_valid=lambda value:value in {SESSION,session}
+    with pytest.raises(PreparationConflict):sessions.open_native({**data,'request_id':'b'*32},session)
+    assert joins==([0] if cancelled else []) and [row[0] for row in calls]==['open']
+
+
 @pytest.mark.parametrize('change',['missing','false','extra','wrong_session','wrong_task','wrong_revision'])
 def test_malformed_native_consent_never_reaches_filler(setup,change):
     sessions,data,calls=native(setup)

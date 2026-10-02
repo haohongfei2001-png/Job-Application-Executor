@@ -9,7 +9,7 @@ from test_preparation_review_browser import open_review,payload,CANARY
 from executor.preparation.qiyunfang import CONTRACT_URL
 
 
-def install(page,observed,*,hold=False,unavailable=False,hold_fill=False,with_resume=False):
+def install(page,observed,*,hold=False,unavailable=False,hold_fill=False,with_resume=False,before_native=None):
     calls=[];pending=[]
     def response(data):
         return {'mode':'PRIVATE_NATIVE_FILL_OFFER','request_id':data['request_id'],
@@ -36,8 +36,95 @@ def install(page,observed,*,hold=False,unavailable=False,hold_fill=False,with_re
     if with_resume:review['resume_version']='b'*64
     open_review(page,observed,result=review)
     page.get_by_role('checkbox',name='选择核对姓名',exact=True).check()
+    if before_native is not None:before_native()
     page.locator('#preparation-native-open').click()
     return calls,pending,response
+
+
+def public_preflight(page,*,cancel_status=200,cancel_value=None):
+    pending=[];calls=[]
+    def route(route):
+        action=route.request.url.rsplit('/',1)[-1];data=route.request.post_data_json;calls.append((action,data))
+        if action=='cancel':pending.append(route);return
+        if action=='open':
+            value={'mode':'READ_ONLY_PUBLIC_PREFLIGHT','status':'EMPTY_FORM_VERIFIED','request_id':data['request_id'],
+                'task_id':data['task_id'],'task_revision':data['expected_revision'],'source_url':CONTRACT_URL,
+                'profile_version':data['profile_version'],'resume_version':data['resume_version'],
+                'plan':[{'field_id':item['field_id'],'value':item['value']} for item in payload()['proposals'] if item['field_id'] in data['selected_ids']],
+                'expires_in_seconds':120,'capabilities':{'live_write':False,'submit':False,'account_verified':False,'server_draft_verified':False}}
+        else:value={'status':'OFFERED','live_write_available':False,'submit_capability':False}
+        route.fulfill(status=200,content_type='application/json',body=json.dumps(value))
+    page.route('**/ui/api/preparation-session/*',route)
+    def open_preflight():
+        page.locator('#preparation-site-check').click()
+        expect(page.locator('#preparation-site-status')).to_contain_text('已通过只读核对')
+    def acknowledge():
+        assert len(pending)==1
+        pending[0].fulfill(status=cancel_status,content_type='application/json',body=json.dumps(
+            cancel_value or {'status':'CANCELLATION_REQUESTED','context_closed':False,'submit_capability':False}))
+    return open_preflight,acknowledge,pending,calls
+
+
+def test_native_transition_waits_for_cancel_acknowledgement_without_duplicate_open(preparation_ui):
+    page,observed=preparation_ui;preflight,acknowledge,pending,public_calls=public_preflight(page)
+    calls,_,_=install(page,observed,before_native=preflight)
+    expect(page.locator('#preparation-native-status')).to_contain_text('正在结束前次检查')
+    page.wait_for_timeout(50);assert len(pending)==1 and calls==[]
+    page.evaluate("document.getElementById('preparation-native-open').dispatchEvent(new MouseEvent('click'))")
+    assert calls==[]
+    acknowledge();expect(page.locator('#preparation-native-consent')).to_be_visible()
+    assert [action for action,_ in calls]==['open']
+    assert public_calls[0][1]['request_id']!=calls[0][1]['request_id']
+    assert CANARY not in json.dumps(calls+public_calls) and observed['errors']==[] and observed['external']==[]
+
+
+@pytest.mark.parametrize('interrupt',['hide','close','task_change','pagehide','selection'])
+def test_cancel_acknowledgement_after_interruption_cannot_start_native_owner(preparation_ui,interrupt):
+    page,observed=preparation_ui;preflight,acknowledge,pending,_=public_preflight(page)
+    calls,_,_=install(page,observed,before_native=preflight)
+    page.wait_for_timeout(50);assert len(pending)==1 and calls==[]
+    if interrupt=='hide':page.locator('#preparation-review-hide').click()
+    elif interrupt=='close':page.locator('#preparation-close').click()
+    elif interrupt=='task_change':page.evaluate("openTaskPreparation('prep-b',9)")
+    elif interrupt=='selection':page.get_by_role('checkbox',name='选择核对姓名',exact=True).uncheck()
+    else:page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+    acknowledge();page.wait_for_timeout(100)
+    assert not any(action=='open' for action,_ in calls)
+    expect(page.locator('#preparation-native-consent')).to_be_hidden()
+    assert observed['errors']==[] and observed['external']==[]
+
+
+@pytest.mark.parametrize('status,value',[(500,None),(200,{'status':'CLOSED','submit_capability':False}),
+    (200,{'status':'CANCELLATION_REQUESTED','submit_capability':True})])
+def test_unconfirmed_cancellation_refuses_replacement_without_automatic_retry(preparation_ui,status,value):
+    page,observed=preparation_ui;preflight,acknowledge,_,_=public_preflight(page,cancel_status=status,cancel_value=value)
+    calls,_,_=install(page,observed,before_native=preflight)
+    page.wait_for_timeout(50);acknowledge()
+    expect(page.locator('#preparation-review-status')).to_contain_text('条件或资料无法确认')
+    assert not any(action=='open' for action,_ in calls)
+    assert CANARY not in page.content() and observed['errors']==[] and observed['external']==[]
+
+
+def test_changed_selection_keeps_prior_cancel_in_the_replacement_wait(preparation_ui):
+    page,observed=preparation_ui;preflight,acknowledge,pending,_=public_preflight(page)
+    calls,_,_=install(page,observed,before_native=preflight)
+    page.wait_for_timeout(50);assert len(pending)==1
+    choice=page.get_by_role('checkbox',name='选择核对姓名',exact=True)
+    choice.uncheck();choice.check();page.locator('#preparation-native-open').click()
+    page.wait_for_timeout(50)
+    assert not any(action=='open' for action,_ in calls)
+    acknowledge();expect(page.locator('#preparation-native-consent')).to_be_visible()
+    assert len([action for action,_ in calls if action=='open'])==1
+    assert observed['errors']==[] and observed['external']==[]
+
+
+def test_lost_cancel_acknowledgement_has_a_bounded_wait_and_no_late_open(preparation_ui):
+    page,observed=preparation_ui;preflight,acknowledge,_,_=public_preflight(page)
+    calls,_,_=install(page,observed,before_native=preflight)
+    expect(page.locator('#preparation-review-status')).to_contain_text('条件或资料无法确认',timeout=12000)
+    acknowledge();page.wait_for_timeout(100)
+    assert not any(action=='open' for action,_ in calls)
+    assert CANARY not in page.content() and observed['errors']==[] and observed['external']==[]
 
 
 def test_native_fill_is_separate_explicit_consent_and_cleared_on_hide(preparation_ui):
