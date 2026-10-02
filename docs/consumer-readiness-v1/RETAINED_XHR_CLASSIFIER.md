@@ -53,3 +53,20 @@ This purpose classifier is not a full private-field review, user intent,
 resume-upload approval, CAPTCHA solution, successful application or release
 certification. Runtime integration remains disabled until those distinct gates
 are satisfied.
+
+## Observed candidate and composed test gate
+
+Exact initial classifier code `fdfb5fcf2d0c4422875594b8eabc0bfe4f3b99f6`
+passed [research run 36958209729](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36958209729):
+164 complete synthetic/contract cases on each of Linux and Mac, followed by a
+compatible unarmed actual empty-public-form bootstrap. This binds that code,
+not a later revision's test result.
+
+The added composition gate joins the actual retained native XHR, purpose
+classifier, existing opaque bridge and real durable preparation/final journal
+against an independent loopback receiver. It covers return, explicit synthetic
+cancel, post-confirmation edit, redirect and response loss. Native human events
+and process binding remain explicit fixtures; no physical-human provenance is
+inferred. Before confirmation there is no consumed final slot and no server
+request; after an attempted transmission the durable slot cannot be refunded.
+These new composed cases require their own exact-head execution.

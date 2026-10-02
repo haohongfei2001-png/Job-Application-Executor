@@ -9,6 +9,7 @@ import pytest
 from executor.preparation import request_classifier as c
 from test_qiyunfang_preparation_browser import browser,bounded_browser_oracle
 from test_preparation_change_epoch_browser import HTML
+from test_preparation_authority_v1 import fixture as authority_fixture,offer,consume,SESSION,BROWSER
 
 
 CANARY='SYNTHETIC_PRIVATE_身份_🚀\\\"\nCANARY'
@@ -228,3 +229,75 @@ def test_worker_constructor_and_native_alias_cannot_create_an_unclassified_xhr(b
         page.wait_for_timeout(30)
         with pytest.raises(c.RequestClassifierConflict):owner.classify(request)
         assert len(routes)==1
+
+
+@pytest.mark.parametrize('outcome',['return','cancel','edit_after_confirm','redirect','disconnect'])
+def test_classifier_composes_with_real_durable_slot_and_opaque_bridge_without_replay(browser,authority_fixture,monkeypatch,outcome):
+    """Actual XHR/SQLite/sink; native human events and process binding are fixtures."""
+    import copy
+    import threading
+    from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+    from types import SimpleNamespace
+    from executor.preparation import human_request as h,final_journal as f
+    from executor.preparation.authority import PreparationJournal,PreparationConflict
+    from test_preparation_final_journal_v1 import rows
+    received=[]
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*_):pass
+        def do_POST(self):
+            received.append(self.rfile.read(int(self.headers['Content-Length'])))
+            if outcome=='disconnect':self.connection.close();return
+            self.send_response(307 if outcome=='redirect' else 204)
+            if outcome=='redirect':self.send_header('Location','/unexpected')
+            self.end_headers()
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    serving=threading.Thread(target=server.serve_forever,daemon=True);serving.start()
+    base=f'http://127.0.0.1:{server.server_port}'
+    monkeypatch.setattr(c,'CONTRACT_URL',base+'/');monkeypatch.setattr(c,'FINAL_URL',base+'/final')
+    monkeypatch.setattr(h,'CONTRACT_URL',base+'/');monkeypatch.setattr(h,'FINAL_URL',base+'/final')
+    monkeypatch.setattr(f,'FINAL_URL',base+'/final')
+    q,task,_,authority,_=authority_fixture
+    permit=consume(authority_fixture,offer(authority_fixture))
+    preparation=PreparationJournal(authority,permit,SESSION,BROWSER)
+    for key in ['0','8']:
+        action=preparation.before(key);preparation.after(action,'READBACK_VERIFIED')
+    preparation.complete()
+    authority.finish(permit,'PREPARED_UNVERIFIED',context_closed=False,session=SESSION,
+                     browser_binding=BROWSER,plan_sha=permit['plan_sha'])
+    try:
+        with prepared(browser) as (context,page,classifier,routes):
+            value=body();send(page,value);settle(page,routes);assert len(routes)==1 and received==[]
+            route=routes[0];request=route.request;metadata=classifier.classify(request)
+            binding={'browser':dict(BROWSER),'frame_id':'SYNTHETIC_NATIVE_FRAME','change_epoch':metadata['change_epoch']}
+            def observe():
+                classifier.require_exact(request)
+                return copy.deepcopy(binding)
+            journal=f.PreparationFinalJournal(authority,permit,SESSION,observe)
+            # No product Dialog.accept call. This finite facade supplies explicit
+            # synthetic native events solely to exercise component composition.
+            facade=SimpleNamespace(main_frame=page.main_frame,evaluate=lambda *_:None)
+            bridge=h.OpaqueHumanRequest(page=facade,client=context.request,binding=binding,
+                guard=journal.guard,consume=journal.consume,record=journal.record)
+            bridge.hold(route,metadata)
+            assert bridge.drain()=={'status':'HELD'} and rows(q)==[] and received==[]
+            bridge.present()
+            bridge.dialog_opened({'type':'confirm','url':h.CONTRACT_URL,'message':bridge._message,
+                                  'frameId':binding['frame_id'],'hasBrowserHandler':True})
+            assert rows(q)==[] and received==[]
+            bridge.dialog_closed({'result':outcome!='cancel','frameId':binding['frame_id']})
+            if outcome=='edit_after_confirm':page.evaluate("document.querySelector('#field').value='changed'")
+            result=bridge.drain();bridge.drain()
+            expected='RETURNED_UNVERIFIED' if outcome=='return' else 'UNKNOWN_OUTCOME' if outcome in {'redirect','disconnect'} else 'CANCELLED'
+            assert result['status']==expected
+            if outcome in {'cancel','edit_after_confirm'}:
+                assert rows(q)==[] and received==[]
+            else:
+                assert received==[value.encode()]
+                assert len(rows(q))==1 and rows(q)[0]['outcome']==expected
+                with pytest.raises((PreparationConflict,c.RequestClassifierConflict)):f.PreparationFinalJournal(authority,permit,SESSION,observe)
+            assert CANARY not in json.dumps(rows(q),ensure_ascii=False)
+            assert 'PRIVATE_AUTHORITY_CANARY' not in json.dumps(rows(q))
+            assert q.get(task['task_id'])['stage']=='BLOCKED'
+    finally:
+        server.shutdown();server.server_close();serving.join()
+        authority.finish(permit,'UNKNOWN_OUTCOME',context_closed=True)
