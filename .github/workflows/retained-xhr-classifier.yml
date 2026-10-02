@@ -1,0 +1,44 @@
+name: Retained XHR classifier research
+
+on:
+  push:
+    branches: [test/jae-retained-xhr-classifier]
+
+permissions:
+  contents: read
+
+jobs:
+  retained_xhr_proof:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pinned synthetic-browser dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+      - name: Verify retained native XHR identity and value-free failure paths
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q tests/test_preparation_request_classifier_v1.py tests/test_preparation_request_classifier_browser.py tests/test_preparation_change_epoch_v1.py tests/test_preparation_change_epoch_browser.py tests/test_public_change_epoch_probe_v1.py
+      - name: Observe only the unarmed empty public bootstrap
+        timeout-minutes: 2
+        run: python scripts/probe_qiyunfang_change_epoch.py --xhr-classifier --output "$RUNNER_TEMP/jae-public-classifier.json"
+      - name: Preserve only the finite empty-bootstrap report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jae-public-classifier-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/jae-public-classifier.json
+          if-no-files-found: error
+          retention-days: 3

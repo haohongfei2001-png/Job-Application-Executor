@@ -15,18 +15,20 @@ import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from executor.preparation.change_epoch import PreDocumentChangeEpoch
+from executor.preparation.request_classifier import RetainedXHRClassifier
 from executor.preparation.preflight import open_public_form
 from executor.preparation.qiyunfang import CONTRACT_URL
 from executor.preparation.session import DisposablePreparationSession
 
 
-def probe():
+def probe(*,xhr_classifier=False):
     result={
         'format':'jae-public-change-epoch-compatibility-v1',
         'source':CONTRACT_URL,
         'status':'PUBLIC_EPOCH_UNVERIFIED',
         'stage':'FRESH_SESSION',
         'observer_installed':False,
+        'classifier_installed':False,
         'observer_reason':'UNOBSERVED',
         'public_form_matched':False,
         'network_sealed':False,
@@ -44,7 +46,8 @@ def probe():
             observer=None
             try:
                 result['stage']='PRE_DOCUMENT_INSTALL'
-                observer=PreDocumentChangeEpoch(owner.context)
+                observer=(RetainedXHRClassifier if xhr_classifier else PreDocumentChangeEpoch)(owner.context)
+                result['classifier_installed']=xhr_classifier
                 result['observer_installed']=True
                 result['stage']='OPEN_EMPTY_PUBLIC_FORM'
                 preflight=open_public_form(owner)
@@ -76,10 +79,11 @@ def probe():
 def main(argv=None):
     parser=argparse.ArgumentParser()
     parser.add_argument('--output',required=True,type=Path)
+    parser.add_argument('--xhr-classifier',action='store_true')
     args=parser.parse_args(argv)
     faulthandler.dump_traceback_later(90,exit=True)
     try:
-        result=probe()
+        result=probe(xhr_classifier=args.xhr_classifier)
         args.output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
         print(json.dumps({'status':result['status'],'stage':result['stage'],'observer_reason':result['observer_reason'],
                           'live_enabled':False,'final_action_enabled':False}))
