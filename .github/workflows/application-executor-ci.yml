@@ -137,6 +137,10 @@ jobs:
         run: |
           python -m pytest -q tests/test_local_operations_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py tests/test_profile_editor_v1.py tests/test_task_preparation_v1.py tests/test_manager_v1.py tests/test_jcr03_discovery.py
           python -m pytest -q tests/test_dashboard_diagnostics_browser.py -k 'diagnostics_need_explicit_copy or expired_session or task_workspace'
+      - name: Complete partial lifecycle-soak runner contract
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q tests/test_lifecycle_soak_runner.py
       - name: Compile Python sources
         run: python -m compileall -q executor tests
       - name: Check local dashboard JavaScript syntax
@@ -310,6 +314,11 @@ jobs:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
         run: python -m pytest -v --durations=15 ${{ matrix.tests }}
 
+      - name: Complete partial lifecycle-soak runner contract on hosted Mac
+        if: matrix.suite == 'runtime_distribution'
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q tests/test_lifecycle_soak_runner.py
       - name: Hosted Mac retired updater public and CLI entrypoints
         if: matrix.suite == 'native_integration'
         run: python -m pytest -q tests/test_local_operations_v1.py -k 'retired_public_updater_entries or retired_module_cli or retired_cli_never'

@@ -83,7 +83,7 @@
       "authorized": true
     }
   ],
-  "next_action": "PR #29 full-gate validation found an existing service-registry retirement race matching the hosted service_identity_unverified failure; see current_candidate_validation and receipts/RETIREMENT-133AA52-FAILURE-AND-REPAIR.md. Complete new-head owning Linux/hosted Mac gates for the bounded repair before merge; preserve the failed run and do not replace it with an unexplained rerun. As of 2026-10-02, main 9fc2202e3bde08ce0bfbc8a31d42464f9eb76d5a has completed successful Application Executor CI 37045631893 (attempt 1) and the unsigned jae-unsigned-macos-37045631893-1 artifact. Use receipts/DELIVERY-9FC2202-MAIN-CI-PASS.md and ENGINEERING_CANDIDATE_GUIDE.zh-CN.md for the exact delivery evidence and both supported artifact routes; do not rerun or rebuild this successful head merely to write a receipt. Continue only dependency-safe engineering against freshly checked remote state. The September 29 PR #20 instructions are historical, not the current publication target. JCR-08 remains IN_PROGRESS, JCR-09 formal acceptance remains NOT_STARTED, and consumer certification remains NOT_CERTIFIED. Full frozen acceptance/platform/fault coverage, real user Mac/physical operations, real-site/account results, signing/notarization, a 24-hour soak and five real usage days are not established by this CI. Raw-CDP comparator XFAIL/XPASS results do not certify the guarded backend. No live application, upload, credential, spending or permission action is authorized by this status update; final submission remains human-only. Later documentation/source heads need their own applicable checks and cannot inherit this run as exact-head evidence.",
+  "next_action": "PR #29 retirement repair head 1c3aa80541256a15865edc6db56ec0df23103807 passed complete hosted CI 37074833221 and merged as main 4954eb2fe80c84456e22e386483f7ed877e1a1b5. Preserve the earlier failed candidate/run in receipts/RETIREMENT-133AA52-FAILURE-AND-REPAIR.md. Post-merge main run 37078259613 was still running when this evidence update was prepared; verify its actual result before treating main as passed. Continue the bounded partial lifecycle-soak foundation documented in LIFECYCLE_SOAK.md: synthetic paused tasks, fresh HOME, manifested source, owned service start/health/stop, durable progress and explicit incomplete scope. Its 600-second rehearsal belongs only to the recorded earlier harness digest; updated code needs its own hosted checks and actual observation. Do not infer 24-hour, full Z-04, browser/task, upgrade, crash-recovery, real-Mac/site, signing/notarization, five real usage days or consumer certification. JCR-08 remains IN_PROGRESS, JCR-09 formal acceptance NOT_STARTED and NOT_CERTIFIED; final submission remains human-only. No live application, user-data upload, credential, spending or permission action is granted by this status update. The older observed_engineering_candidate and September history retain their exact fixed-version scope.",
   "execution_policy_revision": "UNATTENDED_CONTINUOUS_EXECUTION_v1",
   "deferred_final_gate_policy": {
     "enabled": true,
@@ -137,9 +137,36 @@
     "failed_run_id": 37068070773,
     "failed_job_id": 111040720443,
     "observed_failure": "Mac consumer-transactions: 625 passed, 1 failed; authenticated retirement returned service_identity_unverified",
-    "repair_status": "Matching open/unlink/fstat race reproduced and narrowly repaired; exact new-head hosted gates PENDING",
+    "repair_status": "HOSTED_ENGINEERING_PASS",
     "receipt": "docs/consumer-readiness-v1/receipts/RETIREMENT-133AA52-FAILURE-AND-REPAIR.md",
-    "merge_status": "BLOCKED_UNTIL_NEW_HEAD_GATES_PASS",
-    "prior_success_scope": "observed_engineering_candidate remains fixed historical main evidence, not evidence for this repair"
+    "merge_status": "MERGED",
+    "prior_success_scope": "observed_engineering_candidate remains fixed historical main evidence, not evidence for this repair",
+    "repair_head_sha": "1c3aa80541256a15865edc6db56ec0df23103807",
+    "repair_run_id": 37074833221,
+    "repair_run_conclusion": "success",
+    "repair_full_linux": {
+      "passed": 3368,
+      "skipped": 93,
+      "xpassed": 2,
+      "subtests_passed": 132
+    },
+    "repair_hosted_macos_consumer_passed": 644,
+    "merge_sha": "4954eb2fe80c84456e22e386483f7ed877e1a1b5",
+    "post_merge_run_id": 37078259613,
+    "post_merge_observation": "IN_PROGRESS at 2026-10-02T23:35Z; not assumed successful"
+  },
+  "partial_lifecycle_soak": {
+    "status": "ENGINEERING_CANDIDATE",
+    "acceptance_id": "Z-04",
+    "full_acceptance_pass": false,
+    "consumer_certification": "NOT_CERTIFIED",
+    "guide": "docs/consumer-readiness-v1/LIFECYCLE_SOAK.md",
+    "rehearsal_receipt": "docs/consumer-readiness-v1/receipts/LIFECYCLE-SOAK-600S-ENGINEERING.md",
+    "rehearsal_scope": "600.576 actual seconds on earlier harness digest only; updated harness hosted checks and observation pending",
+    "prohibited_claims": [
+      "24-hour soak",
+      "full Z-04 pass",
+      "real application or user-device acceptance"
+    ]
   }
 }
