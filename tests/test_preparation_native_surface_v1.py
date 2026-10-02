@@ -157,3 +157,16 @@ def test_native_http_routes_require_private_cookie_exact_origin_and_strict_json(
         assert len(calls)==6
         assert request('submit')[0]==404
     finally:server.shutdown();server.server_close();thread.join(3)
+
+
+def test_final_review_route_is_bound_and_cannot_carry_approval_or_protected_data(setup):
+    sessions,data,calls=native(setup)
+    sessions.open_native(data,SESSION)
+    owner=sessions.active['controller']
+    owner.begin_human_review=lambda session:{'status':'UNAVAILABLE','submit_capability':False,
+        'automatic_retry':False,'server_application_verified':False,'untrusted_extra':'MUST_NOT_PROJECT'}
+    result=sessions.begin_human_review(close_data(data),SESSION)
+    assert result=={'status':'UNAVAILABLE','submit_capability':False,'automatic_retry':False,
+        'server_application_verified':False,'reason':'PHYSICAL_NATIVE_AND_SITE_ACCEPTANCE_PENDING'}
+    for extra in ({'confirm':True},{'approve_submission':True},{'identity':'SYNTHETIC_PROTECTED'}, {'captcha':'SYNTHETIC_OTP'}):
+        with pytest.raises(PreparationConflict):sessions.begin_human_review({**close_data(data),**extra},SESSION)

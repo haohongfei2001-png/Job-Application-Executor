@@ -740,6 +740,7 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                         return
                     native_actions={'open':'open_native','approve-fill':'approve_fill',
                                     'review-resume':'review_resume','approve-resume':'approve_resume',
+                                    'begin-human-review':'begin_human_review',
                                     'status':'native_status','cancel':'cancel'}
                     if parsed.path.startswith('/ui/api/native-preparation/'):
                         action=parsed.path.removeprefix('/ui/api/native-preparation/')

@@ -215,6 +215,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
             <label><span id="preparation-upload-choice"></span>我同意将这份原始简历上传到武汉启云方科技有限公司</label>
             <button id="preparation-upload-approve" type="button" disabled>确认这份简历上传</button>
           </div>
+          <button id="preparation-human-review" type="button" hidden disabled>查看人工收尾步骤</button>
           <p>以上确认均不授权证件、验证码、协议或最终提交。关闭、隐藏资料或更换任务会结束本次准备，结果不明时不会自动重试。</p>
         </section>
         <button id="preparation-review-hide" class="preparation-secondary" type="button">隐藏个人值</button>
@@ -678,14 +679,15 @@ const nativeOpen=document.getElementById('preparation-native-open'),nativeStatus
   fillConsent=makeNativeChoice('preparation-fill-consent'),fillApprove=document.getElementById('preparation-fill-approve'),
   resumeReview=document.getElementById('preparation-resume-review'),resumeConsent=document.getElementById('preparation-resume-consent'),
   resumeDetail=document.getElementById('preparation-resume-detail'),uploadConsent=makeNativeChoice('preparation-upload-consent'),
-  uploadApprove=document.getElementById('preparation-upload-approve');
+  uploadApprove=document.getElementById('preparation-upload-approve'),
+  humanReview=document.getElementById('preparation-human-review');
 function makeNativeChoice(id){const input=document.createElement('input');input.type='checkbox';input.id=id;return input;}
 let nativeRequest=null,nativeOffer=null,nativeUploadOffer=null,nativePoll=null,nativeExpiry=null,nativeBusy=false;
 function nativeBase(request){return {request_id:request.request_id,task_id:request.task_id,expected_revision:request.expected_revision};}
 function cancelNativePreparation(){
   const request=nativeRequest;nativeRequest=nativeOffer=nativeUploadOffer=null;nativeBusy=false;
   if(nativePoll)clearTimeout(nativePoll);if(nativeExpiry)clearTimeout(nativeExpiry);nativePoll=nativeExpiry=null;
-  nativeConsent.hidden=true;resumeConsent.hidden=true;resumeReview.hidden=true;fillConsent.remove();uploadConsent.remove();
+  nativeConsent.hidden=true;resumeConsent.hidden=true;resumeReview.hidden=true;humanReview.hidden=true;humanReview.disabled=true;fillConsent.remove();uploadConsent.remove();
   fillConsent.checked=uploadConsent.checked=false;fillConsent.disabled=uploadConsent.disabled=false;
   fillApprove.disabled=uploadApprove.disabled=resumeReview.disabled=nativeOpen.disabled=true;
   nativeWarning.textContent=resumeDetail.textContent=nativeStatus.textContent='';
@@ -718,7 +720,12 @@ function nativeWatch(request){
     if(!nativeCurrent(request))return;
     try{
       const state=await nativeCall('status',request);if(!nativeCurrent(request))return;
-      if(state.submit_capability!==false||!['OFFERED','PREPARING','PREPARED_UNVERIFIED','REVIEWING_RESUME','RESUME_OFFERED','UPLOADING_RESUME'].includes(state.status))throw new Error();
+      if(state.submit_capability===false&&['RETURNED_UNVERIFIED','UNKNOWN_OUTCOME','CANCELLED'].includes(state.final_status)){
+        clearPrivatePreparation();privatePreparationStatus.textContent=state.final_status==='RETURNED_UNVERIFIED'
+          ?'本人确认的请求已返回，但申请是否成功尚未核验；不会自动再次发送。'
+          :'人工收尾已取消或结果无法确认；没有自动重试，请本人核对官网。';return;
+      }
+      if(state.submit_capability!==false||!['OFFERED','PREPARING','PREPARED_UNVERIFIED','REVIEWING_RESUME','RESUME_OFFERED','UPLOADING_RESUME','STARTING_HUMAN_REVIEW','HUMAN_REVIEW'].includes(state.status))throw new Error();
       nativeWatch(request);
     }catch(_){nativeFail(request,'准备状态已结束或无法确认，个人值已隐藏；不要据此重复填写或上传。');}
   },1000);
@@ -778,7 +785,7 @@ fillApprove.onclick=async()=>{
       ||!Number.isSafeInteger(preparationTaskRevisions.get(request.task_id))
       ||preparationTaskRevisions.get(request.task_id)>result.task_revision)throw new Error();
     request.binding.revision=result.task_revision;preparationTaskRevisions.set(request.task_id,result.task_revision);
-    request.fillPending=false;nativeBusy=false;fillConsent.checked=false;resumeReview.hidden=false;resumeReview.disabled=false;
+    request.fillPending=false;nativeBusy=false;fillConsent.checked=false;resumeReview.hidden=false;resumeReview.disabled=false;humanReview.hidden=false;humanReview.disabled=false;
     nativeStatus.textContent='已执行本次填写；尚未核实网站草稿、附件留存或申请提交。简历上传需要下面的单独确认。';
     nativeDeadline(request,900);
   }catch(_){nativeFail(request,'本次填写结果无法确认，个人值已隐藏；不会自动重试，也不能当作已提交。');}
@@ -816,6 +823,24 @@ uploadApprove.onclick=async()=>{
     nativeBusy=false;uploadConsent.checked=false;
     nativeStatus.textContent='上传请求已返回，但网站是否实际保留附件尚未验证。没有最终提交，不能当作投递成功；不会自动再次上传。';
   }catch(_){nativeFail(request,'上传结果无法确认，个人值已隐藏；可能已经发送，不会自动重传或最终提交。');}
+};
+
+humanReview.onclick=async()=>{
+  const request=nativeRequest;
+  if(!request||!nativeCurrent(request)||nativeBusy||humanReview.disabled)return;
+  nativeBusy=true;humanReview.disabled=true;
+  try{
+    const result=await nativeCall('begin-human-review',request);if(!nativeCurrent(request))return;
+    if(result.submit_capability!==false||result.automatic_retry!==false||result.server_application_verified!==false
+      ||!['UNAVAILABLE','MANUAL_REVIEW_ACTIVE'].includes(result.status))throw new Error();
+    nativeBusy=false;
+    if(result.status==='UNAVAILABLE'){
+      nativeStatus.textContent='人工最终确认与官网验证码流程尚未启用；本窗口不会发送最终申请。证件、验证码、协议和最终提交仍由本人处理，填写或上传完成不代表已投递。';
+    }else{
+      resumeReview.disabled=uploadApprove.disabled=true;
+      nativeStatus.textContent='请仅在原生浏览器中亲自核对资料；应用不会替你填写证件、解验证码、接受协议或确认最终提交。取消或关闭会结束本次收尾，不会自动重试。';
+    }
+  }catch(_){nativeFail(request,'人工收尾条件无法确认；不会发送最终申请或自动重试。');}
 };
 
 function clearPreparationObservation(){

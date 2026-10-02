@@ -218,3 +218,45 @@ def test_private_confirmation_touch_targets_and_narrow_layout(preparation_ui,wid
         directory=Path(os.environ['JAE_UI_SCREENSHOT_DIR']);directory.mkdir(parents=True,exist_ok=True)
         page.screenshot(path=str(directory/f'preparation-native-{width}.png'))
     assert observed['errors']==[] and observed['external']==[]
+
+
+def test_human_review_explains_disabled_live_gate_without_final_approval(preparation_ui):
+    page,observed=preparation_ui;calls,_,_=install(page,observed)
+    page.locator('#preparation-fill-consent').check()
+    page.locator('#preparation-fill-approve').click()
+    expect(page.locator('#preparation-human-review')).to_be_enabled()
+    reviews=[]
+    def final_route(route):
+        reviews.append(route.request.post_data_json)
+        route.fulfill(status=200,content_type='application/json',body=json.dumps({
+            'status':'UNAVAILABLE','reason':'PHYSICAL_NATIVE_AND_SITE_ACCEPTANCE_PENDING',
+            'submit_capability':False,'automatic_retry':False,'server_application_verified':False}))
+    page.route('**/ui/api/native-preparation/begin-human-review',final_route)
+    page.locator('#preparation-human-review').click()
+    expect(page.locator('#preparation-native-status')).to_contain_text('不会发送最终申请')
+    assert len(reviews)==1 and set(reviews[0])=={'request_id','task_id','expected_revision'}
+    assert CANARY not in json.dumps(reviews) and observed['external']==[] and observed['errors']==[]
+    assert not any(name in json.dumps(reviews) for name in ('approve_submission','captcha','identity','confirm'))
+    if os.environ.get('JAE_UI_SCREENSHOT_DIR'):
+        directory=Path(os.environ['JAE_UI_SCREENSHOT_DIR']);directory.mkdir(parents=True,exist_ok=True)
+        page.locator('#preparation-human-review').scroll_into_view_if_needed()
+        page.screenshot(path=str(directory/'preparation-native-human-gate.png'))
+
+
+@pytest.mark.parametrize('interrupt',['hide','close','task_change'])
+def test_late_human_review_result_does_not_revive_private_state(preparation_ui,interrupt):
+    page,observed=preparation_ui;install(page,observed)
+    page.locator('#preparation-fill-consent').check();page.locator('#preparation-fill-approve').click()
+    pending=[]
+    page.route('**/ui/api/native-preparation/begin-human-review',lambda route:pending.append(route))
+    page.locator('#preparation-human-review').click()
+    expect(page.locator('#preparation-human-review')).to_be_disabled()
+    if interrupt=='hide':page.locator('#preparation-review-hide').click()
+    elif interrupt=='close':page.locator('#preparation-close').click()
+    else:page.evaluate("openTaskPreparation('prep-b',9)")
+    assert len(pending)==1
+    pending[0].fulfill(status=200,content_type='application/json',body=json.dumps({
+        'status':'MANUAL_REVIEW_ACTIVE','submit_capability':False,'automatic_retry':False,'server_application_verified':False}))
+    page.wait_for_timeout(100)
+    assert CANARY not in page.content() and observed['errors']==[] and observed['external']==[]
+    expect(page.locator('#preparation-human-review')).to_be_hidden()

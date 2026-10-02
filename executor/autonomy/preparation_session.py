@@ -169,10 +169,24 @@ class PrivatePreparationSessions:
         return {'status':'RETURNED_UNVERIFIED','server_attachment_verified':False,
                 'automatic_retry':False,'submit_capability':False}
 
+    def begin_human_review(self,data,session):
+        controller=self._native(data,session)
+        result=controller.begin_human_review(session)
+        if self._native(data,session) is not controller:raise PreparationConflict()
+        if (result.get('status') not in {'UNAVAILABLE','MANUAL_REVIEW_ACTIVE'}
+                or result.get('submit_capability') is not False
+                or result.get('automatic_retry') is not False
+                or result.get('server_application_verified') is not False):
+            controller.shutdown(timeout=0);raise PreparationConflict()
+        return {'status':result['status'],'submit_capability':False,'automatic_retry':False,
+                'server_application_verified':False,
+                'reason':'PHYSICAL_NATIVE_AND_SITE_ACCEPTANCE_PENDING' if result['status']=='UNAVAILABLE' else 'HUMAN_NATIVE_REVIEW_REQUIRED'}
+
     def native_status(self,data,session):
         controller=self._native(data,session)
         observed=controller.status()
-        return {key:observed[key] for key in ('status','field_count','resume_status','remaining_seconds','submit_capability')}
+        return {**{key:observed[key] for key in ('status','field_count','resume_status','remaining_seconds','submit_capability')},
+                'final_status':observed.get('final_status','UNAVAILABLE')}
 
     def cancel(self,data,session):
         self._session(session);request_id,task_id,revision=_request(data,False);key=self._key(session,request_id)
