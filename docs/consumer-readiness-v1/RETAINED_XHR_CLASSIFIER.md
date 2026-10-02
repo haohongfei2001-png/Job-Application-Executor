@@ -70,3 +70,23 @@ and process binding remain explicit fixtures; no physical-human provenance is
 inferred. Before confirmation there is no consumed final slot and no server
 request; after an attempted transmission the durable slot cannot be refunded.
 Exact composed-test head `9f05431781d09dae20e952575ad606db7f8a7f6b` passed [run 36958977187](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36958977187): all 169 cases on each of Linux and Mac, followed by a compatible unarmed actual empty-public-form bootstrap. The five composed outcomes ran successfully; all native-human/process-binding fixture limits above remain.
+
+## Owned native Mac composition
+
+A separate regression replaces the simulated process/frame/dialog boundary with
+an actual fresh installed-Chrome session on hosted Mac. The real per-launch
+HTTP/HTTPS/WS/WSS proxy self-check must complete before the full120-second routine
+offer is issued. The actual preparation kernel fills the two approved synthetic
+routine fields; process, document, root and frame observations remain native.
+The actual browser emits the opening/closed confirm events, and the existing
+opaque bridge consumes the real final-slot journal before forwarding to the
+independent loopback receiver. Only the test fixture accepts/dismisses the dialog.
+
+Exact test head `c239667a3418cd1818601a7451bf4ea39859d958` passed
+[run 36960457984](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36960457984):
+both cases in68.25s. Fixture-confirm observed one final POST and one durable
+slot; fixture-cancel observed zero of both. The owned browser and driver were
+proved absent afterward. The Mac-only test is retained in the full preparation
+matrix; its Linux skip is explicit. URLs and applicant material are synthetic,
+and this remains automated native-event evidence rather than physical-human,
+real-private application, owner-device or release certification.
