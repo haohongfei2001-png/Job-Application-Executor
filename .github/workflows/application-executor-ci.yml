@@ -11,6 +11,31 @@ permissions:
   contents: read
 
 jobs:
+  qiyunfang_human_channel_smoke:
+    # Early diagnosis only for the bounded channel candidate. Complete existing
+    # preparation and aggregate gates remain mandatory and unchanged below.
+    if: github.event_name == 'pull_request' && github.event.action != 'labeled' && github.head_ref == 'fix/qiyunfang-human-channel' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pinned native test prerequisites
+        run: |
+          python -m pip install -r requirements.txt
+          if [ ! -f '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' ]; then
+            python -m playwright install chrome
+          fi
+      - name: Complete synthetic native image and human-confirmation journey
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q -s 'tests/test_preparation_human_review_browser.py::test_private_human_review_exact_request_or_zero_and_closed_owner[accept]'
+
   preparation_validation:
     if: github.event.action != 'labeled'
     runs-on: ${{ matrix.os }}

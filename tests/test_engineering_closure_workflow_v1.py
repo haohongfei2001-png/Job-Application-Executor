@@ -161,7 +161,15 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertIn("types: [opened, synchronize, reopened, ready_for_review, labeled]", SOURCE)
         self.assertEqual(SOURCE.split("permissions:\n", 1)[1].split("\njobs:", 1)[0], "  contents: read\n")
         self.assertEqual(len(re.findall(r"^\s*permissions:", SOURCE, re.MULTILINE)), 1)
-        self.assertEqual(set(JOBS), ORDINARY | set(CLOSURE))
+        self.assertEqual(set(JOBS), ORDINARY | set(CLOSURE) | {'qiyunfang_human_channel_smoke'})
+        smoke=JOBS['qiyunfang_human_channel_smoke']
+        self.assertIn("    if: github.event_name == 'pull_request' && github.event.action != 'labeled' && github.head_ref == 'fix/qiyunfang-human-channel' && github.event.pull_request.head.repo.full_name == github.repository\n",smoke)
+        self.assertIn('    timeout-minutes: 8\n',smoke)
+        self.assertIn('    runs-on: macos-latest\n',smoke)
+        self.assertIn("tests/test_preparation_human_review_browser.py::test_private_human_review_exact_request_or_zero_and_closed_owner[accept]",smoke)
+        self.assertNotIn('upload-artifact',smoke)
+        self.assertNotIn('needs:',smoke)
+        self.assertNotIn('continue-on-error',smoke)
         expected_budgets = {"foundation": 30, "packaged_candidate": 20,
                             "macos_consumer_release": 25, "test": 70,
                             "engineering_closure_macos": 20, "preparation_validation": 25}

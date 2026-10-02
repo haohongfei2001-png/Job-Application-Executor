@@ -122,6 +122,25 @@ def make(root, valid):
         temporary.write_text(json.dumps(evidence))
         temporary.replace(PROOF)
     admission = NativePreparationAdmission(still_authorized=lambda: controller._alive())
+    class ImageProbe(captcha_image.CaptchaImageBroker):
+        def __init__(self,owner,page,guard):
+            evidence['phase']='CAPTCHA_CONSTRUCTOR';save()
+            def observed_guard():
+                try:guard()
+                except Exception:
+                    evidence['image_guard_failed']=True
+                    evidence['image_state']=getattr(self,'_state','BOOTSTRAP');save();raise
+            super().__init__(owner,page,observed_guard)
+            evidence['phase']='CAPTCHA_READY';save()
+        def handle(self,route):
+            evidence['image_requests']=evidence.get('image_requests',0)+1;save()
+            try:return super().handle(route)
+            finally:evidence['image_state']=self._state;save()
+        def load(self):
+            evidence['phase']='CAPTCHA_LOAD';save()
+            try:
+                result=super().load();evidence['phase']='CAPTCHA_DISPLAYED';save();return result
+            finally:evidence['image_state']=self._state;save()
     class Review(human_review.HumanReviewCoordinator):
         def __init__(self, owner):
             assert owner.context.pages == []
@@ -132,7 +151,7 @@ def make(root, valid):
             evidence['native_admitted'] = True
             evidence['process_sha'] = owner.identity.process_sha
             super().__init__(owner, admission.admit, forwarding_admission=lambda: True,
-                captcha_factory=captcha_image.CaptchaImageBroker,keep_terminal=CONFIG['decision']=='accept_keep')
+                captcha_factory=ImageProbe,keep_terminal=CONFIG['decision']=='accept_keep')
             self.fixture_owner = owner
             self.fixture_started = False
             self.fixture_observing = False
@@ -331,7 +350,8 @@ def test_private_human_review_exact_request_or_zero_and_closed_owner(
         try:offer = owner.open(task['task_id'], task['revision'], SESSION, ['0', '8'])
         except Exception:
             phase=json.loads(proof.read_text()).get('phase','NATIVE_ADMISSION') if proof.exists() else 'OWNER_START'
-            raise AssertionError('synthetic_child_stage:'+phase) from None
+            hint={key:value for key,value in json.loads(proof.read_text()).items() if key in {'phase','image_state','image_guard_failed','image_requests'}} if proof.exists() else {'phase':phase}
+            raise AssertionError('synthetic_child_stage:'+json.dumps(hint,sort_keys=True)) from None
         assert offer['live_write_available'] is True
         prepared = owner.approve(offer['nonce'], offer['scope_sha'], SESSION, approve_transmission=True)
         assert prepared['status'] == 'PREPARED_UNVERIFIED'
@@ -339,7 +359,8 @@ def test_private_human_review_exact_request_or_zero_and_closed_owner(
         try:started = owner.begin_human_review(SESSION)
         except Exception:
             phase=json.loads(proof.read_text()).get('phase','UNAVAILABLE')
-            raise AssertionError('synthetic_child_stage:'+phase) from None
+            hint={key:value for key,value in json.loads(proof.read_text()).items() if key in {'phase','image_state','image_guard_failed','image_requests'}} if proof.exists() else {'phase':phase}
+            raise AssertionError('synthetic_child_stage:'+json.dumps(hint,sort_keys=True)) from None
         public_results.append(started)
         assert started['status'] == 'MANUAL_REVIEW_ACTIVE'
         assert started['submit_capability'] is False
