@@ -215,7 +215,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
             <label><span id="preparation-upload-choice"></span>我同意将这份原始简历上传到武汉启云方科技有限公司</label>
             <button id="preparation-upload-approve" type="button" disabled>确认这份简历上传</button>
           </div>
-          <button id="preparation-human-review" type="button" hidden disabled>查看人工收尾步骤</button>
+          <button id="preparation-human-review" type="button" hidden disabled>显示官网验证码，进入人工收尾</button>
           <p>以上确认均不授权证件、验证码、协议或最终提交。关闭、隐藏资料或更换任务会结束本次准备，结果不明时不会自动重试。</p>
         </section>
         <button id="preparation-review-hide" class="preparation-secondary" type="button">隐藏个人值</button>
@@ -720,12 +720,18 @@ function nativeWatch(request){
     if(!nativeCurrent(request))return;
     try{
       const state=await nativeCall('status',request);if(!nativeCurrent(request))return;
+      if(state.submit_capability===false&&state.status==='HUMAN_RESULT'&&['RETURNED_UNVERIFIED','UNKNOWN_OUTCOME'].includes(state.final_status)){
+        nativeStatus.textContent=state.final_status==='RETURNED_UNVERIFIED'
+          ?'本人确认的请求已返回，但不代表申请成功。请在原生浏览器核对官网结果；窗口仅保留查看，不能再次发送，最迟五分钟后关闭。'
+          :'请求结果无法确认。请仅在原生浏览器核对，不要重复发送；窗口最迟五分钟后关闭。';
+        nativeWatch(request);return;
+      }
       if(state.submit_capability===false&&['RETURNED_UNVERIFIED','UNKNOWN_OUTCOME','CANCELLED'].includes(state.final_status)){
         clearPrivatePreparation();privatePreparationStatus.textContent=state.final_status==='RETURNED_UNVERIFIED'
           ?'本人确认的请求已返回，但申请是否成功尚未核验；不会自动再次发送。'
           :'人工收尾已取消或结果无法确认；没有自动重试，请本人核对官网。';return;
       }
-      if(state.submit_capability!==false||!['OFFERED','PREPARING','PREPARED_UNVERIFIED','REVIEWING_RESUME','RESUME_OFFERED','UPLOADING_RESUME','STARTING_HUMAN_REVIEW','HUMAN_REVIEW'].includes(state.status))throw new Error();
+      if(state.submit_capability!==false||!['OFFERED','PREPARING','PREPARED_UNVERIFIED','REVIEWING_RESUME','RESUME_OFFERED','UPLOADING_RESUME','STARTING_HUMAN_REVIEW','HUMAN_REVIEW','HUMAN_RESULT'].includes(state.status))throw new Error();
       nativeWatch(request);
     }catch(_){nativeFail(request,'准备状态已结束或无法确认，个人值已隐藏；不要据此重复填写或上传。');}
   },1000);
@@ -835,10 +841,10 @@ humanReview.onclick=async()=>{
       ||!['UNAVAILABLE','MANUAL_REVIEW_ACTIVE'].includes(result.status))throw new Error();
     nativeBusy=false;
     if(result.status==='UNAVAILABLE'){
-      nativeStatus.textContent='人工最终确认与官网验证码流程尚未启用；本窗口不会发送最终申请。证件、验证码、协议和最终提交仍由本人处理，填写或上传完成不代表已投递。';
+      nativeStatus.textContent='当前原生窗口不具备人工收尾条件；本窗口不会发送最终申请。证件、验证码、协议和最终提交仍由本人处理，填写或上传完成不代表已投递。';
     }else{
       resumeReview.disabled=uploadApprove.disabled=true;
-      nativeStatus.textContent='请仅在原生浏览器中亲自核对资料；应用不会替你填写证件、解验证码、接受协议或确认最终提交。取消或关闭会结束本次收尾，不会自动重试。';
+      nativeStatus.textContent='请在原生浏览器亲自核对资料并处理证件、显示的官网验证码及协议。只有你在原生确认框最后确认，才发送这一份请求；应用不会代点确认。不要刷新验证码或重复提交；取消或关闭会结束本次收尾，不会自动重试。';
     }
   }catch(_){nativeFail(request,'人工收尾条件无法确认；不会发送最终申请或自动重试。');}
 };

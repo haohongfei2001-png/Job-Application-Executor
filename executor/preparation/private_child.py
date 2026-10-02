@@ -315,6 +315,17 @@ class PrivatePreparationChild:
         finally:self._shutdown_lock.release()
 
 
+def approved_qiyunfang_owner(owner):
+    """Fixed user-approved domain gate; never controlled by IPC/env/settings."""
+    from .session import DisposablePreparationSession
+    from .qiyunfang import CONTRACT_URL
+    return (type(owner) is DisposablePreparationSession and owner.headless is False
+            and owner.channel=='chrome' and not owner._close_attempted
+            and owner.context is not None and owner.identity is not None
+            and len(owner.context.pages)<=1
+            and all(page.url==CONTRACT_URL for page in owner.context.pages))
+
+
 def _native_controller(root, valid):
     from ..autonomy.queue import TaskQueue
     from .controller import PreparationController
@@ -324,10 +335,13 @@ def _native_controller(root, valid):
     queue=TaskQueue(root)
     admission=NativePreparationAdmission(still_authorized=lambda:controller._alive())
     from .human_review import HumanReviewCoordinator
+    from .captcha_image import CaptchaImageBroker
     controller=PreparationController(queue,valid,
         owner_factory=lambda:DisposablePreparationSession(headless=False,channel='chrome'),
         write_admission=admission.admit,upload_admission=admission.admit,
-        human_review_factory=lambda owner:HumanReviewCoordinator(owner,admission.admit))
+        human_review_factory=lambda owner:HumanReviewCoordinator(owner,admission.admit,
+            forwarding_admission=lambda:approved_qiyunfang_owner(owner),
+            captcha_factory=CaptchaImageBroker,keep_terminal=True))
     return controller
 
 

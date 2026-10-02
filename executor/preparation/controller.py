@@ -29,7 +29,7 @@ class PreparationController:
         self._session_valid=session_valid;self._owner_factory=owner_factory;self._flow_factory=flow_factory
         self._write_admission=write_admission;self._clock=clock
         self._resume_factory=resume_factory;self._upload_admission=upload_admission
-        self._human_factory=human_review_factory;self._human=None;self._human_active=False
+        self._human_factory=human_review_factory;self._human=None;self._human_active=False;self._human_terminal=False
         self._final_status='UNAVAILABLE'
         self._commands=queue.Queue(maxsize=2);self._lock=threading.RLock();self._revoked=threading.Event()
         self._thread=None;self._owner=self._flow=None;self._session=None
@@ -165,9 +165,17 @@ class PreparationController:
                             pages=self._owner.context.pages
                             if len(pages)!=1:break
                             pages[0].wait_for_timeout(25)
-                            if self._human_active:
+                            if self._human_terminal:
+                                if self._clock()>=self._next_review_fence:
+                                    self._human.terminal_tick();self._next_review_fence=self._clock()+1
+                            elif self._human_active:
                                 self._final_status=self._human.tick()['status']
-                                if self._final_status in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME','CANCELLED'}:break
+                                if self._final_status in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME','CANCELLED'}:
+                                    if (getattr(self._human,'keep_terminal',False) is True
+                                            and self._final_status in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME'}):
+                                        self._human_terminal=True;self._state='HUMAN_RESULT'
+                                        self._deadline=min(self._deadline,self._clock()+300)
+                                    else:break
                             elif self._flow is not None and self._clock()>=self._next_review_fence:
                                 self._flow.review_fence();self._next_review_fence=self._clock()+1
                                 if self._state=='RESUME_OFFERED':self._resume.private_offer()

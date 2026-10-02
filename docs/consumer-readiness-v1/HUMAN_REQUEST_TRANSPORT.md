@@ -1,9 +1,9 @@
 # Exact opaque human-request transport prototype
 
-Status: **private-child integration, not live-enabled**. The bounded owner/controller
+Status: **fixed-site, native-human-gated private-child integration**. The bounded owner/controller
 path is documented in [human-review integration](HUMAN_REVIEW_INTEGRATION.md).
-Production forwarding admission remains unavailable; generic runner, model, Resume,
-OTP and v1 routes cannot invoke a final operation. A local review request is not
+Only the explicitly approved fixed Qiyunfang native-owner capability can enter
+review; generic runner, model, Resume, OTP and v1 routes cannot invoke a final operation. A local review request is not
 final-action authority.
 
 `OpaqueHumanRequest` retains one concrete paused form-urlencoded POST Request.
