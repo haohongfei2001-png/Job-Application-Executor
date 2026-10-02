@@ -135,3 +135,57 @@ def test_sibling_image_request_cannot_reuse_consumed_target(fixture):
                                   fulfill=lambda **_:pytest.fail('sibling fulfilled'))
     broker.handle(sibling_route)
     assert calls.count('fetch')==1 and calls[-1]=='sibling_abort'
+
+
+def test_terminal_deny_observation_never_resets_strict_write_history():
+    from executor.preparation.transport import PreparationTransport
+    gate=PreparationTransport();gate.installed=True;gate.phase='SEALED'
+    gate._sealed_certificate_valid=True;gate._sealed_denial_epoch=2;gate.blocked=3
+    gate.require_terminal_sealed()
+    assert gate.blocked==3 and gate._sealed_denial_epoch==2
+    with pytest.raises(RuntimeError):gate.require_sealed()
+    gate._accepted_attempts+=1
+    with pytest.raises(RuntimeError):gate.require_terminal_sealed()
+    assert gate._sealed_accepted_attempts==0
+    gate._accepted_attempts=0
+    for phase,installed,valid in [('READ_ONLY',True,True),('SEALED',False,True),('SEALED',True,False)]:
+        gate.phase=phase;gate.installed=installed;gate._sealed_certificate_valid=valid
+        with pytest.raises(RuntimeError):gate.require_terminal_sealed()
+
+
+def test_terminal_guard_distinguishes_actual_denial_from_extra_admitted_callback():
+    from executor.preparation.transport import PreparationTransport
+    from executor.preparation.qiyunfang import CONTRACT_URL
+    calls=[];response=SimpleNamespace(status=200,body=lambda:b'SYNTHETIC_PUBLIC_HTML')
+    gate=PreparationTransport(public_fetch=lambda _:calls.append('fetch') or response)
+    gate.installed=True;gate.context=SimpleNamespace(pages=[]);gate.seal()
+    request=SimpleNamespace(method='GET',url=CONTRACT_URL,post_data=None,is_navigation_request=lambda:False)
+    route=SimpleNamespace(request=request,abort=lambda *_:calls.append('abort'),fulfill=lambda **_:calls.append('fulfill'))
+    gate._route(route)
+    assert calls==['abort'] and gate._accepted_attempts==0
+    gate.require_terminal_sealed()
+    # A compromised/buggy callback that temporarily admits a request cannot
+    # hide the attempt merely by restoring the phase flag afterward.
+    gate.phase='READ_ONLY';gate._route(route);gate.phase='SEALED'
+    assert calls==['abort','fetch','fulfill'] and gate._accepted_attempts==1
+    assert gate._sealed_accepted_attempts==0
+    with pytest.raises(RuntimeError):gate.require_terminal_sealed()
+    with pytest.raises(RuntimeError):gate.require_sealed()
+
+
+def test_terminal_transport_observation_has_only_the_spent_review_callsite():
+    import ast
+    from pathlib import Path
+    root=Path(c.__file__).resolve().parents[1]
+    locations=[]
+    for path in root.rglob('*.py'):
+        tree=ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node,ast.FunctionDef):
+                for child in ast.walk(node):
+                    if (isinstance(child,ast.Call) and isinstance(child.func,ast.Attribute)
+                            and child.func.attr=='require_terminal_sealed'):
+                        locations.append((path.relative_to(root).as_posix(),node.name))
+    assert locations==[('preparation/human_review.py','terminal_tick')]
+    for name in ('autonomy/dashboard.py','autonomy/supervisor.py','preparation/private_child.py'):
+        assert '_accepted_attempts' not in (root/name).read_text()

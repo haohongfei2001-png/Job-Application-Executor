@@ -138,7 +138,9 @@ def make(root, valid):
             self.fixture_observing = False
             save()
         def begin(self, flow):
+            evidence['phase']='HUMAN_BEGIN';save()
             result = super().begin(flow)
+            evidence['phase']='HUMAN_ARMED';save()
             if result['status'] == 'MANUAL_REVIEW_ACTIVE':
                 self.fixture_page = flow.page
                 self.fixture_cdp = self.fixture_owner.context.new_cdp_session(flow.page)
@@ -205,10 +207,19 @@ def make(root, valid):
             try: route.fulfill(response=response)
             finally: response.dispose()
         owner.context.route(BASE + '/', document)
+        # A synthetic initial broken image is denied by this fixture route.
+        # The real public bootstrap separately certifies its known denials;
+        # this partial fixture must not invent/reset that production receipt.
+        import re
+        owner.context.route(re.compile('^'+re.escape(BASE+'/validateCode.jsp?0&vCodeId=15676')+'$'),
+                            lambda route:route.abort('blockedbyclient'))
+        evidence['phase']='DOCUMENT_LOADING';save()
         page = owner.context.new_page()
         page.goto(BASE + '/')
-        return PreparationFlow(authority, owner, page,
+        evidence['phase']='DOCUMENT_LOADED';save()
+        result=PreparationFlow(authority, owner, page,
             resources_sha=digest('SYNTHETIC_PRIVATE_HUMAN_REVIEW'), **kwargs)
+        evidence['phase']='FLOW_READY';save();return result
     controller = PreparationController(queue, valid, flow_factory=flow,
         owner_factory=lambda: DisposablePreparationSession(headless=False, channel='chrome'),
         write_admission=admission.admit, upload_admission=admission.admit,
@@ -317,12 +328,18 @@ def test_private_human_review_exact_request_or_zero_and_closed_owner(
     try:
         owner = private.PrivatePreparationChild(queue,
             lambda session: checks.append(session) is None and session == SESSION and allowed[0])
-        offer = owner.open(task['task_id'], task['revision'], SESSION, ['0', '8'])
+        try:offer = owner.open(task['task_id'], task['revision'], SESSION, ['0', '8'])
+        except Exception:
+            phase=json.loads(proof.read_text()).get('phase','NATIVE_ADMISSION') if proof.exists() else 'OWNER_START'
+            raise AssertionError('synthetic_child_stage:'+phase) from None
         assert offer['live_write_available'] is True
         prepared = owner.approve(offer['nonce'], offer['scope_sha'], SESSION, approve_transmission=True)
         assert prepared['status'] == 'PREPARED_UNVERIFIED'
         assert len(queue.field_actions(task['task_id'])) == 2
-        started = owner.begin_human_review(SESSION)
+        try:started = owner.begin_human_review(SESSION)
+        except Exception:
+            phase=json.loads(proof.read_text()).get('phase','UNAVAILABLE')
+            raise AssertionError('synthetic_child_stage:'+phase) from None
         public_results.append(started)
         assert started['status'] == 'MANUAL_REVIEW_ACTIVE'
         assert started['submit_capability'] is False

@@ -57,6 +57,7 @@ class PreparationTransport:
         self._certified_discovery = None
         self._sealed_denial_epoch = 0
         self._sealed_certificate_valid = True
+        self._accepted_attempts=0;self._sealed_accepted_attempts=0
         self.phase = "READ_ONLY"
         self.blocked = 0
         self.installed = False
@@ -138,6 +139,9 @@ class PreparationTransport:
             self._abort(route)
             return
         try:
+            # Record admission BEFORE any allowed network operation. This
+            # counter is never refunded by an error or hidden by a later deny.
+            self._accepted_attempts+=1
             if is_lookup or is_popup:
                 # Retire this sole pre-data lookup before its bounded request.
                 if is_lookup:
@@ -198,6 +202,7 @@ class PreparationTransport:
         if not self.installed or self.phase != "READ_ONLY":
             raise RuntimeError("preparation transport state conflict")
         self.phase = "SEALED"
+        self._sealed_accepted_attempts=self._accepted_attempts
         if self._certified_discovery is not None:
             self._sealed_certificate_valid=self._certified_discovery==(self.blocked,digest(self._discovery_receipt()))
             if self._sealed_certificate_valid:self._sealed_denial_epoch=self.blocked
@@ -205,5 +210,18 @@ class PreparationTransport:
 
     def require_sealed(self):
         if (not self.installed or self.phase != "SEALED" or not self._sealed_certificate_valid
-                or self.blocked!=self._sealed_denial_epoch):
+                or self.blocked!=self._sealed_denial_epoch
+                or self._accepted_attempts!=self._sealed_accepted_attempts):
             raise RuntimeError("preparation transport changed")
+
+
+    def require_terminal_sealed(self):
+        """Deny-only readback after a durable final result; grants no action.
+
+        Preserve original denial history. Later rejected page traffic must not
+        itself reopen a route or erase the returned page before human readback.
+        All send/write guards continue using strict require_sealed instead.
+        """
+        if (not self.installed or self.phase!="SEALED" or not self._sealed_certificate_valid
+                or self._accepted_attempts!=self._sealed_accepted_attempts):
+            raise RuntimeError("preparation terminal transport changed")

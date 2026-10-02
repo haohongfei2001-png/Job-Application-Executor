@@ -100,7 +100,6 @@ class HumanReviewCoordinator:
                 or self._closed or self.flow._still_authorized() is not True
                 or self.owner.identity.verify_os()!=self.flow.binding['process_sha']
                 or self.owner.context.pages!=[self.flow.page] or self.flow.page.is_closed()):raise PreparationConflict()
-        self.owner.transport.require_sealed()
         self.flow.authority._session(self.flow.session)
         flow=self.flow
         with _material(flow.authority.queue,flow.permit['task_id'],flow.permit['task_revision']) as (_,report,_,fence):
@@ -108,10 +107,19 @@ class HumanReviewCoordinator:
                 raise PreparationConflict()
             with flow.authority.queue.tx() as db:
                 _prepared_task(db,flow.permit,flow.journal.attempt_id)
-                row=db.execute('SELECT outcome FROM preparation_final_requests WHERE preparation_nonce_sha=?',
+                row=db.execute('SELECT * FROM preparation_final_requests WHERE preparation_nonce_sha=?',
                                (flow.permit['nonce_sha'],)).fetchone()
-                if row is None or row['outcome'] not in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME'}:raise PreparationConflict()
+                if (row is None or row['outcome'] not in {'RETURNED_UNVERIFIED','UNKNOWN_OUTCOME'}
+                        or self.journal is None or row['intent_sha']!=self.journal.intent
+                        or row['scope_sha']!=self.journal.scope_sha
+                        or row['request_nonce_sha']!=self.journal.request_nonce_sha
+                        or row['attempt_id']!=self.journal.attempt_id):raise PreparationConflict()
             fence()
+        if (self.bridge is None or self.bridge._state not in {'DONE','UNKNOWN'}
+                or self._captcha is not None and (self._captcha._state not in {'RETURNED','UNAVAILABLE','CLOSED'}
+                                                 or self._captcha._attempts!=1)):
+            raise PreparationConflict()
+        self.owner.transport.require_terminal_sealed()
         return self.status()
 
     def _invalidate(self):

@@ -37,7 +37,7 @@ class CaptchaImageBroker:
     def __init__(self,owner,page,guard,*,clock=time.monotonic):
         self._thread=threading.get_ident();self.owner=owner;self.page=page
         self._guard=guard;self._clock=clock;self._state='IDLE';self._deadline=0
-        self._request=None;self._target=None
+        self._request=None;self._target=None;self._attempts=0
         if (page.context is not owner.context or owner.context.pages!=[page]
                 or page.url!=CONTRACT_URL or not callable(guard)):raise PreparationConflict()
         guard();owner.transport.require_sealed()
@@ -68,6 +68,8 @@ class CaptchaImageBroker:
                 raise PreparationConflict()
             # Native image GET has no caller-supplied body. Do not inspect any
             # request body/header/cookie values. Preserve its opaque session.
+            if self._attempts:raise PreparationConflict()
+            self._attempts+=1
             self._state='ATTEMPTED';self._request=request
             self._check('ATTEMPTED')
             response=self.owner.client.fetch(request,max_redirects=0,max_retries=0,timeout=15000)
