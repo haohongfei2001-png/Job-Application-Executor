@@ -4,12 +4,22 @@
 
 ## 取得正确的候选包
 
-1. 只使用交付说明中**对应完整 Git 提交 SHA** 的成功 CI 运行。不要因为某个旧运行有附件就把它当作当前版本。
-2. 下载该运行的 `jae-engineering-NOT_CERTIFIED-<完整提交SHA>-<运行号>-<尝试号>` 工程附件。解压 GitHub 的外层 ZIP 后，完整文件夹应同时包含：
-   - `AIApplicationManager-unsigned.tar.gz`
-   - `distribution-manifest.json`
-3. 清单应标明 `signing: unsigned`、`certification: NOT_CERTIFIED`、`final_click_actor: user`、`task_state: excluded`。可用 macOS 的 `shasum -a 256 AIApplicationManager-unsigned.tar.gz` 核对 `archive_sha256`。清单里的 `source_sha256` 是源码载荷摘要，不是 40 位 Git 提交号。
-4. 附件仅保留 7 天；过期不是安装成功或失败的证据。没有对应成功运行及完整清单时，请勿安装。
+1. 只使用交付说明中**对应完整 Git 提交 SHA** 的成功 CI 运行，核对该运行的实际 checkout/测试提交与交付回执。不要因为某个旧运行有附件就把它当作当前版本；普通构建附件可能早于全套测试完成，须等待对应运行成功。
+2. 根据该运行的触发方式下载附件，两条现有路径都受支持：
+   - 普通 `main` push 或非 Draft PR 运行：`jae-unsigned-macos-<运行号>-<尝试号>`。名称不包含提交号，必须用上述运行与回执绑定完整 SHA。
+   - 明确添加匹配当前完整 SHA 的 `eng-<完整提交SHA>` 标签所触发的工程收口运行：`jae-engineering-NOT_CERTIFIED-<完整提交SHA>-<运行号>-<尝试号>`，详见[工程收口规则](ENGINEERING_CLOSURE.md)。普通 Draft PR 不默认生成候选包；普通 push 不生成这个标签路径的附件。
+   - 两条路径解压 GitHub 外层 ZIP 后，完整文件夹都应同时包含 `AIApplicationManager-unsigned.tar.gz` 和 `distribution-manifest.json`。
+3. 清单应标明 `signing: unsigned`、`certification: NOT_CERTIFIED`、`final_click_actor: user`、`task_state: excluded`。可用 macOS 的 `shasum -a 256 AIApplicationManager-unsigned.tar.gz` 核对 `archive_sha256`。GitHub 附件摘要对应外层 ZIP，不是这个内层归档摘要；清单里的 `source_sha256` 是源码载荷摘要，不是 40 位 Git 提交号。
+4. 附件仅保留 7 天；过期不是安装成功或失败的证据。没有对应成功运行及完整清单时，请勿安装。已有完整成功运行及正确附件时，不为补写交付回执而重新构建或重跑。
+
+### 已核对的交付记录（2026-10-02）
+
+- 对应提交：`9fc2202e3bde08ce0bfbc8a31d42464f9eb76d5a`。
+- [成功的 main CI 37045631893，尝试 1](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/37045631893)，完成于 2026-10-02 18:56:31 UTC。
+- [下载工程附件 `jae-unsigned-macos-37045631893-1`](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/37045631893/artifacts/11245607039)，记录的到期时间为 2026-10-09 18:32:52 UTC。
+- 构建清单记录的内层 `archive_sha256`：`3110593afd8c296754fa739a34c44e8c0be99fd1b65f79cff64264b02d919bc7`。下载后仍需自行核对文件与清单。
+
+[固定版本交付回执](receipts/DELIVERY-9FC2202-MAIN-CI-PASS.md) 记录完整测试范围、两层摘要及证据来源。此记录只绑定上述提交，不把后来文档或源码提交自动标为通过；不代表本人 Mac 安装、真实网站投递或消费级认证。
 
 ### 已有当前原生应用
 
