@@ -26,7 +26,6 @@ SCRIPT = r"""options => {
   const create = Object.create;
   const freeze = Object.freeze;
   const apply = Reflect.apply;
-  const ownKeys = Reflect.ownKeys;
   const query = Document.prototype.querySelectorAll;
   const queryElement = Element.prototype.querySelector;
   const item = NodeList.prototype.item;
@@ -139,19 +138,18 @@ SCRIPT = r"""options => {
       damage(target === globalThis ? 'GLOBAL_REFLECTION' : 'PROTOTYPE_REFLECTION'); return;
     }
   };
-  const reflectionMany = (target,properties) => {
-    if (sealed) { damage('POST_SEAL_REFLECTION'); return; }
-    if (target !== Object && target !== Reflect) { reflectionWrite(target); return; }
-    try {
-      const keys = ownKeys(properties);
-      for (let i=0; i<keys.length; i++) reflectionWrite(target,keys[i]);
-    } catch (_) { damage('INTRINSIC_REFLECTION'); }
+  const reflectionMany = target => {
+    // A Proxy can expose different keys to an audit and to the native call.
+    // Do not enumerate or inspect descriptor values twice. Bulk intrinsic
+    // definitions are unsupported; the public page needs only singular keys.
+    if (target === Object || target === Reflect) { damage(sealed ? 'POST_SEAL_REFLECTION' : 'INTRINSIC_REFLECTION'); return; }
+    reflectionWrite(target);
   };
   const wrapReflection = (proto,name) => {
     const original = descriptor(proto,name);
     if (!original || typeof original.value !== 'function' || !original.configurable) { damage('METHOD_UNAVAILABLE'); return; }
     const method = function(...args) {
-      if (name === 'defineProperties') reflectionMany(args[0],args[1]);
+      if (name === 'defineProperties') reflectionMany(args[0]);
       else reflectionWrite(args[0],name === 'setPrototypeOf' ? null : args[1]);
       return apply(original.value,this,args);
     };
