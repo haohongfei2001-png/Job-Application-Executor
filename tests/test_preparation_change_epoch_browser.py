@@ -162,3 +162,67 @@ def test_writable_global_alias_cannot_forge_a_healthy_native_read(watched):
     }''',{'key':observer.key,'epoch':observer.baseline})
     with pytest.raises(ChangeEpochConflict):observer.unchanged()
     with pytest.raises(ChangeEpochConflict):observer.unchanged()
+
+
+def test_reason_diagnostic_never_exports_protected_descriptor_data(watched):
+    page,observer=watched
+    page.evaluate("Object.defineProperty(document.querySelector('#field'),'value',{get(){throw Error('PRIVATE_REASON_CANARY')},configurable:true})")
+    with pytest.raises(ChangeEpochConflict):observer.unchanged()
+    assert observer.diagnostic()=='POST_SEAL_REFLECTION'
+    with pytest.raises(ChangeEpochConflict):observer.unchanged()
+
+
+@pytest.mark.parametrize('polyfill',[
+    "Object.defineProperty(Object,'jaeUnrelatedPolyfill',{value:()=>1,configurable:true})",
+    "Object.defineProperties(Object,{jaeUnrelatedPolyfill:{value:()=>1,configurable:true}})",
+    "Reflect.defineProperty(Reflect,'jaeUnrelatedPolyfill',{value:()=>1,configurable:true})",
+])
+def test_intrinsic_polyfills_allow_only_singular_preseal_definitions(browser,polyfill):
+    context=browser.new_context(service_workers='block');observer=PreDocumentChangeEpoch(context)
+    context.route('**/*',lambda route:route.fulfill(status=200,content_type='text/html',body=HTML+'<script>'+polyfill+'</script>'))
+    page=context.new_page();page.goto('https://synthetic.invalid/')
+    if polyfill.startswith('Object.defineProperties'):
+        with pytest.raises(ChangeEpochConflict):observer.seal()
+        assert observer.diagnostic()=='INTRINSIC_REFLECTION'
+        context.close();return
+    observer.seal()
+    assert observer.unchanged()==observer.baseline and observer.diagnostic()=='NONE'
+    page.evaluate('code=>{try{eval(code)}catch(_){}}',polyfill)
+    with pytest.raises(ChangeEpochConflict):observer.unchanged()
+    context.close()
+
+
+@pytest.mark.parametrize('mutation',[
+    "Object.defineProperty(Object,'defineProperty',Object.getOwnPropertyDescriptor(Object,'defineProperty'))",
+    "Object.defineProperties(Object,{defineProperties:Object.getOwnPropertyDescriptor(Object,'defineProperties')})",
+    "Reflect.defineProperty(Reflect,'defineProperty',Object.getOwnPropertyDescriptor(Reflect,'defineProperty'))",
+    "Object.setPrototypeOf(Object,Object.getPrototypeOf(Object))",
+    "Reflect.setPrototypeOf(Reflect,Object.getPrototypeOf(Reflect))",
+])
+def test_even_restored_or_idempotent_protected_intrinsic_mutation_is_refused(browser,mutation):
+    context=browser.new_context(service_workers='block');observer=PreDocumentChangeEpoch(context)
+    script='<script>try{'+mutation+'}catch(_){}</script>'
+    context.route('**/*',lambda route:route.fulfill(status=200,content_type='text/html',body=HTML+script))
+    page=context.new_page();page.goto('https://synthetic.invalid/')
+    with pytest.raises(ChangeEpochConflict):observer.seal()
+    assert observer.diagnostic()=='INTRINSIC_REFLECTION'
+    context.close()
+
+
+def test_bulk_intrinsic_proxy_cannot_swap_audited_keys_before_the_native_definition(browser):
+    context=browser.new_context(service_workers='block');observer=PreDocumentChangeEpoch(context)
+    script='''<script>
+      globalThis.keyReads=0;
+      const descriptors=new Proxy({}, {
+        ownKeys(){return ++keyReads===1 ? ['jaeUnusedPolyfill'] : ['defineProperty']},
+        getOwnPropertyDescriptor(){return {enumerable:true,configurable:true}},
+        get(){return Object.getOwnPropertyDescriptor(Object,'defineProperty')}
+      });
+      try { Object.defineProperties(Object,descriptors); } catch (_) {}
+    </script>'''
+    context.route('**/*',lambda route:route.fulfill(status=200,content_type='text/html',body=HTML+script))
+    page=context.new_page();page.goto('https://synthetic.invalid/')
+    with pytest.raises(ChangeEpochConflict):observer.seal()
+    assert observer.diagnostic()=='INTRINSIC_REFLECTION'
+    assert page.evaluate('keyReads')<=1
+    context.close()

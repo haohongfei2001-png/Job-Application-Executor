@@ -103,3 +103,12 @@ def test_observer_cannot_become_a_production_entrypoint():
         assert 'from .change_epoch' not in source
         assert 'from executor.preparation.change_epoch' not in source
         assert 'PreDocumentChangeEpoch' not in source
+
+
+@pytest.mark.parametrize('value',['EXTRA_REALM','GLOBAL_REFLECTION','PRIVATE_CANARY',{'value':'PRIVATE_CANARY'},None])
+def test_research_diagnostic_is_finite_and_cannot_clear_refusal(value):
+    context=Context();watch=PreDocumentChangeEpoch(context);page=Page(context);watch.seal()
+    watch._invalidate();page.evaluate=lambda *_:value
+    expected=value if value in ('EXTRA_REALM','GLOBAL_REFLECTION') else 'UNAVAILABLE'
+    assert watch.diagnostic()==expected
+    with pytest.raises(ChangeEpochConflict):watch.unchanged()
