@@ -69,6 +69,20 @@ class PrivatePreparationSessions:
 
     def open_native(self,data,session):
         """Start a distinct headed owner; never upgrade the headless preflight."""
+        self._session(session);_request(data,True)
+        with self.lock:
+            previous=self.active
+            waiting=(previous is not None and previous['key'][0]==self._key(session,'')[0]
+                     and previous['key'] in self.cancelled
+                     and previous['controller'].status()['status']!='CLOSED')
+        if waiting:
+            # Cancellation acknowledgement does not prove browser disposal.
+            # Join only this session's already-revoked owner, outside the
+            # manager lock. Unknown cleanup never permits a replacement owner.
+            if previous['controller'].shutdown(timeout=10) is not True:
+                raise PreparationConflict()
+        # _open rechecks retirement, session, task/material versions, the new
+        # cancellation tombstone and the current owner under its ordinary lock.
         return self._open(data,session,self.native_factory,native=True)
 
     def _open(self,data,session,factory,*,native):

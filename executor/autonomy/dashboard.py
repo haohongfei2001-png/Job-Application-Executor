@@ -545,14 +545,24 @@ const privatePreparation=document.getElementById('preparation-review'),
 const preparationSiteCheck=document.getElementById('preparation-site-check'),
   preparationSiteStatus=document.getElementById('preparation-site-status');
 let preparationSiteRequest=null,preparationSiteTimer=null,preparationSitePoll=null,privatePreparationValues=null;
+const preparationRetirements=new Set();
+function trackPreparationRetirement(promise){
+  preparationRetirements.add(promise);
+  promise.finally(()=>preparationRetirements.delete(promise));
+  return promise;
+}
 function cancelSitePreflight(){
   const request=preparationSiteRequest;preparationSiteRequest=null;
   if(preparationSiteTimer)clearTimeout(preparationSiteTimer);preparationSiteTimer=null;
   if(preparationSitePoll)clearTimeout(preparationSitePoll);preparationSitePoll=null;
   preparationSiteCheck.disabled=true;
-  if(request)uiRequest('/ui/api/preparation-session/cancel',{method:'POST',credentials:'same-origin',cache:'no-store',keepalive:true,
+  if(!request)return Promise.resolve(true);
+  return trackPreparationRetirement(uiRequest('/ui/api/preparation-session/cancel',{method:'POST',credentials:'same-origin',cache:'no-store',keepalive:true,
     headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:request.request_id,task_id:request.task_id,
-      expected_revision:request.expected_revision})}).catch(()=>{});
+      expected_revision:request.expected_revision})}).then(async response=>{
+        const result=await response.json();
+        return response.ok&&result.status==='CANCELLATION_REQUESTED'&&result.submit_capability===false;
+      }).catch(()=>false));
 }
 function clearPrivatePreparation(){
   cancelNativePreparation();
@@ -679,8 +689,12 @@ function cancelNativePreparation(){
   fillConsent.checked=uploadConsent.checked=false;fillConsent.disabled=uploadConsent.disabled=false;
   fillApprove.disabled=uploadApprove.disabled=resumeReview.disabled=nativeOpen.disabled=true;
   nativeWarning.textContent=resumeDetail.textContent=nativeStatus.textContent='';
-  if(request)uiRequest('/ui/api/native-preparation/cancel',{method:'POST',credentials:'same-origin',cache:'no-store',keepalive:true,
-    headers:{'Content-Type':'application/json'},body:JSON.stringify(nativeBase(request))}).catch(()=>{});
+  if(!request)return Promise.resolve(true);
+  return trackPreparationRetirement(uiRequest('/ui/api/native-preparation/cancel',{method:'POST',credentials:'same-origin',cache:'no-store',keepalive:true,
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(nativeBase(request))}).then(async response=>{
+      const result=await response.json();
+      return response.ok&&result.status==='CANCELLATION_REQUESTED'&&result.submit_capability===false;
+    }).catch(()=>false));
 }
 async function nativeCall(action,request,extra={}){
   const response=await uiRequest('/ui/api/native-preparation/'+action,{method:'POST',credentials:'same-origin',cache:'no-store',
@@ -719,17 +733,27 @@ function validNativeOffer(result,request,selected){
     &&Number.isInteger(result.expires_in_seconds)&&result.expires_in_seconds>0&&result.expires_in_seconds<=120
     &&JSON.stringify(result.plan)===JSON.stringify(selected);
 }
+async function waitPreparationRetirement(retirement){
+  let timer;
+  try{return await Promise.race([retirement,new Promise(resolve=>{
+    timer=setTimeout(()=>resolve([false]),10000);
+  })]);}finally{clearTimeout(timer);}
+}
 nativeOpen.onclick=async()=>{
   if(nativeOpen.disabled||!preparationBinding||!privatePreparationValues||privatePreparation.hidden||uiSessionExpired)return;
   cancelNativePreparation();cancelSitePreflight();
+  const retirement=Promise.all([...preparationRetirements]);
   const selectedIds=[...privatePreparationFields.querySelectorAll('input:checked')].map(input=>input.dataset.fieldId);
   const selected=privatePreparationValues.proposals.filter(item=>selectedIds.includes(item.field_id)).map(item=>({field_id:item.field_id,value:item.value}));
   if(!selectedIds.length||selected.length!==selectedIds.length)return;
   const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);
   const request={request_id:[...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join(''),task_id:preparationBinding.taskId,
     expected_revision:preparationBinding.revision,binding:preparationBinding,epoch:preparationEpoch,privateEpoch:privatePreparationEpoch};
-  nativeRequest=request;nativeStatus.textContent='正在检查本机原生浏览器条件并核对官网；尚未授权填写…';
+  nativeRequest=request;nativeStatus.textContent='正在结束前次检查并准备本机原生浏览器；尚未授权填写…';
   try{
+    const retired=await waitPreparationRetirement(retirement);
+    if(!nativeCurrent(request))return;
+    if(retired.some(closed=>closed!==true))throw new Error();
     const result=await nativeCall('open',request,{selected_ids:selectedIds,profile_version:privatePreparationValues.profile_version,
       resume_version:privatePreparationValues.resume_version});
     if(!nativeCurrent(request))return;if(!validNativeOffer(result,request,selected))throw new Error();
