@@ -38,12 +38,20 @@ class NativePreparationAdmission:
     def __repr__(self): return '<NativePreparationAdmission>'
 
     @staticmethod
-    def available():
+    def platform_available():
+        """Static runtime check; private environment is checked in its owner."""
         try:
-            require_private_transport_environment()
             return (sys.platform=='darwin' and platform.machine()=='arm64'
                     and importlib.metadata.version('playwright')==SUPPORTED_PLAYWRIGHT
                     and Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome').is_file())
+        except Exception:
+            return False
+
+    @staticmethod
+    def available():
+        try:
+            require_private_transport_environment()
+            return NativePreparationAdmission.platform_available()
         except Exception:
             return False
 
