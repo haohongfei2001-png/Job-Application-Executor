@@ -33,6 +33,7 @@ def install(monkeypatch,fail=None):
         return SimpleNamespace(page=SimpleNamespace(wait_for_timeout=lambda ms:step('wait_2000') if ms==2000 else pytest.fail('unbounded wait')))
     monkeypatch.setattr(probe,'DisposablePreparationSession',Session)
     monkeypatch.setattr(probe,'PreDocumentChangeEpoch',Observer)
+    monkeypatch.setattr(probe,'RetainedXHRClassifier',Observer)
     monkeypatch.setattr(probe,'open_public_form',open_form)
     return events
 
@@ -81,3 +82,11 @@ def test_diagnostic_workflow_has_one_explicit_readonly_branch_and_no_private_aut
     for forbidden in ('pull_request','workflow_dispatch','secrets.','contents: write','write-all',
                       'continue-on-error','build_macos_app','profiles/','--ignore-certificate-errors'):
         assert forbidden not in source
+
+
+def test_optional_classifier_probe_never_arms_a_final_request(monkeypatch):
+    events=install(monkeypatch);result=probe.probe(xhr_classifier=True)
+    assert result['classifier_installed'] is True
+    assert result['status']=='EMPTY_PUBLIC_FORM_COMPATIBLE'
+    assert result['applicant_data_entered'] is result['final_action_enabled'] is result['live_enabled'] is False
+    assert events.index('install_before_page')<events.index('open_empty_public_form')

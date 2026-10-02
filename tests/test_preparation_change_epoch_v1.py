@@ -98,11 +98,14 @@ def test_observer_cannot_become_a_production_entrypoint():
     from pathlib import Path
     root=Path(__file__).resolve().parents[1]
     for path in (root/'executor').rglob('*.py'):
-        if path.name=='change_epoch.py':continue
+        if path.name in {'change_epoch.py','request_classifier.py'}:continue
         source=path.read_text()
         assert 'from .change_epoch' not in source
         assert 'from executor.preparation.change_epoch' not in source
         assert 'PreDocumentChangeEpoch' not in source
+        assert 'RetainedXHRClassifier' not in source
+        assert 'from .request_classifier' not in source
+        assert 'from executor.preparation.request_classifier' not in source
 
 
 @pytest.mark.parametrize('value',['EXTRA_REALM','GLOBAL_REFLECTION','PRIVATE_CANARY',{'value':'PRIVATE_CANARY'},None])

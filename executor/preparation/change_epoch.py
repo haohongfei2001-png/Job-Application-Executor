@@ -277,10 +277,13 @@ class PreDocumentChangeEpoch:
         self.page = None
         self.invalid = False
         self.baseline = None
-        context.add_init_script(script='('+SCRIPT+')('+json.dumps({'key':self.key,'rootSelector':ROOT})+');')
+        context.add_init_script(script=self._init_script())
         context.on('page', self._page_created)
         context.on('serviceworker', self._invalidate)
         context.on('close', self._invalidate)
+
+    def _init_script(self):
+        return '('+SCRIPT+')('+json.dumps({'key':self.key,'rootSelector':ROOT})+');'
 
     def _page_created(self, page):
         if self.page is not None:

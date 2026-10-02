@@ -1,0 +1,31 @@
+name: Native classified human-request proof
+
+on:
+  push:
+    branches: [test/jae-native-classified-human]
+
+permissions:
+  contents: read
+
+jobs:
+  native_classified_handoff:
+    runs-on: macos-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install pinned dependencies and official headed Chrome
+        run: |
+          python -m pip install -r requirements.txt
+          if [ ! -f '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' ]; then
+            python -m playwright install chrome
+          fi
+      - name: Verify the exact owned native process and dialog composition
+        env:
+          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
+        run: python -m pytest -q -s tests/test_preparation_classified_native_browser.py
