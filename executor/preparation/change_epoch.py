@@ -26,6 +26,7 @@ SCRIPT = r"""options => {
   const create = Object.create;
   const freeze = Object.freeze;
   const apply = Reflect.apply;
+  const ownKeys = Reflect.ownKeys;
   const query = Document.prototype.querySelectorAll;
   const queryElement = Element.prototype.querySelector;
   const item = NodeList.prototype.item;
@@ -121,18 +122,39 @@ SCRIPT = r"""options => {
   wrapMethod(Document.prototype,'open','DOCUMENT_REPLACED');
   wrapMethod(Element.prototype,'attachShadow','SHADOW_REALM');
   wrapMethod(globalThis,'open','NEW_WINDOW');
-  const reflectionWrite = target => {
+  const reflectionWrite = (target,name=null) => {
     if (sealed) { damage('POST_SEAL_REFLECTION'); return; }
-    // Before sealing, page code may define normal object properties. Native
-    // instrumentation/prototype mutations are unsupported even if restored.
-    for (let i=0; i<chains.length; i++) if (target === chains[i][0]) {
-      damage(target === globalThis ? 'GLOBAL_REFLECTION' : target === Object || target === Reflect ? 'INTRINSIC_REFLECTION' : 'PROTOTYPE_REFLECTION'); return;
+    // Public pages may install unrelated Object/Reflect polyfills before the
+    // snapshot exists. Only our pinned keys on these containers are protected;
+    // changing either container's prototype is always unsupported. No incoming
+    // descriptor getter/value is inspected to make this distinction.
+    if (target === Object || target === Reflect) {
+      if (typeof name !== 'string' && typeof name !== 'symbol') { damage('INTRINSIC_REFLECTION'); return; }
+      for (let i=0; i<watched.length; i++) {
+        if (watched[i][0] === target && watched[i][1] === name) { damage('INTRINSIC_REFLECTION'); return; }
+      }
+      return;
     }
+    for (let i=0; i<chains.length; i++) if (target === chains[i][0]) {
+      damage(target === globalThis ? 'GLOBAL_REFLECTION' : 'PROTOTYPE_REFLECTION'); return;
+    }
+  };
+  const reflectionMany = (target,properties) => {
+    if (sealed) { damage('POST_SEAL_REFLECTION'); return; }
+    if (target !== Object && target !== Reflect) { reflectionWrite(target); return; }
+    try {
+      const keys = ownKeys(properties);
+      for (let i=0; i<keys.length; i++) reflectionWrite(target,keys[i]);
+    } catch (_) { damage('INTRINSIC_REFLECTION'); }
   };
   const wrapReflection = (proto,name) => {
     const original = descriptor(proto,name);
     if (!original || typeof original.value !== 'function' || !original.configurable) { damage('METHOD_UNAVAILABLE'); return; }
-    const method = function(...args) { reflectionWrite(args[0]); return apply(original.value,this,args); };
+    const method = function(...args) {
+      if (name === 'defineProperties') reflectionMany(args[0],args[1]);
+      else reflectionWrite(args[0],name === 'setPrototypeOf' ? null : args[1]);
+      return apply(original.value,this,args);
+    };
     const current = {value:method,writable:false,enumerable:original.enumerable,configurable:false};
     define(proto,name,current); track(proto,name,current);
   };
@@ -146,7 +168,7 @@ SCRIPT = r"""options => {
   for (let i=0; i<legacyNames.length; i++) {
     const name = legacyNames[i];
     const original = descriptor(Object.prototype,name);
-    const method = function(...args) { reflectionWrite(this); return apply(original.value,this,args); };
+    const method = function(...args) { reflectionWrite(this,args[0]); return apply(original.value,this,args); };
     const current = {value:method,writable:false,enumerable:false,configurable:false};
     define(Object.prototype,name,current); track(Object.prototype,name,current);
   }

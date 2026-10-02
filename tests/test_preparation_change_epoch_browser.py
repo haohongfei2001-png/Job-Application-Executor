@@ -170,3 +170,35 @@ def test_reason_diagnostic_never_exports_protected_descriptor_data(watched):
     with pytest.raises(ChangeEpochConflict):observer.unchanged()
     assert observer.diagnostic()=='POST_SEAL_REFLECTION'
     with pytest.raises(ChangeEpochConflict):observer.unchanged()
+
+
+@pytest.mark.parametrize('polyfill',[
+    "Object.defineProperty(Object,'jaeUnrelatedPolyfill',{value:()=>1,configurable:true})",
+    "Object.defineProperties(Object,{jaeUnrelatedPolyfill:{value:()=>1,configurable:true}})",
+    "Reflect.defineProperty(Reflect,'jaeUnrelatedPolyfill',{value:()=>1,configurable:true})",
+])
+def test_unrelated_intrinsic_polyfill_is_allowed_only_before_seal(browser,polyfill):
+    context=browser.new_context(service_workers='block');observer=PreDocumentChangeEpoch(context)
+    context.route('**/*',lambda route:route.fulfill(status=200,content_type='text/html',body=HTML+'<script>'+polyfill+'</script>'))
+    page=context.new_page();page.goto('https://synthetic.invalid/');observer.seal()
+    assert observer.unchanged()==observer.baseline and observer.diagnostic()=='NONE'
+    page.evaluate('code=>{try{eval(code)}catch(_){}}',polyfill)
+    with pytest.raises(ChangeEpochConflict):observer.unchanged()
+    context.close()
+
+
+@pytest.mark.parametrize('mutation',[
+    "Object.defineProperty(Object,'defineProperty',Object.getOwnPropertyDescriptor(Object,'defineProperty'))",
+    "Object.defineProperties(Object,{defineProperties:Object.getOwnPropertyDescriptor(Object,'defineProperties')})",
+    "Reflect.defineProperty(Reflect,'defineProperty',Object.getOwnPropertyDescriptor(Reflect,'defineProperty'))",
+    "Object.setPrototypeOf(Object,Object.getPrototypeOf(Object))",
+    "Reflect.setPrototypeOf(Reflect,Object.getPrototypeOf(Reflect))",
+])
+def test_even_restored_or_idempotent_protected_intrinsic_mutation_is_refused(browser,mutation):
+    context=browser.new_context(service_workers='block');observer=PreDocumentChangeEpoch(context)
+    script='<script>try{'+mutation+'}catch(_){}</script>'
+    context.route('**/*',lambda route:route.fulfill(status=200,content_type='text/html',body=HTML+script))
+    page=context.new_page();page.goto('https://synthetic.invalid/')
+    with pytest.raises(ChangeEpochConflict):observer.seal()
+    assert observer.diagnostic()=='INTRINSIC_REFLECTION'
+    context.close()
