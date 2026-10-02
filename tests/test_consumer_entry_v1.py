@@ -6368,3 +6368,74 @@ def test_http_service_retirement_observation_is_ordered_across_paused_handler(
         server_thread.join(timeout=5)
     assert not client_thread.is_alive()
     assert not server_thread.is_alive()
+
+
+@pytest.mark.parametrize("registry_read", [1, 2, 3])
+@pytest.mark.parametrize("successor", [
+    "absent", "same_record", "replacement", "symlink", "dangling_symlink", "hardlink",
+])
+def test_retirement_registry_unlink_between_open_and_fstat_preserves_authority(
+    retirement_private_state, tmp_path, monkeypatch, registry_read, successor
+):
+    """A real unlinked descriptor is absence only when its path is also gone.
+
+    Reads 1/2 are before the authenticated stop; read 3 is its first retirement
+    poll. The fault uses actual unlink/inodes, not a fabricated stat result.
+    """
+    root, queue, db, key = retirement_private_state
+    registry, record = _retirement_registry(root)
+    outside = tmp_path / "successor-service.json"
+    replacement = {**record, "instance": "B" * 43}
+    outside.write_text(json.dumps(replacement), encoding="utf-8")
+    outside.chmod(0o600)
+    before = _retirement_authority(root, db)
+    real_open = os.open
+    opens, calls, after_fault = [], [], []
+
+    def read_with_unlink(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == registry:
+            opens.append(fd)
+            if len(opens) == registry_read:
+                registry.unlink()
+                if successor in {"same_record", "replacement"}:
+                    _retirement_registry(root, record if successor == "same_record" else replacement)
+                elif successor == "symlink":
+                    registry.symlink_to(outside)
+                elif successor == "dangling_symlink":
+                    registry.symlink_to(tmp_path / "missing-service.json")
+                elif successor == "hardlink":
+                    os.link(outside, registry)
+                assert os.fstat(fd).st_nlink == 0
+                after_fault.append(_retirement_inventory(tmp_path))
+        return fd
+
+    def request(_root, port, path, data=None):
+        calls.append(path)
+        assert _root == root and port == record["port"]
+        if path == "/v1/service-identity":
+            assert data is None
+            return record
+        assert path == "/v1/service-stop" and data == record
+        return {"ok": True, "stopping": True}
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("registry retirement must not signal, inspect or replay a process")
+
+    monkeypatch.setattr(cli.os, "open", read_with_unlink)
+    monkeypatch.setattr(cli, "request", request)
+    monkeypatch.setattr(cli.os, "kill", forbidden)
+    monkeypatch.setattr(cli.subprocess, "run", forbidden)
+    result = cli.lifecycle("stop", root, record["port"])
+    expected = ({"ok": True, "running": False} if registry_read == 3 else
+                {"ok": False, "reason": "service_record_missing"})
+    if successor != "absent":
+        expected = {"ok": False, "reason": "service_identity_unverified"}
+    assert result == expected
+    assert len(opens) == registry_read
+    assert calls == ["/v1/service-identity", "/v1/service-stop"][:registry_read - 1]
+    assert len(after_fault) == 1
+    _assert_retirement_inventory(tmp_path, after_fault[0])
+    _assert_retirement_authority(root, db, before)
+    assert (root / "task-answers.key").read_bytes() == key
+    assert "PRIVATE_" not in json.dumps(result)

@@ -60,6 +60,11 @@ def _service_record(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, encoding="utf-8") as handle:
         metadata = os.fstat(handle.fileno())
+        if metadata.st_nlink == 0:
+            # Retirement can unlink this exact inode after open but before
+            # fstat. Preserve the ordinary missing-path result only if lstat
+            # confirms absence; any replacement/alias still fails below.
+            path.stat(follow_symlinks=False)
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
                 or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077):
             raise ValueError("service_identity_unverified")
