@@ -94,11 +94,14 @@ def test_failed_initial_seal_cannot_be_retried_after_repair():
     with pytest.raises(ChangeEpochConflict):watch.seal()
 
 
-def test_observer_cannot_become_a_production_entrypoint():
+def test_only_owner_coordinator_composes_classifier_and_live_forwarding_stays_disabled():
     from pathlib import Path
     root=Path(__file__).resolve().parents[1]
     for path in (root/'executor').rglob('*.py'):
-        if path.name in {'change_epoch.py','request_classifier.py'}:continue
+        # The sole owner-thread composition is now wired, but production
+        # constructs it with unavailable forwarding admission (checked below).
+        if path.relative_to(root).as_posix() in {'executor/preparation/change_epoch.py',
+                'executor/preparation/request_classifier.py','executor/preparation/human_review.py'}:continue
         source=path.read_text()
         assert 'from .change_epoch' not in source
         assert 'from executor.preparation.change_epoch' not in source
@@ -106,6 +109,31 @@ def test_observer_cannot_become_a_production_entrypoint():
         assert 'RetainedXHRClassifier' not in source
         assert 'from .request_classifier' not in source
         assert 'from executor.preparation.request_classifier' not in source
+
+    import ast
+    coordinator=ast.parse((root/'executor/preparation/human_review.py').read_text())
+    cls=next(node for node in coordinator.body if isinstance(node,ast.ClassDef) and node.name=='HumanReviewCoordinator')
+    init=next(node for node in cls.body if isinstance(node,ast.FunctionDef) and node.name=='__init__')
+    index=[arg.arg for arg in init.args.kwonlyargs].index('forwarding_admission')
+    default=init.args.kw_defaults[index]
+    assert isinstance(default,ast.Lambda) and isinstance(default.body,ast.Constant) and default.body.value is False
+    child=ast.parse((root/'executor/preparation/private_child.py').read_text())
+    constructions=[node for node in ast.walk(child) if isinstance(node,ast.Call)
+                   and isinstance(node.func,ast.Name) and node.func.id=='HumanReviewCoordinator']
+    assert len(constructions)==1 and len(constructions[0].args)==2 and constructions[0].keywords==[]
+    owner,admission=constructions[0].args
+    assert isinstance(owner,ast.Name) and owner.id=='owner'
+    assert (isinstance(admission,ast.Attribute) and admission.attr=='admit'
+            and isinstance(admission.value,ast.Name) and admission.value.id=='admission')
+    locations=[]
+    for path in (root/'executor').rglob('*.py'):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node,ast.Call) and
+                    (isinstance(node.func,ast.Name) and node.func.id=='HumanReviewCoordinator'
+                     or isinstance(node.func,ast.Attribute) and node.func.attr=='HumanReviewCoordinator')):
+                locations.append(path.relative_to(root).as_posix())
+    assert locations==['executor/preparation/private_child.py']
+
 
 
 @pytest.mark.parametrize('value',['EXTRA_REALM','GLOBAL_REFLECTION','PRIVATE_CANARY',{'value':'PRIVATE_CANARY'},None])
