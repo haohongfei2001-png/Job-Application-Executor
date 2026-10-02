@@ -41,8 +41,16 @@ JavaScript is sandboxed. Browser extensions, prior privileged init scripts,
 protocol-injected isolated worlds and arbitrary request-generation logic are
 outside this component's proof. Pinned prototypes can be incompatible with page
 frameworks; such pages must remain unsupported rather than relaxing the guard.
-The actual Qiyunfang scripts have not been admitted by this research component.
+An explicit public-empty-form diagnostic has now observed the pinned Qiyunfang scripts with this observer. This is not production or private-form admission.
 A separate body-free request classifier, retained request/document/process
 binding, durable final-slot ownership, native human-event provenance and all
 private/live acceptance gates are still required. No production integration or
 release certification follows from passing these synthetic tests.
+
+## Public empty-form compatibility correction
+
+The original public probe reached the matched empty form but refused epoch sealing on both Linux and Mac. Finite diagnostics identified a pre-seal intrinsic definition. The observer now permits only single-key definitions of unrelated Object/Reflect properties before sealing. Its own pinned keys, prototype changes, bulk intrinsic definitions and every post-seal reflection write still invalidate trust. Invalidation does not prevent the wrapper from invoking the underlying native method; this component does not block all page mutations or become a JavaScript sandbox.
+
+The bulk-definition path refuses trust without an audit enumeration, so a Proxy cannot swap the audited and applied property names. The alternating-ownKeys regression is retained. Diagnostics expose only a fixed reason enum and cannot clear an existing refusal.
+
+Exact code head `219578b8bc8ca01436c4494d6e95d28ac578e910` passed [public compatibility run 36956253583](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/36956253583): 96 synthetic/contract cases on each platform, followed by the actual empty official form, sealed deny transport, two seconds of unchanged epoch and proven owned-session closure. This establishes only a short, no-applicant, read-only compatibility observation. No private fields were filled, no resume was uploaded, and no final request or CAPTCHA was sent. The diagnostic is branch-scoped and does not register the observer in a production entrypoint.
