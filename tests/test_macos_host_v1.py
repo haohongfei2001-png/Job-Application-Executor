@@ -2107,8 +2107,13 @@ def test_installed_first_reopen_consumes_bound_private_continuity_before_service
 
 def test_first_use_pending_fence_commits_once_after_guards_and_survives_normal_reopen(tmp_path,monkeypatch):
     import os
+    # Load platform-sensitive dependencies before the synthetic Darwin entry.
+    from executor.autonomy.queue import TaskQueue
+    from executor.autonomy.worker import ProcessLock, Worker
+    from executor.autonomy.supervisor import Supervisor
     from executor.autonomy import state_compatibility
     module,consumer,host,candidate,target,state=_first_entry_fixture(tmp_path,monkeypatch,managed=True)
+    with state_compatibility.task_state_guard(state):pass
     module._create_first_fence(target.parent,('source',))
     path=module._fence_path(target.parent);inode=path.stat().st_ino
     read_fd,write_fd=os.pipe()
@@ -2116,9 +2121,26 @@ def test_first_use_pending_fence_commits_once_after_guards_and_survives_normal_r
         'bundle_tag':module._bundle_tag(('source',))}).encode());os.close(write_fd)
     calls=[]
     def launch(root,port,**options):
-        assert module._read_first_fence(target.parent)['status']=='complete'
+        from executor.autonomy import first_use_recovery as recovery
+        from executor.autonomy.queue import TaskQueue
+        from executor.autonomy.worker import ProcessLock
+        # Parent releases its guards with the negative fence still pending.
+        # The real queue admission, not calling launch, commits completion.
         with state_compatibility.task_state_guard(state):pass
         lock=consumer._acquire_app_transaction_lock(target.parent);os.close(lock)
+        if '_first_use_record' in options:
+            assert module._read_first_fence(target.parent)['status']=='pending'
+            monkeypatch.setattr(recovery,'__file__',str(candidate/'Contents/Resources/release/executor/autonomy/first_use_recovery.py'))
+            with socket.socket() as reservation:
+                reservation.bind(('127.0.0.1',0));service_port=reservation.getsockname()[1]
+            ack_read,ack_write=os.pipe()
+            try:
+                with recovery._FirstUseStartup(root,service_port,options['_first_use_record'],ack_write) as startup:
+                    with startup.worker_guard():
+                        TaskQueue(root,_first_use_startup=startup)
+                        assert startup.committed is True
+            finally:os.close(ack_read)
+        assert module._read_first_fence(target.parent)['status']=='complete'
         calls.append(True);return {'ok':True,'opened':True}
     monkeypatch.setattr('executor.autonomy.cli.launch_native_consumer',launch)
     result=module.launch_native_entry(state,9344,continuity_fd=read_fd)
@@ -2143,3 +2165,400 @@ def test_first_install_fence_refuses_alias_and_nonprivate_or_unbounded_records(t
         path.chmod(0o644 if fault=='public' else 0o600)
     with pytest.raises((OSError,ValueError)):module._read_first_fence(apps)
     assert (unrelated.read_bytes(),unrelated.stat().st_ino)==before
+
+
+@pytest.mark.parametrize('choice,accepted', [
+    ({'action':'cancel'},True), ({'action':'resume_first_use'},True),
+    ({'action':'resume_first_use','extra':True},False),
+    ({'action':'install','continuity':'first_use'},False),
+    ({'action':'install','continuity':'selected_legacy_directory','legacy_directory':'/tmp/old'},False),
+    (None,False), ([],False), ({'action':True},False),
+])
+def test_pending_first_use_recovery_choice_has_no_install_or_path_authority(choice,accepted):
+    from executor.autonomy import macos_host as module
+    assert module.native_first_use_recovery_choice(choice)==(choice if accepted else None)
+    if choice=={'action':'resume_first_use'}:
+        assert module.native_first_install_choice(choice) is None
+
+
+@pytest.mark.parametrize('recovery,text,expected', [
+    (True,'{"ok":true,"first_use_recovery_choice":{"action":"resume_first_use"}}\n',{'action':'resume_first_use'}),
+    (True,'{"ok":true,"first_use_recovery_choice":{"action":"cancel"}}\n',{'action':'cancel'}),
+    (True,'{"ok":true,"first_install_choice":{"action":"cancel"}}\n',None),
+    (False,'{"ok":true,"first_use_recovery_choice":{"action":"cancel"}}\n',None),
+    (True,'{"ok":true,"first_use_recovery_choice":{"action":"install","continuity":"first_use"}}\n',None),
+    (True,'{"ok":true,"first_use_recovery_choice":{"action":"resume_first_use","action":"cancel"}}\n',None),
+    (True,'{"ok":true,"first_use_recovery_choice":{"action":"cancel"}}\n{}\n',None),
+    (True,'x'*8193+'\n',None),
+])
+def test_pending_first_use_recovery_prompt_rejects_cross_mode_and_unbounded_reply(tmp_path,monkeypatch,recovery,text,expected):
+    from executor.autonomy import macos_host as module
+    root=_candidate(tmp_path);real=subprocess.Popen
+    monkeypatch.setattr(module.sys,'platform','darwin')
+    def owned_child(*args,**kwargs):
+        assert args[0]==[str(root/'AIApplicationWindow'),'--first-use-recovery' if recovery else '--first-install']
+        return real([sys.executable,'-I','-c','import os;os.write(1,'+repr(text.encode())+')'],**kwargs)
+    monkeypatch.setattr(module.subprocess,'Popen',owned_child)
+    prompt=module.present_native_first_use_recovery if recovery else module.present_native_first_install
+    assert prompt(root)==expected
+
+
+def test_pending_first_use_recovery_prompt_partial_reply_keeps_existing_deadline(tmp_path,monkeypatch):
+    from executor.autonomy import macos_host as module
+    root=_candidate(tmp_path);real=subprocess.Popen;children=[]
+    monkeypatch.setattr(module.sys,'platform','darwin')
+    def owned_child(*args,**kwargs):
+        child=real([sys.executable,'-I','-c','import os,time;os.write(1,b"{");time.sleep(60)'],**kwargs)
+        children.append(child);return child
+    monkeypatch.setattr(module.subprocess,'Popen',owned_child)
+    ticks=iter([0.0,0.0,21.0])
+    monkeypatch.setattr(module.time,'monotonic',lambda:next(ticks,21.0))
+    assert module.present_native_first_use_recovery(root,smoke=True) is None
+    assert len(children)==1 and children[0].poll() is not None
+
+
+def test_hosted_mac_pending_first_use_recovery_prompt_is_static_cocoa_cancel_only(compiled_host):
+    from executor.autonomy.macos_host import present_native_first_use_recovery
+    assert present_native_first_use_recovery(compiled_host,smoke=True)=={'action':'cancel'}
+
+
+def _pending_recovery_fixture(tmp_path,monkeypatch):
+    # Import dependencies on the true platform before the synthetic entry shim.
+    from executor.autonomy.queue import TaskQueue
+    from executor.autonomy.worker import Worker
+    from executor.autonomy.supervisor import Supervisor
+    from executor.autonomy import first_use_recovery as recovery
+    module,consumer,host,app,target,state=_first_entry_fixture(tmp_path,monkeypatch,managed=True)
+    monkeypatch.setattr(recovery,'__file__',str(app/'Contents/Resources/release/executor/autonomy/first_use_recovery.py'))
+    from executor.autonomy.state_compatibility import task_state_guard
+    with task_state_guard(state):pass  # Real installer ordering, before pending fence.
+    module._create_first_fence(app.parent,('source',))
+    monkeypatch.setattr(host,'present_native_first_use_recovery',lambda *a,**k:{'action':'resume_first_use'})
+    monkeypatch.setattr(consumer,'_candidate_starts',lambda *a:True)
+    return module,recovery,consumer,host,app,state
+
+
+def _recovery_record(recovery,app,state):
+    return recovery.prepare_recovery(app,state,('source',),app/'Contents/Resources/native-host')
+
+
+def _spare_port():
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1',0));return reservation.getsockname()[1]
+
+
+@pytest.mark.parametrize('choice',[{'action':'cancel'},None,{'action':'install','continuity':'first_use'}])
+def test_pending_recovery_cancel_bad_intent_preserves_all_state_before_probe(tmp_path,monkeypatch,choice):
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    fence=module._fence_path(app.parent);before=(fence.stat().st_ino,fence.read_bytes())
+    authority=recovery._state_snapshot(state)
+    monkeypatch.setattr(host,'present_native_first_use_recovery',lambda *a,**k:choice)
+    monkeypatch.setattr(consumer,'_candidate_starts',lambda *a:pytest.fail('unapproved probe'))
+    if choice=={'action':'cancel'}:assert _recovery_record(recovery,app,state) is None
+    else:
+        with pytest.raises(ValueError):_recovery_record(recovery,app,state)
+    assert recovery._state_snapshot(state)==authority and (fence.stat().st_ino,fence.read_bytes())==before
+
+
+@pytest.mark.parametrize('fault',['bundle','fence','default_key','legacy_wal','probe_failure'])
+def test_pending_recovery_prompt_and_health_rebind_before_any_startup(tmp_path,monkeypatch,fault):
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    fence=module._fence_path(app.parent);before=fence.read_bytes()
+    def probe(*args):
+        if fault=='bundle':monkeypatch.setattr(consumer,'_bundle_transaction_identity',lambda _:('other',))
+        elif fault=='fence':fence.chmod(0o644)
+        elif fault in {'default_key','legacy_wal'}:
+            root=state if fault=='default_key' else app.parent.parent/'Job-Application-Executor/runtime/autonomy'
+            root.mkdir(parents=True,exist_ok=True);(root/('task-answers.key' if fault=='default_key' else 'tasks.sqlite3-wal')).write_bytes(b'SYNTHETIC_EXISTING_AUTHORITY')
+        return fault!='probe_failure'
+    monkeypatch.setattr(consumer,'_candidate_starts',probe)
+    with pytest.raises(ValueError):_recovery_record(recovery,app,state)
+    assert fence.read_bytes()==before
+    assert not any((state/name).exists() for name in ('tasks.sqlite3','auth.token','service.log','service.json'))
+
+
+@pytest.mark.parametrize('fault',['default_key','legacy_wal','bundle','fence_inode','root_inode','worker_inode','migration_inode'])
+def test_pending_recovery_handoff_arrival_refuses_before_queue_token_log_or_exposure(tmp_path,monkeypatch,fault):
+    import os
+    from executor.autonomy.queue import TaskQueue
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    record=_recovery_record(recovery,app,state)
+    fence=module._fence_path(app.parent);before=fence.read_bytes()
+    if fault=='default_key':(state/'task-answers.key').write_bytes(b'SYNTHETIC_LATE_KEY')
+    elif fault=='legacy_wal':
+        old=app.parent.parent/'Job-Application-Executor/runtime/autonomy';old.mkdir(parents=True)
+        (old/'tasks.sqlite3-wal').write_bytes(b'SYNTHETIC_LATE_WAL')
+    elif fault=='bundle':monkeypatch.setattr(consumer,'_bundle_transaction_identity',lambda _:('new',))
+    elif fault=='fence_inode':
+        fence.rename(app.parent/'retained-pending-fence');fence.write_bytes(before);fence.chmod(0o600)
+    elif fault=='root_inode':
+        state.rename(state.with_name('retained-old-authority'));state.mkdir(mode=0o700)
+        for name in recovery._LOCKS:(state/name).touch(mode=0o600)
+    else:
+        name='worker.lock' if fault=='worker_inode' else 'migration.lock'
+        (state/name).rename(state.parent/('retained-'+name));(state/name).touch(mode=0o600)
+    ack_read,ack_write=os.pipe()
+    startup=recovery._FirstUseStartup(state,_spare_port(),record,ack_write)
+    try:
+        with pytest.raises((OSError,ValueError)):
+            with startup:
+                with startup.worker_guard():TaskQueue(state,_first_use_startup=startup)
+    finally:
+        startup.__exit__(None,None,None);os.close(ack_read)
+    assert fence.read_bytes()==before
+    assert not any((state/name).exists() for name in ('tasks.sqlite3','auth.token','service.log','service.json','native-window.json'))
+
+
+@pytest.mark.parametrize('fault',['late_key','busy_app','busy_worker','busy_migration'])
+def test_pending_recovery_real_lock_admission_refuses_without_deadlock_or_db(tmp_path,monkeypatch,fault):
+    import os,time
+    from executor.autonomy.queue import TaskQueue
+    from executor.autonomy.state_compatibility import _private_lock_fd
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    record=_recovery_record(recovery,app,state)
+    ack_read,ack_write=os.pipe();held=None
+    if fault=='busy_app':held=consumer._acquire_app_transaction_lock(app.parent)
+    elif fault=='busy_worker':held=_private_lock_fd(state/'worker.lock')
+    elif fault=='busy_migration':held=_private_lock_fd(state/'migration.lock')
+    else:
+        original=recovery._FirstUseStartup.before_queue
+        def before_queue(self,queue):
+            # Both real lock boundaries are reached before the first SQLite open.
+            for name in ('worker.lock','migration.lock'):
+                with pytest.raises(BlockingIOError):_private_lock_fd(state/name)
+            (state/'task-answers.key').write_bytes(b'SYNTHETIC_ADMISSION_ARRIVAL')
+            return original(self,queue)
+        monkeypatch.setattr(recovery._FirstUseStartup,'before_queue',before_queue)
+    startup=recovery._FirstUseStartup(state,_spare_port(),record,ack_write);started=time.monotonic()
+    try:
+        with pytest.raises((OSError,ValueError)):
+            with startup:
+                with startup.worker_guard():TaskQueue(state,_first_use_startup=startup)
+    finally:
+        if held is not None:os.close(held)
+        startup.__exit__(None,None,None);os.close(ack_read)
+    assert time.monotonic()-started<2
+    assert not any((state/name).exists() for name in ('tasks.sqlite3','auth.token','service.log','service.json'))
+    assert module._read_first_fence(app.parent)['status']=='pending'
+
+
+@pytest.mark.parametrize('fault',['queue_crash','completion_short_write','lost_ack'])
+def test_pending_recovery_post_commit_failures_preserve_honest_partial_state(tmp_path,monkeypatch,fault):
+    import os
+    from executor.autonomy.queue import TaskQueue
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    record=_recovery_record(recovery,app,state)
+    fence=module._fence_path(app.parent);fence_inode=fence.stat().st_ino
+    if fault=='queue_crash':
+        monkeypatch.setattr(recovery._FirstUseStartup,'after_queue',lambda *a:(_ for _ in ()).throw(ValueError('synthetic_crash')))
+    elif fault=='completion_short_write':
+        real_write=os.write
+        def short_write(fd,data):
+            if os.fstat(fd).st_ino==fence_inode:return real_write(fd,data[:-3])
+            return real_write(fd,data)
+        monkeypatch.setattr(module.os,'write',short_write)
+    ack_read,ack_write=os.pipe();startup=recovery._FirstUseStartup(state,_spare_port(),record,ack_write)
+    try:
+        with pytest.raises((OSError,ValueError)) as refused:
+            with startup:
+                with startup.worker_guard():
+                    TaskQueue(state,_first_use_startup=startup)
+                    assert fault=='lost_ack' and startup.committed
+                    os.close(ack_read);ack_read=None
+                    startup.acknowledge(startup.components[1].service_identity())
+    finally:
+        startup.__exit__(None,None,None)
+        if ack_read is not None:os.close(ack_read)
+    assert (state/'tasks.sqlite3').is_file()  # Effects are retained, never called untouched.
+    assert fence.stat().st_ino==fence_inode
+    assert not (state/'service.log').exists() and not (state/'service.json').exists()
+    if fault!='lost_ack':
+        with pytest.raises(ValueError):_recovery_record(recovery,app,state)
+    else:
+        assert isinstance(refused.value,BrokenPipeError), str(refused.value)
+        assert module._read_first_fence(app.parent)['status']=='complete'
+
+
+def test_pending_recovery_same_source_wrong_service_never_adopts_or_restarts(tmp_path,monkeypatch):
+    from executor.autonomy import cli,first_use_recovery as recovery
+    expected={'pid':123,'port':9344,'instance':'a'*32}
+    monkeypatch.setattr(cli,'_service_record',lambda _:expected)
+    monkeypatch.setattr(recovery,'_owned_request',lambda *a,**k:{**expected,'instance':'b'*32})
+    monkeypatch.setattr(cli,'lifecycle',lambda *a,**k:pytest.fail('strict recovery adopted service'))
+    with pytest.raises(ValueError):recovery.verify_started_service(tmp_path,9344,{'service':expected})
+
+
+@pytest.mark.parametrize('payload',[
+    b'{}',b'[]',b'null',b'{"format":"jae-first-use-startup-v1","format":"other"}',
+    b'{"format":"jae-first-use-startup-v1","bundle_tag":"bad"}',b'x'*4097,
+])
+def test_pending_recovery_pipe_rejects_nonfinite_or_cross_mode_records(payload):
+    import os
+    from executor.autonomy import first_use_recovery as recovery
+    read_fd,write_fd=os.pipe();os.write(write_fd,payload);os.close(write_fd)
+    with pytest.raises((ValueError,UnicodeError)):
+        recovery._startup_record(recovery._read_pipe(read_fd))
+    with pytest.raises(OSError):os.fstat(read_fd)
+
+
+def test_pending_recovery_pipe_partial_reply_has_monotonic_deadline(monkeypatch):
+    import os
+    from executor.autonomy import first_use_recovery as recovery
+    read_fd,write_fd=os.pipe();os.write(write_fd,b'{')
+    ticks=iter([0,0,16]);monkeypatch.setattr(recovery.time,'monotonic',lambda:next(ticks,16))
+    try:
+        with pytest.raises(ValueError):recovery._read_pipe(read_fd)
+    finally:os.close(write_fd)
+    with pytest.raises(OSError):os.fstat(read_fd)
+
+
+def test_pending_recovery_missing_token_never_recreates_it_or_uses_ambient_override(tmp_path,monkeypatch):
+    from executor.autonomy import first_use_recovery as recovery
+    tmp_path.chmod(0o700)
+    monkeypatch.setenv('APPLICATION_EXECUTOR_LOCAL_TOKEN','SYNTHETIC_AMBIENT_TOKEN'*3)
+    with pytest.raises(FileNotFoundError):recovery._owned_request(tmp_path,9344,'/health')
+    assert list(tmp_path.iterdir())==[]
+
+
+def test_pending_recovery_fence_inode_swap_at_completion_refuses_identical_record(tmp_path,monkeypatch):
+    import os
+    from executor.autonomy.queue import TaskQueue
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    record=_recovery_record(recovery,app,state)
+    fence=module._fence_path(app.parent);before=fence.read_bytes()
+    real_complete=module._complete_first_fence
+    def replace_before_write(apps,identity,**options):
+        fence.rename(app.parent/'retained-original-fence')
+        fence.write_bytes(before);fence.chmod(0o600)
+        return real_complete(apps,identity,**options)
+    monkeypatch.setattr(module,'_complete_first_fence',replace_before_write)
+    ack_read,ack_write=os.pipe();startup=recovery._FirstUseStartup(state,_spare_port(),record,ack_write)
+    try:
+        with pytest.raises(ValueError):
+            with startup:
+                with startup.worker_guard():TaskQueue(state,_first_use_startup=startup)
+    finally:
+        startup.__exit__(None,None,None);os.close(ack_read)
+    assert fence.read_bytes()==before and module._read_first_fence(app.parent)['status']=='pending'
+    assert (app.parent/'retained-original-fence').read_bytes()==before
+    assert not (state/'service.json').exists()
+
+
+def test_pending_recovery_public_empty_default_refuses_without_chmod_or_prompt(tmp_path,monkeypatch):
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    state.rename(state.with_name('retained-private-root'))
+    state.mkdir(parents=True,mode=0o755);state.chmod(0o755)
+    before=state.stat().st_ino,state.stat().st_mode
+    monkeypatch.setattr(host,'present_native_first_use_recovery',lambda *a,**k:pytest.fail('unadmitted root prompted'))
+    with pytest.raises(ValueError):_recovery_record(recovery,app,state)
+    assert (state.stat().st_ino,state.stat().st_mode)==before and list(state.iterdir())==[]
+
+
+@pytest.mark.parametrize('phase',['prompt_existing','health','anchored_lock_open'])
+def test_pending_recovery_parent_binds_prompt_and_actual_guard_authority(tmp_path,monkeypatch,phase):
+    import os
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    replaced=[]
+    def replace_root(*_args,**_kwargs):
+        if state.exists():state.rename(state.with_name('retained-original-state'))
+        state.mkdir(parents=True,mode=0o755 if phase in {'prompt_existing','anchored_lock_open'} else 0o700)
+        if phase=='health':
+            for name in recovery._LOCKS:(state/name).touch(mode=0o600)
+        replaced.append((state.stat().st_ino,state.stat().st_mode,tuple((p.name,p.stat().st_ino,p.stat().st_mode) for p in state.iterdir())))
+        return True
+    if phase.startswith('prompt'):
+        def prompt(*a,**k):replace_root();return {'action':'resume_first_use'}
+        monkeypatch.setattr(host,'present_native_first_use_recovery',prompt)
+    elif phase=='health':monkeypatch.setattr(consumer,'_candidate_starts',replace_root)
+    else:
+        real_open=os.open
+        def anchored_open(path,flags,*args,**kwargs):
+            if path=='native-window.lock' and 'dir_fd' in kwargs and not replaced:replace_root()
+            return real_open(path,flags,*args,**kwargs)
+        monkeypatch.setattr(recovery.os,'open',anchored_open)
+    with pytest.raises((OSError,ValueError)):_recovery_record(recovery,app,state)
+    assert replaced
+    assert (state.stat().st_ino,state.stat().st_mode,tuple((p.name,p.stat().st_ino,p.stat().st_mode) for p in state.iterdir()))==replaced[0]
+    assert module._read_first_fence(app.parent)['status']=='pending'
+    assert not any((state/name).exists() for name in ('tasks.sqlite3','auth.token','service.log','service.json'))
+
+
+def test_pending_recovery_native_handoff_never_chmods_or_creates_in_replacement(tmp_path,monkeypatch):
+    from executor.autonomy import cli
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    executable=app/'Contents/MacOS/AIApplicationManager';executable.parent.mkdir()
+    executable.write_text(consumer._native_packaged_launcher())
+    monkeypatch.setattr(consumer,'_trusted_bundle',lambda _:True)
+    monkeypatch.setattr(cli,'__file__',str(app/'Contents/Resources/release/executor/autonomy/cli.py'))
+    record=_recovery_record(recovery,app,state)
+    state.rename(state.with_name('retained-admitted-state'));state.mkdir(mode=0o755)
+    before=state.stat().st_ino,state.stat().st_mode
+    monkeypatch.setattr(recovery,'start_first_use',lambda *a,**k:pytest.fail('changed native authority reached startup'))
+    result=cli.launch_native_consumer(state,9344,_first_use_record=record)
+    assert result['ok'] is False
+    assert (state.stat().st_ino,state.stat().st_mode)==before and list(state.iterdir())==[]
+
+
+@pytest.mark.parametrize('change',['before_issue','after_issue'])
+def test_pending_recovery_ticket_mint_and_presentation_remain_exact_instance_bound(tmp_path,monkeypatch,change):
+    from executor.autonomy import first_use_recovery as recovery,consumer_presentation
+    from executor.autonomy.queue import TaskQueue
+    from executor.autonomy.supervisor import Supervisor,create_server
+    supervisor=Supervisor(TaskQueue(tmp_path/'state'));server=create_server(supervisor,port=0)
+    expected=supervisor.service_identity();calls=[]
+    def verify(*a,**k):
+        calls.append('verify')
+        if change=='after_issue' and calls.count('verify')>1:raise ValueError('service_identity_changed')
+        return {'ok':True}
+    def issue(root,port,path,data):
+        assert path=='/v1/ui-ticket' and data=={'expected_service':expected}
+        if change=='before_issue':supervisor._service_instance='replacement-instance-'+'b'*32
+        return supervisor.dispatch('POST',path,data)
+    monkeypatch.setattr(recovery,'verify_started_service',verify)
+    monkeypatch.setattr(recovery,'_owned_request',issue)
+    monkeypatch.setattr(consumer_presentation,'present_surface',lambda *a,**k:pytest.fail('replacement service was presented'))
+    try:
+        with pytest.raises(ValueError):recovery.open_started_ui(tmp_path/'state',expected['port'],{'service':expected},object())
+        assert len(supervisor._ui_tickets)==(0 if change=='before_issue' else 1)
+    finally:server.server_close()
+
+
+@pytest.mark.parametrize('expected',[None,{},True,{'pid':True,'port':9344,'instance':'a'*32}])
+def test_pending_recovery_ticket_rejects_malformed_predicate_without_capability(tmp_path,expected):
+    from executor.autonomy.queue import TaskQueue
+    from executor.autonomy.supervisor import Supervisor,create_server
+    supervisor=Supervisor(TaskQueue(tmp_path/'state'));server=create_server(supervisor,port=0)
+    try:
+        with pytest.raises((ValueError,TypeError)):
+            supervisor.dispatch('POST','/v1/ui-ticket',{'expected_service':expected})
+        assert supervisor._ui_tickets=={}
+    finally:server.server_close()
+
+
+def test_pending_recovery_bound_and_ordinary_ticket_clients_keep_one_time_contract(tmp_path):
+    from executor.autonomy.queue import TaskQueue
+    from executor.autonomy.supervisor import Supervisor,create_server
+    supervisor=Supervisor(TaskQueue(tmp_path/'state'));server=create_server(supervisor,port=0)
+    try:
+        expected=supervisor.service_identity()
+        bound=supervisor.dispatch('POST','/v1/ui-ticket',{'expected_service':expected})
+        assert bound['service']==expected
+        ordinary=supervisor.dispatch('POST','/v1/ui-ticket',{})
+        assert set(ordinary)=={'ticket'} and bound['ticket']!=ordinary['ticket']
+        for ticket in (bound['ticket'],ordinary['ticket']):
+            assert supervisor.consume_ui_ticket(ticket)
+            assert supervisor.consume_ui_ticket(ticket) is None
+    finally:server.server_close()
+
+
+@pytest.mark.parametrize('missing',['root','native-window.lock','worker.lock','migration.lock'])
+def test_pending_recovery_missing_installer_authority_is_never_recreated(tmp_path,monkeypatch,missing):
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    fence=module._fence_path(app.parent);before=fence.stat().st_ino,fence.read_bytes()
+    if missing=='root':state.rename(state.with_name('retained-installer-authority'))
+    else:(state/missing).rename(state.parent/('retained-'+missing))
+    monkeypatch.setattr(host,'present_native_first_use_recovery',lambda *a,**k:pytest.fail('missing authority prompted'))
+    monkeypatch.setattr(consumer,'_candidate_starts',lambda *a,**k:pytest.fail('missing authority probed'))
+    with pytest.raises((OSError,ValueError)):_recovery_record(recovery,app,state)
+    assert (fence.stat().st_ino,fence.read_bytes())==before
+    assert not (state if missing=='root' else state/missing).exists()
