@@ -132,7 +132,7 @@ def _await_preparation_retirement(supervisor):
         time.sleep(.1)
 
 
-def serve(root, port):
+def serve(root, port, *, _first_use_startup=None):
     from ..otp.bridge import OtpBridge
     from .queue import TaskQueue
     from .supervisor import Supervisor, create_server
@@ -143,16 +143,28 @@ def serve(root, port):
     isolated = browser_mode() in {"test", "isolated", "headless"}
     authority = Path(root).expanduser().absolute()
     with ExitStack() as locks:
-        locks.enter_context(ProcessLock(authority / "worker.lock"))
+        if _first_use_startup is not None:
+            from .first_use_recovery import _FirstUseStartup
+            if type(_first_use_startup) is not _FirstUseStartup:
+                raise ValueError("first_use_callback_invalid")
+            locks.enter_context(_first_use_startup)
+        if _first_use_startup is None:
+            locks.enter_context(ProcessLock(authority / "worker.lock"))
+        else:
+            locks.enter_context(_first_use_startup.worker_guard())
         if (not isolated and os.path.normpath(str(authority)) !=
                 os.path.normpath(str(Path(RUNTIME).expanduser().absolute()))):
             locks.enter_context(ProcessLock(Path(RUNTIME) / "worker.lock"))
         from .state_compatibility import _refuse_live_service
         _refuse_live_service(Path(root))
-        queue = TaskQueue(root)
-        worker = Worker(queue, relay=None if isolated else OtpBridge())
-        supervisor = Supervisor(queue, worker)
-        server = create_server(supervisor, port=port)
+        if _first_use_startup is None:
+            queue = TaskQueue(root)
+            worker = Worker(queue, relay=None if isolated else OtpBridge())
+            supervisor = Supervisor(queue, worker)
+            server = create_server(supervisor, port=port)
+        else:
+            queue = TaskQueue(root, _first_use_startup=_first_use_startup)
+            worker, supervisor, server = _first_use_startup.components
         state = private_dir(root) / "service.json"
         record = supervisor.service_identity()
         # Atomic private publication never opens an alias/old registry for write.
@@ -164,6 +176,13 @@ def serve(root, port):
             temporary.replace(state)
         finally:
             temporary.unlink(missing_ok=True)
+        if _first_use_startup is not None:
+            try:
+                _first_use_startup.acknowledge(record)
+            except BaseException:
+                if _service_record(state) == record:
+                    state.unlink()  # Our just-published registry; never another PID.
+                raise
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: worker.stop_event.set())
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -309,7 +328,7 @@ def _open_dependency_recovery(root, port, *, presenter=None, reason="business_de
     }
 
 
-def launch_consumer(root, port, *, presenter=None):
+def launch_consumer(root, port, *, presenter=None, _first_use_service=None):
     loopback_origin(port)
     try:
         root = runtime_root(root)
@@ -318,10 +337,15 @@ def launch_consumer(root, port, *, presenter=None):
                 "checks": {}, "bootstrap_reason": "service_runtime_unavailable",
                 "message": "应用目录暂不可用。现有任务未修改。",
                 "final_click_actor": "user", "submit_capability": False}
+    def strict_refusal():
+        return {"ok":False, "opened":False, "reason":"first_use_service_unconfirmed",
+                "final_click_actor":"user", "submit_capability":False}
     # Check disk integrity before starting an owned browser, then revalidate
     # again through the shared service/recovery admission path.
     identity = _consumer_release_identity()
     if identity["packaged"] and not identity["expected"]:
+        if _first_use_service is not None:
+            return strict_refusal()
         return _open_dependency_recovery(root, port, presenter=presenter,
                                          reason="release_unverified")
     try:
@@ -330,18 +354,36 @@ def launch_consumer(root, port, *, presenter=None):
         live_mode = browser_mode() not in {"test", "isolated", "headless"}
     except Exception:
         # No service/browser/ticket action is admitted by a broken dependency.
+        if _first_use_service is not None:
+            return strict_refusal()
         return _open_dependency_recovery(root, port, presenter=presenter)
+    if _first_use_service is not None:
+        from .first_use_recovery import verify_started_service
+        try:
+            verify_started_service(root, port, _first_use_service)
+        except (OSError, ValueError, TypeError, urllib.error.URLError):
+            return strict_refusal()
     if live_mode and (not identity["packaged"] or identity["expected"]):
         try:
             ensure_chrome()
         except Exception:
             pass
-    started, health = _start_consumer_service(root, port)
+    if _first_use_service is None:
+        started, health = _start_consumer_service(root, port)
+    else:
+        from .first_use_recovery import verify_started_service
+        try:
+            health = verify_started_service(root, port, _first_use_service)
+            started = {"ok":True}
+        except (OSError, ValueError, TypeError, urllib.error.URLError):
+            return strict_refusal()
     try:
         result = collect_live_preflight(
             supervisor_running=bool(health.get("ok")),
         )
     except Exception:
+        if _first_use_service is not None:
+            return strict_refusal()
         return _open_dependency_recovery(root, port, presenter=presenter)
     if not health.get("ok"):
         from .bootstrap import open_bootstrap
@@ -358,8 +400,12 @@ def launch_consumer(root, port, *, presenter=None):
         }
 
     try:
-        ui = (open_ui(root, port) if presenter is None else
-              open_ui(root, port, presenter=presenter))
+        if _first_use_service is not None:
+            from .first_use_recovery import open_started_ui
+            ui = open_started_ui(root, port, _first_use_service, presenter)
+        else:
+            ui = (open_ui(root, port) if presenter is None else
+                  open_ui(root, port, presenter=presenter))
     except Exception:
         ui = {"ok": False, "opened": False}
     return {
@@ -614,7 +660,7 @@ def show_native_release_result(root, result, *, smoke=False):
         return False
 
 
-def launch_native_consumer(root, port, *, smoke=False):
+def launch_native_consumer(root, port, *, smoke=False, _first_use_record=None):
     """Run the owned installed app through one verified native presenter."""
     from .consumer import _native_packaged_launcher, _native_packaged_launcher_v1, _is_native_packaged_launcher, _trusted_bundle
     from .macos_host import NativePresenter
@@ -634,13 +680,26 @@ def launch_native_consumer(root, port, *, smoke=False):
     try:
         # Acquire before service startup or issuing a UI ticket. A duplicate
         # invocation has no authority to reload the existing unsent workbench.
-        with native_window_guard(root) as window_fd:
+        if _first_use_record is None:
+            native_guard = native_window_guard(root)
+        else:
+            from .first_use_recovery import bound_native_guard
+            native_guard = bound_native_guard(root, _first_use_record)
+        with native_guard as window_fd:
+            if _first_use_record is not None:
+                from .first_use_recovery import start_first_use
+                try:
+                    started = start_first_use(root, port, _first_use_record)
+                except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                    return {"ok":False, "opened":False, "reason":"first_use_startup_unconfirmed"}
             presenter = NativePresenter(source.parent / "native-host",
                 consumer_smoke=smoke, ownership_fd=window_fd)
             reopen = create_owned_reopen_server(root, window_fd, lambda: presenter.focus())
             reopen.start()  # Optional IPC refusal never closes the primary window.
             try:
-                result = launch_consumer(root, port, presenter=presenter)
+                result = (launch_consumer(root, port, presenter=presenter)
+                          if _first_use_record is None else
+                          launch_consumer(root, port, presenter=presenter, _first_use_service=started))
                 opened = result.get("opened") is True and result.get("ok") is True
                 closed = presenter.wait_for_close() if opened else False
                 if opened and closed and not smoke:
@@ -652,7 +711,7 @@ def launch_native_consumer(root, port, *, smoke=False):
                 reopen.close()
                 presenter.close()
     except BlockingIOError:
-        if request_owned_focus(root):
+        if _first_use_record is None and request_owned_focus(root):
             return {"ok": True, "opened": True, "native_window": True,
                     "focus_only": True, "final_click_actor": "user"}
         return {"ok": False, "opened": False, "reason": "native_window_already_open"}
@@ -676,6 +735,9 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch"):
         commands.add_parser(name)
+    strict_start = commands.add_parser("first-use-serve", help=argparse.SUPPRESS)
+    strict_start.add_argument("--record-fd", type=int, required=True)
+    strict_start.add_argument("--ack-fd", type=int, required=True)
     entry = commands.add_parser("native-entry")
     entry.add_argument("--native-smoke", action="store_true")
     entry.add_argument("--first-install-continuity-fd", type=int, help=argparse.SUPPRESS)
@@ -716,6 +778,10 @@ def main(argv=None):
     try:
         if args.command == "serve":
             serve(args.runtime, args.port)
+            return 0
+        if args.command == "first-use-serve":
+            from .first_use_recovery import serve_first_use
+            serve_first_use(args.runtime, args.port, args.record_fd, args.ack_fd)
             return 0
         if args.command == "bootstrap-serve":
             from .bootstrap import serve_bootstrap

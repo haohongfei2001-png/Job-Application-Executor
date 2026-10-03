@@ -97,7 +97,7 @@ def _create_first_fence(apps: Path, identity) -> None:
         os.close(parent)
 
 
-def _complete_first_fence(apps: Path, identity) -> None:
+def _complete_first_fence(apps: Path, identity, *, _expected_fence_tag=None) -> None:
     # Caller owns app + state guards and has just re-admitted the empty default
     # authority. In-place finite update fails closed if interrupted; no alias,
     # hardlink, unrelated file replacement or delete is permitted.
@@ -113,6 +113,10 @@ def _complete_first_fence(apps: Path, identity) -> None:
                 or before.st_nlink != 1 or before.st_mode & 0o077 or before.st_size > 1024
                 or (before.st_dev, before.st_ino) != (visible.st_dev, visible.st_ino)
                 or _fence_record(os.read(fd, 1025)) != expected):
+            raise ValueError("first install fence changed")
+        if (_expected_fence_tag is not None and hashlib.sha256(json.dumps([
+                (before.st_dev, before.st_ino, stat.S_IMODE(before.st_mode), before.st_uid),
+                expected], sort_keys=True, separators=(",", ":")).encode()).hexdigest() != _expected_fence_tag):
             raise ValueError("first install fence changed")
         data = json.dumps({**expected, "status": "complete"}, sort_keys=True, separators=(",", ":")).encode()
         os.lseek(fd, 0, os.SEEK_SET)
@@ -220,19 +224,17 @@ def launch_native_entry(root, port, *, smoke=False, continuity_fd=None):
         if candidate == target:
             fence = _read_first_fence(apps)
             if fence is not None and fence["status"] == "pending":
-                if continuity is None:
-                    return refuse("first_install_continuity_unconfirmed")
-                from .state_compatibility import task_state_guard
-                lock_fd = consumer._acquire_app_transaction_lock(apps)
+                from .first_use_recovery import prepare_recovery
                 try:
-                    with task_state_guard(state):
-                        if (consumer._bundle_transaction_identity(candidate) != identity
-                                or consumer._legacy_root_has_state(state, state)
-                                or consumer._legacy_state_migration_needed(conventional, target, state)):
-                            return refuse("first_install_continuity_unconfirmed")
-                        _complete_first_fence(apps, identity)
-                finally:
-                    os.close(lock_fd)
+                    startup = prepare_recovery(candidate, state, identity, host,
+                                               confirm=continuity is None)
+                except (OSError, ValueError, TypeError):
+                    return refuse("first_install_continuity_unconfirmed")
+                if startup is None:
+                    return {"ok":True, "cancelled":True, "installed":True,
+                            "recovery_requested":False, **boundary}
+                return cli.launch_native_consumer(state, port, smoke=smoke,
+                                                  _first_use_record=startup)
             elif continuity is not None:
                 # No missing/complete fence may replay an initial admission.
                 return refuse("first_install_continuity_unconfirmed")

@@ -94,6 +94,8 @@ static BOOL releaseResult(NSDictionary *command) {
 @property BOOL focusSmoke;
 @property BOOL releaseSmoke;
 @property BOOL releaseResultMode;
+@property BOOL firstUseRecoveryMode;
+@property BOOL firstUseRecoverySmoke;
 @property BOOL firstInstallMode;
 @property BOOL firstInstallSmoke;
 @property NSString *firstInstallResult;
@@ -116,6 +118,29 @@ static BOOL releaseResult(NSDictionary *command) {
 
 @implementation JAEHost
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    if (self.firstUseRecoveryMode) {
+        // Only explicit revalidation of an already admitted pending first use.
+        // No path picker, WebView, credentials or service control in this host.
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"继续核对首次使用";
+        alert.informativeText = @"上次首次使用尚未完成。继续后仅核对当前应用和空任务状态；发现旧任务、文件变化或占用时会停止并保留原状，不会自动搬迁、重装或删除文件。";
+        [alert addButtonWithTitle:@"重新核对并完成首次使用"];
+        [alert addButtonWithTitle:@"取消"];
+        [NSApp activateIgnoringOtherApps:YES];
+        if (self.firstUseRecoverySmoke) {
+            [alert.window makeKeyAndOrderFront:nil];
+            BOOL visible = alert.window.isVisible && self.view == nil;
+            [alert.window close]; self.finished = YES;
+            report(@{@"ok": @(visible), @"first_use_recovery_prompt_visible": @(visible),
+                     @"first_use_recovery_choice": @{@"action": @"cancel"}});
+            [NSApp terminate:nil]; return;
+        }
+        NSModalResponse response = [alert runModal];
+        self.finished = YES;
+        report(@{@"ok": @YES, @"first_use_recovery_choice":
+            @{@"action": response == NSAlertFirstButtonReturn ? @"resume_first_use" : @"cancel"}});
+        [NSApp terminate:nil]; return;
+    }
     if (self.firstInstallMode) {
         // Static local install/continuity choice. No WebView, URL or service.
         NSAlert *alert = [NSAlert new];
@@ -479,6 +504,8 @@ static BOOL releaseResult(NSDictionary *command) {
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         JAEHost *host = [JAEHost new];
+        host.firstUseRecoverySmoke = argc == 2 && strcmp(argv[1], "--first-use-recovery-smoke") == 0;
+        host.firstUseRecoveryMode = host.firstUseRecoverySmoke || (argc == 2 && strcmp(argv[1], "--first-use-recovery") == 0);
         host.firstInstallSmoke = argc == 2 && strcmp(argv[1], "--first-install-smoke") == 0;
         host.firstInstallMode = host.firstInstallSmoke || (argc == 2 && strcmp(argv[1], "--first-install") == 0)
             || (argc == 3 && strcmp(argv[1], "--first-install-result") == 0);
@@ -490,7 +517,7 @@ int main(int argc, const char *argv[]) {
         host.releaseSmoke = argc == 2 && strcmp(argv[1], "--release-smoke") == 0;
         host.releaseResultSmoke = argc == 2 && strcmp(argv[1], "--release-result-smoke") == 0;
         host.releaseResultMode = host.releaseResultSmoke || (argc == 2 && strcmp(argv[1], "--release-result") == 0);
-        host.smoke = host.firstInstallSmoke || host.consumerSmoke || host.failureSmoke || host.focusSmoke || host.releaseSmoke || host.releaseResultSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
+        host.smoke = host.firstUseRecoverySmoke || host.firstInstallSmoke || host.consumerSmoke || host.failureSmoke || host.focusSmoke || host.releaseSmoke || host.releaseResultSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
         [NSApplication sharedApplication];
         NSApp.delegate = host;
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -835,10 +862,26 @@ def native_first_install_choice(value) -> dict | None:
     return {"action": "install", "continuity": "selected_legacy_directory", "legacy_directory": path}
 
 
+def native_first_use_recovery_choice(value) -> dict | None:
+    """Recovery has its own finite intent; installation intent cannot grant it."""
+    if type(value) is dict and value in ({"action": "cancel"}, {"action": "resume_first_use"}):
+        return dict(value)
+    return None
+
+
+def present_native_first_use_recovery(directory: str | Path, *, smoke: bool = False) -> dict | None:
+    return _present_first_install_prompt(directory, smoke=smoke, recovery=True)
+
+
 def present_native_first_install(directory: str | Path, *, smoke: bool = False,
                                  result: str | None = None) -> dict | None:
+    return _present_first_install_prompt(directory, smoke=smoke, result=result)
+
+
+def _present_first_install_prompt(directory: str | Path, *, smoke: bool = False,
+                                  result: str | None = None, recovery: bool = False) -> dict | None:
     """Trusted static host, bounded terminal reply; never launches an installer."""
-    if (type(smoke) is not bool or smoke and result is not None
+    if (type(smoke) is not bool or type(recovery) is not bool or (smoke or recovery) and result is not None
             or result is not None and (type(result) is not str or result not in {
             "legacy-state-required", "target-occupied", "state-continuity-required",
             "not-confirmed", "reopen-failed"})):
@@ -849,8 +892,9 @@ def present_native_first_install(directory: str | Path, *, smoke: bool = False,
             return None
         presenter = NativePresenter(root)
         try:
+            mode = "first-use-recovery" if recovery else "first-install"
             args = (["--first-install-result", result] if result is not None else
-                    ["--first-install-smoke" if smoke else "--first-install"])
+                    ["--" + mode + ("-smoke" if smoke else "")])
             presenter.process = subprocess.Popen([str(root / "AIApplicationWindow"), *args],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1, close_fds=True)
@@ -885,11 +929,13 @@ def present_native_first_install(directory: str | Path, *, smoke: bool = False,
                     output[key] = value
                 return output
             reply = json.loads(line, object_pairs_hook=unique)
-            expected = {"ok", "first_install_choice"} | ({"first_install_prompt_visible"} if smoke else set())
+            prefix = "first_use_recovery" if recovery else "first_install"
+            expected = {"ok", prefix + "_choice"} | ({prefix + "_prompt_visible"} if smoke else set())
             if (type(reply) is not dict or set(reply) != expected or reply.get("ok") is not True
-                    or smoke and reply.get("first_install_prompt_visible") is not True):
+                    or smoke and reply.get(prefix + "_prompt_visible") is not True):
                 return None
-            return native_first_install_choice(reply["first_install_choice"])
+            validate = native_first_use_recovery_choice if recovery else native_first_install_choice
+            return validate(reply[prefix + "_choice"])
         finally:
             presenter.close()
     except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):

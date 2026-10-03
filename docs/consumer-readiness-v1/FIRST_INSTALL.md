@@ -59,8 +59,11 @@ folder to bypass continuity refusal.
   and state locks before service startup. No selected path is passed.
 - Before activation, a mode-0600 finite pending fence is fsynced in the application
   directory. It contains only a bundle tag and pending/complete state. Interrupted
-  or refused admission therefore also blocks a later ordinary Finder open. Only
-  the exact initial child can mark it complete after guarded checks. Aliases,
+  or refused admission therefore also blocks a later ordinary Finder open. The
+  exact initial child, or an explicit pending-first-use recovery in builds that
+  include it, can complete admission only at guarded owned service startup.
+  See [pending recovery](PENDING_FIRST_USE_RECOVERY.md) for its bounded empty-state
+  contract and partial-initialization failure boundary. Aliases,
   hardlinks, public modes, malformed records and uncertain writes fail closed.
   No fence is deleted, no private data is imported, and a completed fence does
   not independently authorize an application payload.

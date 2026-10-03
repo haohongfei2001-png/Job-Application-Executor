@@ -1404,3 +1404,90 @@ def test_hosted_mac_legacy_native_command_contract_is_preserved_through_new_inst
     finally:
         stopped=subprocess.run(command+['stop'],env=env,capture_output=True,text=True,timeout=20)
         assert stopped.returncode==0
+
+
+@pytest.mark.parametrize('late_authority',[False,True])
+def test_hosted_mac_pending_recovery_revalidates_actual_child_before_private_initialization(
+    native_installed_app,tmp_path,late_authority
+):
+    from executor.autonomy import consumer,first_install
+    f=native_installed_app;app=f['app'];source=app/'Contents/Resources/release'
+    python=app/'Contents/Resources/runtime/bin/python'
+    identity=consumer._bundle_transaction_identity(app);assert identity is not None
+    # Actual installer has already created the empty private authority/locks
+    # before the simulated activation-to-initial-child interruption checkpoint.
+    assert f['state'].is_dir() and f['state'].stat().st_mode & 0o777==0o700
+    assert {path.name for path in f['state'].iterdir()}=={'native-window.lock','worker.lock','migration.lock'}
+    assert all((f['state']/name).stat().st_mode & 0o777==0o600
+               for name in ('native-window.lock','worker.lock','migration.lock'))
+    first_install._create_first_fence(app.parent,identity)
+    f['repo'].rename(tmp_path/'removed-recovery-checkout')
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
+    probe=r'''
+import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from executor.autonomy import first_install,first_use_recovery,macos_host,consumer,cli
+from executor.autonomy.runtime_paths import default_runtime
+source=Path(sys.argv[1]);state=default_runtime(source);port=int(sys.argv[2]);late=sys.argv[3]=='1'
+app=source.parent.parent.parent;fence=first_install._fence_path(app.parent)
+before=fence.stat().st_ino,fence.read_bytes();prompts=[];children=[]
+real_prompt=macos_host.present_native_first_use_recovery
+choice={'action':'cancel'}
+def prompt(directory,**options):
+ assert real_prompt(directory,smoke=True)=={'action':'cancel'}
+ prompts.append(True);return dict(choice)
+macos_host.present_native_first_use_recovery=prompt
+def forbidden_compile(*a,**k):raise AssertionError('recovery required compiler')
+consumer._stage_native_host=forbidden_compile
+real_start=first_use_recovery.start_first_use
+real_popen=first_use_recovery.subprocess.Popen
+def popen(args,**options):
+ child=real_popen(args,**options)
+ if 'first-use-serve' in args:children.append(child)
+ return child
+first_use_recovery.subprocess.Popen=popen
+def start(root,port,record):
+ if late:(Path(root)/'task-answers.key').write_bytes(b'SYNTHETIC_LATE_FIRST_USE_AUTHORITY')
+ return real_start(root,port,record)
+first_use_recovery.start_first_use=start
+try:
+ cancelled=first_install.launch_native_entry(state,port,smoke=True)
+ assert cancelled.get('cancelled') is True and (fence.stat().st_ino,fence.read_bytes())==before
+ assert not any((state/name).exists() for name in ('tasks.sqlite3','auth.token','service.log','service.json'))
+ choice={'action':'resume_first_use'}
+ result=first_install.launch_native_entry(state,port,smoke=True)
+ assert len(prompts)==2 and len(children)==1
+ if late:
+  assert result.get('ok') is False and children[0].wait(timeout=10)!=0
+  assert (state/'task-answers.key').read_bytes()==b'SYNTHETIC_LATE_FIRST_USE_AUTHORITY'
+  assert not any((state/name).exists() for name in ('tasks.sqlite3','auth.token','service.log','service.json','native-window.json'))
+  assert (fence.stat().st_ino,fence.read_bytes())==before
+ else:
+  assert result.get('ok') is True and result.get('native_page') is True
+  assert first_install._read_first_fence(app.parent)['status']=='complete'
+  observed=cli._service_record(state/'service.json')
+  assert observed['pid']==children[0].pid and cli.request(state,port,'/v1/service-identity')==observed
+  assert cli.request(state,port,'/health')['ok'] is True
+  reopened=first_install.launch_native_entry(state,port,smoke=True)
+  assert reopened.get('ok') is True and reopened.get('native_page') is True
+  assert cli._service_record(state/'service.json')==observed and len(children)==1
+ print(json.dumps({'prompt_observed':True,'cancel_preserved':True,'late_authority':late,
+                   'actual_native_recovery':not late,'actual_child_refused':late}))
+finally:
+ stopped=cli._stop_owned_service(state,port)
+ assert stopped.get('ok') is True or stopped.get('reason')=='service_record_missing'
+ for child in children:child.wait(timeout=10)
+'''
+    env={'HOME':str(f['home']),'PATH':os.defpath,'LANG':'en_US.UTF-8',
+         'APPLICATION_EXECUTOR_BROWSER_MODE':'isolated','BROWSER':'/usr/bin/false',
+         'PYTHONHOME':'/nonexistent-synthetic-home','PYTHONPATH':'/nonexistent-synthetic-path'}
+    outcome=subprocess.run([str(python),'-I','-B','-c',probe,str(source),str(port),'1' if late_authority else '0'],
+        cwd=f['home'],env=env,capture_output=True,text=True,timeout=180)
+    assert outcome.returncode==0,'complete native pending-recovery journey failed'
+    assert json.loads(outcome.stdout)=={'prompt_observed':True,'cancel_preserved':True,
+        'late_authority':late_authority,'actual_native_recovery':not late_authority,
+        'actual_child_refused':late_authority}
+    assert _trusted_bundle(app) and not (f['state']/'service.json').exists()
+    assert not list(source.rglob('__pycache__'))

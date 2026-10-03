@@ -165,8 +165,13 @@ class Supervisor:
         self._ui_tickets = {k: v for k, v in self._ui_tickets.items() if v > now}
         self._ui_sessions = {k: v for k, v in self._ui_sessions.items() if v > now}
 
-    def issue_ui_ticket(self) -> str:
+    def issue_ui_ticket(self, *, expected_service=None) -> str:
         with self._ui_lock:
+            if expected_service is not None:
+                from .cli import _service_identity_valid
+                if (not _service_identity_valid(expected_service)
+                        or expected_service != self.service_identity()):
+                    raise ValueError("service_identity_changed")
             self._expire_ui()
             ticket = secrets.token_urlsafe(24)
             self._ui_tickets[ticket] = time.monotonic() + 60
@@ -564,8 +569,16 @@ class Supervisor:
             return self.queue.enqueue(TaskSpec.model_validate(data))
         if method == "POST" and parts == ["v1", "chat"] and set(data) == {"message"}:
             return self.manager.handle(data["message"])
-        if method == "POST" and parts == ["v1", "ui-ticket"] and not data:
-            return {"ticket": self.issue_ui_ticket()}
+        if method == "POST" and parts == ["v1", "ui-ticket"]:
+            if not data:
+                return {"ticket": self.issue_ui_ticket()}
+            if type(data) is dict and set(data) == {"expected_service"}:
+                expected = data["expected_service"]
+                if expected is None:
+                    raise ValueError("service_identity_changed")
+                return {"ticket": self.issue_ui_ticket(expected_service=expected),
+                        "service": self.service_identity()}
+            raise ValueError("invalid_ui_ticket_request")
         if method == "POST" and parts == ["v1", "otp"]:
             if set(data) - {"message", "task_id", "hint", "attempt_id"} or "message" not in data:
                 raise ValueError("invalid OTP envelope")

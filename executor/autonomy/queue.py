@@ -113,8 +113,14 @@ class TaskSpec(BaseModel):
 
 class TaskQueue:
     """A transaction per operation; leases use fencing tokens, not process IDs."""
-    def __init__(self, root=RUNTIME, *, clock=time.time):
-        self.root = private_dir(root)
+    def __init__(self, root=RUNTIME, *, clock=time.time, _first_use_startup=None):
+        if _first_use_startup is not None:
+            from .first_use_recovery import _FirstUseStartup
+            if type(_first_use_startup) is not _FirstUseStartup:
+                raise ValueError("first_use_callback_invalid")
+        # Strict first use already admitted an existing private root. Do not
+        # mkdir/chmod a replacement before its bound-inode callback can refuse.
+        self.root = private_dir(root) if _first_use_startup is None else Path(root).absolute()
         self.path = self.root / "tasks.sqlite3"
         self.clock = clock
         self.lock = threading.RLock()
@@ -125,7 +131,11 @@ class TaskQueue:
         # Own the migration fence through both backup AND the complete schema
         # transaction, so the app updater cannot certify a concurrently changing
         # journal. Queue construction retains its existing blocking protocol.
-        with os.fdopen(_private_lock_fd(migration_lock, blocking=True), "a+") as lock_handle:
+        migration_fd = (_private_lock_fd(migration_lock, blocking=True) if _first_use_startup is None
+                        else _first_use_startup.bound_lock_fd("migration.lock"))
+        with os.fdopen(migration_fd, "a+") as lock_handle:
+            if _first_use_startup is not None:
+                _first_use_startup.before_queue(self)
             if self.path.exists() and not backup_path.exists():
                 with sqlite3.connect(self.path) as source:
                     columns_before = {row[1] for row in source.execute("PRAGMA table_info(tasks)")}
@@ -223,6 +233,8 @@ class TaskQueue:
                     UNIQUE(upload_intent_sha,ordinal))''')
                 db.execute("INSERT OR IGNORE INTO task_view_context VALUES(1,NULL,0)")
             self.path.chmod(0o600)
+            if _first_use_startup is not None:
+                _first_use_startup.after_queue(self)
 
     @contextmanager
     def tx(self):
