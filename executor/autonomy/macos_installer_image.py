@@ -23,6 +23,7 @@ def build_installer_image(distribution, output):
     from .app_distribution import stage_macos_distribution, _bundle_members, _sha256, _no_alias_path
     from .consumer import _bundle_transaction_identity, _native_packaged_launcher, _owned_bundle_text
     from .release import source_manifest, RUNTIME_MANIFEST_NAME
+    from .consumer_installer import bundle_release_version
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         raise ValueError('installer_build_requires_apple_silicon')
     output = Path(output).absolute()
@@ -43,6 +44,7 @@ def build_installer_image(distribution, output):
             if len(header) != 8 or struct.unpack('<II', header) != (0xFEEDFACF, 0x0100000C):
                 raise ValueError('installer_payload_platform_invalid')
         members = _bundle_members(app)
+        version = bundle_release_version(app, identity)
         source = source_manifest(app / 'Contents/Resources/release')
         runtime = json.loads(_owned_bundle_text(app / 'Contents/Resources/runtime' / RUNTIME_MANIFEST_NAME))
         if set(app.parent.iterdir()) != {app}:
@@ -85,6 +87,7 @@ def build_installer_image(distribution, output):
             receipt = {'format': 'jae-macos-installer-v1', 'image': IMAGE_NAME,
                 'image_sha256': _sha256(image), 'source_sha256': source['source_sha256'],
                 'runtime_sha256': runtime['runtime_sha256'], 'architecture': 'arm64',
+                'bundle_version': str(version),
                 'minimum_macos': '13.0', 'signing': 'unsigned', 'notarization': 'not_performed',
                 'certification': 'NOT_CERTIFIED', 'task_state': 'excluded',
                 'installation': 'explicit_native_user_choice'}

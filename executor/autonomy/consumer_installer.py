@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
+import re
 import subprocess
 import stat
 import time
@@ -29,6 +32,22 @@ def _service_snapshot(state):
         return _service_record(state / 'service.json')
     except FileNotFoundError:
         return None
+
+
+def bundle_release_version(app, identity):
+    """Read one canonical sequence from the already captured Info.plist."""
+    from .consumer import _owned_bundle_bytes
+    path = app / 'Contents/Info.plist'
+    if path.stat(follow_symlinks=False).st_size > 16 * 1024:
+        raise ValueError('installer_version_unverified')
+    raw = _owned_bundle_bytes(path)
+    expected = next((digest for name, _, digest in identity[2] if name == 'Contents/Info.plist'), None)
+    if len(raw) > 16 * 1024 or hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError('installer_version_unverified')
+    value = plistlib.loads(raw).get('CFBundleVersion')
+    if type(value) is not str or re.fullmatch(r'[1-9][0-9]{0,8}', value) is None:
+        raise ValueError('installer_version_unverified')
+    return int(value)
 
 
 def _app_snapshot(apps):
@@ -85,7 +104,8 @@ def _capture(target, state):
                 or consumer._owned_bundle_text(target / 'Contents/MacOS/AIApplicationManager')
                    == consumer._native_packaged_launcher_v1()):
             raise ValueError('installer_pending_target_unverified')
-    return {'target': identity, 'authority': authority, 'apps': _app_snapshot(target.parent),
+    return {'target': identity, 'version': bundle_release_version(target, identity),
+            'authority': authority, 'apps': _app_snapshot(target.parent),
             'fence': fence, 'service': _service_snapshot(state)}
 
 
@@ -257,9 +277,12 @@ def run_downloaded_installer(candidate, target, state, port, candidate_identity)
     attempted = False
     try:
         snapshot = _capture(target, state)
+        candidate_version = bundle_release_version(candidate, candidate_identity)
         same = tuple((p, h) for p, _, h in snapshot['target'][2]) == tuple((p, h) for p, _, h in candidate_identity[2])
         pending = snapshot['fence'] is not None and snapshot['fence'][1]['status'] == 'pending'
-        mode = 'recovery' if pending else 'open' if same else 'update'
+        mode = ('recovery' if pending else 'open' if same else
+                'older' if candidate_version < snapshot['version'] else
+                'conflict' if candidate_version == snapshot['version'] else 'update')
         choice = macos_host.present_native_installer(host, mode)
         if choice == {'action': 'cancel'}:
             return {'ok': True, 'cancelled': True, 'installed': True, **boundary}
@@ -280,7 +303,7 @@ def run_downloaded_installer(candidate, target, state, port, candidate_identity)
         unchanged()
         if choice['action'] == 'open':
             return {**_open_existing(target, snapshot['target'], port), **boundary}
-        if pending or same:
+        if pending or same or candidate_version <= snapshot['version']:
             raise ValueError('installer_intent_unconfirmed')
         release = candidate / 'Contents/Resources/release'
         runtime = candidate / 'Contents/Resources/runtime'

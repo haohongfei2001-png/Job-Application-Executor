@@ -2589,7 +2589,8 @@ def _installer_bundle(path, *, marker='one'):
     launcher=path/'Contents/MacOS/AIApplicationManager';launcher.parent.mkdir()
     launcher.write_text(consumer._native_packaged_launcher());launcher.chmod(0o755)
     (path/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':consumer.BUNDLE_ID,
-        'CFBundleExecutable':'AIApplicationManager','CFBundleVersion':'SYNTHETIC_PRESERVE_'+marker}))
+        'CFBundleExecutable':'AIApplicationManager','CFBundleVersion':'1' if marker=='one' else '2',
+        'SYNTHETICPreservedMetadata':marker}))
     assert consumer._trusted_bundle(path)
     return path
 
@@ -2775,7 +2776,7 @@ def test_installer_and_recovery_local_auth_never_follow_redirects(tmp_path,statu
         for thread in threads:thread.join(timeout=2)
 
 
-@pytest.mark.parametrize('mode',['open','update','recovery'])
+@pytest.mark.parametrize('mode',['open','update','recovery','older','conflict'])
 def test_hosted_mac_installer_prompt_uses_actual_cocoa_and_cancels(compiled_host,mode):
     assert macos_host.present_native_installer(compiled_host,mode,smoke=True)=={'action':'cancel'}
 
@@ -2895,3 +2896,58 @@ def test_installer_pending_fence_never_opens_legacy_native_launch(tmp_path,monke
     assert (_installer_inventory(target),_installer_inventory(state),first_install._fence_path(target.parent).read_bytes())==before
     with pytest.raises(ValueError,match='installer_pending_target_unverified'):
         installer._open_existing(target,consumer._bundle_transaction_identity(target),9344)
+
+
+@pytest.mark.parametrize('installed_version,candidate_version,mode',[(3,2,'older'),(2,2,'conflict')])
+def test_installer_old_or_same_version_different_payload_never_offers_update(tmp_path,monkeypatch,installed_version,candidate_version,mode):
+    import plistlib
+    installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)
+    for app,version in [(target,installed_version),(candidate,candidate_version)]:
+        path=app/'Contents/Info.plist';info=plistlib.loads(path.read_bytes());info['CFBundleVersion']=str(version);path.write_bytes(plistlib.dumps(info))
+    before=(_installer_inventory(target),_installer_inventory(state));modes=[]
+    monkeypatch.setattr(macos_host,'present_native_installer',lambda directory,observed:modes.append(observed) or {'action':'cancel'})
+    monkeypatch.setattr(installer,'_retire',lambda *a:pytest.fail('older/conflicting payload retired service'))
+    result=installer.run_downloaded_installer(candidate,target,state,9344,consumer._bundle_transaction_identity(candidate))
+    assert result['cancelled'] is True and modes==[mode]
+    assert (_installer_inventory(target),_installer_inventory(state))==before
+
+
+@pytest.mark.parametrize('value',[None,'','0','01','-1','1.0',' 2','2\n','1000000000',True,2])
+@pytest.mark.parametrize('side',['candidate','target'])
+def test_installer_missing_or_noncanonical_version_refuses_before_choice(tmp_path,monkeypatch,value,side):
+    import plistlib
+    installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)
+    app=candidate if side=='candidate' else target
+    path=app/'Contents/Info.plist';info=plistlib.loads(path.read_bytes())
+    if value is None:info.pop('CFBundleVersion')
+    else:info['CFBundleVersion']=value
+    path.write_bytes(plistlib.dumps(info))
+    before=(_installer_inventory(target),_installer_inventory(state))
+    monkeypatch.setattr(macos_host,'present_native_installer',lambda *a,**k:pytest.fail('invalid version prompted'))
+    monkeypatch.setattr(installer,'_retire',lambda *a:pytest.fail('invalid version retired service'))
+    result=installer.run_downloaded_installer(candidate,target,state,9344,consumer._bundle_transaction_identity(candidate))
+    assert result['ok'] is False and (_installer_inventory(target),_installer_inventory(state))==before
+
+
+@pytest.mark.parametrize('side',['candidate','target'])
+def test_installer_version_changed_during_prompt_never_retires_service(tmp_path,monkeypatch,side):
+    import plistlib
+    installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)
+    identity=consumer._bundle_transaction_identity(candidate);before=_installer_inventory(state)
+    def choose(directory,mode):
+        assert mode=='update'
+        app=candidate if side=='candidate' else target
+        path=app/'Contents/Info.plist';info=plistlib.loads(path.read_bytes());info['CFBundleVersion']='3';path.write_bytes(plistlib.dumps(info))
+        return {'action':'update'}
+    monkeypatch.setattr(macos_host,'present_native_installer',choose)
+    monkeypatch.setattr(installer,'_retire',lambda *a:pytest.fail('changed version retired service'))
+    result=installer.run_downloaded_installer(candidate,target,state,9344,identity)
+    assert result['ok'] is False and _installer_inventory(state)==before
+    assert not (target.parent/('.'+consumer.APP_NAME+'.app.previous')).exists()
+
+
+@pytest.mark.parametrize('mode',['older','conflict'])
+def test_installer_readonly_version_choices_cannot_authorize_replacement(mode):
+    assert macos_host.native_installer_choice({'action':'open'},mode)=={'action':'open'}
+    assert macos_host.native_installer_choice({'action':'cancel'},mode)=={'action':'cancel'}
+    assert macos_host.native_installer_choice({'action':'update'},mode) is None

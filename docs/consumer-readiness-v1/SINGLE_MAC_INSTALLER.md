@@ -19,6 +19,12 @@ Update and Cancel actions as applicable. The same payload opens without another
 installation. Update asks the user to save inputs and close the existing app
 window. Busy windows are not forced closed. The exact target, default state and
 lock inodes, fence and service are observed before the choice, then rechecked.
+Updates require a higher canonical numeric bundle version. Older installers and
+equal-version bundles with different contents offer only Open/Cancel; missing or
+malformed versions refuse. Version reads are bound to the captured Info.plist.
+Each subsequently adopted source release must increase `RELEASE_SEQUENCE`;
+explicit retained-version rollback remains a separate operation. Already-built
+earlier installer artifacts do not inherit this corrected admission policy.
 Only an authenticated matching service can retire at its existing safe
 checkpoint. Redirects from authenticated loopback endpoints are refused.
 
@@ -50,7 +56,8 @@ Local source review, complete owning tests, exact-head hosted gates and the
 post-merge run must be recorded for this candidate before adoption. No earlier
 artifact or previously passed source version certifies this larger change.
 
-The corrected Linux source gate passed 294 native/lifecycle/routing cases plus
-132 subtests, with 24 explicitly Mac-only skips. The actual mounted-image
-journey and native launcher/prompt cases remain required hosted evidence;
-these local results do not mark them as passed.
+The initial frozen installer source passed 294 local native/lifecycle/routing
+cases and its hosted DMG journey, but review then reproduced an older-installer
+and equal-version replacement offer. That artifact is superseded for update
+acceptance. The corrected ordered-version candidate requires its own complete
+owning gate and exact-head hosted evidence; earlier green runs do not certify it.

@@ -125,8 +125,14 @@ static BOOL releaseResult(NSDictionary *command) {
         alert.messageText = @"AI 投递经理已安装";
         BOOL updating = [self.installerMode isEqualToString:@"update"];
         BOOL pending = [self.installerMode isEqualToString:@"recovery"];
+        BOOL older = [self.installerMode isEqualToString:@"older"];
+        BOOL conflict = [self.installerMode isEqualToString:@"conflict"];
+        if (older) alert.messageText = @"安装包版本较旧";
+        if (conflict) alert.messageText = @"同版本内容不一致";
         alert.informativeText = updating
             ? @"可更新到本安装包版本。请先保存输入并关闭已打开的应用窗口；现有任务与已保存答案会保留。版本、任务或服务状态无法核对时会停止，不会强制关闭窗口、迁移旧资料或自动重试。"
+            : older ? @"本机已有更新版本，本安装包不会将它降级。请直接打开已安装应用；如确需回退，使用应用内单独的保留版本回退入口。"
+            : conflict ? @"安装包与本机应用版本号相同，但内容不同，无法将它当作更新。已安装应用和任务保持不变，请使用已核对的新版本安装包。"
             : pending ? @"上次首次使用尚未完成。请打开已安装应用进行核对；本安装包不会替换它或删除任何资料。"
                       : @"本机已有相同版本。直接打开即可，不会重复安装或另建任务库。";
         [alert addButtonWithTitle:updating ? @"更新并打开" : pending ? @"打开并核对首次使用" : @"打开已安装应用"];
@@ -536,7 +542,7 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         JAEHost *host = [JAEHost new];
         host.firstUseRecoverySmoke = argc == 2 && strcmp(argv[1], "--first-use-recovery-smoke") == 0;
-        for (NSString *mode in @[@"open", @"update", @"recovery"]) {
+        for (NSString *mode in @[@"open", @"update", @"recovery", @"older", @"conflict"]) {
             NSString *flag = [@"--installer-" stringByAppendingString:mode];
             NSString *smokeFlag = [flag stringByAppendingString:@"-smoke"];
             if (argc == 2 && (strcmp(argv[1], flag.UTF8String) == 0 || strcmp(argv[1], smokeFlag.UTF8String) == 0)) {
@@ -917,7 +923,7 @@ def present_native_installer(directory: str | Path, mode: str, *, smoke: bool = 
 
 
 def native_installer_choice(value, mode):
-    if (mode not in {"open", "update", "recovery"} or type(value) is not dict
+    if (mode not in {"open", "update", "recovery", "older", "conflict"} or type(value) is not dict
             or set(value) != {"action"} or type(value["action"]) is not str):
         return None
     allowed = {"open", "cancel", "update"} if mode == "update" else {"open", "cancel"}
@@ -933,7 +939,7 @@ def _present_first_install_prompt(directory: str | Path, *, smoke: bool = False,
                                   result: str | None = None, recovery: bool = False,
                                   installer: str | None = None) -> dict | None:
     """Trusted static host, bounded terminal reply; never launches an installer."""
-    if (installer is not None and (type(installer) is not str or installer not in {"open", "update", "recovery"}
+    if (installer is not None and (type(installer) is not str or installer not in {"open", "update", "recovery", "older", "conflict"}
             or result is not None or recovery)
             or type(smoke) is not bool or type(recovery) is not bool or (smoke or recovery) and result is not None
             or result is not None and (type(result) is not str or result not in {

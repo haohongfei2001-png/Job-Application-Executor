@@ -1629,6 +1629,8 @@ finally:
     source=source_app/'Contents/Resources/release'
     with (source/'executor/__init__.py').open('a') as handle:handle.write('\n# SYNTHETIC_DMG_SECOND_VERSION\n')
     (source/MANIFEST_NAME).write_text(json.dumps(source_manifest(source),sort_keys=True,separators=(',',':'))+'\n')
+    info_path=source_app/'Contents/Info.plist';info=plistlib.loads(info_path.read_bytes())
+    info['CFBundleVersion']=str(int(info['CFBundleVersion'])+1);info_path.write_bytes(plistlib.dumps(info))
     assert consumer._trusted_bundle(source_app)
     second=build_installer_image(_installer_distribution_from_native_app(source_app,tmp_path/'delivery-two'),tmp_path/'image-two')
     assert first['source_sha256']!=second['source_sha256']

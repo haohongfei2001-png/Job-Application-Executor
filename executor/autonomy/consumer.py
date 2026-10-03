@@ -30,6 +30,9 @@ from .process_entry import CLI_ENTRY_SCRIPT
 
 APP_NAME = "AI 投递经理"
 BUNDLE_ID = "com.local.job-application-executor.ai-application-manager"
+# Increase for each subsequently adopted source release. Equal sequence with
+# different bytes is intentionally not an ordinary installer update.
+RELEASE_SEQUENCE = 2
 
 
 def _owned_bundle_file(path: Path) -> bool:
@@ -1038,7 +1041,7 @@ def _install_macos_app_unlocked(
             "CFBundleName": APP_NAME,
             "CFBundlePackageType": "APPL",
             "CFBundleShortVersionString": "1.0",
-            "CFBundleVersion": "1",
+            "CFBundleVersion": str(RELEASE_SEQUENCE),
             "LSMinimumSystemVersion": "13.0",
             "NSHighResolutionCapable": True,
         }
