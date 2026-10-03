@@ -36,6 +36,9 @@ STATIC_STEP = (
 )
 
 
+LIFECYCLE_SOAK_STEP = '      - name: Complete partial lifecycle-soak runner contract\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n'
+LIFECYCLE_SOAK_MAC_STEP = "      - name: Complete partial lifecycle-soak runner contract on hosted Mac\n        if: matrix.suite == 'runtime_distribution'\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n"
+
 PREPARATION_STEP = '      - name: Anonymous preparation kernel and controller-death oracle\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n          JAE_UI_SCREENSHOT_DIR: ${{ runner.temp }}/jae-preparation-ui\n        run: python -m pytest -q -s tests/test_qiyunfang_preparation_v1.py tests/test_preparation_review_v1.py tests/test_preparation_authority_v1.py tests/test_preparation_authority_browser.py tests/test_preparation_review_browser.py tests/test_qiyunfang_preparation_browser.py tests/test_preparation_human_request_v1.py tests/test_preparation_human_request_browser.py tests/test_preparation_network_fence_v1.py tests/test_preparation_network_fence_browser.py tests/test_preparation_lifecycle_browser.py\n'
 PREPARATION_MAC_STEP = "      - name: Anonymous preparation early Mac oracle\n        if: matrix.suite == 'native_integration'\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q -s tests/test_qiyunfang_preparation_v1.py tests/test_preparation_review_v1.py tests/test_preparation_authority_v1.py tests/test_preparation_authority_browser.py tests/test_preparation_review_browser.py tests/test_qiyunfang_preparation_browser.py tests/test_preparation_human_request_v1.py tests/test_preparation_human_request_browser.py tests/test_preparation_network_fence_v1.py tests/test_preparation_network_fence_browser.py tests/test_preparation_lifecycle_browser.py\n"
 
@@ -250,9 +253,13 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 if name in {"packaged_candidate", "macos_consumer_release"}:
                     protected = body[body.index("    strategy:\n"):]
                 if name == "macos_consumer_release":
+                    self.assertEqual(protected.count(LIFECYCLE_SOAK_MAC_STEP), 1)
+                    protected = protected.replace(LIFECYCLE_SOAK_MAC_STEP, "", 1)
                     self.assertEqual(protected.count(PREPARATION_MAC_STEP), 0)
                     protected = protected.replace(PREPARATION_MAC_STEP, "", 1)
                 if name == "foundation":
+                    self.assertEqual(protected.count(LIFECYCLE_SOAK_STEP), 1)
+                    protected = protected.replace(LIFECYCLE_SOAK_STEP, "", 1)
                     self.assertEqual(protected.count(PREPARATION_STEP), 0)
                     protected = protected.replace(PREPARATION_STEP, "", 1)
                     self.assertEqual(protected.count(PUBLIC_PROBE_STEP),0)

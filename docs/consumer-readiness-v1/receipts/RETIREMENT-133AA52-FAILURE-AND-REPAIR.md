@@ -79,3 +79,17 @@ remain unverified; final submission remains human-only.
 The failed candidate's full Linux job separately completed **3350 passed,
 93 skipped, 2 xpassed, 132 subtests passed** in 2413.05 seconds. This preserves
 the passing scope without overriding the Mac failure or certifying the repair.
+
+## Corrected-head hosted closure, 2026-10-02
+
+The narrow repair head `1c3aa80541256a15865edc6db56ec0df23103807` passed
+[complete run 37074833221](https://github.com/haohongfei2001-png/Job-Application-Executor/actions/runs/37074833221):
+all eight selected jobs succeeded. Full Linux: **3368 passed, 93 skipped,
+2 xpassed, 132 subtests passed** in 2062.88 seconds. Hosted Mac consumer:
+**644 passed** in 607.66 seconds, including all 18 appended real-unlink cases.
+The earlier failed run and local environment limitations above remain preserved.
+
+PR #29 merged as `4954eb2fe80c84456e22e386483f7ed877e1a1b5`. Its normal
+post-merge run **37078259613** was in progress when this follow-up was written;
+that new run is not assumed passed. The repair does not promote consumer or
+full Z-04 certification or establish a live/physical-device result.
