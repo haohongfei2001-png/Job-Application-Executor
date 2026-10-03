@@ -30,6 +30,9 @@ from .process_entry import CLI_ENTRY_SCRIPT
 
 APP_NAME = "AI 投递经理"
 BUNDLE_ID = "com.local.job-application-executor.ai-application-manager"
+# Increase for each subsequently adopted source release. Equal sequence with
+# different bytes is intentionally not an ordinary installer update.
+RELEASE_SEQUENCE = 2
 
 
 def _owned_bundle_file(path: Path) -> bool:
@@ -222,7 +225,7 @@ def _native_packaged_launcher_v1() -> str:
         ' "$RELEASE_ROOT" native-launch "$@" >>"$LOG_FILE" 2>&1')
 
 
-def _native_packaged_launcher() -> str:
+def _native_packaged_launcher_v2() -> str:
     return _native_packaged_launcher_v1().replace(
         ' "$RELEASE_ROOT" native-launch "$@"',
         ' "$RELEASE_ROOT" native-entry "$@"').replace(
@@ -232,9 +235,26 @@ def _native_packaged_launcher() -> str:
         'AI 投递经理尚未确认安装或打开。请保留原应用和任务，重新打开应用查看本机说明；不要删除旧文件或强行覆盖。')
 
 
+def _native_packaged_launcher() -> str:
+    # Run fixed Apple platform checks before an architecture-specific runtime,
+    # log directory or task authority is touched. Retained v1/v2 bytes stay valid.
+    preflight = """if [[ "$(/usr/bin/uname -m)" != "arm64" ]]; then
+  /usr/bin/osascript -e 'display dialog "此安装包适用于 Apple Silicon（M 系列）Mac，不能用于 Intel Mac。没有安装或修改任务。" buttons {"关闭"} default button "关闭" with icon caution'
+  exit 2
+fi
+OS_VERSION="$(/usr/bin/sw_vers -productVersion)"
+OS_MAJOR="${OS_VERSION%%.*}"
+if [[ "$OS_MAJOR" != <-> || "$OS_MAJOR" -lt 13 ]]; then
+  /usr/bin/osascript -e 'display dialog "AI 投递经理需要 macOS 13 或更新版本。没有安装或修改任务。" buttons {"关闭"} default button "关闭" with icon caution'
+  exit 2
+fi
+"""
+    return _native_packaged_launcher_v2().replace('set -u\n', 'set -u\n' + preflight, 1)
+
+
 def _is_native_packaged_launcher(value: str) -> bool:
     # Retained versions keep their exact historical source-bound launcher.
-    return type(value) is str and value in {_native_packaged_launcher_v1(), _native_packaged_launcher()}
+    return type(value) is str and value in {_native_packaged_launcher_v1(), _native_packaged_launcher_v2(), _native_packaged_launcher()}
 
 
 def _native_bundle_matches(release: Path, directory: Path) -> bool:
@@ -735,6 +755,7 @@ def install_macos_bundle(
     _first_install: bool = False,
     _legacy_additional_origins: tuple[Path, ...] = (),
     _approved_identity: tuple | None = None,
+    _preserve_bundle: bool = False,
 ) -> dict:
     """Feed a verified delivered app through the existing release transaction.
 
@@ -748,8 +769,10 @@ def install_macos_bundle(
         candidate = Path(candidate_app).expanduser().absolute()
         if any(part.is_symlink() for part in (candidate, *candidate.parents)):
             raise ValueError("bundle_alias")
-        approved = (candidate, _approved_identity) if _first_install else None
-        if _first_install and (type(_approved_identity) is not tuple or not _approved_first_install_matches(approved)):
+        if type(_preserve_bundle) is not bool:
+            raise ValueError("bundle_mode_invalid")
+        approved = (candidate, _approved_identity) if _first_install or _preserve_bundle else None
+        if (_first_install or _preserve_bundle) and (type(_approved_identity) is not tuple or not _approved_first_install_matches(approved)):
             return {"ok": False, "reason": "first_install_source_changed"}
         release = candidate / "Contents" / "Resources" / "release"
         runtime = candidate / "Contents" / "Resources" / "runtime"
@@ -770,6 +793,7 @@ def install_macos_bundle(
     return install_macos_app(release, destination=apps, platform=platform,
         task_state_root=task_state_root, standalone_runtime=runtime,
         native_presentation=native, _approved_bundle=approved,
+        _bundle_payload=approved if _preserve_bundle else None,
         _native_launcher=_owned_bundle_text(launcher) if native else None,
         _legacy_origin=Path(__file__).absolute().parents[2],
         _first_install=_first_install, _legacy_additional_origins=_legacy_additional_origins, **options)
@@ -789,6 +813,7 @@ def install_macos_app(
     _legacy_additional_origins: tuple[Path, ...] = (),
     _native_launcher: str | None = None,
     _approved_bundle: tuple | None = None,
+    _bundle_payload: tuple | None = None,
 ) -> dict:
     if (platform or sys.platform) != "darwin":
         return _install_macos_app_unlocked(repo_root, destination=destination, platform=platform)
@@ -831,7 +856,8 @@ def install_macos_app(
                     native_presentation=native_presentation, native_host=native_host,
                     _state_backup_evidence=backup_evidence, _legacy_origin=_legacy_origin,
                     _first_install=_first_install, _legacy_additional_origins=_legacy_additional_origins,
-                    _native_launcher=_native_launcher, _approved_bundle=_approved_bundle)
+                    _native_launcher=_native_launcher, _approved_bundle=_approved_bundle,
+                    _bundle_payload=_bundle_payload)
                 return {**result, "task_state_backup": backup_evidence} if backup_evidence else result
         except BlockingIOError:
             return {"ok": False, "reason": "task_state_in_use",
@@ -858,8 +884,16 @@ def _install_macos_app_unlocked(
     _legacy_additional_origins: tuple[Path, ...] = (),
     _native_launcher: str | None = None,
     _approved_bundle: tuple | None = None,
+    _bundle_payload: tuple | None = None,
+    _installer_guard=None,
+    _expected_current_identity: tuple | None = None,
 ) -> dict:
     """Stage a source-and-runtime snapshot, then atomically activate the Mac app."""
+    if _installer_guard is not None:
+        from .consumer_installer import _UpdateAuthority
+        if type(_installer_guard) is not _UpdateAuthority:
+            raise ValueError("installer_authority_invalid")
+        _installer_guard.verify()
     current_platform = platform or sys.platform
     if current_platform != "darwin":
         return {
@@ -901,6 +935,8 @@ def _install_macos_app_unlocked(
             "message": "现有应用包无法核对；没有替换或删除任何应用。",
         }
     current_identity = _bundle_transaction_identity(app) if app.exists() else None
+    if _expected_current_identity is not None and current_identity != _expected_current_identity:
+        return {"ok": False, "reason": "current_identity_unverified"}
     if app.exists() and current_identity is None:
         return {"ok": False, "reason": "current_identity_unverified",
                 "message": "当前应用身份无法核对；没有替换或删除任何应用。"}
@@ -937,66 +973,80 @@ def _install_macos_app_unlocked(
             "message": "发现未完成的安装暂存目录；没有删除或替换任何应用。",
         }
 
-    macos = staging / "Contents" / "MacOS"
-    macos.mkdir(parents=True)
-    release = staging / "Contents" / "Resources" / "release"
-    runtime = staging / "Contents" / "Resources" / "runtime"
-    try:
-        copy_source_candidate(repo, release)
-    except (OSError, ValueError):
-        shutil.rmtree(staging)
-        return {
-            "ok": False,
-            "reason": "source_snapshot_failed",
-            "message": "无法准备完整的新版本；现有应用没有被替换。",
-        }
-    try:
-        if standalone_runtime is None:
-            copy_runtime_candidate(repo / ".venv", runtime, release)
-        else:
-            copy_standalone_runtime_candidate(standalone_runtime, runtime, release)
-    except (OSError, ValueError):
-        shutil.rmtree(staging)
-        return {
-            "ok": False,
-            "reason": "runtime_snapshot_failed",
-            "message": "无法准备独立运行环境；现有应用没有被替换。",
-        }
-    executable = macos / "AIApplicationManager"
-    host_target = staging / "Contents" / "Resources" / "native-host"
-    native_ready = (not native_presentation or (
-        _copy_native_host_candidate(release, Path(native_host).expanduser(), host_target)
-        if native_host is not None else
-        _stage_native_host(runtime / "bin" / "python", release, host_target)))
-    if not native_ready:
-        shutil.rmtree(staging)
-        return {"ok": False, "reason": "native_candidate_failed",
-                "message": "原生窗口候选未通过校验；现有应用和任务保持不变。"}
-    launcher = (_native_launcher or _native_packaged_launcher()) if native_presentation else _packaged_launcher()
+    if _bundle_payload is not None:
+        from .bundle_copy import copy_bundle_payload
+        try:
+            source_app, source_identity = _bundle_payload
+            if (source_app / "Contents/Resources/release" != repo
+                    or _approved_bundle != _bundle_payload):
+                raise ValueError("installer_payload_invalid")
+            copy_bundle_payload(source_app, staging, source_identity)
+        except (OSError, ValueError, TypeError):
+            return {"ok": False, "reason": "bundle_snapshot_failed",
+                    "message": "安装文件核对未完成；原应用未替换，暂存内容已保留。"}
+        release = staging / "Contents/Resources/release"
+        runtime = staging / "Contents/Resources/runtime"
+    else:
+        macos = staging / "Contents" / "MacOS"
+        macos.mkdir(parents=True)
+        release = staging / "Contents" / "Resources" / "release"
+        runtime = staging / "Contents" / "Resources" / "runtime"
+        try:
+            copy_source_candidate(repo, release)
+        except (OSError, ValueError):
+            shutil.rmtree(staging)
+            return {
+                "ok": False,
+                "reason": "source_snapshot_failed",
+                "message": "无法准备完整的新版本；现有应用没有被替换。",
+            }
+        try:
+            if standalone_runtime is None:
+                copy_runtime_candidate(repo / ".venv", runtime, release)
+            else:
+                copy_standalone_runtime_candidate(standalone_runtime, runtime, release)
+        except (OSError, ValueError):
+            shutil.rmtree(staging)
+            return {
+                "ok": False,
+                "reason": "runtime_snapshot_failed",
+                "message": "无法准备独立运行环境；现有应用没有被替换。",
+            }
+        executable = macos / "AIApplicationManager"
+        host_target = staging / "Contents" / "Resources" / "native-host"
+        native_ready = (not native_presentation or (
+            _copy_native_host_candidate(release, Path(native_host).expanduser(), host_target)
+            if native_host is not None else
+            _stage_native_host(runtime / "bin" / "python", release, host_target)))
+        if not native_ready:
+            shutil.rmtree(staging)
+            return {"ok": False, "reason": "native_candidate_failed",
+                    "message": "原生窗口候选未通过校验；现有应用和任务保持不变。"}
+        launcher = (_native_launcher or _native_packaged_launcher()) if native_presentation else _packaged_launcher()
 
-    executable.write_text(launcher, encoding="utf-8")
-    executable.chmod(
-        executable.stat().st_mode
-        | stat.S_IXUSR
-        | stat.S_IXGRP
-        | stat.S_IXOTH
-    )
+        executable.write_text(launcher, encoding="utf-8")
+        executable.chmod(
+            executable.stat().st_mode
+            | stat.S_IXUSR
+            | stat.S_IXGRP
+            | stat.S_IXOTH
+        )
 
-    info = {
-        "CFBundleDevelopmentRegion": "zh_CN",
-        "CFBundleDisplayName": APP_NAME,
-        "CFBundleExecutable": "AIApplicationManager",
-        "CFBundleIdentifier": BUNDLE_ID,
-        "CFBundleInfoDictionaryVersion": "6.0",
-        "CFBundleName": APP_NAME,
-        "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": "1.0",
-        "CFBundleVersion": "1",
-        "LSMinimumSystemVersion": "13.0",
-        "NSHighResolutionCapable": True,
-    }
-    with (staging / "Contents" / "Info.plist").open("wb") as handle:
-        plistlib.dump(info, handle, sort_keys=True)
+        info = {
+            "CFBundleDevelopmentRegion": "zh_CN",
+            "CFBundleDisplayName": APP_NAME,
+            "CFBundleExecutable": "AIApplicationManager",
+            "CFBundleIdentifier": BUNDLE_ID,
+            "CFBundleInfoDictionaryVersion": "6.0",
+            "CFBundleName": APP_NAME,
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": str(RELEASE_SEQUENCE),
+            "LSMinimumSystemVersion": "13.0",
+            "NSHighResolutionCapable": True,
+        }
+        with (staging / "Contents" / "Info.plist").open("wb") as handle:
+            plistlib.dump(info, handle, sort_keys=True)
 
     if (not _trusted_bundle(staging) or not verify_source_candidate(release)
             or not verify_runtime_candidate(runtime, release)):
@@ -1014,6 +1064,8 @@ def _install_macos_app_unlocked(
         return {"ok": False, "reason": "candidate_identity_unverified",
                 "message": "候选应用身份无法核对；候选保留供诊断，现有应用没有被替换。"}
 
+    if _installer_guard is not None:
+        _installer_guard.verify()
     if (not _candidate_starts(runtime / "bin" / "python", release)
             or not verify_source_candidate(release)
             or not verify_runtime_candidate(runtime, release)):
@@ -1046,6 +1098,8 @@ def _install_macos_app_unlocked(
     backup_evidence = _state_backup_evidence if _state_backup_evidence is not None else {}
     if _first_install and (task_state_root is None or _legacy_root_has_state(task_state_root, task_state_root)):
         return {"ok": False, "reason": "first_install_state_continuity_required"}
+    if _installer_guard is not None:
+        _installer_guard.verify()
     if (task_state_root is None or not _prepare_task_state_release(
             runtime / "bin" / "python", release, task_state_root, apps_dir, backup_evidence)):
         shutil.rmtree(staging)
@@ -1055,6 +1109,8 @@ def _install_macos_app_unlocked(
             "message": "新版本无法完整保留现有任务状态；现有应用和任务保持不变。",
         }
 
+    if _installer_guard is not None:
+        _installer_guard.verify()
     # Candidate startup and compatibility may take time. A historical journal
     # can arrive after the initial admission check; refuse before the first
     # app move rather than activating an empty, split task authority.
@@ -1083,6 +1139,8 @@ def _install_macos_app_unlocked(
 
     if not _approved_first_install_matches(_approved_bundle, staging):
         return {"ok": False, "reason": "first_install_source_changed"}
+    if _installer_guard is not None:
+        _installer_guard.verify()
     replaced = current_identity is not None
     if _first_install and replaced:
         return {"ok": False, "reason": "first_install_target_occupied"}
@@ -1232,6 +1290,8 @@ def _install_macos_app_unlocked(
             "message": ("新版本启用后未通过健康检查；已恢复上一版本。"
                         if replaced else "新版本启用后未通过健康检查；失败候选已保留供诊断。"),
         }
+    if _installer_guard is not None:
+        _installer_guard.verify()
     if _first_install:
         # Final-path health can yield after the pre-activation check. A selected
         # old authority arriving here still forbids opening a new service.

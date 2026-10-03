@@ -494,6 +494,11 @@ def verify_started_service(root, port, admitted):
     return health
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, newurl):
+        raise ValueError('local_service_redirect_refused')
+
+
 def _owned_request(root, port, path, data=None):
     """Authenticate with an existing owned token, never create/replace one."""
     from .runtime_paths import _private_regular_fd, _same_entry
@@ -511,7 +516,7 @@ def _owned_request(root, port, path, data=None):
     request = urllib.request.Request('http://127.0.0.1:'+str(port)+path,
         data=None if data is None else json.dumps(data).encode(),
         headers={'Authorization':'Bearer '+raw.strip(), 'Content-Type':'application/json'})
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=.5) as response:
+    with urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect()).open(request, timeout=.5) as response:
         body = response.read(65537)
     if len(body)>65536:
         raise ValueError('first_use_response_invalid')

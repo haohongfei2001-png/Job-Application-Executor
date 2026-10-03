@@ -94,6 +94,8 @@ static BOOL releaseResult(NSDictionary *command) {
 @property BOOL focusSmoke;
 @property BOOL releaseSmoke;
 @property BOOL releaseResultMode;
+@property NSString *installerMode;
+@property BOOL installerSmoke;
 @property BOOL firstUseRecoveryMode;
 @property BOOL firstUseRecoverySmoke;
 @property BOOL firstInstallMode;
@@ -118,6 +120,40 @@ static BOOL releaseResult(NSDictionary *command) {
 
 @implementation JAEHost
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    if (self.installerMode) {
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"AI 投递经理已安装";
+        BOOL updating = [self.installerMode isEqualToString:@"update"];
+        BOOL pending = [self.installerMode isEqualToString:@"recovery"];
+        BOOL older = [self.installerMode isEqualToString:@"older"];
+        BOOL conflict = [self.installerMode isEqualToString:@"conflict"];
+        if (older) alert.messageText = @"安装包版本较旧";
+        if (conflict) alert.messageText = @"同版本内容不一致";
+        alert.informativeText = updating
+            ? @"可更新到本安装包版本。请先保存输入并关闭已打开的应用窗口；现有任务与已保存答案会保留。版本、任务或服务状态无法核对时会停止，不会强制关闭窗口、迁移旧资料或自动重试。"
+            : older ? @"本机已有更新版本，本安装包不会将它降级。请直接打开已安装应用；如确需回退，使用应用内单独的保留版本回退入口。"
+            : conflict ? @"安装包与本机应用版本号相同，但内容不同，无法将它当作更新。已安装应用和任务保持不变，请使用已核对的新版本安装包。"
+            : pending ? @"上次首次使用尚未完成。请打开已安装应用进行核对；本安装包不会替换它或删除任何资料。"
+                      : @"本机已有相同版本。直接打开即可，不会重复安装或另建任务库。";
+        [alert addButtonWithTitle:updating ? @"更新并打开" : pending ? @"打开并核对首次使用" : @"打开已安装应用"];
+        if (updating) [alert addButtonWithTitle:@"打开已安装应用"];
+        [alert addButtonWithTitle:@"取消"];
+        [NSApp activateIgnoringOtherApps:YES];
+        if (self.installerSmoke) {
+            [alert.window makeKeyAndOrderFront:nil];
+            BOOL visible = alert.window.isVisible && self.view == nil;
+            [alert.window close]; self.finished = YES;
+            report(@{@"ok": @(visible), @"installer_prompt_visible": @(visible),
+                     @"installer_choice": @{@"action": @"cancel"}});
+            [NSApp terminate:nil]; return;
+        }
+        NSModalResponse response = [alert runModal];
+        NSString *action = response == NSAlertFirstButtonReturn ? (updating ? @"update" : @"open")
+            : updating && response == NSAlertSecondButtonReturn ? @"open" : @"cancel";
+        self.finished = YES;
+        report(@{@"ok": @YES, @"installer_choice": @{@"action": action}});
+        [NSApp terminate:nil]; return;
+    }
     if (self.firstUseRecoveryMode) {
         // Only explicit revalidation of an already admitted pending first use.
         // No path picker, WebView, credentials or service control in this host.
@@ -150,6 +186,7 @@ static BOOL releaseResult(NSDictionary *command) {
             alert.messageText = @"安装尚未完成";
             NSDictionary *messages = @{
                 @"legacy-state-required": @"发现旧版任务或无法核对旧版资料。原应用、任务和答案保持原处；需要完成安全迁移后再安装。请勿删除旧文件或改选空文件夹绕过检查。",
+                @"app-in-use": @"请先保存输入并关闭已打开的 AI 投递经理窗口，再重新打开本安装包。没有强制关闭窗口、替换应用或删除任务。",
                 @"target-occupied": @"当前用户的应用程序文件夹已有同名应用，安装包没有替换它。请关闭此窗口并打开已有应用；如需更新，使用已有应用内的更新入口。",
                 @"state-continuity-required": @"发现没有对应应用的既有任务状态。为避免另建空任务库，安装已停止，原状态保持不变。",
                 @"not-confirmed": @"安装结果尚未确认。没有自动重试或打开另一套任务库；请保留原应用和安装包，核对后再操作。",
@@ -505,6 +542,14 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         JAEHost *host = [JAEHost new];
         host.firstUseRecoverySmoke = argc == 2 && strcmp(argv[1], "--first-use-recovery-smoke") == 0;
+        for (NSString *mode in @[@"open", @"update", @"recovery", @"older", @"conflict"]) {
+            NSString *flag = [@"--installer-" stringByAppendingString:mode];
+            NSString *smokeFlag = [flag stringByAppendingString:@"-smoke"];
+            if (argc == 2 && (strcmp(argv[1], flag.UTF8String) == 0 || strcmp(argv[1], smokeFlag.UTF8String) == 0)) {
+                host.installerMode = mode;
+                host.installerSmoke = strcmp(argv[1], smokeFlag.UTF8String) == 0;
+            }
+        }
         host.firstUseRecoveryMode = host.firstUseRecoverySmoke || (argc == 2 && strcmp(argv[1], "--first-use-recovery") == 0);
         host.firstInstallSmoke = argc == 2 && strcmp(argv[1], "--first-install-smoke") == 0;
         host.firstInstallMode = host.firstInstallSmoke || (argc == 2 && strcmp(argv[1], "--first-install") == 0)
@@ -873,18 +918,33 @@ def present_native_first_use_recovery(directory: str | Path, *, smoke: bool = Fa
     return _present_first_install_prompt(directory, smoke=smoke, recovery=True)
 
 
+def present_native_installer(directory: str | Path, mode: str, *, smoke: bool = False) -> dict | None:
+    return _present_first_install_prompt(directory, smoke=smoke, installer=mode)
+
+
+def native_installer_choice(value, mode):
+    if (mode not in {"open", "update", "recovery", "older", "conflict"} or type(value) is not dict
+            or set(value) != {"action"} or type(value["action"]) is not str):
+        return None
+    allowed = {"open", "cancel", "update"} if mode == "update" else {"open", "cancel"}
+    return dict(value) if value["action"] in allowed else None
+
+
 def present_native_first_install(directory: str | Path, *, smoke: bool = False,
                                  result: str | None = None) -> dict | None:
     return _present_first_install_prompt(directory, smoke=smoke, result=result)
 
 
 def _present_first_install_prompt(directory: str | Path, *, smoke: bool = False,
-                                  result: str | None = None, recovery: bool = False) -> dict | None:
+                                  result: str | None = None, recovery: bool = False,
+                                  installer: str | None = None) -> dict | None:
     """Trusted static host, bounded terminal reply; never launches an installer."""
-    if (type(smoke) is not bool or type(recovery) is not bool or (smoke or recovery) and result is not None
+    if (installer is not None and (type(installer) is not str or installer not in {"open", "update", "recovery", "older", "conflict"}
+            or result is not None or recovery)
+            or type(smoke) is not bool or type(recovery) is not bool or (smoke or recovery) and result is not None
             or result is not None and (type(result) is not str or result not in {
             "legacy-state-required", "target-occupied", "state-continuity-required",
-            "not-confirmed", "reopen-failed"})):
+            "not-confirmed", "reopen-failed", "app-in-use"})):
         return None
     try:
         root = Path(directory).absolute()
@@ -892,7 +952,7 @@ def _present_first_install_prompt(directory: str | Path, *, smoke: bool = False,
             return None
         presenter = NativePresenter(root)
         try:
-            mode = "first-use-recovery" if recovery else "first-install"
+            mode = "installer-" + installer if installer else "first-use-recovery" if recovery else "first-install"
             args = (["--first-install-result", result] if result is not None else
                     ["--" + mode + ("-smoke" if smoke else "")])
             presenter.process = subprocess.Popen([str(root / "AIApplicationWindow"), *args],
@@ -929,13 +989,14 @@ def _present_first_install_prompt(directory: str | Path, *, smoke: bool = False,
                     output[key] = value
                 return output
             reply = json.loads(line, object_pairs_hook=unique)
-            prefix = "first_use_recovery" if recovery else "first_install"
+            prefix = "installer" if installer else "first_use_recovery" if recovery else "first_install"
             expected = {"ok", prefix + "_choice"} | ({prefix + "_prompt_visible"} if smoke else set())
             if (type(reply) is not dict or set(reply) != expected or reply.get("ok") is not True
                     or smoke and reply.get(prefix + "_prompt_visible") is not True):
                 return None
             validate = native_first_use_recovery_choice if recovery else native_first_install_choice
-            return validate(reply[prefix + "_choice"])
+            return (native_installer_choice(reply[prefix + "_choice"], installer) if installer
+                    else validate(reply[prefix + "_choice"]))
         finally:
             presenter.close()
     except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):

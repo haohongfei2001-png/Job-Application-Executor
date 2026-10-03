@@ -1491,3 +1491,164 @@ finally:
         'actual_child_refused':late_authority}
     assert _trusted_bundle(app) and not (f['state']/'service.json').exists()
     assert not list(source.rglob('__pycache__'))
+
+
+def _installer_distribution_from_native_app(app, directory):
+    from executor.autonomy.release import RUNTIME_MANIFEST_NAME
+    directory.mkdir()
+    _archive_app(app,directory/ARCHIVE_NAME)
+    runtime=json.loads((app/'Contents/Resources/runtime'/RUNTIME_MANIFEST_NAME).read_text())
+    receipt={'format':'jae-macos-distribution-v1','archive':ARCHIVE_NAME,
+        'archive_sha256':hashlib.sha256((directory/ARCHIVE_NAME).read_bytes()).hexdigest(),
+        'app_name':APP_NAME+'.app','source_sha256':source_manifest(app/'Contents/Resources/release')['source_sha256'],
+        'runtime_sha256':runtime['runtime_sha256'],'requirements_sha256':runtime['requirements_sha256'],
+        'signing':'unsigned','certification':'NOT_CERTIFIED','final_click_actor':'user',
+        'task_state':'excluded','build_host_metadata':'excluded','presentation':'native'}
+    (directory/RECEIPT_NAME).write_text(json.dumps(receipt))
+    return directory
+
+
+def test_single_installer_builder_refuses_wrong_platform_before_read_or_output(tmp_path,monkeypatch):
+    from executor.autonomy import macos_installer_image as image
+    monkeypatch.setattr(image.platform,'system',lambda:'Linux')
+    monkeypatch.setattr(image.subprocess,'run',lambda *a,**k:pytest.fail('unsupported platform launched image tool'))
+    output=tmp_path/'image'
+    with pytest.raises(ValueError,match='installer_build_requires_apple_silicon'):
+        image.build_installer_image(tmp_path/'missing',output)
+    assert not output.exists()
+
+
+@pytest.mark.skipif(sys.platform!='darwin',reason='Real readonly DMG and Cocoa installation require hosted macOS')
+def test_hosted_mac_single_dmg_install_open_update_preserves_private_authority(native_installed_app,tmp_path):
+    """Actual bundle/DMG/service; only local native decision input is synthetic."""
+    import plistlib
+    from contextlib import contextmanager
+    from executor.autonomy import consumer
+    from executor.autonomy.macos_installer_image import build_installer_image,IMAGE_NAME
+    from executor.autonomy.release import MANIFEST_NAME
+    from executor.autonomy.worker import Worker
+    from executor.facts.answers import TaskAnswerStore
+    fixture=native_installed_app
+    source_app=fixture['app']
+    first=build_installer_image(_installer_distribution_from_native_app(source_app,tmp_path/'delivery-one'),tmp_path/'image-one')
+    assert first['signing']=='unsigned' and first['certification']=='NOT_CERTIFIED'
+    home=tmp_path/'consumer-home';home.mkdir(mode=0o700)
+    state=home/'Library/Application Support/AI投递经理/autonomy'
+    target=home/'Applications'/(APP_NAME+'.app')
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
+    environment={'HOME':str(home),'PATH':os.defpath,'LANG':'en_US.UTF-8',
+        'APPLICATION_EXECUTOR_BROWSER_MODE':'isolated','BROWSER':'/usr/bin/false',
+        'PYTHONHOME':'/nonexistent-fixture','PYTHONPATH':'/nonexistent-fixture'}
+    @contextmanager
+    def mounted(image,name):
+        mount=tmp_path/name;mount.mkdir()
+        result=subprocess.run(['/usr/bin/hdiutil','attach','-readonly','-nobrowse','-owners','off',
+            '-mountpoint',str(mount),'-plist',str(image)],capture_output=True,timeout=60)
+        assert result.returncode==0,'synthetic installer image mount failed'
+        observed=plistlib.loads(result.stdout)
+        assert any(item.get('mount-point')==str(mount) for item in observed['system-entities'])
+        try:
+            app=mount/(APP_NAME+'.app')
+            assert consumer._trusted_bundle(app)
+            yield app
+        finally:
+            closed=subprocess.run(['/usr/bin/hdiutil','detach',str(mount)],capture_output=True,timeout=60)
+            assert closed.returncode==0,'synthetic installer mount remained in use'
+    bootstrap=r'''
+import json,sys,os
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from executor.autonomy import first_install,consumer,macos_host,cli
+from executor.autonomy.runtime_paths import default_runtime
+source=Path(sys.argv[1]);port=int(sys.argv[2]);mode=sys.argv[3]
+state=default_runtime(source);target=Path.home()/'Applications'/(consumer.APP_NAME+'.app')
+assert Path(cli.__file__).is_relative_to(source)
+children=[];choices=[];allow_first=[False]
+original_first=macos_host.present_native_first_install
+original_installer=macos_host.present_native_installer
+def first(directory,**options):
+ if options:return {'action':'cancel'}
+ assert original_first(directory,smoke=True)=={'action':'cancel'}
+ choices.append('first')
+ return {'action':'install','continuity':'first_use'} if allow_first[0] else {'action':'cancel'}
+def existing(directory,kind,**options):
+ assert original_installer(directory,kind,smoke=True)=={'action':'cancel'}
+ choices.append(kind)
+ return {'action':'update' if kind=='update' else 'open'}
+macos_host.present_native_first_install=first
+macos_host.present_native_installer=existing
+consumer._stage_native_host=lambda *a,**k:(_ for _ in ()).throw(AssertionError('installer invoked compiler'))
+real=first_install.subprocess.Popen
+def launch(args,**options):
+ native=('native-entry' in args or str(args[0]).endswith('/Contents/MacOS/AIApplicationManager'))
+ child=real(args+(['--native-smoke'] if native else []),**options)
+ if native:children.append(child)
+ return child
+first_install.subprocess.Popen=launch
+try:
+ if mode=='fresh':
+  result=first_install.launch_native_entry(state,port)
+  assert result=={'ok':True,'cancelled':True,'installed':False,'final_click_actor':'user','submit_capability':False}
+  assert not target.exists() and not state.exists() and children==[]
+  allow_first[0]=True
+ result=first_install.launch_native_entry(state,port)
+ assert result.get('ok') is True and result.get('installed') is True,result
+ assert len(children)==1 and children[-1].wait(timeout=40)==0
+ assert cli.request(state,port,'/health')['ok'] is True
+ assert consumer._trusted_bundle(target)
+ if mode=='update':assert result['updated'] is True and result['replaced'] is True
+ inode=target.stat().st_ino
+ result=first_install.launch_native_entry(state,port)
+ assert result.get('ok') is True and result['reopen_requested'] is True
+ assert len(children)==2 and children[-1].wait(timeout=40)==0 and target.stat().st_ino==inode
+ assert choices==(['first','first','open'] if mode=='fresh' else ['update','open']),choices
+ print(json.dumps({'mode':mode,'actual_native_opened':True,'single_file_installer':True,'synthetic_decisions':True}))
+finally:
+ stopped=cli._stop_owned_service(state,port)
+ assert stopped.get('ok') is True or stopped.get('reason')=='service_record_missing'
+'''
+    fixture['repo'].rename(tmp_path/'removed-build-checkout')
+    with mounted(tmp_path/'image-one'/IMAGE_NAME,'mounted-one') as app:
+        source=app/'Contents/Resources/release';python=app/'Contents/Resources/runtime/bin/python'
+        run=subprocess.run([str(python),'-I','-B','-c',bootstrap,str(source),str(port),'fresh'],
+            cwd=home,env=environment,capture_output=True,text=True,timeout=240)
+        assert run.returncode==0,'single DMG first install/native reopen did not complete: '+run.stderr[-1800:]
+        assert json.loads(run.stdout)['actual_native_opened'] is True
+    queue=TaskQueue(state);worker=Worker(queue)
+    task=queue.enqueue(TaskSpec(company='Synthetic DMG',role='Engineer',target_url='https://example.test/dmg',profile_ref='synthetic-profile.json'))
+    queue.pause(task['task_id'])
+    # Synthetic journal fixture; real encryption and decoder, never owner data.
+    answers=TaskAnswerStore(queue)
+    with queue.tx() as db:
+        for field,value in [('family.primary.role','SYNTHETIC_ANSWER'),('preferences.accept_travel',False)]:
+            db.execute('INSERT INTO task_answer_events(task_id,field_key,ciphertext,answer_version,source,task_revision,created) VALUES(?,?,?,?,?,?,?)',
+                (task['task_id'],field,answers.cipher.encrypt(json.dumps(value).encode()),1,'user_explicit_task',1,2))
+    before=queue.tasks();typed=answers.load(task['task_id']);key=(state/'task-answers.key').read_bytes()
+    # The second complete candidate changes only a synthetic source version.
+    source=source_app/'Contents/Resources/release'
+    with (source/'executor/__init__.py').open('a') as handle:handle.write('\n# SYNTHETIC_DMG_SECOND_VERSION\n')
+    (source/MANIFEST_NAME).write_text(json.dumps(source_manifest(source),sort_keys=True,separators=(',',':'))+'\n')
+    info_path=source_app/'Contents/Info.plist';info=plistlib.loads(info_path.read_bytes())
+    info['CFBundleVersion']=str(int(info['CFBundleVersion'])+1);info_path.write_bytes(plistlib.dumps(info))
+    assert consumer._trusted_bundle(source_app)
+    second=build_installer_image(_installer_distribution_from_native_app(source_app,tmp_path/'delivery-two'),tmp_path/'image-two')
+    assert first['source_sha256']!=second['source_sha256']
+    # Actual old app opens/closes its native window and leaves its owned service.
+    old=subprocess.run([str(target/'Contents/Resources/runtime/bin/python'),'-I','-B','-c',CLI_ENTRY_SCRIPT,
+        str(target/'Contents/Resources/release'),'--runtime',str(state),'--port',str(port),'native-entry','--native-smoke'],
+        cwd=home,env=environment,capture_output=True,text=True,timeout=90)
+    assert old.returncode==0,'old installed native app did not open'
+    with mounted(tmp_path/'image-two'/IMAGE_NAME,'mounted-two') as app:
+        source=app/'Contents/Resources/release';python=app/'Contents/Resources/runtime/bin/python'
+        run=subprocess.run([str(python),'-I','-B','-c',bootstrap,str(source),str(port),'update'],
+            cwd=home,env=environment,capture_output=True,text=True,timeout=240)
+        assert run.returncode==0,'single DMG update/native reopen did not complete: '+run.stderr[-1800:]
+        assert json.loads(run.stdout)['actual_native_opened'] is True
+    assert TaskQueue(state).tasks()==before
+    assert TaskAnswerStore(TaskQueue(state)).load(task['task_id'])==typed
+    assert (state/'task-answers.key').read_bytes()==key
+    assert consumer._trusted_bundle(target)
+    assert consumer._trusted_bundle(target.parent/('.'+APP_NAME+'.app.previous'))
+    assert source_manifest(target/'Contents/Resources/release')['source_sha256']==second['source_sha256']
+    assert not (state/'service.json').exists()
