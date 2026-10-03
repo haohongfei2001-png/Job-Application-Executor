@@ -123,6 +123,8 @@ def resource_sample(child):
 
 def run(root, duration, hold, count):
     global STOP_REQUESTED
+    preparation_started = time.monotonic()
+    preparation_started_at = utc_now()
     # No executor imports occurred before fresh HOME. Strip inherited credentials,
     # provider configuration, local tokens and proxy variables from both processes.
     os.environ.clear()
@@ -136,8 +138,9 @@ def run(root, duration, hold, count):
 
     source = root / "source"
     manifest = copy_source_candidate(SOURCE, source)
-    start = time.monotonic()
-    report = {"format": "jae-lifecycle-soak-v1", "status": "RUNNING", "started_at": utc_now(),
+    start = None
+    report = {"format": "jae-lifecycle-soak-v1", "status": "RUNNING", "started_at": None,
+              "preparation_started_at": preparation_started_at, "preparation_seconds": 0,
               "host": {"os": sys.platform, "architecture": platform.machine()},
               "interpreter": {"version": platform.python_version(), "implementation": platform.python_implementation(),
                               "binary_sha256": hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest(),
@@ -174,6 +177,11 @@ def run(root, duration, hold, count):
                                           str(root / "synthetic-profile-unused.json"), f"soak-pause-{index}")
         baseline = snapshot(queue.path, expected)
         report["journal_snapshot_sha256"] = baseline
+        report["preparation_seconds"] = round(time.monotonic() - preparation_started, 3)
+        # Preparation is not endurance observation. Freeze this baseline before
+        # starting the actual window; never backdate it to setup or a prior run.
+        start = time.monotonic()
+        report["started_at"] = utc_now()
         write_report(root, report)
         while time.monotonic() - start < duration and not STOP_REQUESTED:
             require(verify_source_candidate(source) and source_manifest(source)["source_sha256"] == report["source_sha256"], "source_changed")
@@ -261,7 +269,9 @@ def run(root, duration, hold, count):
                     report["cleanup"] = "forced_owned_child_cleanup"
                 except subprocess.TimeoutExpired:
                     report["cleanup"] = "UNCONFIRMED_OWNED_CHILD"
-        report["observed_seconds"] = round(time.monotonic() - start, 3)
+        report["observed_seconds"] = round(time.monotonic() - start, 3) if start is not None else 0
+        if start is None:
+            report["preparation_seconds"] = round(time.monotonic() - preparation_started, 3)
         report["continuous_24h_observed"] = report["status"] == "COMPLETED_PARTIAL_WINDOW" and duration >= 86400 and report["observed_seconds"] >= 86400
         report["service_running_seconds"] = round(report["service_running_seconds"], 3)
         report["finished_at"] = utc_now()

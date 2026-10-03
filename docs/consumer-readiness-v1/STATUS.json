@@ -167,6 +167,11 @@
       "24-hour soak",
       "full Z-04 pass",
       "real application or user-device acceptance"
-    ]
+    ],
+    "failed_candidate_head": "7718dee64bf011fd72e11e83adf0ba3220a807ff",
+    "failed_run_id": 37078626720,
+    "failed_macos_job_id": 111074033757,
+    "correction": "Separate preparation from actual observation clock; real-delay regression passes locally; corrected-head hosted checks PENDING",
+    "failure_receipt": "docs/consumer-readiness-v1/receipts/LIFECYCLE-7718-MAC-SETUP-FAILURE.md"
   }
 }

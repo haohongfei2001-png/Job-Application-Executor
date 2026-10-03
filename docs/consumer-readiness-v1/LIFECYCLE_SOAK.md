@@ -38,7 +38,10 @@ not duration evidence. This tool is intended for Linux/macOS engineering hosts.
 ## Evidence and limits
 
 Each private, fsynced checkpoint has a sequence number, actual monotonic elapsed
-time, completed cycles and health observations. Separate fields bind source
+time, completed cycles and health observations. Preparation has its own timestamp
+and duration; the observation clock starts only after the synthetic queue and
+independent baseline are ready, and preparation never contributes to elapsed-soak
+evidence. Separate fields bind source
 payload, dependency file, harness file, Git HEAD, dirty-checkout state, interpreter
 version/binary digest and host OS/architecture. Each checkpoint also records the
 exact cumulative bytes of all checkpoint files through itself. Dirty
@@ -51,8 +54,9 @@ ceilings are 512 MiB RSS and 128 descriptors; these are abort guards, not proof
 of zero growth. Restarts reset child resources, and runner-process resource
 trends are not measured. Reports are bounded to 50,000 checkpoints/128 MiB;
 service logs are checked against 1 MiB each/16 MiB total. Observations and
-operation deadlines are bounded; a run-level deadline allows 60 seconds of
-completion/cleanup grace after the requested window.
+operation deadlines are bounded; a process-level deadline is the requested duration plus 60 seconds total for
+preparation/completion/cleanup overhead. Slow preparation can therefore cause an
+explicit incomplete failure; it cannot shorten the required observation and pass.
 
 Successful exit 0 plus final `COMPLETED_PARTIAL_WINDOW` means only this bounded
 scope completed. Require both; a RUNNING, partial, unreadable or absent final

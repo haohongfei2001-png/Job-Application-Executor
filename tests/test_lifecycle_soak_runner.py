@@ -50,13 +50,15 @@ def test_actual_two_cycle_fresh_home_soak_is_partial_and_private(tmp_path):
     workspace = tmp_path / "run"
     env = {**os.environ, "HOME": str(ambient), "APPLICATION_EXECUTOR_LOCAL_TOKEN": poison,
            "DEEPSEEK_API_KEY": poison, "HTTPS_PROXY": "http://127.0.0.1:1"}
-    run = subprocess.run(command(workspace), env=env, capture_output=True, text=True, timeout=20)
+    run = subprocess.run(command(workspace, "--duration-seconds", "10"), env=env, capture_output=True, text=True, timeout=20)
     assert run.returncode == 0, run.stdout + run.stderr
     report = result(run)
     assert report["status"] == "COMPLETED_PARTIAL_WINDOW"
     assert report["completed_cycles"] >= 2
     assert report["health_observations"] >= 2
-    assert report["observed_seconds"] >= 4
+    assert report["observed_seconds"] >= 10
+    assert report["preparation_seconds"] > 0
+    assert report["preparation_started_at"] <= report["started_at"]
     assert report["continuous_24h_observed"] is False
     assert report["full_z04_pass"] is False
     assert report["certification"] == "NOT_CERTIFIED"
@@ -193,3 +195,29 @@ def test_existing_hosted_jobs_keep_complete_runner_coverage_without_new_allocati
     assert "        if: matrix.suite == 'runtime_distribution'\n" in step
     assert "        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n" in step
     assert "timeout-minutes: 30" in foundation and "timeout-minutes: 25" in mac
+
+
+def test_real_preparation_delay_is_not_counted_as_observation(tmp_path):
+    workspace = tmp_path / "delayed-run"
+    script = "\n".join([
+        "import importlib.util,sys,time",
+        f"spec=importlib.util.spec_from_file_location('soak',{str(SCRIPT)!r})",
+        "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)",
+        "original=m.subprocess.run",
+        "def delayed(*args,**kwargs):",
+        "    if args[0][:2]==['git','rev-parse']: time.sleep(5)",
+        "    return original(*args,**kwargs)",
+        "m.subprocess.run=delayed",
+        f"sys.argv={command(workspace, '--duration-seconds', '3')[3:]!r}",
+        "raise SystemExit(m.main())",
+    ])
+    begun = time.monotonic()
+    run = subprocess.run([sys.executable, "-I", "-B", "-c", script], capture_output=True, text=True, timeout=20)
+    total = time.monotonic() - begun
+    assert run.returncode == 0, run.stdout + run.stderr
+    report = result(run)
+    assert report["preparation_seconds"] >= 5
+    assert report["observed_seconds"] >= 3
+    assert report["observed_seconds"] < total - 4
+    assert report["health_observations"] >= 1 and report["completed_cycles"] >= 1
+    assert report["full_z04_pass"] is False and report["continuous_24h_observed"] is False
