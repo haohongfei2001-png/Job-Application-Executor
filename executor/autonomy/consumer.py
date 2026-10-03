@@ -214,12 +214,27 @@ def _packaged_launcher() -> str:
 
 
 
-def _native_packaged_launcher() -> str:
+def _native_packaged_launcher_v1() -> str:
     # Keep the existing isolated owned-Python boundary. URLs/tickets stay stdin
     # on the verified native child; no ambient browser fallback is requested.
     return _packaged_launcher().replace(
         ' "$RELEASE_ROOT" launch >>"$LOG_FILE" 2>&1',
         ' "$RELEASE_ROOT" native-launch "$@" >>"$LOG_FILE" 2>&1')
+
+
+def _native_packaged_launcher() -> str:
+    return _native_packaged_launcher_v1().replace(
+        ' "$RELEASE_ROOT" native-launch "$@"',
+        ' "$RELEASE_ROOT" native-entry "$@"').replace(
+        'if [[ $STATUS -ne 0 ]]; then',
+        'if [[ $STATUS -ne 0 && $STATUS -ne 2 ]]; then').replace(
+        'AI 投递经理没有成功就绪。现有任务不会被提交或丢失。请在 ChatGPT 中检查启动状态。',
+        'AI 投递经理尚未确认安装或打开。请保留原应用和任务，重新打开应用查看本机说明；不要删除旧文件或强行覆盖。')
+
+
+def _is_native_packaged_launcher(value: str) -> bool:
+    # Retained versions keep their exact historical source-bound launcher.
+    return type(value) is str and value in {_native_packaged_launcher_v1(), _native_packaged_launcher()}
 
 
 def _native_bundle_matches(release: Path, directory: Path) -> bool:
@@ -344,7 +359,7 @@ def _isolated_bundle_startup(app: Path) -> bool:
             return False
         launcher = _owned_bundle_text(executable)
         return (runtime.is_dir() and (launcher == _packaged_launcher()
-            or (launcher == _native_packaged_launcher()
+            or (_is_native_packaged_launcher(launcher)
                 and _native_bundle_matches(runtime.parent / "release", runtime.parent / "native-host"))))
     except (OSError, UnicodeError):
         return False
@@ -356,7 +371,8 @@ def _packaged_bundle_matches(executable: Path, runtime: Path) -> bool:
             return False
         launcher = _owned_bundle_text(executable)
         if runtime.exists():
-            return launcher in {_packaged_launcher(), _packaged_launcher_v2(), _native_packaged_launcher()}
+            return (launcher in {_packaged_launcher(), _packaged_launcher_v2()}
+                    or _is_native_packaged_launcher(launcher))
         assignments = [line for line in launcher.splitlines()
                        if line.startswith("REPO_ROOT=")]
         if len(assignments) != 1:
@@ -399,7 +415,7 @@ def _trusted_bundle(app: Path) -> bool:
                  and (verify_runtime_candidate(runtime, release) if runtime.exists() else True)
                  and _packaged_bundle_matches(executable, runtime)
                  and (_native_bundle_matches(release, resources / "native-host")
-                      if _owned_bundle_text(executable) == _native_packaged_launcher()
+                      if _is_native_packaged_launcher(_owned_bundle_text(executable))
                       else not ((resources / "native-host").exists() or (resources / "native-host").is_symlink()))
              if release.exists() else _legacy_bundle_matches(executable))
         )
@@ -507,38 +523,41 @@ def _legacy_state_migration_needed(repo: Path, app: Path, target: Path) -> bool:
             raise ValueError("legacy_launcher_changed")
         roots.append((old_repo, old_repo / "runtime" / "autonomy"))
     roots.append((app, app / "Contents" / "Resources" / "release" / "runtime" / "autonomy"))
-    for base, root in roots:
-        # Compare only after refusing aliases in every legacy path component.
-        # A missing parent is ordinary absence; an existing alias is ambiguous.
-        components = [root]
-        parent = root
-        while parent != base:
-            parent = parent.parent
-            components.append(parent)
-        # The historical launcher supplies base; an alias above it can move
-        # the entire old authority even when runtime/autonomy itself is plain.
-        # Refuse before resolve() or scanning lock-only state as empty.
-        if any(parent.is_symlink() for parent in (*components, *base.parents)):
-            raise ValueError("legacy_state_path_invalid")
-        if root.resolve() == target.resolve():
+    return any(_legacy_root_has_state(base, root, target) for base, root in roots)
+
+
+def _legacy_root_has_state(base: Path, root: Path, target: Path | None = None) -> bool:
+    # Compare only after refusing aliases in every legacy path component.
+    # A missing parent is ordinary absence; an existing alias is ambiguous.
+    components = [root]
+    parent = root
+    while parent != base:
+        parent = parent.parent
+        components.append(parent)
+    # The historical launcher supplies base; an alias above it can move
+    # the entire old authority even when runtime/autonomy itself is plain.
+    # Refuse before resolve() or scanning lock-only state as empty.
+    if any(parent.is_symlink() for parent in (*components, *base.parents)):
+        raise ValueError("legacy_state_path_invalid")
+    if target is not None and root.resolve() == target.resolve():
+        return False
+    if not root.exists():
+        return False
+    if not root.is_dir():
+        raise ValueError("legacy_state_path_invalid")
+    for child in root.iterdir():
+        if child.name in {"worker.lock", "migration.lock", "native-window.lock"}:
+            # Only an owned ordinary single-link inode can be ignored as
+            # empty legacy lock state. An alias must not certify an empty
+            # authority without ever reading its payload.
+            metadata = child.stat(follow_symlinks=False)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_uid != os.geteuid()):
+                raise ValueError("legacy_state_path_invalid")
             continue
-        if not root.exists():
-            continue
-        if not root.is_dir():
-            raise ValueError("legacy_state_path_invalid")
-        for child in root.iterdir():
-            if child.name in {"worker.lock", "migration.lock", "native-window.lock"}:
-                # Only an owned ordinary single-link inode can be ignored as
-                # empty legacy lock state. An alias must not certify an empty
-                # authority without ever reading its payload.
-                metadata = child.stat(follow_symlinks=False)
-                if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
-                        or metadata.st_uid != os.geteuid()):
-                    raise ValueError("legacy_state_path_invalid")
-                continue
-            # Any remaining state (including unknown files, keys and service
-            # records) requires explicit transactional transfer. No read/log.
-            return True
+        # Any remaining state (including unknown files, keys and service
+        # records) requires explicit transactional transfer. No read/log.
+        return True
     return False
 
 
@@ -664,11 +683,58 @@ def _prepare_task_state_release(python: Path, release: Path, state: Path,
         return False
 
 
+def _activate_first_install_exclusive(staging: Path, app: Path) -> None:
+    """Darwin no-replace rename anchored to one admitted application directory."""
+    import ctypes
+    import errno
+    if sys.platform != "darwin" or staging.parent != app.parent:
+        raise OSError(errno.ENOTSUP, "first_install_exclusive_rename_unavailable")
+    parent = _app_transaction_directory(app.parent)
+    fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        observed, visible = os.fstat(fd), parent.stat(follow_symlinks=False)
+        if (not stat.S_ISDIR(observed.st_mode) or observed.st_uid != os.geteuid()
+                or (observed.st_dev, observed.st_ino) != (visible.st_dev, visible.st_ino)):
+            raise OSError(errno.EINVAL, "first_install_parent_changed")
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        operation = library.renameatx_np
+        operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        operation.restype = ctypes.c_int
+        # Apple's sys/stdio.h: RENAME_EXCL=0x4. Unsupported filesystems refuse.
+        if operation(fd, os.fsencode(staging.name), fd, os.fsencode(app.name), 0x4) != 0:
+            raise OSError(ctypes.get_errno(), "first_install_exclusive_rename_refused")
+    except AttributeError:
+        raise OSError(errno.ENOTSUP, "first_install_exclusive_rename_unavailable") from None
+    finally:
+        os.close(fd)
+
+
+def _approved_first_install_matches(approved, staging: Path | None = None) -> bool:
+    if approved is None:
+        return True
+    candidate, identity = approved
+    if _bundle_transaction_identity(candidate) != identity:
+        return False
+    if staging is None:
+        return True
+    staged = _bundle_transaction_identity(staging)
+    if staged is None:
+        return False
+    # Staging may normalize control-file modes/plist formatting, but all
+    # approved source/runtime/native manifests and launcher bytes stay exact.
+    bound = lambda value: {name: digest for name, mode, digest in value[2]
+                           if name != "Contents/Info.plist"}
+    return bound(staged) == bound(identity)
+
+
 def install_macos_bundle(
     candidate_app: str | Path, *,
     destination: str | Path | None = None,
     task_state_root: str | Path | None = None,
     platform: str | None = None,
+    _first_install: bool = False,
+    _legacy_additional_origins: tuple[Path, ...] = (),
+    _approved_identity: tuple | None = None,
 ) -> dict:
     """Feed a verified delivered app through the existing release transaction.
 
@@ -682,6 +748,9 @@ def install_macos_bundle(
         candidate = Path(candidate_app).expanduser().absolute()
         if any(part.is_symlink() for part in (candidate, *candidate.parents)):
             raise ValueError("bundle_alias")
+        approved = (candidate, _approved_identity) if _first_install else None
+        if _first_install and (type(_approved_identity) is not tuple or not _approved_first_install_matches(approved)):
+            return {"ok": False, "reason": "first_install_source_changed"}
         release = candidate / "Contents" / "Resources" / "release"
         runtime = candidate / "Contents" / "Resources" / "runtime"
         if not _trusted_bundle(candidate) or not verify_standalone_runtime(runtime, release):
@@ -689,7 +758,7 @@ def install_macos_bundle(
         launcher = candidate / "Contents" / "MacOS" / "AIApplicationManager"
         if not _owned_bundle_file(launcher):
             raise ValueError("bundle_unverified")
-        native = _owned_bundle_text(launcher) == _native_packaged_launcher()
+        native = _is_native_packaged_launcher(_owned_bundle_text(launcher))
         apps = _app_transaction_directory(destination if destination is not None else Path.home() / "Applications")
         if candidate.resolve() == (apps / (APP_NAME + ".app")).resolve():
             return {"ok": False, "reason": "bundle_candidate_is_active",
@@ -700,8 +769,10 @@ def install_macos_bundle(
     options = {"native_host": candidate / "Contents" / "Resources" / "native-host"} if native else {}
     return install_macos_app(release, destination=apps, platform=platform,
         task_state_root=task_state_root, standalone_runtime=runtime,
-        native_presentation=native,
-        _legacy_origin=Path(__file__).absolute().parents[2], **options)
+        native_presentation=native, _approved_bundle=approved,
+        _native_launcher=_owned_bundle_text(launcher) if native else None,
+        _legacy_origin=Path(__file__).absolute().parents[2],
+        _first_install=_first_install, _legacy_additional_origins=_legacy_additional_origins, **options)
 
 
 def install_macos_app(
@@ -714,9 +785,18 @@ def install_macos_app(
     native_presentation: bool = False,
     native_host: str | Path | None = None,
     _legacy_origin: Path | None = None,
+    _first_install: bool = False,
+    _legacy_additional_origins: tuple[Path, ...] = (),
+    _native_launcher: str | None = None,
+    _approved_bundle: tuple | None = None,
 ) -> dict:
     if (platform or sys.platform) != "darwin":
         return _install_macos_app_unlocked(repo_root, destination=destination, platform=platform)
+    if (type(_first_install) is not bool or type(_legacy_additional_origins) is not tuple
+            or len(_legacy_additional_origins) > 2
+            or any(not isinstance(p, Path) or not p.is_absolute() for p in _legacy_additional_origins)
+            or _native_launcher is not None and (not native_presentation or not _is_native_packaged_launcher(_native_launcher))):
+        return {"ok": False, "reason": "first_install_intent_invalid"}
     try:
         apps_dir = _app_transaction_directory(
             destination if destination is not None else Path.home() / "Applications")
@@ -734,13 +814,24 @@ def install_macos_app(
         state_root = (Path(task_state_root).expanduser() if task_state_root is not None
                       else default_runtime(apps_dir / f"{APP_NAME}.app" / "Contents" / "Resources" / "release"))
         try:
+            if _first_install:
+                from .first_install import _read_first_fence
+                if _read_first_fence(apps_dir) is not None:
+                    return {"ok": False, "reason": "first_install_continuity_unconfirmed"}
+                target_app = apps_dir / f"{APP_NAME}.app"
+                if target_app.exists() or target_app.is_symlink():
+                    return {"ok": False, "reason": "first_install_target_occupied"}
+                if _legacy_root_has_state(state_root, state_root):
+                    return {"ok": False, "reason": "first_install_state_continuity_required"}
             with task_state_guard(state_root):
                 backup_evidence = {}
                 result = _install_macos_app_unlocked(
                     repo_root, destination=apps_dir, platform=platform,
                     task_state_root=state_root, standalone_runtime=standalone_runtime,
                     native_presentation=native_presentation, native_host=native_host,
-                    _state_backup_evidence=backup_evidence, _legacy_origin=_legacy_origin)
+                    _state_backup_evidence=backup_evidence, _legacy_origin=_legacy_origin,
+                    _first_install=_first_install, _legacy_additional_origins=_legacy_additional_origins,
+                    _native_launcher=_native_launcher, _approved_bundle=_approved_bundle)
                 return {**result, "task_state_backup": backup_evidence} if backup_evidence else result
         except BlockingIOError:
             return {"ok": False, "reason": "task_state_in_use",
@@ -763,6 +854,10 @@ def _install_macos_app_unlocked(
     native_host: str | Path | None = None,
     _state_backup_evidence: dict | None = None,
     _legacy_origin: Path | None = None,
+    _first_install: bool = False,
+    _legacy_additional_origins: tuple[Path, ...] = (),
+    _native_launcher: str | None = None,
+    _approved_bundle: tuple | None = None,
 ) -> dict:
     """Stage a source-and-runtime snapshot, then atomically activate the Mac app."""
     current_platform = platform or sys.platform
@@ -795,6 +890,10 @@ def _install_macos_app_unlocked(
     )
     apps_dir.mkdir(parents=True, exist_ok=True)
     app = apps_dir / f"{APP_NAME}.app"
+    if _first_install and (app.exists() or app.is_symlink()):
+        return {"ok": False, "reason": "first_install_target_occupied"}
+    if _first_install and (task_state_root is None or _legacy_root_has_state(task_state_root, task_state_root)):
+        return {"ok": False, "reason": "first_install_state_continuity_required"}
     if (app.exists() or app.is_symlink()) and not _trusted_bundle(app):
         return {
             "ok": False,
@@ -810,7 +909,7 @@ def _install_macos_app_unlocked(
     # original app and its complete private/WAL state remain the authority.
     # Delivered intake replaces repo with staged payload. Retain the trusted
     # invoking source separately; pure builds do not pass this origin.
-    legacy_sources = (repo,) if _legacy_origin is None else (repo, _legacy_origin)
+    legacy_sources = ((repo,) if _legacy_origin is None else (repo, _legacy_origin)) + _legacy_additional_origins
     try:
         if task_state_root is None or any(
                 _legacy_state_migration_needed(source, app, task_state_root)
@@ -826,6 +925,8 @@ def _install_macos_app_unlocked(
             "reason": "legacy_state_unavailable",
             "message": "无法安全核对旧版任务状态；现有应用和任务保持不变。",
         }
+    if not _approved_first_install_matches(_approved_bundle):
+        return {"ok": False, "reason": "first_install_source_changed"}
     staging = apps_dir / f".{APP_NAME}.app.installing"
     try:
         staging.mkdir()
@@ -871,7 +972,7 @@ def _install_macos_app_unlocked(
         shutil.rmtree(staging)
         return {"ok": False, "reason": "native_candidate_failed",
                 "message": "原生窗口候选未通过校验；现有应用和任务保持不变。"}
-    launcher = _native_packaged_launcher() if native_presentation else _packaged_launcher()
+    launcher = (_native_launcher or _native_packaged_launcher()) if native_presentation else _packaged_launcher()
 
     executable.write_text(launcher, encoding="utf-8")
     executable.chmod(
@@ -906,6 +1007,8 @@ def _install_macos_app_unlocked(
             "message": "新应用包未通过本机校验；现有应用没有被替换。",
         }
 
+    if not _approved_first_install_matches(_approved_bundle, staging):
+        return {"ok": False, "reason": "first_install_source_changed"}
     candidate_identity = _bundle_transaction_identity(staging)
     if candidate_identity is None:
         return {"ok": False, "reason": "candidate_identity_unverified",
@@ -941,6 +1044,8 @@ def _install_macos_app_unlocked(
     # queue can initialize a WAL-aware copy of the actual shared journal.
     # The daemon lock remains held until activation/recovery has finished.
     backup_evidence = _state_backup_evidence if _state_backup_evidence is not None else {}
+    if _first_install and (task_state_root is None or _legacy_root_has_state(task_state_root, task_state_root)):
+        return {"ok": False, "reason": "first_install_state_continuity_required"}
     if (task_state_root is None or not _prepare_task_state_release(
             runtime / "bin" / "python", release, task_state_root, apps_dir, backup_evidence)):
         shutil.rmtree(staging)
@@ -954,6 +1059,8 @@ def _install_macos_app_unlocked(
     # can arrive after the initial admission check; refuse before the first
     # app move rather than activating an empty, split task authority.
     try:
+        if _first_install and _legacy_root_has_state(task_state_root, task_state_root):
+            return {"ok": False, "reason": "first_install_state_continuity_required"}
         late_legacy = any(_legacy_state_migration_needed(source, app, task_state_root)
                           for source in legacy_sources)
     except (OSError, UnicodeError, ValueError):
@@ -974,11 +1081,24 @@ def _install_macos_app_unlocked(
         return {"ok": False, "reason": "activation_identity_changed",
                 "message": "检查期间应用身份或位置发生变化；没有启用候选，所有版本保留供核对。"}
 
+    if not _approved_first_install_matches(_approved_bundle, staging):
+        return {"ok": False, "reason": "first_install_source_changed"}
     replaced = current_identity is not None
+    if _first_install and replaced:
+        return {"ok": False, "reason": "first_install_target_occupied"}
+    if _first_install:
+        from .first_install import _create_first_fence
+        try:
+            _create_first_fence(apps_dir, candidate_identity)
+        except (OSError, ValueError):
+            return {"ok": False, "reason": "first_install_continuity_unconfirmed"}
     try:
         if replaced:
             app.rename(rollback)
-        staging.rename(app)
+        if _first_install:
+            _activate_first_install_exclusive(staging, app)
+        else:
+            staging.rename(app)
     except OSError:
         # A filesystem error does not preserve the authority observed BEFORE
         # rename. Re-admit retained input and the entire recovery destination;
@@ -1040,6 +1160,11 @@ def _install_macos_app_unlocked(
     if (_bundle_transaction_identity(app) != candidate_identity
             or not _candidate_starts(active_runtime / "bin" / "python", active_release)
             or _bundle_transaction_identity(app) != candidate_identity):
+        if _first_install:
+            # This entry owns no previous version. Preserve an unconfirmed
+            # active candidate in place; no replace-capable recovery rename.
+            return {"ok": False, "reason": "first_install_activation_unconfirmed",
+                    "installed": None, "activation_unconfirmed": True}
         # Health may have yielded to another actor. Never overwrite a newly
         # occupied slot, move an unowned app inode, or activate changed retained
         # payloads. Preserve every version for recovery without further moves.
@@ -1107,6 +1232,18 @@ def _install_macos_app_unlocked(
             "message": ("新版本启用后未通过健康检查；已恢复上一版本。"
                         if replaced else "新版本启用后未通过健康检查；失败候选已保留供诊断。"),
         }
+    if _first_install:
+        # Final-path health can yield after the pre-activation check. A selected
+        # old authority arriving here still forbids opening a new service.
+        try:
+            if (_legacy_root_has_state(task_state_root, task_state_root)
+                    or any(_legacy_state_migration_needed(old, app, task_state_root)
+                           for old in legacy_sources)):
+                return {"ok": False, "reason": "first_install_continuity_unconfirmed",
+                        "installed": None, "activation_unconfirmed": True}
+        except (OSError, ValueError, UnicodeError):
+            return {"ok": False, "reason": "first_install_continuity_unconfirmed",
+                    "installed": None, "activation_unconfirmed": True}
     # A healthy active candidate does not prove that its known-good retained
     # release or recovery slot stayed unchanged while startup yielded.
     if ((replaced and _bundle_transaction_identity(rollback) != current_identity)

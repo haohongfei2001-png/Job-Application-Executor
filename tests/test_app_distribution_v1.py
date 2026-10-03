@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import shlex
+import socket
 import subprocess
 import sys
 import tarfile
@@ -581,7 +582,9 @@ def test_hosted_mac_native_archive_relocates_and_launches_exact_verified_window_
     assert sorted(path.name for path in output.iterdir()) == [ARCHIVE_NAME, RECEIPT_NAME]
     with (output / ARCHIVE_NAME).open("rb") as archive_file:
         assert hashlib.file_digest(archive_file, "sha256").hexdigest() == receipt["archive_sha256"]
-    relocated = tmp_path / "Relocated Applications"
+    home = tmp_path / "relocated consumer home"
+    home.mkdir()
+    relocated = home / "Applications"
     relocated.mkdir()
     with tarfile.open(output / ARCHIVE_NAME, "r:gz") as archive:
         members = archive.getmembers()
@@ -635,8 +638,6 @@ def test_hosted_mac_native_archive_relocates_and_launches_exact_verified_window_
     assert identity["runtime_sha256"] == receipt["runtime_sha256"]
     assert identity["requirements_sha256"] == receipt["requirements_sha256"]
     assert verify_standalone_runtime(runtime, release)
-    home = tmp_path / "consumer-home"
-    home.mkdir()
     state = home / "Library/Application Support/AI投递经理/autonomy"
     user_queue = TaskQueue(state)
     user_task = user_queue.enqueue(TaskSpec(company="Synthetic consumer", role="Engineer",
@@ -1249,3 +1250,157 @@ def test_hosted_mac_fresh_delivered_install_retains_old_checkout_authority(
         assert installed.returncode == 1 and not app.exists()
         assert not any((target / name).exists() for name in
                        ("tasks.sqlite3", "task-answers.key", "auth.token", "service.json"))
+
+
+def test_hosted_mac_first_entry_rebinds_source_and_installs_without_checkout_or_compiler(
+    native_installed_app, tmp_path, monkeypatch
+):
+    from executor.autonomy import consumer
+    from executor.autonomy.release import MANIFEST_NAME
+    f = native_installed_app
+    candidate = f['app']
+    release = candidate/'Contents/Resources/release'
+    launcher = candidate/'Contents/MacOS/AIApplicationManager'
+    approved = consumer._bundle_transaction_identity(candidate)
+    assert approved is not None
+    original_launcher = launcher.read_bytes()
+    real_probe = consumer.verify_standalone_runtime
+    def changed_during_probe(*args):
+        assert real_probe(*args)
+        launcher.write_text(consumer._native_packaged_launcher_v1())
+        return True
+    with monkeypatch.context() as scoped:
+        scoped.setattr(consumer,'verify_standalone_runtime',changed_during_probe)
+        refused = consumer.install_macos_bundle(candidate, destination=tmp_path/'probe-target',
+            task_state_root=tmp_path/'probe-state', _first_install=True, _approved_identity=approved)
+    assert refused['reason']=='first_install_source_changed'
+    assert not (tmp_path/'probe-target'/(APP_NAME+'.app')).exists()
+    launcher.write_bytes(original_launcher)
+    assert consumer._bundle_transaction_identity(candidate)==approved
+
+    candidate_cli=release/'executor/autonomy/cli.py'
+    original_cli,original_manifest=candidate_cli.read_bytes(),(release/MANIFEST_NAME).read_bytes()
+    real_copy=consumer.copy_source_candidate
+    def changed_during_copy(source,destination):
+        result=real_copy(source,destination)
+        if source==release:
+            candidate_cli.write_bytes(original_cli+b'\n# SYNTHETIC_RESEALED_SOURCE_CHANGE\n')
+            (release/MANIFEST_NAME).write_text(json.dumps(source_manifest(release),sort_keys=True,separators=(',',':'))+'\n')
+        return result
+    with monkeypatch.context() as scoped:
+        scoped.setattr(consumer,'copy_source_candidate',changed_during_copy)
+        refused=consumer.install_macos_bundle(candidate,destination=tmp_path/'copy-target',
+            task_state_root=tmp_path/'copy-state',_first_install=True,_approved_identity=approved)
+    assert refused['reason']=='first_install_source_changed'
+    assert not (tmp_path/'copy-target'/(APP_NAME+'.app')).exists()
+    assert (tmp_path/'copy-target'/('.'+APP_NAME+'.app.installing')).exists()
+    candidate_cli.write_bytes(original_cli);(release/MANIFEST_NAME).write_bytes(original_manifest)
+    assert consumer._bundle_transaction_identity(candidate)==approved
+
+    home=tmp_path/'fresh-first-install-home';home.mkdir(mode=0o700)
+    downloads=home/'Downloads';downloads.mkdir()
+    downloaded=downloads/(APP_NAME+'.app');candidate.rename(downloaded)
+    release=downloaded/'Contents/Resources/release'
+    python=downloaded/'Contents/Resources/runtime/bin/python'
+    target=home/'Applications'/(APP_NAME+'.app')
+    state=home/'Library/Application Support/AI投递经理/autonomy'
+    assert not target.exists() and not state.exists()
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
+    f['repo'].rename(tmp_path/'removed-build-checkout')
+    # The real Cocoa oracle closes without approving an installation. This
+    # synthetic process then supplies one explicit fixture-only first-use
+    # intent. Physical button/picker approval remains a separate owner gate.
+    bootstrap=r'''
+import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from executor.autonomy import first_install,macos_host,cli,consumer
+from executor.autonomy.runtime_paths import default_runtime
+source=Path(sys.argv[1]);state=default_runtime(source);port=int(sys.argv[2])
+original=macos_host.present_native_first_install;prompts=[];children=[]
+def forbidden_compile(*args,**kwargs):raise AssertionError("installed path required compiler")
+consumer._stage_native_host=forbidden_compile
+def choose(directory,**options):
+ if options:return {'action':'cancel'}
+ assert original(directory,smoke=True)=={'action':'cancel'}
+ prompts.append(True)
+ return {'action':'install','continuity':'first_use'}
+macos_host.present_native_first_install=choose
+real=first_install.subprocess.Popen
+def launch(args,**options):
+ reopen='native-entry' in args
+ child=real(args+(['--native-smoke'] if reopen else []),**options)
+ if reopen:children.append(child)
+ return child
+first_install.subprocess.Popen=launch
+result={}
+try:
+ result=first_install.launch_native_entry(state,port)
+ assert result.get('ok') is True and result.get('installed') is True
+ assert len(prompts)==len(children)==1 and children[0].wait(timeout=40)==0
+ assert cli.request(state,port,'/health')['ok'] is True
+ assert consumer._trusted_bundle(Path.home()/'Applications'/(consumer.APP_NAME+'.app'))
+ print(json.dumps({'installed':True,'prompt_observed':True,'reopened_actual_native_ui':True,
+                   'native_ready_claim_from_request':result['native_ready_verified']}))
+finally:
+ stopped=cli._stop_owned_service(state,port)
+ assert stopped.get('ok') is True or stopped.get('reason')=='service_record_missing'
+'''
+    env={'HOME':str(home),'PATH':os.defpath,'LANG':'en_US.UTF-8',
+         'APPLICATION_EXECUTOR_BROWSER_MODE':'isolated','BROWSER':'/usr/bin/false',
+         'PYTHONHOME':'/nonexistent-synthetic-home','PYTHONPATH':'/nonexistent-synthetic-path'}
+    opened=subprocess.run([str(python),'-I','-B','-c',bootstrap,str(release),str(port)],
+                          cwd=home,env=env,capture_output=True,text=True,timeout=180)
+    assert opened.returncode==0,'source-bound first-install native journey did not complete'
+    assert json.loads(opened.stdout)=={'installed':True,'prompt_observed':True,
+        'reopened_actual_native_ui':True,'native_ready_claim_from_request':False}
+    assert _trusted_bundle(target) and _trusted_bundle(downloaded)
+    from executor.autonomy.first_install import _read_first_fence
+    assert _read_first_fence(target.parent)['status']=='complete'
+    assert source_manifest(target/'Contents/Resources/release')==source_manifest(release)
+    assert not (state/'service.json').exists()
+    assert not list(release.rglob('__pycache__'))
+
+
+def test_hosted_mac_legacy_native_command_contract_is_preserved_through_new_installer(
+    native_installed_app,tmp_path
+):
+    from executor.autonomy import consumer
+    from executor.autonomy.release import MANIFEST_NAME
+    f=native_installed_app;candidate=f['app'];release=candidate/'Contents/Resources/release'
+    # Synthetic legacy command contract: a real complete bundle whose CLI
+    # supports native-launch but has no native-entry command. This is not a
+    # claim that the fixture is an exact historical released binary.
+    cli_file=release/'executor/autonomy/cli.py'
+    text=cli_file.read_text()
+    parser='    entry = commands.add_parser("native-entry")\n    entry.add_argument("--native-smoke", action="store_true")\n    entry.add_argument("--first-install-continuity-fd", type=int, help=argparse.SUPPRESS)\n'
+    branch='        elif args.command == "native-entry":\n            from .first_install import launch_native_entry\n            result = launch_native_entry(args.runtime, args.port, smoke=args.native_smoke,\n                                         continuity_fd=args.first_install_continuity_fd)\n'
+    assert parser in text and branch in text
+    cli_file.write_text(text.replace(parser,'').replace(branch,''))
+    legacy_consumer=release/'executor/autonomy/consumer.py'
+    legacy_consumer.write_text(legacy_consumer.read_text()+'\n_native_packaged_launcher = _native_packaged_launcher_v1\n')
+    (release/MANIFEST_NAME).write_text(json.dumps(source_manifest(release),sort_keys=True,separators=(',',':'))+'\n')
+    launcher=candidate/'Contents/MacOS/AIApplicationManager'
+    launcher.write_text(consumer._native_packaged_launcher_v1())
+    assert _trusted_bundle(candidate)
+    home=tmp_path/'legacy-contract-home';home.mkdir()
+    apps=home/'Applications';state=home/'Library/Application Support/AI投递经理/autonomy'
+    result=consumer.install_macos_bundle(candidate,destination=apps,task_state_root=state)
+    assert result['ok'] is True and result['installed'] is True
+    app=apps/(APP_NAME+'.app')
+    assert (app/'Contents/MacOS/AIApplicationManager').read_bytes()==launcher.read_bytes()
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
+    source=app/'Contents/Resources/release';python=app/'Contents/Resources/runtime/bin/python'
+    command=[str(python),'-I','-B','-c',CLI_ENTRY_SCRIPT,str(source),'--port',str(port)]
+    env={'HOME':str(home),'PATH':os.defpath,'LANG':'en_US.UTF-8',
+         'APPLICATION_EXECUTOR_BROWSER_MODE':'isolated','BROWSER':'/usr/bin/false'}
+    try:
+        absent=subprocess.run(command+['native-entry','--native-smoke'],env=env,capture_output=True,text=True,timeout=10)
+        assert absent.returncode!=0
+        opened=subprocess.run(command+['native-launch','--native-smoke'],env=env,capture_output=True,text=True,timeout=40)
+        assert opened.returncode==0 and json.loads(opened.stdout)['opened'] is True
+    finally:
+        stopped=subprocess.run(command+['stop'],env=env,capture_output=True,text=True,timeout=20)
+        assert stopped.returncode==0

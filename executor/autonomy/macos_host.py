@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from .consumer_presentation import ConsumerSurface
@@ -93,6 +94,9 @@ static BOOL releaseResult(NSDictionary *command) {
 @property BOOL focusSmoke;
 @property BOOL releaseSmoke;
 @property BOOL releaseResultMode;
+@property BOOL firstInstallMode;
+@property BOOL firstInstallSmoke;
+@property NSString *firstInstallResult;
 @property BOOL releaseResultSmoke;
 @property (strong) NSDictionary *releaseRequest;
 @property NSUInteger focusCount;
@@ -112,6 +116,59 @@ static BOOL releaseResult(NSDictionary *command) {
 
 @implementation JAEHost
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    if (self.firstInstallMode) {
+        // Static local install/continuity choice. No WebView, URL or service.
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"首次安装 AI 投递经理";
+        alert.informativeText = @"应用将安装到当前用户的“应用程序”文件夹，不需要终端。已有应用不会覆盖，旧任务不会自动搬迁。若使用过旧版，请选择旧版项目文件夹核对；发现旧任务时会保留并停止安装。";
+        if (self.firstInstallResult) {
+            alert.messageText = @"安装尚未完成";
+            NSDictionary *messages = @{
+                @"legacy-state-required": @"发现旧版任务或无法核对旧版资料。原应用、任务和答案保持原处；需要完成安全迁移后再安装。请勿删除旧文件或改选空文件夹绕过检查。",
+                @"target-occupied": @"当前用户的应用程序文件夹已有同名应用，安装包没有替换它。请关闭此窗口并打开已有应用；如需更新，使用已有应用内的更新入口。",
+                @"state-continuity-required": @"发现没有对应应用的既有任务状态。为避免另建空任务库，安装已停止，原状态保持不变。",
+                @"not-confirmed": @"安装结果尚未确认。没有自动重试或打开另一套任务库；请保留原应用和安装包，核对后再操作。",
+                @"reopen-failed": @"应用已安装，但工作台尚未确认打开。请从当前用户的应用程序文件夹打开 AI 投递经理，核对任务状态。"};
+            NSString *message = messages[self.firstInstallResult];
+            if (!message) { report(@{@"ok": @NO}); [NSApp terminate:nil]; return; }
+            alert.informativeText = message;
+            [alert addButtonWithTitle:@"关闭"];
+        } else {
+            [alert addButtonWithTitle:@"选择旧版项目文件夹…"];
+            [alert addButtonWithTitle:@"首次使用，没有旧版任务"];
+            [alert addButtonWithTitle:@"取消"];
+        }
+        [NSApp activateIgnoringOtherApps:YES];
+        if (self.firstInstallSmoke) {
+            [alert.window makeKeyAndOrderFront:nil];
+            BOOL visible = alert.window.isVisible && self.view == nil;
+            [alert.window close]; self.finished = YES;
+            report(@{@"ok": @(visible), @"first_install_prompt_visible": @(visible),
+                     @"first_install_choice": @{@"action": @"cancel"}});
+            [NSApp terminate:nil]; return;
+        }
+        NSModalResponse response = [alert runModal];
+        NSDictionary *choice = @{@"action": @"cancel"};
+        if (!self.firstInstallResult && response == NSAlertSecondButtonReturn) {
+            choice = @{@"action": @"install", @"continuity": @"first_use"};
+        } else if (!self.firstInstallResult && response == NSAlertFirstButtonReturn) {
+            NSOpenPanel *panel = [NSOpenPanel openPanel];
+            panel.title = @"选择旧版 Job-Application-Executor 项目文件夹";
+            panel.canChooseFiles = NO; panel.canChooseDirectories = YES;
+            panel.allowsMultipleSelection = NO; panel.canCreateDirectories = NO;
+            if ([panel runModal] == NSModalResponseOK && panel.URLs.count == 1) {
+                NSURL *selected = panel.URLs.firstObject;
+                if (selected.isFileURL && selected.path.isAbsolutePath && selected.path.length <= 2048
+                    && [selected.path rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound) {
+                    choice = @{@"action": @"install", @"continuity": @"selected_legacy_directory",
+                               @"legacy_directory": selected.path};
+                }
+            }
+        }
+        self.finished = YES;
+        report(@{@"ok": @YES, @"first_install_choice": choice});
+        [NSApp terminate:nil]; return;
+    }
     if (self.releaseResultMode) {
         // A finite local result has no web view, URL, task control or installer.
         self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 240)
@@ -422,13 +479,18 @@ static BOOL releaseResult(NSDictionary *command) {
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         JAEHost *host = [JAEHost new];
+        host.firstInstallSmoke = argc == 2 && strcmp(argv[1], "--first-install-smoke") == 0;
+        host.firstInstallMode = host.firstInstallSmoke || (argc == 2 && strcmp(argv[1], "--first-install") == 0)
+            || (argc == 3 && strcmp(argv[1], "--first-install-result") == 0);
+        if (argc == 3 && strcmp(argv[1], "--first-install-result") == 0)
+            host.firstInstallResult = [NSString stringWithUTF8String:argv[2]];
         host.consumerSmoke = argc == 2 && strcmp(argv[1], "--consumer-smoke") == 0;
         host.failureSmoke = argc == 2 && strcmp(argv[1], "--failure-smoke") == 0;
         host.focusSmoke = argc == 2 && strcmp(argv[1], "--focus-smoke") == 0;
         host.releaseSmoke = argc == 2 && strcmp(argv[1], "--release-smoke") == 0;
         host.releaseResultSmoke = argc == 2 && strcmp(argv[1], "--release-result-smoke") == 0;
         host.releaseResultMode = host.releaseResultSmoke || (argc == 2 && strcmp(argv[1], "--release-result") == 0);
-        host.smoke = host.consumerSmoke || host.failureSmoke || host.focusSmoke || host.releaseSmoke || host.releaseResultSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
+        host.smoke = host.firstInstallSmoke || host.consumerSmoke || host.failureSmoke || host.focusSmoke || host.releaseSmoke || host.releaseResultSmoke || (argc == 2 && strcmp(argv[1], "--smoke") == 0);
         [NSApplication sharedApplication];
         NSApp.delegate = host;
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -751,3 +813,84 @@ def present_native_release_result(directory: str | Path, result: str, *,
             presenter.close()
     except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
         return False
+
+
+def native_first_install_choice(value) -> dict | None:
+    """One finite native intent. A selected path adds only a continuity check."""
+    if type(value) is not dict:
+        return None
+    if value == {"action": "cancel"}:
+        return {"action": "cancel"}
+    if value == {"action": "install", "continuity": "first_use"}:
+        return {"action": "install", "continuity": "first_use"}
+    if (set(value) != {"action", "continuity", "legacy_directory"}
+            or value.get("action") != "install"
+            or value.get("continuity") != "selected_legacy_directory"):
+        return None
+    path = value["legacy_directory"]
+    if (type(path) is not str or not path or len(path) > 2048
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or not Path(path).is_absolute()):
+        return None
+    return {"action": "install", "continuity": "selected_legacy_directory", "legacy_directory": path}
+
+
+def present_native_first_install(directory: str | Path, *, smoke: bool = False,
+                                 result: str | None = None) -> dict | None:
+    """Trusted static host, bounded terminal reply; never launches an installer."""
+    if (type(smoke) is not bool or smoke and result is not None
+            or result is not None and (type(result) is not str or result not in {
+            "legacy-state-required", "target-occupied", "state-continuity-required",
+            "not-confirmed", "reopen-failed"})):
+        return None
+    try:
+        root = Path(directory).absolute()
+        if sys.platform != "darwin" or not verify_native_host(root):
+            return None
+        presenter = NativePresenter(root)
+        try:
+            args = (["--first-install-result", result] if result is not None else
+                    ["--first-install-smoke" if smoke else "--first-install"])
+            presenter.process = subprocess.Popen([str(root / "AIApplicationWindow"), *args],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1, close_fds=True)
+            process = presenter.process
+            deadline = time.monotonic() + (20 if smoke else 600)
+            data = bytearray()
+            fd = process.stdout.fileno()
+            os.set_blocking(fd, False)
+            while b"\n" not in data:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or len(data) >= 8192:
+                    return None
+                ready, _, _ = select.select([fd], [], [], remaining)
+                if not ready:
+                    return None
+                chunk = os.read(fd, min(1024, 8193 - len(data)))
+                if not chunk:
+                    return None
+                data.extend(chunk)
+            if len(data) > 8192 or process.wait(timeout=max(.001, min(5, deadline-time.monotonic()))) != 0:
+                return None
+            if os.read(fd, 8193) != b"" or not verify_native_host(root):
+                return None
+            line = data.decode("utf-8")
+            if not line.endswith("\n") or line.count("\n") != 1:
+                return None
+            def unique(pairs):
+                output = {}
+                for key, value in pairs:
+                    if key in output:
+                        raise ValueError("duplicate native reply")
+                    output[key] = value
+                return output
+            reply = json.loads(line, object_pairs_hook=unique)
+            expected = {"ok", "first_install_choice"} | ({"first_install_prompt_visible"} if smoke else set())
+            if (type(reply) is not dict or set(reply) != expected or reply.get("ok") is not True
+                    or smoke and reply.get("first_install_prompt_visible") is not True):
+                return None
+            return native_first_install_choice(reply["first_install_choice"])
+        finally:
+            presenter.close()
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+        return None

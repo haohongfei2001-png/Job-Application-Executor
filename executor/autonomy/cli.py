@@ -385,7 +385,7 @@ def restore_installed_consumer(root):
         return {"ok": False, "restored": False, "reason": "macos_required", **boundary}
     try:
         from .consumer import (
-            APP_NAME, _trusted_bundle, _native_packaged_launcher,
+            APP_NAME, _trusted_bundle, _native_packaged_launcher, _native_packaged_launcher_v1, _is_native_packaged_launcher,
             _packaged_launcher, rollback_macos_app,
         )
         source = Path(__file__).absolute().parents[2]
@@ -403,7 +403,8 @@ def restore_installed_consumer(root):
                 or any(c not in "0123456789abcdef" for c in expected)
                 or not _trusted_bundle(app)
                 or executable.read_text(encoding="utf-8") not in {
-                    _packaged_launcher(), _native_packaged_launcher()}):
+                    _packaged_launcher(), _native_packaged_launcher(),
+                    _native_packaged_launcher_v1()}):
             return {"ok": False, "restored": False,
                     "reason": "installed_restore_unverified", **boundary}
         from .runtime_paths import default_runtime
@@ -451,7 +452,7 @@ def update_installed_consumer(root, distribution):
         return {"ok": False, "updated": False, "reason": "macos_required", **boundary}
     try:
         from .consumer import (
-            APP_NAME, _trusted_bundle, _native_packaged_launcher, _packaged_launcher,
+            APP_NAME, _trusted_bundle, _native_packaged_launcher, _native_packaged_launcher_v1, _is_native_packaged_launcher, _packaged_launcher,
         )
         source = Path(__file__).absolute().parents[2]
         app = source.parent.parent.parent
@@ -466,7 +467,8 @@ def update_installed_consumer(root, distribution):
                 or any(c not in "0123456789abcdef" for c in expected)
                 or not _trusted_bundle(app)
                 or executable.read_text(encoding="utf-8") not in {
-                    _packaged_launcher(), _native_packaged_launcher()}):
+                    _packaged_launcher(), _native_packaged_launcher(),
+                    _native_packaged_launcher_v1()}):
             return {"ok": False, "updated": False,
                     "reason": "installed_update_unverified", **boundary}
         from .runtime_paths import default_runtime
@@ -528,7 +530,7 @@ def handoff_installed_consumer(root, port, release_request):
     if intent is None:
         return {"ok": False, "reason": "native_release_intent_invalid", **boundary}
     try:
-        from .consumer import APP_NAME, _trusted_bundle, _native_packaged_launcher
+        from .consumer import APP_NAME, _trusted_bundle, _is_native_packaged_launcher
         from .runtime_paths import default_runtime
         source = Path(__file__).absolute().parents[2]
         app = source.parent.parent.parent
@@ -545,7 +547,7 @@ def handoff_installed_consumer(root, port, release_request):
                 or any(c not in "0123456789abcdef" for c in expected)
                 or observed_root != Path(default_runtime(source)).expanduser().absolute()
                 or not _trusted_bundle(app)
-                or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
+                or not _is_native_packaged_launcher(executable.read_text(encoding="utf-8"))):
             return {"ok": False, "reason": "native_release_installation_unverified", **boundary}
         stopped = _stop_owned_service(observed_root, port)
         if (stopped.get("ok") is not True
@@ -562,7 +564,7 @@ def handoff_installed_consumer(root, port, release_request):
         # of window/service readiness, signing or consumer certification.
         if (not _trusted_bundle(app)
                 or any(p.is_symlink() for p in (app, *app.parents))
-                or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
+                or not _is_native_packaged_launcher(executable.read_text(encoding="utf-8"))):
             return {"ok": False, completed: False, "reopen_requested": False,
                     "reason": "activated_app_unverified", **boundary}
         try:
@@ -581,7 +583,7 @@ def handoff_installed_consumer(root, port, release_request):
 
 def show_native_release_result(root, result, *, smoke=False):
     """Admit a verified, lease-owned static result after an explicit handoff."""
-    from .consumer import _native_packaged_launcher, _trusted_bundle
+    from .consumer import _native_packaged_launcher, _native_packaged_launcher_v1, _is_native_packaged_launcher, _trusted_bundle
     from .macos_host import present_native_release_result
     from .runtime_paths import default_runtime
     from .state_compatibility import native_window_guard
@@ -598,7 +600,7 @@ def show_native_release_result(root, result, *, smoke=False):
                 or any(path.is_symlink() for path in (source, *source.parents,
                                                      authority, *authority.parents))
                 or not _trusted_bundle(app)
-                or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
+                or not _is_native_packaged_launcher(executable.read_text(encoding="utf-8"))):
             return False
         completed = result.get("ok") is True and (
             result.get("updated") is True or result.get("restored") is True)
@@ -614,7 +616,7 @@ def show_native_release_result(root, result, *, smoke=False):
 
 def launch_native_consumer(root, port, *, smoke=False):
     """Run the owned installed app through one verified native presenter."""
-    from .consumer import _native_packaged_launcher, _trusted_bundle
+    from .consumer import _native_packaged_launcher, _native_packaged_launcher_v1, _is_native_packaged_launcher, _trusted_bundle
     from .macos_host import NativePresenter
 
     source = Path(__file__).resolve().parents[2]
@@ -622,7 +624,7 @@ def launch_native_consumer(root, port, *, smoke=False):
     executable = app / "Contents" / "MacOS" / "AIApplicationManager"
     if (type(smoke) is not bool or sys.platform != "darwin"
             or not _trusted_bundle(app)
-            or executable.read_text(encoding="utf-8") != _native_packaged_launcher()):
+            or not _is_native_packaged_launcher(executable.read_text(encoding="utf-8"))):
         return {"ok": False, "opened": False, "reason": "native_bundle_unverified"}
     from .state_compatibility import native_window_guard
     from .native_reopen import create_owned_reopen_server, request_owned_focus
@@ -674,6 +676,9 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("serve", "start", "stop", "restart", "status", "health", "tasks", "events", "ui", "launch"):
         commands.add_parser(name)
+    entry = commands.add_parser("native-entry")
+    entry.add_argument("--native-smoke", action="store_true")
+    entry.add_argument("--first-install-continuity-fd", type=int, help=argparse.SUPPRESS)
     native = commands.add_parser("native-launch")
     native_mode = native.add_mutually_exclusive_group()
     native_mode.add_argument("--native-smoke", action="store_true")
@@ -730,6 +735,10 @@ def main(argv=None):
             )
         elif args.command == "launch":
             result = launch_consumer(args.runtime, args.port)
+        elif args.command == "native-entry":
+            from .first_install import launch_native_entry
+            result = launch_native_entry(args.runtime, args.port, smoke=args.native_smoke,
+                                         continuity_fd=args.first_install_continuity_fd)
         elif args.command == "native-launch":
             result = (restore_installed_consumer(args.runtime) if args.restore_previous else
                       update_installed_consumer(args.runtime, args.update_distribution)
@@ -782,6 +791,8 @@ def main(argv=None):
                 None if args.command in {"get", "observe"} else {},
             )
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.command == "native-entry" and result.get("first_install_result_visible") is True:
+            return 2  # Fixed native explanation already shown; no duplicate shell alert.
         return 0 if result.get("ok", True) else 1
     except Exception:
         # No exception repr: transport errors can contain payloads or private paths.
