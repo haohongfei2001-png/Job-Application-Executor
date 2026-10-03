@@ -1615,6 +1615,9 @@ finally:
             cwd=home,env=environment,capture_output=True,text=True,timeout=240)
         assert run.returncode==0,'single DMG first install/native reopen did not complete: '+run.stderr[-1800:]
         assert json.loads(run.stdout)['actual_native_opened'] is True
+    # A new consumer enters ordinary fields/resume in the actual installed UI,
+    # without supplying a JSON profile or importing the source-side editor.
+    profile_before = _installed_profile_onboarding(target,state,port,home,environment,create=True)
     queue=TaskQueue(state);worker=Worker(queue)
     task=queue.enqueue(TaskSpec(company='Synthetic DMG',role='Engineer',target_url='https://example.test/dmg',profile_ref='synthetic-profile.json'))
     queue.pause(task['task_id'])
@@ -1652,3 +1655,82 @@ finally:
     assert consumer._trusted_bundle(target.parent/('.'+APP_NAME+'.app.previous'))
     assert source_manifest(target/'Contents/Resources/release')['source_sha256']==second['source_sha256']
     assert not (state/'service.json').exists()
+    assert _installed_profile_onboarding(target,state,port,home,environment,create=False)==profile_before
+    assert TaskQueue(state).tasks()==before
+    assert TaskAnswerStore(TaskQueue(state)).load(task['task_id'])==typed
+
+
+def _installed_profile_onboarding(target,state,port,home,environment,*,create):
+    """Actual installed service/UI, synthetic facts and isolated browser only."""
+    from playwright.sync_api import sync_playwright, expect
+    from executor.autonomy import cli
+    from executor.autonomy.first_use_recovery import _owned_request
+    source=target/'Contents/Resources/release'
+    command=[str(target/'Contents/Resources/runtime/bin/python'),'-I','-B','-c',CLI_ENTRY_SCRIPT,
+        str(source),'--runtime',str(state),'--port',str(port),'native-entry','--native-smoke']
+    base='http://127.0.0.1:'+str(port)
+    writes,external,errors=[],[],[]
+    resume=b'%PDF-1.4\nSYNTHETIC_INSTALLED_ONBOARDING\n%%EOF'
+    try:
+        opened=subprocess.run(command,cwd=home,env=environment,capture_output=True,text=True,timeout=90)
+        assert opened.returncode==0,'installed onboarding native entry did not open'
+        health=_owned_request(state,port,'/health')
+        assert health['ok'] is True and health['loaded_source_sha256']==source_manifest(source)['source_sha256']
+        with sync_playwright() as playwright:
+            browser=playwright.chromium.launch(headless=True)
+            try:
+                context=browser.new_context(viewport={'width':1000,'height':850})
+                def local_only(route):
+                    if route.request.url.startswith(base+'/'):
+                        route.continue_()
+                    else:
+                        external.append(route.request.url);route.abort()
+                context.route('**/*',local_only)
+                def open_page():
+                    page=context.new_page()
+                    page.on('pageerror',lambda error:errors.append(str(error)))
+                    page.on('request',lambda request:writes.append(request.url) if request.method=='POST' else None)
+                    ticket=_owned_request(state,port,'/v1/ui-ticket',{})['ticket']
+                    page.goto(base+'/ui-login?ticket='+ticket)
+                    return page
+                page=open_page()
+                if create:
+                    expect(page.locator('#profile-onboarding')).to_be_visible()
+                    page.locator('#profile-onboarding-open').click()
+                    expect(page.locator('#profile-editor-field-0')).to_be_enabled()
+                    page.locator('#profile-editor-field-0').fill('SYNTHETIC_INSTALLED_PERSON')
+                    page.locator('#profile-editor-resume').set_input_files({
+                        'name':'synthetic-resume.pdf','mimeType':'application/pdf','buffer':resume})
+                    assert writes==[] and not (state/'settings.json').exists()
+                    page.locator('#profile-editor-save').click()
+                    expect(page.locator('#profile-editor-status')).to_contain_text('已保存在本机并重新读取确认')
+                    page.locator('#profile-editor-close').click()
+                    expect(page.locator('#profile-onboarding')).not_to_be_visible()
+                    assert '已就绪' not in page.locator('#readiness').inner_text()
+                    assert writes==[base+'/ui/api/profile-editor']
+                    page.close()
+                    page=open_page()
+                page.locator('#profile-setup').click()
+                expect(page.locator('#profile-editor-open')).to_be_enabled()
+                assert not page.locator('#profile-file').is_visible()
+                page.locator('#profile-editor-open').click()
+                expect(page.locator('#profile-editor-field-0')).to_have_value('SYNTHETIC_INSTALLED_PERSON')
+                expect(page.locator('#profile-editor-resume-status')).to_contain_text('本机已记录 PDF')
+                assert page.locator('#profile-editor-resume').input_value()==''
+                assert page.evaluate('localStorage.length + sessionStorage.length')==0
+                assert external==[] and errors==[]
+                if not create:assert writes==[]
+            finally:
+                browser.close()
+        settings_bytes=(state/'settings.json').read_bytes()
+        selected=json.loads(settings_bytes)['profile_path']
+        assert Path(selected).parent==state
+        profile_bytes=Path(selected).read_bytes();profile=json.loads(profile_bytes)
+        assert profile['fields']['identity.full_name']['value']=='SYNTHETIC_INSTALLED_PERSON'
+        asset=profile['assets']['resume'];assert Path(asset['path']).parent==state
+        assert Path(asset['path']).read_bytes()==resume
+        assert asset['sha256']==hashlib.sha256(resume).hexdigest()
+        return settings_bytes,profile_bytes,resume
+    finally:
+        stopped=cli._stop_owned_service(state,port)
+        assert stopped.get('ok') is True or stopped.get('reason')=='service_record_missing'

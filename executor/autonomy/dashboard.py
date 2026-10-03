@@ -59,6 +59,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 @media(max-width:820px){.shell{grid-template-columns:1fr}aside{display:block;max-height:45vh;border-right:0;border-bottom:1px solid #e5e7eb}main{min-height:55vh}}
 #candidates>button[data-existing-task]{min-height:44px}
 .profile-editor-fields{display:grid;gap:12px;margin:18px 0}.profile-editor-field{display:grid;gap:5px;font-size:13px}.profile-editor-field input,.profile-editor-field textarea{width:100%;min-width:0;border:1px solid #cbd5e1;border-radius:7px;padding:9px;font:inherit}.profile-editor-field small{color:#64748b}.profile-editor-dialog .diagnostics-actions{flex-wrap:wrap;position:sticky;bottom:-22px;background:white;padding:12px 0}.profile-editor-dialog button{min-height:44px}.profile-editor-dialog input[type=file]{display:block;max-width:100%;margin:10px 0}.profile-editor-dialog details{font-size:12px;overflow-wrap:anywhere;margin:12px 0}.profile-editor-dialog p[role=status]{min-height:20px}
+.profile-onboarding{max-width:820px;border:1px solid #cbd5e1;border-radius:12px;padding:18px;background:#fff;margin:0 0 18px}.profile-onboarding h2{font-size:17px;margin:0 0 8px}.profile-onboarding p{font-size:14px;line-height:1.6;margin:0 0 14px}.profile-onboarding button,#profile-editor-open{min-height:44px;padding:10px 16px}.profile-import{margin:18px 0;font-size:13px;line-height:1.6}.profile-import summary{cursor:pointer;min-height:44px;padding:10px 0}.profile-import input{display:block;max-width:100%;margin:10px 0}.profile-import button{min-height:44px}
 </style>
 </head>
 <body>
@@ -105,6 +106,11 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   </div>
 </header>
 <div id="chat" class="chat">
+  <section id="profile-onboarding" class="profile-onboarding" aria-labelledby="profile-onboarding-title" hidden>
+    <h2 id="profile-onboarding-title">先填写基本资料与简历</h2>
+    <p>本机还没有选择个人资料。直接在应用里填写，并选择你的简历文件；保存后可供之后的新任务使用。你可以稍后再填，保存资料也不代表已经具备投递条件。</p>
+    <button id="profile-onboarding-open" type="button">开始填写</button>
+  </section>
   <div class="bubble ai">可按公司和岗位查找官方招聘信息；同名岗位会请你选择。任务控制可在任务卡片操作，私人资料请在任务卡片本地填写。最终提交由你本人完成。</div>
 </div>
 <div class="composer">
@@ -115,14 +121,18 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
 </div>
 <dialog id="profile-dialog" class="diagnostics-dialog" aria-labelledby="profile-title">
   <h2 id="profile-title">资料设置</h2>
-  <p>选择个人资料 JSON 文件，内容仅保存在本机，用于之后添加的任务。已有任务继续使用原资料。密码、验证码和 API 密钥请勿放入资料文件；最终提交由你本人完成。</p>
-  <button id="profile-editor-open" type="button" disabled>编辑基本资料与简历</button>
+  <p>直接填写基本资料，并选择简历文件。内容仅保存在本机，用于之后添加的任务；已有任务继续使用原资料。请本人核对内容，密码、验证码和 API 密钥不要填写在这里。</p>
+  <button id="profile-editor-open" type="button" disabled>填写或编辑基本资料与简历</button>
   <p id="profile-status" role="status">正在读取设置…</p>
-  <label for="profile-file">选择资料文件（JSON，最多 256 KB）</label>
-  <input id="profile-file" type="file" accept=".json,application/json" disabled>
+  <details id="profile-import" class="profile-import">
+    <summary>导入已有资料文件（可选）</summary>
+    <p>仅在已经准备好完整资料文件时使用此入口。导入后只改变以后新任务选择的资料，不会合并旧任务或确认内容正确。</p>
+    <label for="profile-file">选择资料文件（JSON，最多 256 KB）</label>
+    <input id="profile-file" type="file" accept=".json,application/json" disabled>
+    <button id="profile-save" type="button" disabled>保存导入资料</button>
+  </details>
   <div class="diagnostics-actions">
     <button id="profile-close" class="headerbtn" type="button">关闭</button>
-    <button id="profile-save" type="button" disabled>保存资料</button>
   </div>
 </dialog>
 <dialog id="profile-editor-dialog" class="diagnostics-dialog profile-editor-dialog" aria-labelledby="profile-editor-title">
@@ -132,7 +142,7 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <p id="profile-editor-status" role="status"></p>
   <div id="profile-editor-fields" class="profile-editor-fields"></div>
   <p id="profile-editor-resume-status"></p>
-  <label for="profile-editor-resume">替换以后新任务的简历（PDF、DOCX 或 DOC）</label>
+  <label for="profile-editor-resume">选择或替换简历（PDF、DOCX 或 DOC）</label>
   <input id="profile-editor-resume" type="file" accept=".pdf,.docx,.doc" disabled>
   <p>文件与资料合计最多 20 MiB。只保存所选文件，不预览或解析；旧简历的解析记录不会自动更新，也不会代你上传到网站。</p>
   <button id="profile-editor-clear-resume" type="button" disabled>撤销本次文件选择</button>
@@ -256,10 +266,10 @@ function profileControls(){
 }
 function clearProfileSelection(){
   profileEpoch++;profileVersion=null;profileBusy=false;profileFile.value='';
-  profileStatus.textContent='';profileControls();
+  profileStatus.textContent='';document.getElementById('profile-import').open=false;profileControls();
 }
-async function openProfileSetup(){
-  if(uiSessionExpired)return;
+async function openProfileSetup({editor=false}={}){
+  if(uiSessionExpired||profileDialog.open||editorDialog.open)return;
   clearProfileSelection();
   const epoch=profileEpoch;
   profileStatus.textContent='正在读取设置…';profileDialog.showModal();profileClose.focus();
@@ -269,13 +279,16 @@ async function openProfileSetup(){
     if(uiSessionExpired||epoch!==profileEpoch||!profileDialog.open)return;
     if(!response.ok||!validProfileState(data))throw new Error();
     profileVersion=data.settings_version;
-    profileStatus.textContent=data.profile_selected?'已选择本机资料，可选择新文件供之后的任务使用。':'尚未选择资料，请选择文件并明确保存。';
+    profileStatus.textContent=data.profile_selected?'已选择本机资料。可打开编辑器核对基本资料与简历；已选择不代表完整或正确。':'尚未保存个人资料。点击上方按钮填写并明确保存，无需准备资料文件。';
+    profileControls();
+    if(editor)await openEditor();
   }catch(_){
     if(!uiSessionExpired&&epoch===profileEpoch&&profileDialog.open)
       profileStatus.textContent='无法读取设置，请关闭后重新打开；没有修改资料。';
   }finally{if(epoch===profileEpoch)profileControls();}
 }
 profileBtn.onclick=()=>void openProfileSetup();
+document.getElementById('profile-onboarding-open').onclick=()=>void openProfileSetup({editor:true});
 function closeProfileSetup(){
   clearProfileSelection();
   if(profileDialog.open)profileDialog.close();
@@ -1083,7 +1096,7 @@ function expireUISession(){
   providerRefreshObservation=null;providerLoadStatus.textContent='';
   currentTaskId=null;savedView=null;updateTaskContext();
   clearProfileSelection();if(profileDialog.open)profileDialog.close();
-  closeEditor();
+  closeEditor();renderProfileOnboarding(null);
   recoveryObservations.clear();tasksEl.querySelectorAll('[data-field-recovery]').forEach(panel=>panel.remove());
   const notice=document.getElementById('session-expired');
   notice.hidden=false;
@@ -1675,20 +1688,28 @@ readinessClose.onclick=()=>readinessDialog.close();
 readinessDialog.addEventListener('close',()=>{providerLoadEpoch++;providerRefreshObservation=null;
   providerLoadStatus.textContent='';updateProviderLoadControl();
   if(!uiSessionExpired)readinessBtn.focus();});
+function renderProfileOnboarding(data){
+  const checks=data?.checks;
+  document.getElementById('profile-onboarding').hidden=uiSessionExpired||!checks
+    ||checks.profile_configured!==false||checks.profile_exists!==false||checks.profile_loadable!==false;
+}
+let readinessEpoch=0;
 async function readiness(){
   if(uiSessionExpired)return;
+  const epoch=++readinessEpoch;
   const label=document.getElementById('readiness');
   try{
     const r=await uiRequest('/ui/api/readiness',{credentials:'same-origin'});
     if(!r.ok)throw new Error();
     const data=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
+    if(epoch!==readinessEpoch)return;
     label.textContent=data.ready_for_live_e2e?'已就绪 · 最终提交由你确认':data.message||'运行条件待检查';
-    renderReadinessDetails(data);
+    renderReadinessDetails(data);renderProfileOnboarding(data);
   }catch(e){
-    if(uiSessionExpired)return;
+    if(uiSessionExpired||epoch!==readinessEpoch)return;
     label.textContent='无法检查运行条件；任务不会自动提交';
     readinessSummary.textContent='无法读取检查结果；任务不会自动提交。';
-    readinessChecks.replaceChildren();
+    readinessChecks.replaceChildren();renderProfileOnboarding(null);
   }
 }
 async function state(){
