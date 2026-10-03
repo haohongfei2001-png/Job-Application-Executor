@@ -700,7 +700,8 @@ def install_macos_bundle(
     options = {"native_host": candidate / "Contents" / "Resources" / "native-host"} if native else {}
     return install_macos_app(release, destination=apps, platform=platform,
         task_state_root=task_state_root, standalone_runtime=runtime,
-        native_presentation=native, **options)
+        native_presentation=native,
+        _legacy_origin=Path(__file__).absolute().parents[2], **options)
 
 
 def install_macos_app(
@@ -712,6 +713,7 @@ def install_macos_app(
     standalone_runtime: str | Path | None = None,
     native_presentation: bool = False,
     native_host: str | Path | None = None,
+    _legacy_origin: Path | None = None,
 ) -> dict:
     if (platform or sys.platform) != "darwin":
         return _install_macos_app_unlocked(repo_root, destination=destination, platform=platform)
@@ -738,7 +740,7 @@ def install_macos_app(
                     repo_root, destination=apps_dir, platform=platform,
                     task_state_root=state_root, standalone_runtime=standalone_runtime,
                     native_presentation=native_presentation, native_host=native_host,
-                    _state_backup_evidence=backup_evidence)
+                    _state_backup_evidence=backup_evidence, _legacy_origin=_legacy_origin)
                 return {**result, "task_state_backup": backup_evidence} if backup_evidence else result
         except BlockingIOError:
             return {"ok": False, "reason": "task_state_in_use",
@@ -760,6 +762,7 @@ def _install_macos_app_unlocked(
     native_presentation: bool = False,
     native_host: str | Path | None = None,
     _state_backup_evidence: dict | None = None,
+    _legacy_origin: Path | None = None,
 ) -> dict:
     """Stage a source-and-runtime snapshot, then atomically activate the Mac app."""
     current_platform = platform or sys.platform
@@ -805,8 +808,13 @@ def _install_macos_app_unlocked(
     # Source-path health alone cannot prove continuity with a historical
     # repo-local journal. Refuse before staging or candidate startup so the
     # original app and its complete private/WAL state remain the authority.
+    # Delivered intake replaces repo with staged payload. Retain the trusted
+    # invoking source separately; pure builds do not pass this origin.
+    legacy_sources = (repo,) if _legacy_origin is None else (repo, _legacy_origin)
     try:
-        if task_state_root is None or _legacy_state_migration_needed(repo, app, task_state_root):
+        if task_state_root is None or any(
+                _legacy_state_migration_needed(source, app, task_state_root)
+                for source in legacy_sources):
             return {
                 "ok": False,
                 "reason": "legacy_state_migration_required",
@@ -946,7 +954,8 @@ def _install_macos_app_unlocked(
     # can arrive after the initial admission check; refuse before the first
     # app move rather than activating an empty, split task authority.
     try:
-        late_legacy = _legacy_state_migration_needed(repo, app, task_state_root)
+        late_legacy = any(_legacy_state_migration_needed(source, app, task_state_root)
+                          for source in legacy_sources)
     except (OSError, UnicodeError, ValueError):
         return {"ok": False, "reason": "legacy_state_unavailable",
                 "message": "无法安全核对旧版任务状态；现有应用和任务保持不变。"}

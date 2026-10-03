@@ -6439,3 +6439,145 @@ def test_retirement_registry_unlink_between_open_and_fstat_preserves_authority(
     _assert_retirement_authority(root, db, before)
     assert (root / "task-answers.key").read_bytes() == key
     assert "PRIVATE_" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("artifact", ["tasks.sqlite3-wal", "task-answers.key", "auth.token", "unknown-private-state"])
+def test_delivered_origin_private_state_refuses_before_candidate_staging(tmp_path, monkeypatch, artifact):
+    candidate = tmp_path / "staged-release"
+    python = candidate / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    origin = tmp_path / "invoking-checkout"
+    state = origin / "runtime/autonomy"
+    state.mkdir(parents=True)
+    item = state / artifact
+    item.write_bytes(b"SYNTHETIC_ORIGIN_AUTHORITY")
+    item.chmod(0o600)
+    before = item.read_bytes(), item.stat().st_mode, item.stat().st_ino
+    monkeypatch.setattr(consumer, "copy_source_candidate", lambda *a: pytest.fail("must refuse before staging"))
+    apps, target = tmp_path / "Applications", tmp_path / "new-state"
+    result = install_macos_app(candidate, destination=apps, platform="darwin",
+                               task_state_root=target, _legacy_origin=origin)
+    assert result["ok"] is False and result["reason"] == "legacy_state_migration_required"
+    assert (item.read_bytes(), item.stat().st_mode, item.stat().st_ino) == before
+    assert not (apps / (consumer.APP_NAME + ".app")).exists()
+    assert not (apps / ("." + consumer.APP_NAME + ".app.installing")).exists()
+    assert not (target / "tasks.sqlite3").exists()
+    assert not (target / "auth.token").exists()
+    assert str(origin) not in json.dumps(result) and "SYNTHETIC_ORIGIN" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("alias_at", ["origin", "ancestor", "runtime"])
+def test_delivered_origin_alias_cannot_certify_absence(tmp_path, monkeypatch, alias_at):
+    candidate = tmp_path / "staged-release"
+    python = candidate / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    real = tmp_path / "actual-parent/invoking-checkout"
+    state = real / "runtime/autonomy"
+    state.mkdir(parents=True)
+    item = state / "worker.lock"
+    item.touch()
+    if alias_at == "origin":
+        origin = tmp_path / "alias-checkout"
+        origin.symlink_to(real, target_is_directory=True)
+    elif alias_at == "ancestor":
+        parent = tmp_path / "alias-parent"
+        parent.symlink_to(real.parent, target_is_directory=True)
+        origin = parent / real.name
+    else:
+        origin = tmp_path / "invoking-checkout"
+        origin.mkdir()
+        (origin / "runtime").symlink_to(real / "runtime", target_is_directory=True)
+    before = item.stat().st_ino, item.stat().st_mode
+    monkeypatch.setattr(consumer, "copy_source_candidate", lambda *a: pytest.fail("alias must refuse before staging"))
+    apps = tmp_path / "Applications"
+    result = install_macos_app(candidate, destination=apps, platform="darwin",
+                               task_state_root=tmp_path / "new-state", _legacy_origin=origin)
+    assert result["ok"] is False and result["reason"] == "legacy_state_unavailable"
+    assert (item.stat().st_ino, item.stat().st_mode) == before
+    assert not (apps / (consumer.APP_NAME + ".app")).exists()
+
+
+@pytest.mark.parametrize("mode", ["same-authority", "empty-locks", "pure-build"])
+def test_delivered_origin_does_not_replace_explicit_authority_or_pure_build_semantics(tmp_path, monkeypatch, mode):
+    candidate = tmp_path / "staged-release"
+    python = candidate / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    origin = tmp_path / "invoking-checkout"
+    state = origin / "runtime/autonomy"
+    state.mkdir(parents=True)
+    item = state / ("worker.lock" if mode == "empty-locks" else "task-answers.key")
+    item.write_bytes(b"" if mode == "empty-locks" else b"SYNTHETIC_OLD_KEY")
+    item.chmod(0o600)
+    before = item.read_bytes(), item.stat().st_mode, item.stat().st_ino
+    reached = []
+    def stop_at_staging(*args):
+        reached.append(True)
+        raise OSError("synthetic staging boundary")
+    monkeypatch.setattr(consumer, "copy_source_candidate", stop_at_staging)
+    options = {} if mode == "pure-build" else {"_legacy_origin": origin}
+    result = install_macos_app(candidate, destination=tmp_path / "Applications", platform="darwin",
+        task_state_root=state if mode == "same-authority" else tmp_path / "new-state", **options)
+    assert reached == [True] and result["reason"] == "source_snapshot_failed"
+    assert (item.read_bytes(), item.stat().st_mode, item.stat().st_ino) == before
+
+
+@pytest.mark.parametrize("artifact", ["tasks.sqlite3-wal", "task-answers.key"])
+def test_delivered_origin_arriving_during_health_is_checked_again_before_activation(tmp_path, monkeypatch, artifact):
+    candidate = tmp_path / "staged-release"
+    python = candidate / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    _minimal_source(candidate)
+    origin = tmp_path / "invoking-checkout"
+    state = origin / "runtime/autonomy"
+    apps, target = tmp_path / "Applications", tmp_path / "new-state"
+    starts = []
+    # Focus this fault injection on transaction ordering. The exact hosted
+    # delivered-install regression separately retains real native health.
+    def health_then_arrival(*args):
+        assert not state.exists()
+        state.mkdir(parents=True)
+        (state / artifact).write_bytes(b"SYNTHETIC_LATE_ORIGIN")
+        starts.append(True)
+        return True
+    monkeypatch.setattr(consumer, "_candidate_starts", health_then_arrival)
+    monkeypatch.setattr(consumer, "_prepare_task_state_release", lambda *a: True)
+    result = install_macos_app(candidate, destination=apps, platform="darwin",
+                               task_state_root=target, _legacy_origin=origin)
+    assert starts == [True]
+    assert result["ok"] is False and result["reason"] == "legacy_state_migration_required"
+    assert (state / artifact).read_bytes() == b"SYNTHETIC_LATE_ORIGIN"
+    assert not (apps / (consumer.APP_NAME + ".app")).exists()
+    assert not (apps / ("." + consumer.APP_NAME + ".app.previous")).exists()
+    assert (apps / ("." + consumer.APP_NAME + ".app.installing")).is_dir()
+    assert not (target / "tasks.sqlite3").exists() and not (target / "auth.token").exists()
+    assert str(origin) not in json.dumps(result)
+
+
+def test_delivered_bundle_binds_invoking_module_origin_not_candidate_payload(tmp_path, monkeypatch):
+    candidate = tmp_path / "delivered.app"
+    executable = candidate / "Contents/MacOS/AIApplicationManager"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(consumer._packaged_launcher())
+    executable.chmod(0o755)
+    origin = tmp_path / "invoking-checkout"
+    monkeypatch.setattr(consumer, "__file__", str(origin / "executor/autonomy/consumer.py"))
+    monkeypatch.setattr(consumer, "_trusted_bundle", lambda app: app == candidate)
+    monkeypatch.setattr(consumer, "verify_standalone_runtime", lambda *a: True)
+    calls = []
+    def capture(repo, **options):
+        calls.append((repo, options))
+        return {"ok": False, "reason": "synthetic_transaction_boundary"}
+    monkeypatch.setattr(consumer, "install_macos_app", capture)
+    apps, state = tmp_path / "Applications", tmp_path / "explicit-state"
+    result = consumer.install_macos_bundle(candidate, destination=apps,
+                                           task_state_root=state, platform="darwin")
+    assert result["reason"] == "synthetic_transaction_boundary"
+    assert len(calls) == 1
+    repo, options = calls[0]
+    assert repo == candidate / "Contents/Resources/release"
+    assert options["_legacy_origin"] == origin and options["_legacy_origin"] != repo
+    assert options["task_state_root"] == state and options["destination"] == apps
