@@ -264,9 +264,9 @@ def native_installed_app(tmp_path):
     runtime = Path(os.environ["JAE_STANDALONE_RUNTIME"])
     repo = tmp_path / "source"
     copy_source_candidate(Path(__file__).resolve().parents[1], repo)
-    apps = tmp_path / "Applications"
     home = tmp_path / "home"
     home.mkdir()
+    apps = home / "Applications"
     state = home / "Library" / "Application Support" / "AI投递经理" / "autonomy"
     result = consumer.install_macos_app(repo, destination=apps,
         standalone_runtime=runtime, task_state_root=state, native_presentation=True)
@@ -1860,3 +1860,286 @@ def test_release_result_refuses_unadmitted_or_contended_authority_without_any_ef
     else:
         assert cli.show_native_release_result(supplied, outcome) is False
     assert canary.read_bytes() == before and not (root / "tasks.sqlite3").exists()
+
+
+@pytest.mark.parametrize('value', [
+    None, [], {}, {'action': 'install'}, {'action': 'cancel', 'extra': True},
+    {'action': 'install', 'continuity': 'first_use', 'legacy_directory': '/tmp/old'},
+    {'action': 'install', 'continuity': 'selected_legacy_directory', 'legacy_directory': 'relative'},
+    {'action': 'install', 'continuity': 'selected_legacy_directory', 'legacy_directory': '/tmp/old\nprivate'},
+    {'action': 'install', 'continuity': 'selected_legacy_directory', 'legacy_directory': True},
+    {'action': 'install', 'continuity': 'selected_legacy_directory', 'legacy_directory': '/'+('x'*2048)},
+    {'action': 'update', 'distribution': '/tmp/private'},
+])
+def test_first_install_choice_refuses_every_nonfinite_or_ambiguous_intent(value):
+    from executor.autonomy.macos_host import native_first_install_choice
+    assert native_first_install_choice(value) is None
+
+
+@pytest.mark.parametrize('value', [
+    {'action': 'cancel'}, {'action': 'install', 'continuity': 'first_use'},
+    {'action': 'install', 'continuity': 'selected_legacy_directory', 'legacy_directory': '/tmp/旧版项目'},
+])
+def test_first_install_choice_retains_exact_finite_intent_without_path_reinterpretation(value):
+    from executor.autonomy.macos_host import native_first_install_choice
+    assert native_first_install_choice(value) == value
+
+
+def _first_entry_fixture(tmp_path, monkeypatch, *, managed=False):
+    from pathlib import Path
+    from executor.autonomy import consumer, first_install, macos_host, release
+    home = tmp_path / 'home'; home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setattr(first_install.sys, 'platform', 'darwin')
+    target = home / 'Applications' / (consumer.APP_NAME+'.app')
+    candidate = target if managed else home / 'Downloads' / (consumer.APP_NAME+'.app')
+    source = candidate / 'Contents/Resources/release'; source.mkdir(parents=True)
+    state = home / 'Library/Application Support/AI投递经理/autonomy'
+    monkeypatch.setattr(first_install, '__file__', str(source / 'executor/autonomy/first_install.py'))
+    monkeypatch.setattr('executor.autonomy.runtime_paths.default_runtime', lambda _: state)
+    monkeypatch.setattr(consumer, '_bundle_transaction_identity', lambda app: ('source' if app==candidate else 'active',))
+    monkeypatch.setattr(consumer, '_owned_bundle_text', lambda _: consumer._native_packaged_launcher())
+    monkeypatch.setattr(release, 'source_manifest', lambda _: {'source_sha256':'a'*64})
+    monkeypatch.setattr(consumer, '_approved_first_install_matches', lambda *a: True)
+    return first_install, consumer, macos_host, candidate, target, state
+
+
+@pytest.mark.parametrize('choice', [None, {'action':'cancel'}, {'action':'install','extra':'PRIVATE'}])
+def test_first_install_cancel_or_bad_intent_never_reaches_state_or_service(tmp_path, monkeypatch, choice):
+    module, consumer, host, candidate, target, state = _first_entry_fixture(tmp_path, monkeypatch)
+    prompts=[]
+    monkeypatch.setattr(host, 'present_native_first_install', lambda *a, **k: prompts.append(k) or choice)
+    monkeypatch.setattr(consumer, 'install_macos_bundle', lambda *a, **k: pytest.fail('cancel started install'))
+    monkeypatch.setattr('executor.autonomy.cli.launch_native_consumer', lambda *a, **k: pytest.fail('cancel launched service'))
+    result = module.launch_native_entry(state, 9344)
+    assert result.get('installed') is False
+    assert result['ok'] is (choice == {'action':'cancel'})
+    if choice == {'action':'cancel'}:
+        assert result['cancelled'] is True and prompts == [{}]
+    assert not state.exists() and not target.exists()
+    assert 'PRIVATE' not in json.dumps(result)
+
+
+def test_first_install_changed_source_after_choice_cannot_enter_transaction(tmp_path, monkeypatch):
+    module, consumer, host, candidate, target, state = _first_entry_fixture(tmp_path, monkeypatch)
+    changed=[False]
+    monkeypatch.setattr(consumer, '_bundle_transaction_identity', lambda _: ('changed' if changed[0] else 'source',))
+    def prompt(*args, **kwargs):
+        changed[0]=True
+        return {'action':'install','continuity':'first_use'}
+    monkeypatch.setattr(host, 'present_native_first_install', prompt)
+    monkeypatch.setattr(consumer, 'install_macos_bundle', lambda *a, **k: pytest.fail('changed source installed'))
+    result=module.launch_native_entry(state,9344)
+    assert result['reason']=='first_install_source_changed'
+    assert not state.exists() and not target.exists()
+
+
+@pytest.mark.parametrize('selected', [False, True])
+def test_first_install_routing_adds_continuity_and_reopens_only_fixed_activated_source(tmp_path, monkeypatch, selected):
+    from pathlib import Path
+    module, consumer, host, candidate, target, state = _first_entry_fixture(tmp_path, monkeypatch)
+    old=tmp_path/'explicit-old'; old.mkdir()
+    choice=({'action':'install','continuity':'selected_legacy_directory','legacy_directory':str(old)}
+            if selected else {'action':'install','continuity':'first_use'})
+    monkeypatch.setattr(host,'present_native_first_install',lambda *a,**k:choice if not k else {'action':'cancel'})
+    calls=[];active=[False]
+    def install(app,**options):
+        assert app==candidate and options['destination']==target.parent
+        assert options['_first_install'] is True
+        assert options['_legacy_additional_origins']==(Path.home()/'Job-Application-Executor',)+((old,) if selected else ())
+        assert 'task_state_root' not in options
+        calls.append('install');active[0]=True
+        return {'ok':True,'installed':True,'replaced':False}
+    def launch(args,**options):
+        assert active[0] and args[0]==str(target/'Contents/Resources/runtime/bin/python')
+        assert 'native-entry' in args and str(target/'Contents/Resources/release') in args
+        assert args[-2]=='--first-install-continuity-fd'
+        fd=int(args[-1])
+        assert options['pass_fds']==(fd,)
+        record=json.loads(__import__('os').read(fd,8193))
+        assert set(record)=={'format','bundle_tag'}
+        assert str(candidate/'Contents/Resources/release') not in args
+        assert options['close_fds'] is True and options['start_new_session'] is True
+        calls.append('reopen')
+    monkeypatch.setattr(consumer,'install_macos_bundle',install)
+    monkeypatch.setattr(module.subprocess,'Popen',launch)
+    monkeypatch.setattr('executor.autonomy.cli.launch_native_consumer',lambda *a,**k:pytest.fail('download source launched'))
+    result=module.launch_native_entry(state,9344)
+    if selected:
+        assert calls==[] and result['reason']=='legacy_state_migration_required'
+        assert result['installed'] is False
+    else:
+        assert calls==['install','reopen'] and result['reopen_requested'] is True
+        assert result['native_ready_verified'] is False
+    assert str(old) not in json.dumps(result) and str(candidate) not in json.dumps(result)
+
+
+@pytest.mark.parametrize('entry', ['directory','symlink'])
+def test_first_install_existing_target_refuses_before_choice_or_private_state(tmp_path, monkeypatch, entry):
+    module, consumer, host, candidate, target, state = _first_entry_fixture(tmp_path, monkeypatch)
+    target.parent.mkdir()
+    if entry=='directory':target.mkdir()
+    else:target.symlink_to(tmp_path/'unrelated-missing')
+    inode=target.lstat().st_ino
+    calls=[]
+    def prompt(*args,**kwargs):
+        calls.append(kwargs)
+        assert kwargs=={'result':'target-occupied'}
+        return {'action':'cancel'}
+    monkeypatch.setattr(host,'present_native_first_install',prompt)
+    monkeypatch.setattr(consumer,'install_macos_bundle',lambda *a,**k:pytest.fail('occupied target installed'))
+    result=module.launch_native_entry(state,9344)
+    assert result['reason']=='first_install_target_occupied' and len(calls)==1
+    assert target.lstat().st_ino==inode and not state.exists()
+
+
+def test_managed_first_entry_retains_known_old_authority_even_without_prompt(tmp_path,monkeypatch):
+    from pathlib import Path
+    module,consumer,host,candidate,target,state=_first_entry_fixture(tmp_path,monkeypatch,managed=True)
+    old=Path.home()/'Job-Application-Executor/runtime/autonomy';old.mkdir(parents=True)
+    canary=old/'task-answers.key';canary.write_bytes(b'SYNTHETIC_OLD_AUTHORITY')
+    before=canary.stat().st_ino,canary.read_bytes()
+    monkeypatch.setattr(host,'present_native_first_install',lambda *a,**k:{'action':'cancel'})
+    monkeypatch.setattr('executor.autonomy.cli.launch_native_consumer',lambda *a,**k:pytest.fail('stranded old authority launched'))
+    result=module.launch_native_entry(state,9344)
+    assert result['reason']=='legacy_state_migration_required'
+    assert (canary.stat().st_ino,canary.read_bytes())==before and not state.exists()
+
+
+def test_hosted_mac_first_install_prompt_is_actual_static_cocoa_and_cancel_only(compiled_host):
+    from executor.autonomy.macos_host import present_native_first_install
+    assert present_native_first_install(compiled_host, smoke=True)=={'action':'cancel'}
+
+
+@pytest.mark.parametrize('text', [
+    '{"ok":true,"first_install_choice":{"action":"cancel"}}\n',
+    '{"ok":true,"ok":false,"first_install_choice":{"action":"cancel"}}\n',
+    '{"ok":true,"first_install_choice":{"action":"install","continuity":"first_use","extra":"PRIVATE"}}\n',
+    '{"ok":true,"first_install_choice":{"action":"cancel"}}\n{"extra":"PRIVATE"}\n',
+    'PRIVATE_MALFORMED\n',
+])
+def test_first_install_prompt_consumes_one_closed_bounded_reply(tmp_path,monkeypatch,text):
+    from executor.autonomy import macos_host as module
+    root=_candidate(tmp_path)
+    real=subprocess.Popen
+    monkeypatch.setattr(module.sys,'platform','darwin')
+    def owned_child(*args,**kwargs):
+        assert args[0]==[str(root/'AIApplicationWindow'),'--first-install']
+        return real([sys.executable,'-I','-c','import os;os.write(1,'+repr(text.encode())+')'],**kwargs)
+    monkeypatch.setattr(module.subprocess,'Popen',owned_child)
+    result=module.present_native_first_install(root)
+    assert result==({'action':'cancel'} if text=='{"ok":true,"first_install_choice":{"action":"cancel"}}\n' else None)
+
+
+def test_first_install_prompt_partial_line_cannot_extend_read_deadline(tmp_path,monkeypatch):
+    from executor.autonomy import macos_host as module
+    root=_candidate(tmp_path);real=subprocess.Popen;children=[]
+    monkeypatch.setattr(module.sys,'platform','darwin')
+    def owned_child(*args,**kwargs):
+        child=real([sys.executable,'-I','-c','import os,time;os.write(1,b"{");time.sleep(60)'],**kwargs)
+        children.append(child);return child
+    monkeypatch.setattr(module.subprocess,'Popen',owned_child)
+    ticks=iter([0.0,0.0,21.0])
+    monkeypatch.setattr(module.time,'monotonic',lambda:next(ticks,21.0))
+    assert module.present_native_first_install(root,smoke=True) is None
+    assert len(children)==1 and children[0].poll() is not None
+
+
+@pytest.mark.parametrize('result,code', [
+    ({'ok':True,'cancelled':True,'installed':False},0),
+    ({'ok':False,'first_install_result_visible':True,'reason':'legacy_state_migration_required'},2),
+    ({'ok':False,'first_install_result_visible':False,'reason':'native_entry_unverified'},1),
+])
+def test_finder_first_entry_exit_distinguishes_cancel_and_already_visible_refusal(monkeypatch,capsys,result,code):
+    from executor.autonomy import cli,consumer,first_install
+    monkeypatch.setattr(first_install,'launch_native_entry',lambda *a,**k:result)
+    assert cli.main(['native-entry'])==code
+    assert json.loads(capsys.readouterr().out)==result
+    assert '$STATUS -ne 0 && $STATUS -ne 2' in consumer._native_packaged_launcher()
+    assert 'ChatGPT' not in consumer._native_packaged_launcher()
+    assert '$STATUS -ne 0 && $STATUS -ne 2' not in consumer._native_packaged_launcher_v1()
+
+
+def test_first_install_known_authority_arrival_after_return_blocks_reopen(tmp_path,monkeypatch):
+    module,consumer,host,candidate,target,state=_first_entry_fixture(tmp_path,monkeypatch)
+    old=target.parent.parent/'Job-Application-Executor';old.mkdir()
+    choice={'action':'install','continuity':'first_use'}
+    monkeypatch.setattr(host,'present_native_first_install',lambda *a,**k:choice if not k else {'action':'cancel'})
+    def install(*args,**kwargs):
+        private=old/'runtime/autonomy';private.mkdir(parents=True)
+        (private/'task-answers.key').write_bytes(b'SYNTHETIC_LATE_SELECTED_KEY')
+        return {'ok':True,'installed':True,'replaced':False}
+    monkeypatch.setattr(consumer,'install_macos_bundle',install)
+    monkeypatch.setattr(module.subprocess,'Popen',lambda *a,**k:pytest.fail('late old authority reopened'))
+    result=module.launch_native_entry(state,9344)
+    assert result['reason']=='first_install_continuity_unconfirmed'
+    assert result['installed'] is None and result['activation_unconfirmed'] is True
+    assert not state.exists()
+    assert (old/'runtime/autonomy/task-answers.key').read_bytes()==b'SYNTHETIC_LATE_SELECTED_KEY'
+
+
+@pytest.mark.parametrize('fault',['late_default','late_conventional','changed_bundle','missing_record'])
+def test_installed_first_reopen_consumes_bound_private_continuity_before_service(tmp_path,monkeypatch,fault):
+    import os
+    module,consumer,host,candidate,target,state=_first_entry_fixture(tmp_path,monkeypatch,managed=True)
+    old=target.parent.parent/'Job-Application-Executor';old.mkdir()
+    module._create_first_fence(target.parent,('source',))
+    fence_before=module._fence_path(target.parent).read_bytes()
+    record={'format':'jae-first-install-reopen-v1','bundle_tag':module._bundle_tag(('source',))}
+    if fault in {'late_default','late_conventional'}:
+        private=state if fault=='late_default' else old/'runtime/autonomy';private.mkdir(parents=True)
+        (private/'task-answers.key').write_bytes(b'SYNTHETIC_PIPE_SELECTED_KEY')
+    elif fault=='changed_bundle':record['bundle_tag']='0'*64
+    read_fd,write_fd=os.pipe()
+    os.write(write_fd,json.dumps(record if fault!='missing_record' else {}).encode());os.close(write_fd)
+    monkeypatch.setattr(host,'present_native_first_install',lambda *a,**k:{'action':'cancel'})
+    monkeypatch.setattr('executor.autonomy.cli.launch_native_consumer',lambda *a,**k:pytest.fail('unconfirmed first reopen started service'))
+    result=module.launch_native_entry(state,9344,continuity_fd=read_fd)
+    assert result['reason']=='first_install_continuity_unconfirmed'
+    assert not any((state/name).exists() for name in ('tasks.sqlite3','auth.token','service.json'))
+    assert str(old) not in json.dumps(result)
+    assert module._fence_path(target.parent).read_bytes()==fence_before
+    again=module.launch_native_entry(state,9344)
+    assert again['reason']=='first_install_continuity_unconfirmed'
+    assert module._fence_path(target.parent).read_bytes()==fence_before
+    with pytest.raises(OSError):os.fstat(read_fd)
+
+
+def test_first_use_pending_fence_commits_once_after_guards_and_survives_normal_reopen(tmp_path,monkeypatch):
+    import os
+    from executor.autonomy import state_compatibility
+    module,consumer,host,candidate,target,state=_first_entry_fixture(tmp_path,monkeypatch,managed=True)
+    module._create_first_fence(target.parent,('source',))
+    path=module._fence_path(target.parent);inode=path.stat().st_ino
+    read_fd,write_fd=os.pipe()
+    os.write(write_fd,json.dumps({'format':'jae-first-install-reopen-v1',
+        'bundle_tag':module._bundle_tag(('source',))}).encode());os.close(write_fd)
+    calls=[]
+    def launch(root,port,**options):
+        assert module._read_first_fence(target.parent)['status']=='complete'
+        with state_compatibility.task_state_guard(state):pass
+        lock=consumer._acquire_app_transaction_lock(target.parent);os.close(lock)
+        calls.append(True);return {'ok':True,'opened':True}
+    monkeypatch.setattr('executor.autonomy.cli.launch_native_consumer',launch)
+    result=module.launch_native_entry(state,9344,continuity_fd=read_fd)
+    assert result['opened'] is True and calls==[True]
+    assert path.stat().st_ino==inode and path.stat().st_mode & 0o777==0o600
+    assert module.launch_native_entry(state,9344)['opened'] is True and calls==[True,True]
+
+
+@pytest.mark.parametrize('fault',['symlink','hardlink','public','fifo','oversized','malformed'])
+def test_first_install_fence_refuses_alias_and_nonprivate_or_unbounded_records(tmp_path,fault):
+    import os
+    from executor.autonomy import first_install as module
+    apps=tmp_path/'Applications';apps.mkdir()
+    path=module._fence_path(apps)
+    unrelated=tmp_path/'unrelated';unrelated.write_bytes(b'SYNTHETIC_UNRELATED');unrelated.chmod(0o600)
+    before=unrelated.read_bytes(),unrelated.stat().st_ino
+    if fault=='symlink':path.symlink_to(unrelated)
+    elif fault=='hardlink':os.link(unrelated,path)
+    elif fault=='fifo':os.mkfifo(path,0o600)
+    else:
+        path.write_bytes(b'x'*1025 if fault=='oversized' else b'{}')
+        path.chmod(0o644 if fault=='public' else 0o600)
+    with pytest.raises((OSError,ValueError)):module._read_first_fence(apps)
+    assert (unrelated.read_bytes(),unrelated.stat().st_ino)==before

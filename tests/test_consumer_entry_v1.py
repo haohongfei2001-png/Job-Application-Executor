@@ -6581,3 +6581,216 @@ def test_delivered_bundle_binds_invoking_module_origin_not_candidate_payload(tmp
     assert repo == candidate / "Contents/Resources/release"
     assert options["_legacy_origin"] == origin and options["_legacy_origin"] != repo
     assert options["task_state_root"] == state and options["destination"] == apps
+
+
+@pytest.mark.parametrize('kind',['directory','file','symlink'])
+def test_strict_first_install_refuses_occupied_target_under_lock_before_task_state(tmp_path,monkeypatch,kind):
+    from executor.autonomy import state_compatibility
+    apps=tmp_path/'Applications';apps.mkdir()
+    target=apps/(consumer.APP_NAME+'.app')
+    if kind=='directory':target.mkdir()
+    elif kind=='file':target.write_bytes(b'SYNTHETIC_OTHER_APP')
+    else:target.symlink_to(tmp_path/'foreign-missing')
+    before=target.lstat()
+    state=tmp_path/'state'
+    monkeypatch.setattr(state_compatibility,'task_state_guard',lambda *a:pytest.fail('occupied target touched state'))
+    monkeypatch.setattr(consumer,'_install_macos_app_unlocked',lambda *a,**k:pytest.fail('occupied target entered install'))
+    result=install_macos_app(tmp_path/'missing-source',destination=apps,platform='darwin',
+                             task_state_root=state,_first_install=True)
+    assert result=={'ok':False,'reason':'first_install_target_occupied'}
+    after=target.lstat()
+    assert (before.st_ino,before.st_mode,before.st_size)==(after.st_ino,after.st_mode,after.st_size)
+    assert not state.exists()
+
+
+@pytest.mark.parametrize('name',['tasks.sqlite3-wal','task-answers.key','service.json','profile.json'])
+def test_strict_first_install_refuses_orphan_default_state_without_adoption(tmp_path,monkeypatch,name):
+    from executor.autonomy import state_compatibility
+    state=tmp_path/'state';state.mkdir()
+    item=state/name;item.write_bytes(b'SYNTHETIC_ORPHAN_PRIVATE');item.chmod(0o600)
+    before=item.read_bytes(),item.stat().st_ino,item.stat().st_mode
+    monkeypatch.setattr(state_compatibility,'task_state_guard',lambda *a:pytest.fail('orphan state opened'))
+    monkeypatch.setattr(consumer,'_install_macos_app_unlocked',lambda *a,**k:pytest.fail('orphan state installed'))
+    apps=tmp_path/'Applications'
+    result=install_macos_app(tmp_path/'missing-source',destination=apps,platform='darwin',
+                             task_state_root=state,_first_install=True)
+    assert result=={'ok':False,'reason':'first_install_state_continuity_required'}
+    assert (item.read_bytes(),item.stat().st_ino,item.stat().st_mode)==before
+    assert sorted(p.name for p in state.iterdir())==[name]
+    assert not (apps/(consumer.APP_NAME+'.app')).exists()
+
+
+@pytest.mark.parametrize('origin_index',[0,1])
+def test_strict_first_install_checks_known_and_selected_origins_additively(tmp_path,monkeypatch,origin_index):
+    candidate=tmp_path/'release'
+    python=candidate/'.venv/bin/python';python.parent.mkdir(parents=True);python.symlink_to(sys.executable)
+    origins=(tmp_path/'known',tmp_path/'selected')
+    old=origins[origin_index]/'runtime/autonomy';old.mkdir(parents=True)
+    item=old/'task-answers.key';item.write_bytes(b'SYNTHETIC_PRIVATE_OLD_KEY');item.chmod(0o600)
+    before=item.read_bytes(),item.stat().st_ino,item.stat().st_mode
+    monkeypatch.setattr(consumer,'copy_source_candidate',lambda *a:pytest.fail('old state reached staging'))
+    apps,state=tmp_path/'Applications',tmp_path/'state'
+    result=install_macos_app(candidate,destination=apps,platform='darwin',task_state_root=state,
+                             _first_install=True,_legacy_additional_origins=origins)
+    assert result['reason']=='legacy_state_migration_required'
+    assert (item.read_bytes(),item.stat().st_ino,item.stat().st_mode)==before
+    assert not (apps/(consumer.APP_NAME+'.app')).exists()
+    assert not (state/'tasks.sqlite3').exists()
+
+
+@pytest.mark.parametrize('arrival',['selected','default'])
+def test_strict_first_install_rechecks_late_selected_and_orphan_authority(tmp_path,monkeypatch,arrival):
+    candidate=tmp_path/'release'
+    python=candidate/'.venv/bin/python';python.parent.mkdir(parents=True);python.symlink_to(sys.executable)
+    _minimal_source(candidate)
+    origin=tmp_path/'selected';state=tmp_path/'state';apps=tmp_path/'Applications'
+    old=origin/'runtime/autonomy' if arrival=='selected' else state
+    calls=[]
+    def health(*args):
+        old.mkdir(parents=True,exist_ok=True)
+        (old/'task-answers.key').write_bytes(b'SYNTHETIC_LATE_AUTHORITY')
+        calls.append('health');return True
+    monkeypatch.setattr(consumer,'_candidate_starts',health)
+    monkeypatch.setattr(consumer,'_prepare_task_state_release',lambda *a:True)
+    monkeypatch.setattr(consumer,'_activate_first_install_exclusive',lambda *a:pytest.fail('late state activated'))
+    result=install_macos_app(candidate,destination=apps,platform='darwin',task_state_root=state,
+                             _first_install=True,_legacy_additional_origins=(origin,))
+    assert calls==['health']
+    assert result['reason']==('legacy_state_migration_required' if arrival=='selected' else 'first_install_state_continuity_required')
+    assert (old/'task-answers.key').read_bytes()==b'SYNTHETIC_LATE_AUTHORITY'
+    assert not (apps/(consumer.APP_NAME+'.app')).exists()
+    assert (apps/('.'+consumer.APP_NAME+'.app.installing')).exists()
+
+
+@pytest.mark.skipif(sys.platform!='darwin',reason='Actual Darwin exclusive activation primitive requires hosted Mac')
+@pytest.mark.parametrize('occupied',['absent','directory','symlink','file'])
+def test_hosted_mac_exclusive_first_install_activation_never_overwrites(tmp_path,occupied):
+    apps=tmp_path/'Applications';apps.mkdir()
+    staging=apps/('.'+consumer.APP_NAME+'.app.installing');staging.mkdir()
+    (staging/'synthetic').write_bytes(b'OWNED_CANDIDATE')
+    target=apps/(consumer.APP_NAME+'.app')
+    if occupied=='directory':target.mkdir()
+    elif occupied=='symlink':target.symlink_to(tmp_path/'unrelated-missing')
+    elif occupied=='file':target.write_bytes(b'FOREIGN_TARGET')
+    before=target.lstat() if occupied!='absent' else None
+    if before is None:
+        consumer._activate_first_install_exclusive(staging,target)
+        assert (target/'synthetic').read_bytes()==b'OWNED_CANDIDATE' and not staging.exists()
+    else:
+        with pytest.raises(OSError):consumer._activate_first_install_exclusive(staging,target)
+        after=target.lstat()
+        assert (after.st_ino,after.st_mode,after.st_size)==(before.st_ino,before.st_mode,before.st_size)
+        assert (staging/'synthetic').read_bytes()==b'OWNED_CANDIDATE'
+
+
+def test_strict_first_install_target_arrival_during_state_guard_never_replaces(tmp_path,monkeypatch):
+    from contextlib import contextmanager
+    from executor.autonomy import state_compatibility
+    candidate=tmp_path/'release'
+    python=candidate/'.venv/bin/python';python.parent.mkdir(parents=True);python.symlink_to(sys.executable)
+    apps,state=tmp_path/'Applications',tmp_path/'state'
+    target=apps/(consumer.APP_NAME+'.app')
+    original=state_compatibility.task_state_guard
+    entered=[]
+    @contextmanager
+    def arrival(root):
+        with original(root):
+            target.mkdir();(target/'foreign').write_bytes(b'SYNTHETIC_EXISTING_APP')
+            entered.append(target.stat().st_ino)
+            yield
+    monkeypatch.setattr(state_compatibility,'task_state_guard',arrival)
+    monkeypatch.setattr(consumer,'_trusted_bundle',lambda *a:pytest.fail('arriving app must refuse before admission'))
+    monkeypatch.setattr(consumer,'_activate_first_install_exclusive',lambda *a:pytest.fail('arriving app moved'))
+    result=install_macos_app(candidate,destination=apps,platform='darwin',task_state_root=state,_first_install=True)
+    assert result=={'ok':False,'reason':'first_install_target_occupied'}
+    assert entered==[target.stat().st_ino]
+    assert (target/'foreign').read_bytes()==b'SYNTHETIC_EXISTING_APP'
+    assert not (apps/('.'+consumer.APP_NAME+'.app.previous')).exists()
+
+
+@pytest.mark.parametrize('arrival',['selected','default'])
+def test_strict_first_install_final_path_health_rechecks_continuity_without_recovery_moves(tmp_path,monkeypatch,arrival):
+    candidate=tmp_path/'release'
+    python=candidate/'.venv/bin/python';python.parent.mkdir(parents=True);python.symlink_to(sys.executable)
+    _minimal_source(candidate)
+    origin=tmp_path/'selected';state=tmp_path/'state';apps=tmp_path/'Applications'
+    old=origin/'runtime/autonomy' if arrival=='selected' else state
+    calls=[]
+    def health(*args):
+        calls.append(True)
+        if len(calls)==2:
+            old.mkdir(parents=True,exist_ok=True)
+            (old/'task-answers.key').write_bytes(b'SYNTHETIC_POST_ACTIVATION_OLD_AUTHORITY')
+        return True
+    monkeypatch.setattr(consumer,'_candidate_starts',health)
+    monkeypatch.setattr(consumer,'_prepare_task_state_release',lambda *a:True)
+    # Ordering oracle only. Actual no-replace behavior has separate Darwin cases.
+    monkeypatch.setattr(consumer,'_activate_first_install_exclusive',lambda a,b:os.rename(a,b))
+    result=install_macos_app(candidate,destination=apps,platform='darwin',task_state_root=state,
+                             _first_install=True,_legacy_additional_origins=(origin,))
+    assert calls==[True,True]
+    assert result=={'ok':False,'reason':'first_install_continuity_unconfirmed','installed':None,'activation_unconfirmed':True}
+    assert (old/'task-answers.key').read_bytes()==b'SYNTHETIC_POST_ACTIVATION_OLD_AUTHORITY'
+    assert (apps/(consumer.APP_NAME+'.app')).is_dir()
+    from executor.autonomy.first_install import _read_first_fence
+    assert _read_first_fence(apps)['status']=='pending'
+    assert not (apps/('.'+consumer.APP_NAME+'.app.failed')).exists()
+    assert not (apps/('.'+consumer.APP_NAME+'.app.previous')).exists()
+
+
+@pytest.mark.parametrize('foreign_slot',['failed','active'])
+def test_strict_first_install_failed_final_health_preserves_late_foreign_slots(tmp_path,monkeypatch,foreign_slot):
+    candidate=tmp_path/'release'
+    python=candidate/'.venv/bin/python';python.parent.mkdir(parents=True);python.symlink_to(sys.executable)
+    _minimal_source(candidate)
+    apps,state=tmp_path/'Applications',tmp_path/'state'
+    active=apps/(consumer.APP_NAME+'.app');failed=apps/('.'+consumer.APP_NAME+'.app.failed')
+    calls=[];foreign=[]
+    def health(*args):
+        calls.append(True)
+        if len(calls)==1:return True
+        path=failed if foreign_slot=='failed' else active
+        if foreign_slot=='active':os.rename(active,apps/'held-original-candidate.app')
+        path.mkdir();(path/'foreign').write_bytes(b'SYNTHETIC_FOREIGN_TARGET')
+        foreign.append((path,path.stat().st_ino))
+        return False
+    monkeypatch.setattr(consumer,'_candidate_starts',health)
+    monkeypatch.setattr(consumer,'_prepare_task_state_release',lambda *a:True)
+    monkeypatch.setattr(consumer,'_activate_first_install_exclusive',lambda a,b:os.rename(a,b))
+    result=install_macos_app(candidate,destination=apps,platform='darwin',task_state_root=state,_first_install=True)
+    assert calls==[True,True]
+    assert result=={'ok':False,'reason':'first_install_activation_unconfirmed','installed':None,'activation_unconfirmed':True}
+    path,inode=foreign[0]
+    assert path.stat().st_ino==inode and (path/'foreign').read_bytes()==b'SYNTHETIC_FOREIGN_TARGET'
+    assert active.exists()
+    from executor.autonomy.first_install import _read_first_fence
+    assert _read_first_fence(apps)['status']=='pending'
+    assert not (apps/('.'+consumer.APP_NAME+'.app.previous')).exists()
+
+
+@pytest.mark.parametrize('phase',['before_create','after_create'])
+def test_strict_first_install_fence_failure_never_activates_or_erases_candidate(tmp_path,monkeypatch,phase):
+    from executor.autonomy import first_install
+    candidate=tmp_path/'release'
+    python=candidate/'.venv/bin/python';python.parent.mkdir(parents=True);python.symlink_to(sys.executable)
+    _minimal_source(candidate)
+    apps,state=tmp_path/'Applications',tmp_path/'state'
+    calls=[]
+    monkeypatch.setattr(consumer,'_candidate_starts',lambda *a:calls.append(True) or True)
+    monkeypatch.setattr(consumer,'_prepare_task_state_release',lambda *a:True)
+    monkeypatch.setattr(consumer,'_activate_first_install_exclusive',lambda *a:pytest.fail('unfenced candidate activated'))
+    original=first_install._create_first_fence
+    def fail(apps,identity):
+        if phase=='after_create':original(apps,identity)
+        raise OSError('synthetic durability failure')
+    monkeypatch.setattr(first_install,'_create_first_fence',fail)
+    result=install_macos_app(candidate,destination=apps,platform='darwin',task_state_root=state,_first_install=True)
+    assert result=={'ok':False,'reason':'first_install_continuity_unconfirmed'}
+    assert calls==[True] and not (apps/(consumer.APP_NAME+'.app')).exists()
+    assert (apps/('.'+consumer.APP_NAME+'.app.installing')).is_dir()
+    if phase=='after_create':
+        before=first_install._fence_path(apps).read_bytes()
+        assert first_install._read_first_fence(apps)['status']=='pending'
+        again=install_macos_app(candidate,destination=apps,platform='darwin',task_state_root=state,_first_install=True)
+        assert again['reason']=='first_install_continuity_unconfirmed' and calls==[True]
+        assert first_install._fence_path(apps).read_bytes()==before

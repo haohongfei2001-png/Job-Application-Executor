@@ -423,8 +423,8 @@ def stage_macos_distribution(distribution: str | Path):
                    for key in ("runtime_sha256", "requirements_sha256")):
                 raise ValueError("distribution_payload_identity")
             phase = "presentation"
-            from .consumer import _native_packaged_launcher
-            native = _owned_bundle_text(app / "Contents/MacOS/AIApplicationManager") == _native_packaged_launcher()
+            from .consumer import _is_native_packaged_launcher
+            native = _is_native_packaged_launcher(_owned_bundle_text(app / "Contents/MacOS/AIApplicationManager"))
             if native != (receipt.get("presentation") == "native"):
                 raise ValueError("distribution_presentation_mismatch")
             expanded.unlink()
