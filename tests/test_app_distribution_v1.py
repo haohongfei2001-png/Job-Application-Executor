@@ -1112,3 +1112,140 @@ def test_distribution_intake_refuses_external_hardlinked_input_before_staging(
             pytest.fail("external hardlink yielded an installed candidate")
     assert supplied.stat().st_ino == private.stat().st_ino
     assert private.read_bytes() == before
+
+
+# Reuse the complete existing native/standalone app fixture. This regression
+# does not replace the distribution, interpreter, installer or candidate health.
+from test_macos_host_v1 import native_installed_app
+
+
+def test_hosted_mac_fresh_delivered_install_retains_old_checkout_authority(
+    native_installed_app, tmp_path
+):
+    """No prior app may make a populated invoking checkout disappear from admission."""
+    from contextlib import closing
+    import sqlite3
+    import socket
+    import stat
+    from executor.autonomy.consumer import _native_bundle_matches
+    from executor.autonomy.release import MANIFEST_NAME
+    from test_task_state_compatibility_v1 import legacy_state, encrypted_answers
+
+    fixture = native_installed_app
+    candidate = fixture["app"]
+    candidate_source = candidate / "Contents/Resources/release"
+    assert _trusted_bundle(candidate)
+    assert _native_bundle_matches(candidate_source, candidate / "Contents/Resources/native-host")
+    delivery = tmp_path / "complete-first-delivery"
+    delivery.mkdir()
+    archive = delivery / ARCHIVE_NAME
+    _archive_app(candidate, archive)
+    with archive.open("rb") as stream:
+        archive_digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    runtime_identity = json.loads((candidate / "Contents/Resources/runtime/release-runtime-manifest.json").read_text())
+    receipt = {
+        "format": "jae-macos-distribution-v1", "archive": ARCHIVE_NAME,
+        "archive_sha256": archive_digest, "app_name": APP_NAME + ".app",
+        "source_sha256": source_manifest(candidate_source)["source_sha256"],
+        "runtime_sha256": runtime_identity["runtime_sha256"],
+        "requirements_sha256": runtime_identity["requirements_sha256"],
+        "signing": "unsigned", "certification": "NOT_CERTIFIED",
+        "final_click_actor": "user", "task_state": "excluded",
+        "build_host_metadata": "excluded", "presentation": "native",
+    }
+    (delivery / RECEIPT_NAME).write_text(json.dumps(receipt))
+    archive_before = (archive.stat().st_ino, archive.stat().st_size, archive.stat().st_mtime_ns)
+
+    # A real ordinary checkout invokes the documented first-install CLI.
+    # Remove only this test-created snapshot marker to model an actual checkout;
+    # otherwise is_packaged_source would deliberately select the new app root.
+    home = tmp_path / "first-consumer-home"
+    home.mkdir(mode=0o700)
+    old_checkout = home / "Job-Application-Executor"
+    copy_source_candidate(Path(__file__).resolve().parents[1], old_checkout)
+    (old_checkout / MANIFEST_NAME).unlink()
+    old_state = old_checkout / "runtime/autonomy"
+    old_state.parent.mkdir()
+    apps = home / "Applications"
+    app = apps / (APP_NAME + ".app")
+    target = home / "Library/Application Support/AI投递经理/autonomy"
+    assert not apps.exists() and not target.exists()
+
+    def private_inventory():
+        return {p.relative_to(old_state).as_posix(): (
+            p.read_bytes(), stat.S_IMODE(p.stat().st_mode), p.stat().st_ino)
+            for p in old_state.rglob("*") if p.is_file()}
+
+    with closing(legacy_state(old_state)) as db:
+        key = encrypted_answers(old_state, db)
+        profile = old_state / "profile.json"
+        profile.write_text(json.dumps({"complete": [f"{i}: SYNTHETIC_OLD_PROFILE" for i in range(1000)]}))
+        profile.chmod(0o600)
+        spec = TaskSpec(company="Synthetic legacy owner", role="Synthetic role",
+                        target_url="https://example.invalid/jobs/old-authority",
+                        profile_ref=str(profile), live_authorized=False)
+        db.execute("UPDATE tasks SET spec=? WHERE task_id='synthetic-task'", (spec.model_dump_json(),))
+        db.commit()
+        assert (old_state / "tasks.sqlite3-wal").stat().st_size > 0
+        old_rows = db.execute("SELECT * FROM tasks").fetchall()
+        old_answers = db.execute("SELECT * FROM task_answer_events").fetchall()
+        before = private_inventory()
+        def assert_private_preserved():
+            identical = private_inventory() == before
+            assert identical, "complete synthetic old private bytes/modes/inodes changed"
+        env = {"HOME": str(home), "PATH": os.defpath, "LANG": "en_US.UTF-8",
+               "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated", "BROWSER": "/usr/bin/false"}
+        # No --runtime or destination override: exercise ordinary authority choice.
+        installed = subprocess.run([sys.executable, "-I", "-B", "-c", CLI_ENTRY_SCRIPT,
+            str(old_checkout), "install-distribution", "--distribution", str(delivery)],
+            cwd=old_checkout, env=env, capture_output=True, text=True, timeout=90)
+        result = json.loads(installed.stdout)
+        output = installed.stdout + installed.stderr
+        assert key.decode() not in output and "SYNTHETIC_OLD_PROFILE" not in output
+        assert_private_preserved()
+
+        # If the current code unexpectedly activates, observe the genuine new
+        # default UI/journal, then gracefully retire only that synthetic service.
+        # Preserve a value-free diagnostic; never turn this path into an xfail.
+        native_opened = False
+        new_task_count = None
+        if result.get("ok") is True:
+            assert _trusted_bundle(app)
+            active_source = app / "Contents/Resources/release"
+            owned_python = app / "Contents/Resources/runtime/bin/python"
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            command = [str(owned_python), "-I", "-B", "-c", CLI_ENTRY_SCRIPT,
+                       str(active_source), "--port", str(port)]
+            try:
+                opened = subprocess.run(command + ["native-launch", "--native-smoke"],
+                    cwd=home, env=env, capture_output=True, text=True, timeout=40)
+                native_result = json.loads(opened.stdout)
+                native_opened = opened.returncode == 0 and native_result.get("opened") is True
+                assert key.decode() not in opened.stdout + opened.stderr
+                assert native_opened, "synthetic first-launch observation did not complete"
+                with sqlite3.connect((target / "tasks.sqlite3").as_uri() + "?mode=ro", uri=True) as fresh:
+                    new_task_count = fresh.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+            finally:
+                stopped = subprocess.run(command + ["stop"], cwd=home, env=env,
+                    capture_output=True, text=True, timeout=20)
+                assert stopped.returncode == 0, "synthetic service cleanup not confirmed"
+            assert not (target / "service.json").exists()
+
+        # Check complete bytes before any reader changes SQLite WAL reader marks.
+        assert_private_preserved()
+        rows_preserved = db.execute("SELECT * FROM tasks").fetchall() == old_rows
+        answers_preserved = db.execute("SELECT * FROM task_answer_events").fetchall() == old_answers
+        key_preserved = (old_state / "task-answers.key").read_bytes() == key
+        assert rows_preserved and answers_preserved and key_preserved, "old logical/key authority changed"
+        assert (archive.stat().st_ino, archive.stat().st_size, archive.stat().st_mtime_ns) == archive_before
+        assert json.loads((delivery / RECEIPT_NAME).read_text()) == receipt
+        summary = {"install_ok": result.get("ok"), "reason": result.get("reason"),
+                   "app_activated": app.exists(), "native_opened": native_opened,
+                   "old_task_count": len(old_rows), "new_default_task_count": new_task_count,
+                   "old_private_state_preserved": True}
+        assert result.get("ok") is False and result.get("reason") == "legacy_state_migration_required", json.dumps(summary)
+        assert installed.returncode == 1 and not app.exists()
+        assert not any((target / name).exists() for name in
+                       ("tasks.sqlite3", "task-answers.key", "auth.token", "service.json"))
