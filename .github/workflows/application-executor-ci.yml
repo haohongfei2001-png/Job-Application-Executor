@@ -339,6 +339,20 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Build single unsigned consumer installer image
+        if: (github.event_name == 'push' || github.event.pull_request.draft == false) && matrix.suite == 'native_integration'
+        run: python scripts/build_macos_installer.py --distribution "$RUNNER_TEMP/jae-unsigned-distribution" --output "$RUNNER_TEMP/jae-installer-image"
+      - name: Retain single installer engineering artifact
+        if: (github.event_name == 'push' || github.event.pull_request.draft == false) && matrix.suite == 'native_integration'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jae-macos-installer-UNSIGNED-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/jae-installer-image/AIApplicationManager-AppleSilicon.dmg
+            ${{ runner.temp }}/jae-installer-image/installer-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
   test:
     if: (github.event.action != 'labeled' && (github.event_name == 'push' || github.event.pull_request.draft == false)) || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.pull_request.head.repo.full_name == github.repository && github.event.label.name == format('eng-{0}', github.event.pull_request.head.sha))
     runs-on: ubuntu-latest

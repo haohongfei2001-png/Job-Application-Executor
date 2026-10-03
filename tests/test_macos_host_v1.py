@@ -2562,3 +2562,336 @@ def test_pending_recovery_missing_installer_authority_is_never_recreated(tmp_pat
     with pytest.raises((OSError,ValueError)):_recovery_record(recovery,app,state)
     assert (fence.stat().st_ino,fence.read_bytes())==before
     assert not (state if missing=='root' else state/missing).exists()
+
+
+# Consumer installer: complete declared bytes, synthetic private authority.
+from pathlib import Path
+from executor.autonomy import macos_host
+
+
+def _installer_bundle(path, *, marker='one'):
+    import plistlib
+    from executor.autonomy import consumer
+    from executor.autonomy.release import copy_source_candidate, runtime_manifest, RUNTIME_MANIFEST_NAME
+    path.mkdir(parents=True)
+    release = path/'Contents/Resources/release'
+    copy_source_candidate(Path(__file__).resolve().parents[1], release)
+    runtime = path/'Contents/Resources/runtime'
+    (runtime/'bin').mkdir(parents=True)
+    (runtime/'bin/python').write_bytes(b'SYNTHETIC_RUNTIME_'+marker.encode())
+    (runtime/'bin/python').chmod(0o755)
+    (runtime/RUNTIME_MANIFEST_NAME).write_text(json.dumps(runtime_manifest(runtime, release)))
+    native = path/'Contents/Resources/native-host';native.mkdir()
+    image = native/'AIApplicationWindow';image.write_bytes(b'SYNTHETIC_NATIVE_'+marker.encode());image.chmod(0o755)
+    (native/HOST_RECEIPT).write_text(json.dumps({'format':'jae-native-host-v1',
+        'source_sha256':hashlib.sha256(HOST_SOURCE.encode()).hexdigest(),
+        'executable_sha256':hashlib.sha256(image.read_bytes()).hexdigest()}))
+    launcher=path/'Contents/MacOS/AIApplicationManager';launcher.parent.mkdir()
+    launcher.write_text(consumer._native_packaged_launcher());launcher.chmod(0o755)
+    (path/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':consumer.BUNDLE_ID,
+        'CFBundleExecutable':'AIApplicationManager','CFBundleVersion':'SYNTHETIC_PRESERVE_'+marker}))
+    assert consumer._trusted_bundle(path)
+    return path
+
+
+def _installer_inventory(path):
+    import stat
+    return {p.relative_to(path).as_posix():(stat.S_IMODE(p.stat().st_mode),p.read_bytes())
+            for p in path.rglob('*') if p.is_file()}
+
+
+def test_installer_whole_bundle_copy_preserves_every_declared_byte_and_mode(tmp_path):
+    from executor.autonomy import consumer
+    from executor.autonomy.bundle_copy import copy_bundle_payload
+    source=_installer_bundle(tmp_path/'source.app');target=tmp_path/'staged.app';target.mkdir()
+    before=_installer_inventory(source);identity=consumer._bundle_transaction_identity(source)
+    copy_bundle_payload(source,target,identity)
+    assert _installer_inventory(source)==_installer_inventory(target)==before
+    assert consumer._trusted_bundle(target)
+    assert (target/'Contents/Info.plist').read_bytes()==(source/'Contents/Info.plist').read_bytes()
+
+
+@pytest.mark.parametrize('fault',['extra','signature','alias','hardlink','stage_alias','occupied_stage'])
+def test_installer_whole_bundle_refuses_unadmitted_members_and_destinations(tmp_path,fault):
+    import os
+    from executor.autonomy import consumer
+    from executor.autonomy.bundle_copy import copy_bundle_payload
+    source=_installer_bundle(tmp_path/'source.app');target=tmp_path/'staged.app'
+    identity=consumer._bundle_transaction_identity(source)
+    private=tmp_path/'private';private.mkdir();canary=private/'untouched';canary.write_bytes(b'SYNTHETIC_PRIVATE')
+    if fault=='extra':(source/'Contents/extra.txt').write_text('undeclared')
+    elif fault=='signature':
+        signing=source/'Contents/_CodeSignature';signing.mkdir();(signing/'CodeResources').write_text('unverified envelope')
+    elif fault in {'alias','hardlink'}:
+        item=source/'Contents/Resources/runtime/extra'
+        item.symlink_to(canary) if fault=='alias' else os.link(canary,item)
+    if fault=='stage_alias':target.symlink_to(private,target_is_directory=True)
+    else:
+        target.mkdir()
+        if fault=='occupied_stage':(target/'unrelated').write_text('preserve')
+    before=_installer_inventory(private)
+    with pytest.raises((OSError,ValueError)):
+        copy_bundle_payload(source,target,identity)
+    assert _installer_inventory(private)==before
+    if fault=='occupied_stage':assert (target/'unrelated').read_text()=='preserve'
+
+
+def test_installer_whole_copy_rejects_source_change_during_stream(tmp_path,monkeypatch):
+    from executor.autonomy import consumer,bundle_copy
+    source=_installer_bundle(tmp_path/'source.app');target=tmp_path/'staged.app';target.mkdir()
+    identity=consumer._bundle_transaction_identity(source)
+    file=source/'Contents/MacOS/AIApplicationManager';original=file.read_bytes()
+    real=bundle_copy.os.read;changed=[]
+    def read(fd,n):
+        result=real(fd,n)
+        if result==original and not changed:
+            changed.append(True);file.write_bytes(original+b'\n# concurrent change\n')
+        return result
+    monkeypatch.setattr(bundle_copy.os,'read',read)
+    with pytest.raises((OSError,ValueError)):
+        bundle_copy.copy_bundle_payload(source,target,identity)
+    assert changed and source.exists() and target.exists()
+
+
+def _downloaded_installer_fixture(tmp_path,monkeypatch,*,same=False,pending=False):
+    from executor.autonomy import consumer, consumer_installer as installer, first_install
+    from executor.autonomy.state_compatibility import task_state_guard
+    home=tmp_path/'home';home.mkdir();monkeypatch.setenv('HOME',str(home))
+    target=_installer_bundle(home/'Applications'/(consumer.APP_NAME+'.app'))
+    import os
+    os.close(consumer._acquire_app_transaction_lock(target.parent))
+    candidate=_installer_bundle(home/'Downloads'/(consumer.APP_NAME+'.app'),marker='one' if same else 'two')
+    state=home/'Library/Application Support/AI投递经理/autonomy'
+    with task_state_guard(state):pass
+    from executor.autonomy.queue import TaskQueue,TaskSpec
+    from executor.autonomy.worker import Worker
+    queue=TaskQueue(state);Worker(queue)
+    profile=home/'synthetic-profile.json';profile.write_text('{"fields":{}}');profile.chmod(0o600)
+    task=queue.enqueue(TaskSpec(company='Synthetic installer',role='Engineer',target_url='https://example.test/role',profile_ref=str(profile)))
+    queue.pause(task['task_id'])
+    if pending:first_install._create_first_fence(target.parent,consumer._bundle_transaction_identity(target))
+    monkeypatch.setattr(macos_host,'present_native_first_install',lambda *a,**k:{'action':'cancel'})
+    monkeypatch.setattr(consumer,'verify_standalone_runtime',lambda *a:True)
+    return installer,consumer,candidate,target,state
+
+
+@pytest.mark.parametrize('mode',['cancel','open_same','pending_open'])
+def test_installer_explicit_cancel_or_open_preserves_apps_and_task_authority(tmp_path,monkeypatch,mode):
+    installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch,
+        same=mode=='open_same',pending=mode=='pending_open')
+    before=(_installer_inventory(target),_installer_inventory(state));prompts=[];opened=[]
+    monkeypatch.setattr(macos_host,'present_native_installer',lambda directory,kind:prompts.append(kind) or
+        {'action':'cancel' if mode=='cancel' else 'open'})
+    monkeypatch.setattr(installer.subprocess,'Popen',lambda args,**kw:opened.append(args))
+    monkeypatch.setattr(installer,'_retire',lambda *a:pytest.fail('cancel/open retired service'))
+    result=installer.run_downloaded_installer(candidate,target,state,9344,consumer._bundle_transaction_identity(candidate))
+    assert result['ok'] is True and (_installer_inventory(target),_installer_inventory(state))==before
+    assert prompts==[{'cancel':'update','open_same':'open','pending_open':'recovery'}[mode]]
+    assert len(opened)==(mode!='cancel')
+    if opened:
+        assert opened[0][0]==str(target/'Contents/Resources/runtime/bin/python')
+        assert opened[0][-3:]==['--port','9344','native-entry']
+        assert opened[0][1:4]==['-I','-B','-c']
+    assert not (target.parent/('.'+consumer.APP_NAME+'.app.previous')).exists()
+
+
+@pytest.mark.parametrize('fault',['root','native_lock','fence','service','candidate','target','busy_window'])
+def test_installer_update_prompt_changes_or_busy_window_never_retire_or_replace(tmp_path,monkeypatch,fault):
+    import fcntl,os
+    from executor.autonomy import first_install
+    installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)
+    identity=consumer._bundle_transaction_identity(candidate);old_target=_installer_inventory(target)
+    descriptors=[]
+    def choose(directory,mode):
+        assert mode=='update'
+        if fault=='root':
+            state.rename(state.with_name('retained-state'));state.mkdir(mode=0o755)
+        elif fault=='native_lock':
+            (state/'native-window.lock').rename(state/'retained-native.lock');(state/'native-window.lock').touch(mode=0o600)
+        elif fault=='fence':first_install._create_first_fence(target.parent,consumer._bundle_transaction_identity(target))
+        elif fault=='service':
+            path=state/'service.json';path.write_text(json.dumps({'pid':os.getpid(),'port':9344,'instance':'s'*32}));path.chmod(0o600)
+        elif fault in {'candidate','target'}:
+            app=candidate if fault=='candidate' else target
+            with (app/'Contents/MacOS/AIApplicationManager').open('a') as out:out.write('\n# changed\n')
+        else:
+            fd=os.open(state/'native-window.lock',os.O_RDWR);fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);descriptors.append(fd)
+        return {'action':'update'}
+    monkeypatch.setattr(macos_host,'present_native_installer',choose)
+    monkeypatch.setattr(installer,'_stop_request',lambda *a:pytest.fail('changed admission stopped service'))
+    monkeypatch.setattr(consumer,'_install_macos_app_unlocked',lambda *a,**k:pytest.fail('changed admission installed'))
+    try:
+        result=installer.run_downloaded_installer(candidate,target,state,9344,identity)
+        assert result['ok'] is False
+        if fault!='target':assert _installer_inventory(target)==old_target
+        if fault=='root':assert state.stat().st_mode&0o777==0o755 and list(state.iterdir())==[]
+    finally:
+        for fd in descriptors:os.close(fd)
+
+
+@pytest.mark.parametrize('value',[None,{},[],{'action':'install'},{'action':'update','extra':True},{'action':True}])
+def test_installer_native_intent_refuses_unbounded_values(value):
+    assert macos_host.native_installer_choice(value,'update') is None
+
+
+def test_installer_pending_and_same_version_prompt_cannot_issue_update():
+    assert macos_host.native_installer_choice({'action':'update'},'open') is None
+    assert macos_host.native_installer_choice({'action':'update'},'recovery') is None
+    assert macos_host.native_installer_choice({'action':'update'},'update')=={'action':'update'}
+
+
+@pytest.mark.parametrize('status',[301,302,303,307,308])
+@pytest.mark.parametrize('endpoint',['identity','health','stop'])
+def test_installer_and_recovery_local_auth_never_follow_redirects(tmp_path,status,endpoint):
+    import threading
+    from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+    from executor.autonomy import first_use_recovery as recovery,consumer_installer as installer
+    received=[]
+    class Recipient(BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def do_GET(self):received.append(self.headers.get('Authorization'));self.send_response(204);self.end_headers()
+        do_POST=do_GET
+    target=ThreadingHTTPServer(('127.0.0.1',0),Recipient)
+    class Redirect(BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def do_GET(self):
+            self.send_response(status)
+            self.send_header('Location',f'http://127.0.0.1:{target.server_port}/collector')
+            self.send_header('Content-Length','0');self.end_headers()
+        do_POST=do_GET
+    source=ThreadingHTTPServer(('127.0.0.1',0),Redirect)
+    threads=[threading.Thread(target=s.serve_forever,daemon=True) for s in (source,target)]
+    for thread in threads:thread.start()
+    root=tmp_path/'state';root.mkdir(mode=0o700)
+    token=root/'auth.token';token.write_text('SYNTHETIC_LOCAL_TOKEN_'+'s'*32);token.chmod(0o600)
+    before=token.read_bytes()
+    try:
+        with pytest.raises(ValueError,match='local_service_redirect_refused'):
+            if endpoint=='stop':installer._stop_request(root,source.server_port,{'pid':123,'port':source.server_port,'instance':'s'*32})
+            else:recovery._owned_request(root,source.server_port,'/health' if endpoint=='health' else '/v1/service-identity')
+        assert received==[] and token.read_bytes()==before
+    finally:
+        source.shutdown();target.shutdown();source.server_close();target.server_close()
+        for thread in threads:thread.join(timeout=2)
+
+
+@pytest.mark.parametrize('mode',['open','update','recovery'])
+def test_hosted_mac_installer_prompt_uses_actual_cocoa_and_cancels(compiled_host,mode):
+    assert macos_host.present_native_installer(compiled_host,mode,smoke=True)=={'action':'cancel'}
+
+
+@pytest.mark.skipif(sys.platform!='darwin',reason='Exact zsh launcher preflight uses hosted Mac shell')
+@pytest.mark.parametrize('architecture,version,allowed',[('x86_64','26.0',False),('arm64','12.7',False),('arm64','invalid',False),('arm64','13.0',True)])
+def test_hosted_mac_launcher_preflight_precedes_runtime_and_private_paths(tmp_path,architecture,version,allowed):
+    import os,shlex,subprocess
+    from executor.autonomy import consumer
+    home=tmp_path/'home';home.mkdir()
+    app=tmp_path/'app';executable=app/'Contents/MacOS/AIApplicationManager';executable.parent.mkdir(parents=True)
+    release=app/'Contents/Resources/release';release.mkdir(parents=True)
+    python=app/'Contents/Resources/runtime/bin/python';python.parent.mkdir(parents=True)
+    marker=tmp_path/'runtime-invoked'
+    python.write_text('#!/bin/sh\nprintf invoked > "$SYNTHETIC_MARKER"\n');python.chmod(0o755)
+    script=consumer._native_packaged_launcher()
+    for original,value,name in [('/usr/bin/uname -m',architecture,'uname'),('/usr/bin/sw_vers -productVersion',version,'sw-vers')]:
+        command=tmp_path/name;command.write_text('#!/bin/sh\nprintf %s '+shlex.quote(value)+'\n');command.chmod(0o755)
+        script=script.replace(original,shlex.quote(str(command)))
+    dialog=tmp_path/'dialog';dialog.write_text('#!/bin/sh\nexit 0\n');dialog.chmod(0o755)
+    script=script.replace('/usr/bin/osascript',shlex.quote(str(dialog)))
+    executable.write_text(script);executable.chmod(0o755)
+    run=subprocess.run(['/bin/zsh',str(executable)],env={'HOME':str(home),'PATH':os.defpath,'SYNTHETIC_MARKER':str(marker)},capture_output=True,timeout=10)
+    assert run.returncode==(0 if allowed else 2)
+    assert marker.exists() is allowed
+    assert (home/'Library/Logs/AI投递经理').exists() is allowed
+    assert not (home/'Library/Application Support').exists()
+
+
+@pytest.mark.parametrize('fault',['successor_before_stop','successor_after_ack','wrong_loaded_source','lost_ack'])
+def test_installer_retirement_remains_bound_to_pre_prompt_service(tmp_path,monkeypatch,fault):
+    import os
+    from executor.autonomy import first_use_recovery as recovery
+    from executor.autonomy.release import source_manifest
+    installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)
+    record={'pid':os.getpid(),'port':9344,'instance':'original_'+'s'*32}
+    successor={**record,'instance':'successor_'+'s'*32}
+    path=state/'service.json';path.write_text(json.dumps(record));path.chmod(0o600)
+    snapshot=installer._capture(target,state);stops=[]
+    source=source_manifest(target/'Contents/Resources/release')['source_sha256']
+    def request(root,port,url):
+        if url=='/v1/service-identity':return record
+        if fault=='successor_before_stop':path.write_text(json.dumps(successor))
+        return {'ok':True,'loaded_source_sha256':'0'*64 if fault=='wrong_loaded_source' else source}
+    def stop(root,port,expected):
+        assert expected==record;stops.append(expected)
+        if fault=='lost_ack':raise TimeoutError('synthetic lost acknowledgement')
+        path.write_text(json.dumps(successor));return {'ok':True,'stopping':True}
+    monkeypatch.setattr(recovery,'_owned_request',request)
+    monkeypatch.setattr(installer,'_stop_request',stop)
+    before=_installer_inventory(target)
+    with pytest.raises((ValueError,TimeoutError)):
+        installer._retire(state,9344,snapshot,lambda:None)
+    assert len(stops)==(fault in {'successor_after_ack','lost_ack'})
+    assert _installer_inventory(target)==before
+    assert json.loads(path.read_text())==(record if fault in {'wrong_loaded_source','lost_ack'} else successor)
+
+
+def test_installer_exact_copy_update_holds_original_locks_and_keeps_task_bytes(tmp_path,monkeypatch):
+    import fcntl,os
+    installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)
+    monkeypatch.setattr(consumer.sys,'platform','darwin')
+    monkeypatch.setattr(macos_host,'present_native_installer',lambda *a,**k:{'action':'update'})
+    before=_installer_inventory(state);old=_installer_inventory(target);probes=[];opened=[]
+    monkeypatch.setattr(consumer,'_candidate_starts',lambda *a:True)
+    def compatible(*args):
+        for path in [state/'native-window.lock',state/'worker.lock',state/'migration.lock',
+                     target.parent/('.'+consumer.APP_NAME+'.app.transaction.lock')]:
+            fd=os.open(path,os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            finally:os.close(fd)
+        probes.append(True);return True
+    monkeypatch.setattr(consumer,'_prepare_task_state_release',compatible)
+    monkeypatch.setattr(installer.subprocess,'Popen',lambda args,**kw:opened.append(args))
+    result=installer.run_downloaded_installer(candidate,target,state,9344,consumer._bundle_transaction_identity(candidate))
+    assert result['ok'] is True and result['updated'] is True and probes==[True] and len(opened)==1
+    assert _installer_inventory(target)==_installer_inventory(candidate)
+    assert _installer_inventory(target.parent/('.'+consumer.APP_NAME+'.app.previous'))==old
+    assert _installer_inventory(state)==before
+
+
+@pytest.mark.parametrize('phase',['health','compatibility'])
+def test_installer_late_pending_fence_refuses_before_activation(tmp_path,monkeypatch,phase):
+    from executor.autonomy import first_install
+    installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)
+    monkeypatch.setattr(consumer.sys,'platform','darwin')
+    before=_installer_inventory(target)
+    monkeypatch.setattr(macos_host,'present_native_installer',lambda *a,**k:{'action':'update'})
+    def arrive(*args):
+        first_install._create_first_fence(target.parent,consumer._bundle_transaction_identity(target));return True
+    monkeypatch.setattr(consumer,'_candidate_starts',arrive if phase=='health' else lambda *a:True)
+    monkeypatch.setattr(consumer,'_prepare_task_state_release',arrive if phase=='compatibility' else lambda *a:True)
+    monkeypatch.setattr(installer.subprocess,'Popen',lambda *a,**k:pytest.fail('late pending fence reopened'))
+    result=installer.run_downloaded_installer(candidate,target,state,9344,consumer._bundle_transaction_identity(candidate))
+    assert result['ok'] is False and _installer_inventory(target)==before
+    assert first_install._read_first_fence(target.parent)['status']=='pending'
+    assert not (target.parent/('.'+consumer.APP_NAME+'.app.previous')).exists()
+
+
+@pytest.mark.parametrize('matching',[False,True])
+def test_installer_pending_fence_never_opens_legacy_native_launch(tmp_path,monkeypatch,matching):
+    from executor.autonomy import first_install
+    installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch,pending=True)
+    launcher=target/'Contents/MacOS/AIApplicationManager'
+    launcher.write_text(consumer._native_packaged_launcher_v1())
+    if matching:
+        fence=first_install._fence_path(target.parent)
+        record=first_install._read_first_fence(target.parent)
+        record['bundle_tag']=first_install._bundle_tag(consumer._bundle_transaction_identity(target))
+        fence.write_text(json.dumps(record))
+    before=(_installer_inventory(target),_installer_inventory(state),first_install._fence_path(target.parent).read_bytes())
+    monkeypatch.setattr(macos_host,'present_native_installer',lambda *a,**k:pytest.fail('unadmitted pending target prompted'))
+    monkeypatch.setattr(installer.subprocess,'Popen',lambda *a,**k:pytest.fail('pending fence bypassed native-entry'))
+    result=installer.run_downloaded_installer(candidate,target,state,9344,consumer._bundle_transaction_identity(candidate))
+    assert result['ok'] is False
+    assert (_installer_inventory(target),_installer_inventory(state),first_install._fence_path(target.parent).read_bytes())==before
+    with pytest.raises(ValueError,match='installer_pending_target_unverified'):
+        installer._open_existing(target,consumer._bundle_transaction_identity(target),9344)

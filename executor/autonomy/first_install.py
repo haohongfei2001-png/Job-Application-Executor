@@ -242,7 +242,10 @@ def launch_native_entry(root, port, *, smoke=False, continuity_fd=None):
                 return refuse("legacy_state_migration_required")
             return cli.launch_native_consumer(state, port, smoke=smoke)
         if target.exists() or target.is_symlink():
-            return refuse("first_install_target_occupied")
+            if not consumer._trusted_bundle(target):
+                return refuse("first_install_target_occupied")
+            from .consumer_installer import run_downloaded_installer
+            return run_downloaded_installer(candidate, target, state, port, identity)
         choice = macos_host.present_native_first_install(host)
         if choice == {"action": "cancel"}:
             return {"ok": True, "cancelled": True, "installed": False, **boundary}
@@ -262,7 +265,8 @@ def launch_native_entry(root, port, *, smoke=False, continuity_fd=None):
             return refuse("legacy_state_migration_required")
         activation_attempted = True
         result = consumer.install_macos_bundle(candidate, destination=apps,
-            _first_install=True, _legacy_additional_origins=origins, _approved_identity=identity)
+            _first_install=True, _legacy_additional_origins=origins, _approved_identity=identity,
+            _preserve_bundle=True)
         if (type(result) is not dict or result.get("ok") is not True
                 or result.get("installed") is not True or result.get("replaced") is not False):
             reason = result.get("reason") if type(result) is dict else None
