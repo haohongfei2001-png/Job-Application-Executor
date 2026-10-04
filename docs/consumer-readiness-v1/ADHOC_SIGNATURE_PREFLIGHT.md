@@ -37,6 +37,12 @@ design would need independently trusted publisher policy and a reviewed versione
 contract for original input provenance versus final signed bytes. Without that
 identity/contract this work stops at evidence; it does not grow a signing framework.
 
+The first hosted attempt, run 37177620344 at source 23681e95, stopped in probe
+contract tests before signing: CPython's `os.*xattr` functions are Linux-only.
+The corrected harness uses bounded Darwin descriptor APIs for reading xattrs and
+the system metadata-preserving copy tool for tamper controls. This correction
+does not turn the failed attempt into signing evidence or modify product code.
+
 Actual Developer ID signing and notarization still require a separately approved
 Apple identity/account workflow. A real consumer release additionally needs
 verified download/distribution, exact signed DMG/app checks, and fresh quarantined

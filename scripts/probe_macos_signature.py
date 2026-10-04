@@ -8,6 +8,8 @@ uploaded: signed bundles, archives, images and synthetic HOME remain disposable.
 from __future__ import annotations
 
 import argparse
+import ctypes
+from functools import cache
 import hashlib
 import importlib.metadata
 import json
@@ -29,6 +31,52 @@ MACHO_MAGIC = {b'\xce\xfa\xed\xfe', b'\xcf\xfa\xed\xfe',
                b'\xfe\xed\xfa\xce', b'\xfe\xed\xfa\xcf',
                b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
                b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
+
+
+@cache
+def _darwin_xattr_api():
+    # CPython's os.*xattr API is Linux-only. Use Apple's descriptor API instead
+    # of shelling out once per bundle member or treating unavailable as empty.
+    library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    library.flistxattr.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    library.flistxattr.restype = ctypes.c_ssize_t
+    library.fgetxattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
+                                 ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    library.fgetxattr.restype = ctypes.c_ssize_t
+    return library
+
+
+def xattrs(path):
+    if sys.platform != 'darwin':
+        return {name: os.getxattr(path, name, follow_symlinks=False)
+                for name in sorted(os.listxattr(path, follow_symlinks=False))}
+    library = _darwin_xattr_api()
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        def read(call, maximum):
+            size = call(None, 0)
+            if size < 0:
+                raise OSError(ctypes.get_errno(), 'probe_xattr_read_failed')
+            if size > maximum:
+                raise ValueError('probe_xattr_bound')
+            buffer = ctypes.create_string_buffer(max(1, size))
+            actual = call(buffer, size)
+            if actual < 0:
+                raise OSError(ctypes.get_errno(), 'probe_xattr_read_failed')
+            if actual != size:
+                raise ValueError('probe_xattr_changed')
+            return buffer.raw[:actual]
+        raw = read(lambda b, n: library.flistxattr(fd, b, n, 0), 65_536)
+        if raw and not raw.endswith(b'\0'):
+            raise ValueError('probe_xattr_names_invalid')
+        names = raw[:-1].split(b'\0') if raw else []
+        if any(not name for name in names) or len(names) != len(set(names)):
+            raise ValueError('probe_xattr_names_invalid')
+        return {name.decode('utf-8'): read(
+            lambda b, n: library.fgetxattr(fd, name, b, n, 0, 0), 8 * 1024 ** 2)
+            for name in sorted(names)}
+    finally:
+        os.close(fd)
 
 
 def digest(path):
@@ -53,8 +101,7 @@ def inventory(root):
         total += before.st_size if path.is_file() else 0
         if len(entries) >= MAX_FILES or total > MAX_BYTES:
             raise ValueError('inventory_bound')
-        attrs = {name: hashlib.sha256(os.getxattr(path, name, follow_symlinks=False)).hexdigest()
-                 for name in sorted(os.listxattr(path, follow_symlinks=False))}
+        attrs = {name: hashlib.sha256(value).hexdigest() for name, value in xattrs(path).items()}
         item = {'mode': stat.S_IMODE(before.st_mode), 'xattrs': attrs,
                 'type': 'file' if stat.S_ISREG(before.st_mode) else 'directory'}
         if item['type'] == 'file':
@@ -83,7 +130,7 @@ def changes(before, after):
 def command(argv, *, timeout=90):
     # Fixed Apple tools only. No shell, keychain, certificate, network or payload
     # execution. Bounded disk capture avoids an unbounded PIPE allocation.
-    if argv[0] not in {'/usr/bin/codesign', '/usr/bin/hdiutil', '/usr/bin/sw_vers'}:
+    if argv[0] not in {'/usr/bin/codesign', '/usr/bin/hdiutil', '/usr/bin/sw_vers', '/usr/bin/ditto'}:
         raise ValueError('probe_tool_invalid')
     with tempfile.TemporaryFile() as output:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=output,
@@ -202,6 +249,17 @@ def byte_copy(source, target):
         (target / path.relative_to(source)).chmod(stat.S_IMODE(path.stat().st_mode))
 
 
+def metadata_copy(source, target):
+    if target.exists() or target.is_symlink():
+        raise ValueError('probe_copy_target_exists')
+    if sys.platform == 'darwin':
+        result = command(['/usr/bin/ditto', '--rsrc', '--extattr', str(source), str(target)])
+        if result['returncode']:
+            raise ValueError('probe_metadata_copy_failed')
+    else:
+        shutil.copytree(source, target, copy_function=shutil.copy2)
+
+
 def image_roundtrip(app, work):
     work.mkdir()
     image, mount = work / 'CONTROL-NOT-A-DELIVERY.dmg', work / 'mount'
@@ -245,7 +303,7 @@ def tamper_cases(app, work, pinned):
         target = work / app.name
         # Tamper controls must begin from the complete signed identity, including
         # xattrs. A failed transport is inconclusive, never tamper detection.
-        shutil.copytree(app, target, copy_function=shutil.copy2)
+        metadata_copy(app, target)
         try:
             baseline_matches = inventory(target) == pinned
             baseline_verify = verify(target)

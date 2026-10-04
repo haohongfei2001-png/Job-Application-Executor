@@ -5,10 +5,26 @@ import json
 import os
 from pathlib import Path
 import tarfile
+import subprocess
 
 import pytest
 
 from scripts import probe_macos_signature as probe
+
+
+def set_attribute(path, name, data):
+    if os.sys.platform == 'darwin':
+        subprocess.run(['/usr/bin/xattr', '-w', '-x', name, data.hex(), str(path)],
+                       check=True, timeout=10)
+    else:
+        os.setxattr(path, name, data)
+
+
+def remove_attribute(path, name):
+    if os.sys.platform == 'darwin':
+        subprocess.run(['/usr/bin/xattr', '-d', name, str(path)], check=True, timeout=10)
+    else:
+        os.removexattr(path, name)
 
 
 def tree(tmp_path):
@@ -61,7 +77,7 @@ def test_inventory_bounds_are_enforced(tmp_path, monkeypatch, limit, value):
 def test_bytes_only_copy_drops_xattrs_but_keeps_modes_and_bytes(tmp_path):
     app, leaf = tree(tmp_path)
     attribute = 'user.jae-test' if os.sys.platform != 'darwin' else 'org.jae.test'
-    os.setxattr(leaf, attribute, b'synthetic attribute')
+    set_attribute(leaf, attribute, b'synthetic attribute')
     leaf.chmod(0o755)
     copied = tmp_path / 'copy'
     probe.byte_copy(app, copied)
@@ -77,7 +93,7 @@ def test_control_archive_preserves_sidecars_and_has_no_xattr_transport(tmp_path)
     signature = app / 'Contents/_CodeSignature'; signature.mkdir()
     (signature / 'CodeResources').write_bytes(b'SYNTHETIC NOT A SIGNATURE')
     attribute = 'user.jae-test' if os.sys.platform != 'darwin' else 'org.jae.test'
-    os.setxattr(leaf, attribute, b'synthetic attribute')
+    set_attribute(leaf, attribute, b'synthetic attribute')
     archive = tmp_path / 'control.tar.gz'
     probe.raw_archive(app, archive)
     output = tmp_path / 'output'; output.mkdir()
@@ -130,16 +146,15 @@ def test_macho_catalog_uses_magic_not_filename(tmp_path):
 def test_tamper_requires_exact_valid_baseline(tmp_path, monkeypatch, failure):
     app, leaf = tree(tmp_path)
     attribute = 'user.jae-test' if os.sys.platform != 'darwin' else 'org.jae.test'
-    os.setxattr(leaf, attribute, b'synthetic signature metadata')
+    set_attribute(leaf, attribute, b'synthetic signature metadata')
     pinned = probe.inventory(app)
-    copy = probe.shutil.copytree
-    def copy_then_lose_metadata(source, target, *args, **kwargs):
-        result = copy(source, target, *args, **kwargs)
-        if Path(target).name == app.name:
-            os.removexattr(Path(target) / 'Contents/payload', attribute)
+    copy = probe.metadata_copy
+    def copy_then_lose_metadata(source, target):
+        result = copy(source, target)
+        remove_attribute(target / 'Contents/payload', attribute)
         return result
     if failure == 'xattr_loss':
-        monkeypatch.setattr(probe.shutil, 'copytree', copy_then_lose_metadata)
+        monkeypatch.setattr(probe, 'metadata_copy', copy_then_lose_metadata)
     monkeypatch.setattr(probe, 'verify', lambda *a: {'returncode': int(failure == 'invalid_os_signature')})
     monkeypatch.setattr(probe, 'seal', lambda *a, **k: pytest.fail('no tamper or re-sign before a proven baseline'))
     results = probe.tamper_cases(app, tmp_path / 'tamper', pinned)
@@ -147,6 +162,38 @@ def test_tamper_requires_exact_valid_baseline(tmp_path, monkeypatch, failure):
     assert all(v['status'] == 'INCONCLUSIVE_BASELINE_NOT_ESTABLISHED' for v in results.values())
     assert all('pinned_inventory_matches' not in v and 'os_verify' not in v for v in results.values())
     assert probe.inventory(app) == pinned
+
+
+def test_metadata_control_preserves_nonempty_and_empty_xattrs(tmp_path):
+    app, leaf = tree(tmp_path)
+    prefix = 'user.' if os.sys.platform != 'darwin' else 'org.jae.'
+    set_attribute(leaf, prefix + 'nonempty', b'synthetic signature metadata')
+    set_attribute(leaf, prefix + 'empty', b'')
+    pinned = probe.inventory(app)
+    target = tmp_path / 'copy'
+    probe.metadata_copy(app, target)
+    assert probe.inventory(target) == pinned
+
+
+@pytest.mark.parametrize('failure', ['read_error', 'growth', 'bound', 'duplicate'])
+def test_darwin_xattrs_refuse_errors_changes_and_oversize(tmp_path, monkeypatch, failure):
+    class Library:
+        def flistxattr(self, fd, buffer, size, options):
+            assert options == 0 and fd >= 0
+            if failure == 'read_error':
+                return -1
+            if failure == 'bound':
+                return 65_537
+            if failure == 'growth':
+                return 2 if buffer is None else 3
+            data = b'dup\0dup\0'
+            if buffer is not None:
+                probe.ctypes.memmove(buffer, data, len(data))
+            return len(data)
+    monkeypatch.setattr(probe.sys, 'platform', 'darwin')
+    monkeypatch.setattr(probe, '_darwin_xattr_api', lambda: Library())
+    with pytest.raises((ValueError, OSError), match='probe_xattr_'):
+        probe.xattrs(tmp_path)
 
 
 def test_production_install_not_called_if_intake_unexpectedly_accepts(tmp_path, monkeypatch):
