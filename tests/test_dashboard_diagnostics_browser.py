@@ -2168,6 +2168,7 @@ def test_task_workspace_missing_resume_cancel_clears_file_without_save(profile_e
     page, observed = profile_editor_ui
     observed["payload"] = _missing_resume_payload()
     _open_editor(page)
+    expect(page.locator("#profile-editor-resume")).to_be_enabled()
     page.locator("#profile-editor-resume").set_input_files({"name": "new.pdf", "mimeType": "application/pdf", "buffer": b"SYNTHETIC_NOT_SAVED"})
     if interruption == "close": page.locator("#profile-editor-close").click()
     elif interruption == "escape": page.locator("#profile-editor-dialog").press("Escape")
@@ -2200,6 +2201,7 @@ def test_task_workspace_missing_resume_save_uncertainty_never_replays(profile_ed
     page, observed = profile_editor_ui
     observed["payload"] = _missing_resume_payload()
     _open_editor(page)
+    expect(page.locator("#profile-editor-resume")).to_be_enabled()
     page.locator("#profile-editor-resume").set_input_files({"name": "new.pdf", "mimeType": "application/pdf", "buffer": b"SYNTHETIC_UNCERTAIN"})
     observed["save_status"] = 409 if failure == "conflict" else 500
     observed["save_payload"] = {"error": "state_conflict" if failure == "conflict" else "PRIVATE_UNTRUSTED_ERROR"}
@@ -2210,6 +2212,53 @@ def test_task_workspace_missing_resume_save_uncertainty_never_replays(profile_ed
     page.evaluate("document.querySelector('#profile-editor-save').dispatchEvent(new MouseEvent('click'))")
     assert len(_editor_posts(observed)) == 1
     assert "PRIVATE_UNTRUSTED_ERROR" not in page.locator("#profile-editor-dialog").inner_text()
+
+
+def test_task_workspace_missing_resume_held_read_requires_ready_chooser(profile_editor_ui):
+    """Reproduce the non-human early-selection race, then use the real UI gate.
+
+    set_input_files has no enabled/actionability check. Dialog visibility alone
+    does not admit a selection while the asynchronous profile read is pending.
+    """
+    page, observed = profile_editor_ui
+    observed["payload"] = _missing_resume_payload()
+    observed["hold"] = True
+    _open_editor(page)
+    page.wait_for_function("window.__editorHeldReads === 1")
+    chooser = page.locator("#profile-editor-resume")
+    save = page.locator("#profile-editor-save")
+    expect(chooser).to_be_disabled()
+    expect(save).to_be_disabled()
+    # Deliberate diagnostic bypass only: reproduce the old test actor's mistake.
+    # A person cannot select through this disabled control.
+    chooser.set_input_files({"name": "premature.pdf", "mimeType": "application/pdf",
+                             "buffer": b"SYNTHETIC_PREMATURE_SELECTION"})
+    assert chooser.evaluate("node => node.files.length") == 1
+    expect(chooser).to_be_disabled()
+    expect(save).to_be_disabled()
+    route, payload = observed["pending"].pop()
+    observed["hold"] = False
+    route.fulfill(content_type="application/json", body=json.dumps(payload))
+    expect(chooser).to_be_enabled()
+    expect(chooser).to_have_value("")
+    expect(save).to_be_disabled()
+    assert _editor_posts(observed) == []
+    # Actual consumer action starts only after the trusted read admits input.
+    chooser.set_input_files({"name": "chosen.pdf", "mimeType": "application/pdf",
+                             "buffer": b"SYNTHETIC_ADMITTED_SELECTION"})
+    expect(save).to_be_enabled()
+    observed["save_status"] = 409
+    observed["save_payload"] = {"error": "state_conflict"}
+    save.click()
+    expect(page.locator("#profile-editor-reconcile")).to_be_enabled()
+    expect(save).to_be_disabled()
+    expect(chooser).to_have_value("")
+    posts = _editor_posts(observed)
+    assert len(posts) == 1
+    assert b"SYNTHETIC_ADMITTED_SELECTION" in posts[0][1]
+    assert b"SYNTHETIC_PREMATURE_SELECTION" not in posts[0][1]
+    page.evaluate("document.querySelector('#profile-editor-save').dispatchEvent(new MouseEvent('click'))")
+    assert len(_editor_posts(observed)) == 1
 
 
 @pytest.mark.parametrize("failure", ["new_profile", "missing_version", "missing_kind", "editable_fact", "ready_status"])
