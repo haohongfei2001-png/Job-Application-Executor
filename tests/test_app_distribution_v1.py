@@ -1975,7 +1975,7 @@ finally:
 
 
 def test_hosted_mac_real_build_prepares_noninstallable_signing_workspace(tmp_path, capsys):
-    """Real unsigned build/stager/copy; no signing or prepared-payload execution."""
+    """Real build, static ad-hoc delta oracle and publisher refusal; no app execution."""
     if sys.platform != "darwin":
         pytest.skip("Real native unsigned builder requires hosted macOS")
     from scripts import build_macos_app
@@ -2003,6 +2003,16 @@ def test_hosted_mac_real_build_prepares_noninstallable_signing_workspace(tmp_pat
         complete = signing._capture(prepared, names | {signing.BRIDGE})
         assert {path: item for path, item in complete.items() if path != signing.BRIDGE} == baseline
         assert complete == identity["files"]
+        from scripts.macos_signing_delta import inspect_signing_input
+        from scripts.finalize_macos_signing import _read, MAX_MACHO_BYTES
+        catalog = [path for path, item in baseline.items() if item.get("macho_header")]
+        assert catalog
+        # Read-only format coverage of the real current payload. This is not
+        # signature validity and never executes/signs the inspected bytes.
+        for path in catalog:
+            inspect_signing_input(_read(original / path, MAX_MACHO_BYTES))
+        print(json.dumps({"real_unsigned_macho_layouts": len(catalog),
+                          "publisher_validation": "NOT_PERFORMED"}))
     assert _trusted_bundle(prepared) is False
     from executor.autonomy.consumer import install_macos_bundle
     result = install_macos_bundle(prepared, platform="darwin",
@@ -2010,3 +2020,118 @@ def test_hosted_mac_real_build_prepares_noninstallable_signing_workspace(tmp_pat
     assert result["ok"] is False
     assert not (tmp_path / "must-not-install").exists()
     assert not (tmp_path / "must-not-initialize").exists()
+    # The actual build report is the operator handoff into the real finalizer.
+    # No signing/mocked OS success: Apple's fixed static check must reject this
+    # ordinary unsigned app, leaving no final identity or consumer authority.
+    from scripts import finalize_macos_signing as finalizer
+    pins = report["signing_preparation"]["finalization_inputs"]
+    assert pins["entry"] == "scripts/finalize_macos_signing.py"
+    args = ["--distribution", str(distribution), "--workspace", str(workspace),
+            "--publisher-team-id", "SYNTHETIC1", "--publisher-bundle-id", BUNDLE_ID]
+    for key in ("expected_receipt_sha256", "expected_prepared_identity_sha256", "expected_policy_sha256"):
+        args.extend(["--" + key.replace("_", "-"), pins[key]])
+    with pytest.raises(ValueError, match="signing_static_requirement_refused"):
+        finalizer.main(args)
+    assert not (workspace / finalizer.FINAL_IDENTITY).exists()
+    # Run only this extra oracle in a separate process group. The parent owns a
+    # hard 90-second wall-time bound including staging, hashing and finalization.
+    # Every signed-code operation stays in the child; no candidate is executed.
+    import signal
+    import time
+    root = Path(__file__).resolve().parents[1]
+    code = ("import json, sys; from pathlib import Path; "
+            "from test_app_distribution_v1 import _hosted_ad_hoc_delta_oracle; "
+            "_hosted_ad_hoc_delta_oracle(Path(sys.argv[1]), Path(sys.argv[2]), json.loads(sys.argv[3]))")
+    started = time.monotonic()
+    process = subprocess.Popen([sys.executable, "-B", "-c", code, str(distribution),
+        str(workspace), json.dumps(args)], cwd=root, start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+             "PYTHONPATH": str(root / "tests") + os.pathsep + str(root)})
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(timeout=90)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate(timeout=5)
+    elapsed = time.monotonic() - started
+    observations = [json.loads(line) for line in stdout.splitlines() if line.startswith("{")]
+    last = observations[-1] if observations else {"status": "NO_ORACLE_OBSERVATION"}
+    last["parent_elapsed_seconds"] = round(elapsed, 2)
+    last["hard_timeout"] = timed_out
+    with capsys.disabled():
+        print(json.dumps(last, sort_keys=True))
+    assert not timed_out, "ad-hoc delta oracle hit its hard 90s deadline: " + json.dumps(last)
+    assert process.returncode == 0, stderr[-4000:]
+    assert last["status"] == "ADHOC_DELTA_CHECKED_PUBLISHER_REFUSED"
+    assert last["real_unsigned_layouts"] == last["real_adhoc_deltas"] == len(catalog)
+    assert not (workspace / finalizer.FINAL_IDENTITY).exists()
+    assert _trusted_bundle(prepared) is False
+
+
+def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
+    """Private hosted test child: real signed bytes, no publisher acceptance."""
+    import time
+    from scripts import prepare_macos_signing as signing
+    from scripts import finalize_macos_signing as finalizer
+    from executor.autonomy.app_distribution import stage_macos_distribution
+    from executor.autonomy.consumer import BUNDLE_ID
+    prepared = workspace / (APP_NAME + ".app")
+    started = time.monotonic()
+    observation = {"real_unsigned_layouts": 0, "signed_objects": 0,
+        "real_adhoc_deltas": 0, "publisher_validation": "NOT_PERFORMED",
+        "consumer_admission": "NOT_ADMITTED", "signed_candidate_executions": 0,
+        "status": "INCOMPLETE"}
+    def emit():
+        observation["elapsed_seconds"] = round(time.monotonic() - started, 2)
+        observation["final_identity_created"] = (workspace / finalizer.FINAL_IDENTITY).exists()
+        print(json.dumps(observation, sort_keys=True), flush=True)
+    def apple(*args):
+        result = subprocess.run(["/usr/bin/codesign", *args],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            timeout=20, check=False)
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")[-2000:]
+    emit()
+    try:
+        with stage_macos_distribution(distribution) as original:
+            names = {p.relative_to(original).as_posix() for p in original.rglob("*")} | {"."}
+            baseline = signing._capture(original, names)
+            catalog = [path for path, item in baseline.items() if item.get("macho_header")]
+            observation["real_unsigned_layouts"] = len(catalog)
+            bridge = json.loads((prepared / signing.BRIDGE).read_text())
+            assert {item["path"] for item in bridge["signing_order"]} == set(catalog)
+            emit()
+            # Explicit '-' identity only: no identity discovery, keychain or notary.
+            for item in bridge["signing_order"]:
+                apple("--force", "--sign", "-", "--timestamp=none", "--identifier",
+                      item["required_identifier"], str(prepared / item["path"]))
+                apple("--verify", "--strict", "--all-architectures", str(prepared / item["path"]))
+                observation["signed_objects"] += 1
+                emit()
+            apple("--force", "--sign", "-", "--timestamp=none", "--identifier", BUNDLE_ID, str(prepared))
+            apple("--verify", "--strict", "--all-architectures", str(prepared))
+            signed_names = names | {signing.BRIDGE, finalizer.SIGNATURE_DIRECTORY} | finalizer.SIGNATURE_FILES
+            signed_inventory = signing._capture(prepared, signed_names)
+            assert signing._capture(original, names) == baseline
+            transitions = finalizer._validate_delta(original, prepared, baseline, signed_inventory, bridge)
+            assert set(transitions) == set(catalog)
+            observation["real_adhoc_deltas"] = len(transitions)
+            emit()
+            finalizer._bridge_coverage(
+                finalizer._read(prepared / (finalizer.SIGNATURE_DIRECTORY + "/CodeResources")),
+                finalizer._read(prepared / signing.BRIDGE))
+        # Independent Developer ID policy still refuses the ad-hoc app.
+        with pytest.raises(ValueError, match="signing_static_requirement_refused"):
+            finalizer.main(arguments)
+        observation["publisher_validation"] = "REFUSED_ADHOC"
+        assert not (workspace / finalizer.FINAL_IDENTITY).exists()
+        assert signing._capture(prepared, signed_names) == signed_inventory
+        assert _trusted_bundle(prepared) is False
+        observation["status"] = "ADHOC_DELTA_CHECKED_PUBLISHER_REFUSED"
+    finally:
+        emit()

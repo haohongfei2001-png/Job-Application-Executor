@@ -1,4 +1,4 @@
-# Build-only signing preparation
+# Build-only signing preparation and finalization
 
 This developer component prepares the existing real unsigned distribution for a
 future signing pipeline. It never signs, notarizes, executes the prepared app,
@@ -21,7 +21,7 @@ python scripts/build_macos_app.py \
 The team is an explicitly configured *future required publisher*, not an observed
 or authenticated publisher. There is no default team, incoming Authority/Team
 claim, development/ad-hoc fallback, keychain access, identity selection or
-signature-success result. Missing/malformed policy refuses before building.
+signature-success result during preparation. Missing/malformed policy refuses before building.
 The ordinary builder without these options produces the same unsigned artifact
 contract as before. The producer lives in `scripts`. One shared copy-helper extension lets a caller
 pin its already-created target inode before writing; existing callers keep their
@@ -83,19 +83,99 @@ must bind the original-input statement to final signed bytes. Never rewrite
 RECORD hashes to disguise signing mutations or interpret original runtime/native
 hashes as the signed outputs.
 
-After legitimate signature/publisher verification and eventual notarization and
-stapling, compute a **new** external all-bytes signed-output identity. The unsigned
-preparation identity is stale as soon as any signing byte changes. The outer seal
-cannot contain a manifest hashing that same final outer signature. The final
-external identity also needs an independently authenticated release binding;
-a self-declared JSON file next to the app is insufficient.
+## Connected static finalization
 
-No signing finalizer, new release trust service, signed archive/DMG transport,
-consumer admission, runtime startup exception or update/rollback policy is enabled
-here. Those integrations and real-device acceptance remain developer work. Actual
-Apple team/Developer ID/notarization availability is unknown and is not checked.
-Any necessary owner account/credential step belongs to a later authorized flow.
-Optional legacy-data migration is separate from ordinary fresh installation.
+The build report now includes `signing_preparation.finalization_inputs`: the
+original receipt digest, the prepared identity digest, and the canonical explicit
+publisher-policy digest. Preserve these values in the trusted invoking build
+context. After a separately authorized signer has worked on that same workspace,
+the next entry is:
+
+```sh
+python scripts/finalize_macos_signing.py \
+  --distribution "$UNSIGNED_OUTPUT" \
+  --workspace "$FRESH_PRIVATE_WORKSPACE" \
+  --expected-receipt-sha256 "$BUILD_RECEIPT_SHA256" \
+  --expected-prepared-identity-sha256 "$BUILD_PREPARED_IDENTITY_SHA256" \
+  --expected-policy-sha256 "$BUILD_POLICY_SHA256" \
+  --publisher-team-id "$EXPECTED_APPLE_TEAM_ID" \
+  --publisher-bundle-id com.local.job-application-executor.ai-application-manager
+```
+
+These are explicit build inputs, not values discovered from the candidate's
+claimed signer. Rehashing arbitrary downloaded sidecars does not authenticate a
+release. There is no signing command or credential lookup in this pipeline.
+Calling finalization on the normal unsigned build must fail Apple's real static
+verification and must not produce a final identity.
+
+The finalizer reuses the original unsigned stager and deterministically rebuilds
+the preparation statement. It checks every original payload byte against the
+original pinned archive, except a strictly bounded Mach-O signing transition:
+
+- `macos_signing_delta.py` supports thin little-endian arm64/x86_64 images and
+  the observed big-endian FAT32 containers with exactly those two slices. CPU,
+  subtype and architecture order are preserved; no architecture is removed.
+- The transition follows the internal allocator in the fixed Apple Security
+  source version linked below. Existing signature offsets remain fixed. A missing
+  signature command may be appended only in verified original zero header padding,
+  with exactly one 16-byte command and the required header count/length increments;
+  the signature starts at the original slice end rounded up to 16 bytes.
+- Signature allocations and the necessary `__LINKEDIT` file length may change.
+  The new mapping length must equal that file length rounded up to 16KB. FAT slices
+  must be repacked at exactly 16KB boundaries with alignment exponent 14. All
+  intervening padding is checked; these are fixed formulas, not arbitrary masks.
+- Everything else, including original section/command fields and all code/data,
+  stays byte-exact. Thread-zerofill sections are correctly treated as memory-only
+  while their original fields and existing file padding remain preserved.
+- Other formats, commands, relocation or allocator behavior refuse. In particular,
+  this is not a generic Mach-O rewriter or compatibility promise for older
+  standalone cctools allocation rules.
+- All other original paths, including manifests, RECORD/METADATA/WHEEL and the
+  bridge, remain byte-exact. No hashes or metadata are repaired. The only added
+  paths are the current four-file script-main `_CodeSignature` envelope.
+
+The only external process is `/usr/bin/codesign` on macOS, invoked with fixed
+`--verify --strict --all-architectures --test-requirement` arguments. Each planned
+native object and the outer app must satisfy a requirement reconstructed from the
+independently supplied policy: Apple anchor, Developer ID intermediate and leaf
+certificate OIDs, team OU and the predetermined per-object identifier. Displayed
+TeamIdentifier/Authority strings and the candidate's own requirement are unused.
+
+The outer signature must authenticate an unchanged v2 CodeResources envelope
+whose exact ordinary `files2` entry for the bridge contains its SHA-256. Optional,
+symlink, nested-code, missing, duplicate or unknown bridge-entry forms refuse.
+A codesign return code of zero without this linkage or original-payload proof is
+insufficient. The finalizer rechecks the complete inventory and source evidence
+before and after committing its external result.
+
+Use a trusted, quiescent local build workspace. Apple static validation and
+before/after snapshots do not provide isolation from a hostile concurrent writer.
+Aliases, hardlinks, unexpected xattrs (including empty attributes), unsupported
+file types and drift refuse. This remains a no-xattr build subset, not a solution
+to the measured signed-metadata transport gap.
+
+Only after all checks does `signed-build-identity-v2.json`, outside the app,
+record the complete final bytes/types/modes inventory and the original-input
+linkage. It excludes itself to avoid a hash cycle. Its phase is
+`STATIC_SIGNED_BUILD_IDENTITY`; consumer admission is always `NOT_ADMITTED` and
+certification `NOT_CERTIFIED`. It has no independently authenticated release
+binding. Hardened-runtime policy, entitlements, notarization, Gatekeeper and fresh
+online revocation checks are explicitly `NOT_PERFORMED`. It is a point-in-time
+build identity that must be rehashed, not a consumer authorization. An error can
+leave partial evidence, including a receipt invalidated by a final recheck; it
+never counts as completion and is not automatically overwritten.
+
+Actual Developer ID positive-path verification is still unverified. The owner’s
+Apple team/identity/notary availability is unknown. A later authorized flow must
+supply legitimate identity access and establish real signed compatibility,
+notarization/stapling and quarantined fresh-install evidence. No ad-hoc or mocked
+success substitutes for those gates. Stapling or any later mutation invalidates
+this point-in-time identity and requires a separately reviewed final closure.
+
+Signed archive/DMG transport, independently authenticated release binding,
+consumer admission and runtime/update/rollback integration remain developer work.
+The original cold installer continues to refuse these workspaces. Optional legacy
+migration remains separate from ordinary fresh installation.
 
 ## Verification
 
@@ -104,9 +184,52 @@ bytes and the real unsigned stager/copy/preparation. It tests policy/input bindi
 metadata preservation, unexpected modifications, aliases, hardlinks, xattrs,
 workspace replacement and real command-entry wiring. It never mocks codesign to
 claim Apple acceptance. The hosted-Mac test in `test_app_distribution_v1.py` uses
-the actual unsigned builder/runtime/native host and does not sign the result.
-Local Linux results do not establish that hosted test or any signed-release gate.
+the actual unsigned builder/runtime/native host, feeds its emitted pins into the
+actual finalizer CLI, and requires rejection by Apple's static verifier with no
+output identity. A further bounded 90-second section reuses that workspace for a
+real ad-hoc-only signing-delta oracle: each nested object is signed explicitly
+with the `-` identity, checked with all-architecture static verification, and then
+sealed by the outer app. The new delta validator and bridge-coverage check consume
+those actual before/after bytes. The full finalizer must still reject the ad-hoc
+app against the independent Developer ID requirement and create no final identity.
+The oracle never executes signed code or uploads the signed bundle. It reports
+partial counts/elapsed time on failure, keeps the existing Mac owner/job budget,
+and does not replace any original test. Only an actual hosted run can establish
+this oracle's result; local synthetic tests or historical length records cannot.
+`test_macos_signing_finalization.py` and `test_macos_signing_delta.py` cover pinned
+input/phase rejection, structural byte preservation, explicit bridge coverage and
+static-verifier refusal boundaries using clearly synthetic bytes. Their explicitly labeled post-verifier synthetic seam exercises receipt writing
+and mutation failures; it never establishes a successful Apple-verified artifact. Local Linux results do not
+establish the hosted negative test or any signed-release gate.
 
 Relevant prior evidence: [D534 measured boundary](receipts/ADHOC-D534-OBSERVATION.md).
 Apple references: [independent requirements](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)
 and [distribution signing order](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac).
+
+Static-finalization references: [code signing hashes and resource envelopes](https://developer.apple.com/documentation/technotes/tn3126-inside-code-signing-hashes),
+[Apple static verifier implementation](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_codesigning/lib/StaticCode.cpp),
+and [static verification concurrency limitation](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_codesigning/lib/SecStaticCode.h).
+
+### Existing real input coverage and remaining signed-byte evidence
+
+Read-only inspection of PR43 exact-main run `37232251737`, artifact `11315559898`,
+SHA `681e32bac364cab798bd4483aa6df051f1baf9ab`, identifies 32 Mach-O objects and 43
+architecture slices: 21 thin objects and 11 two-slice FAT containers. Of those
+slices, 32 already contain an embedded signature; 11 x86_64 slices require a new
+signature command. The bounded original-layout inspector covers all 32 objects and 43 slices. This
+is original-layout evidence, not signature validation.
+The archived artifact ZIP SHA-256 is
+`b56952a81a444254a2c74265cec1ed7316ff73b4d2535e3395134ce1abb0654a`.
+
+All 32 original binary hashes also match D534's retained unsigned inventory.
+D534 records actual ad-hoc signed hashes, sizes and static-check results, but did
+not retain signed payload bytes. Therefore that correlation alone cannot verify
+the new byte-delta implementation or establish real Developer ID compatibility.
+
+The modeled allocation formulas are pinned to Apple Security commit
+`db15acbe6a7f257a859ad9a3bb86097bfe0679d9` (Security-61901.0.87.0.1):
+[internal allocator invocation](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/signerutils.cpp#L188-L200),
+[signature and LINKEDIT layout](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/codesign_alloc.cpp#L236-L318),
+and [FAT layout](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/codesign_alloc.cpp#L412-L442).
+Source inspection does not prove which allocator produced a historical artifact;
+real signed-byte compatibility and publisher acceptance remain separate evidence.

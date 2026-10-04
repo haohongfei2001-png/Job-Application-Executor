@@ -179,6 +179,44 @@ def _write_at(directory_fd, name, data):
     os.fsync(directory_fd)
 
 
+def _input_bridge(receipt, expected_receipt_sha256, before, policy):
+    """Deterministic original-input statement, also reconstructed by finalization."""
+    planned = sorted((name for name, item in before.items() if item.get('macho_header')),
+                     key=lambda name: (-len(Path(name).parts), name))
+    return {
+        'format': 'jae-signing-input-bridge-v1',
+        'phase': 'UNSIGNED_SIGNING_PREPARATION',
+        'unsigned_receipt_sha256': expected_receipt_sha256,
+        'unsigned_distribution': receipt, 'unsigned_inventory': before,
+        'unsigned_inventory_sha256': _digest(_encoded(before)),
+        'required_publisher_policy': policy, 'publisher_validation': 'NOT_PERFORMED',
+        'signing_order': [{
+            'path': name, 'input_sha256': before[name]['sha256'],
+            'classification': 'MACHO_HEADER_CANDIDATE',
+            'required_identifier': policy['bundle_id'] + '.component.' + _digest(name.encode()),
+            'required_requirement': _requirement(policy, policy['bundle_id'] + '.component.' + _digest(name.encode())),
+        } for name in planned],
+        'outer_seal': {'path': '.', 'required_identifier': policy['bundle_id'],
+            'required_requirement': _requirement(policy, policy['bundle_id']),
+            'must_cover_bridge': BRIDGE, 'phase': 'AFTER_NESTED_SIGNING'},
+        'consumer_admission': 'DISALLOWED', 'notarization': 'NOT_PERFORMED',
+    }
+
+
+def _prepared_identity(app_name, expected_receipt_sha256, bridge_bytes, prepared, policy):
+    return {
+        'format': 'jae-build-bundle-identity-v2',
+        'phase': 'UNSIGNED_SIGNING_PREPARATION', 'app_name': app_name,
+        'unsigned_receipt_sha256': expected_receipt_sha256,
+        'bridge_path': BRIDGE, 'bridge_sha256': _digest(bridge_bytes),
+        'required_publisher_policy': policy,
+        'files': prepared, 'bundle_sha256': _digest(_encoded(prepared)),
+        'signing': 'unsigned', 'publisher_validation': 'NOT_PERFORMED',
+        'signed_output_identity': None, 'notarization': 'NOT_PERFORMED',
+        'consumer_admission': 'DISALLOWED', 'certification': 'NOT_CERTIFIED',
+    }
+
+
 def prepare_signing_workspace(distribution, output, *, expected_receipt_sha256,
                               required_publisher_policy):
     """Produce a fresh unsigned preparation; identity receipt is committed last.
@@ -247,24 +285,7 @@ def prepare_signing_workspace(distribution, output, *, expected_receipt_sha256,
             unchanged_app()
             if _capture(app, names) != before or _capture(source, names) != before:
                 raise ValueError('signing_copy_changed')
-            bridge = {
-                'format': 'jae-signing-input-bridge-v1',
-                'phase': 'UNSIGNED_SIGNING_PREPARATION',
-                'unsigned_receipt_sha256': expected_receipt_sha256,
-                'unsigned_distribution': receipt, 'unsigned_inventory': before,
-                'unsigned_inventory_sha256': _digest(_encoded(before)),
-                'required_publisher_policy': policy, 'publisher_validation': 'NOT_PERFORMED',
-                'signing_order': [{
-                    'path': name, 'input_sha256': before[name]['sha256'],
-                    'classification': 'MACHO_HEADER_CANDIDATE',
-                    'required_identifier': policy['bundle_id'] + '.component.' + _digest(name.encode()),
-                    'required_requirement': _requirement(policy, policy['bundle_id'] + '.component.' + _digest(name.encode())),
-                } for name in planned],
-                'outer_seal': {'path': '.', 'required_identifier': policy['bundle_id'],
-                    'required_requirement': _requirement(policy, policy['bundle_id']),
-                    'must_cover_bridge': BRIDGE, 'phase': 'AFTER_NESTED_SIGNING'},
-                'consumer_admission': 'DISALLOWED', 'notarization': 'NOT_PERFORMED',
-            }
+            bridge = _input_bridge(receipt, expected_receipt_sha256, before, policy)
             bridge_bytes = _encoded(bridge)
             # The extra runtime entry deliberately invalidates the untouched v1
             # runtime manifest, so direct installers refuse before execution.
@@ -289,17 +310,7 @@ def prepare_signing_workspace(distribution, output, *, expected_receipt_sha256,
             if ({key: value for key, value in prepared.items() if key != BRIDGE} != before
                     or prepared[BRIDGE]['sha256'] != _digest(bridge_bytes)):
                 raise ValueError('signing_bridge_changed')
-            result = {
-                'format': 'jae-build-bundle-identity-v2',
-                'phase': 'UNSIGNED_SIGNING_PREPARATION', 'app_name': source.name,
-                'unsigned_receipt_sha256': expected_receipt_sha256,
-                'bridge_path': BRIDGE, 'bridge_sha256': _digest(bridge_bytes),
-                'required_publisher_policy': policy,
-                'files': prepared, 'bundle_sha256': _digest(_encoded(prepared)),
-                'signing': 'unsigned', 'publisher_validation': 'NOT_PERFORMED',
-                'signed_output_identity': None, 'notarization': 'NOT_PERFORMED',
-                'consumer_admission': 'DISALLOWED', 'certification': 'NOT_CERTIFIED',
-            }
+            result = _prepared_identity(source.name, expected_receipt_sha256, bridge_bytes, prepared, policy)
             unchanged_app()
             _write_at(workspace, ORIGINAL_RECEIPT, receipt_bytes)
             if (_capture(app, names | {BRIDGE}) != prepared

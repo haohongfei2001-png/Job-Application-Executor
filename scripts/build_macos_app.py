@@ -38,7 +38,7 @@ def main(argv=None):
     receipt = build_macos_distribution(Path(__file__).resolve().parents[1], **options)
     if args.signing_workspace is not None:
         from executor.autonomy.app_distribution import RECEIPT_NAME, _read_distribution_receipt
-        from scripts.prepare_macos_signing import prepare_signing_workspace
+        from scripts.prepare_macos_signing import prepare_signing_workspace, _encoded, IDENTITY
         import hashlib
         # Pin the exact receipt authored by this invocation, not a candidate's
         # self-declared signer. Preparation never activates signed admission.
@@ -48,8 +48,17 @@ def main(argv=None):
         prepared = prepare_signing_workspace(args.output, args.signing_workspace,
             expected_receipt_sha256=hashlib.sha256(encoded).hexdigest(),
             required_publisher_policy=policy)
+        identity_bytes = _encoded(prepared)
+        if (args.signing_workspace.expanduser().absolute() / IDENTITY).read_bytes() != identity_bytes:
+            raise ValueError("signing_build_preparation_changed")
         receipt = {**receipt, "signing_preparation": {
-            key: prepared[key] for key in ("phase", "bundle_sha256", "consumer_admission")}}
+            **{key: prepared[key] for key in ("phase", "bundle_sha256", "consumer_admission")},
+            "finalization_inputs": {
+                "entry": "scripts/finalize_macos_signing.py",
+                "expected_receipt_sha256": hashlib.sha256(encoded).hexdigest(),
+                "expected_prepared_identity_sha256": hashlib.sha256(identity_bytes).hexdigest(),
+                "expected_policy_sha256": hashlib.sha256(_encoded(policy)).hexdigest(),
+            }}}
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0
 
