@@ -277,6 +277,9 @@ jobs:
               [sys.executable, "-m", "pytest", "-vv", "--durations=15", *selected],
           ).returncode)
           PY
+      - name: Validate unsigned signing preparation boundaries
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft && matrix.suite == 'release_distribution'
+        run: python -m pytest -q tests/test_macos_signing_preparation.py
 
 
   macos_consumer_release:
@@ -317,6 +320,9 @@ jobs:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
         run: python -m pytest -v --durations=15 ${{ matrix.tests }}
 
+      - name: Validate unsigned signing preparation boundaries on hosted Mac
+        if: matrix.suite == 'runtime_distribution'
+        run: python -m pytest -q tests/test_macos_signing_preparation.py
       - name: Complete partial lifecycle-soak runner contract on hosted Mac
         if: matrix.suite == 'runtime_distribution'
         env:

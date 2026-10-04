@@ -1972,3 +1972,41 @@ finally:
         'actual_child_ack':True, 'native_reopen':True, 'tasks_executed':0}
     assert _trusted_bundle(app) and not (f['state']/'service.json').exists()
     assert not list(source.rglob('__pycache__'))
+
+
+def test_hosted_mac_real_build_prepares_noninstallable_signing_workspace(tmp_path, capsys):
+    """Real unsigned build/stager/copy; no signing or prepared-payload execution."""
+    if sys.platform != "darwin":
+        pytest.skip("Real native unsigned builder requires hosted macOS")
+    from scripts import build_macos_app
+    from scripts import prepare_macos_signing as signing
+    from executor.autonomy.consumer import BUNDLE_ID
+    from executor.autonomy.app_distribution import stage_macos_distribution
+    distribution = tmp_path / "unsigned-distribution"
+    workspace = tmp_path / "signing-workspace"
+    assert build_macos_app.main([
+        "--standalone-runtime", os.environ["JAE_STANDALONE_RUNTIME"],
+        "--output", str(distribution), "--signing-workspace", str(workspace),
+        "--publisher-team-id", "SYNTHETIC1", "--publisher-bundle-id", BUNDLE_ID,
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["signing_preparation"]["consumer_admission"] == "DISALLOWED"
+    identity = json.loads((workspace / signing.IDENTITY).read_text())
+    prepared = workspace / (APP_NAME + ".app")
+    assert identity["signed_output_identity"] is None
+    assert identity["publisher_validation"] == "NOT_PERFORMED"
+    assert (workspace / signing.ORIGINAL_RECEIPT).read_bytes() == (distribution / RECEIPT_NAME).read_bytes()
+    # Re-admit the complete original output, not a reconstructed smaller app.
+    with stage_macos_distribution(distribution) as original:
+        names = {p.relative_to(original).as_posix() for p in original.rglob("*")} | {"."}
+        baseline = signing._capture(original, names)
+        complete = signing._capture(prepared, names | {signing.BRIDGE})
+        assert {path: item for path, item in complete.items() if path != signing.BRIDGE} == baseline
+        assert complete == identity["files"]
+    assert _trusted_bundle(prepared) is False
+    from executor.autonomy.consumer import install_macos_bundle
+    result = install_macos_bundle(prepared, platform="darwin",
+        destination=tmp_path / "must-not-install", task_state_root=tmp_path / "must-not-initialize")
+    assert result["ok"] is False
+    assert not (tmp_path / "must-not-install").exists()
+    assert not (tmp_path / "must-not-initialize").exists()
