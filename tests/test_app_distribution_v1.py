@@ -1619,7 +1619,8 @@ finally:
     # without supplying a JSON profile or importing the source-side editor.
     profile_before = _installed_profile_onboarding(target,state,port,home,environment,create=True)
     queue=TaskQueue(state);worker=Worker(queue)
-    task=queue.enqueue(TaskSpec(company='Synthetic DMG',role='Engineer',target_url='https://example.test/dmg',profile_ref='synthetic-profile.json'))
+    task=queue.enqueue(TaskSpec(company='Synthetic DMG',role='Engineer',target_url='https://example.test/dmg',
+        profile_ref=json.loads(profile_before[0])['profile_path']))
     queue.pause(task['task_id'])
     # Synthetic journal fixture; real encryption and decoder, never owner data.
     answers=TaskAnswerStore(queue)
@@ -1628,6 +1629,10 @@ finally:
             db.execute('INSERT INTO task_answer_events(task_id,field_key,ciphertext,answer_version,source,task_revision,created) VALUES(?,?,?,?,?,?,?)',
                 (task['task_id'],field,answers.cipher.encrypt(json.dumps(value).encode()),1,'user_explicit_task',1,2))
     before=queue.tasks();typed=answers.load(task['task_id']);key=(state/'task-answers.key').read_bytes()
+    profile_before=_installed_missing_resume_recovery(target,state,port,home,environment,profile_before)
+    assert queue.tasks()==before and answers.load(task['task_id'])==typed
+    assert _installed_profile_onboarding(target,state,port,home,environment,create=False,
+        expected_resume=profile_before[2])==profile_before
     # The second complete candidate changes only a synthetic source version.
     source=source_app/'Contents/Resources/release'
     with (source/'executor/__init__.py').open('a') as handle:handle.write('\n# SYNTHETIC_DMG_SECOND_VERSION\n')
@@ -1655,12 +1660,13 @@ finally:
     assert consumer._trusted_bundle(target.parent/('.'+APP_NAME+'.app.previous'))
     assert source_manifest(target/'Contents/Resources/release')['source_sha256']==second['source_sha256']
     assert not (state/'service.json').exists()
-    assert _installed_profile_onboarding(target,state,port,home,environment,create=False)==profile_before
+    assert _installed_profile_onboarding(target,state,port,home,environment,create=False,
+        expected_resume=profile_before[2])==profile_before
     assert TaskQueue(state).tasks()==before
     assert TaskAnswerStore(TaskQueue(state)).load(task['task_id'])==typed
 
 
-def _installed_profile_onboarding(target,state,port,home,environment,*,create):
+def _installed_profile_onboarding(target,state,port,home,environment,*,create,expected_resume=None):
     """Actual installed service/UI, synthetic facts and isolated browser only."""
     from playwright.sync_api import sync_playwright, expect
     from executor.autonomy import cli
@@ -1670,7 +1676,7 @@ def _installed_profile_onboarding(target,state,port,home,environment,*,create):
         str(source),'--runtime',str(state),'--port',str(port),'native-entry','--native-smoke']
     base='http://127.0.0.1:'+str(port)
     writes,external,errors=[],[],[]
-    resume=b'%PDF-1.4\nSYNTHETIC_INSTALLED_ONBOARDING\n%%EOF'
+    resume=expected_resume if expected_resume is not None else b'%PDF-1.4\nSYNTHETIC_INSTALLED_ONBOARDING\n%%EOF'
     try:
         opened=subprocess.run(command,cwd=home,env=environment,capture_output=True,text=True,timeout=90)
         assert opened.returncode==0,'installed onboarding native entry did not open'
@@ -1731,6 +1737,71 @@ def _installed_profile_onboarding(target,state,port,home,environment,*,create):
         assert Path(asset['path']).read_bytes()==resume
         assert asset['sha256']==hashlib.sha256(resume).hexdigest()
         return settings_bytes,profile_bytes,resume
+    finally:
+        stopped=cli._stop_owned_service(state,port)
+        assert stopped.get('ok') is True or stopped.get('reason')=='service_record_missing'
+
+
+def _installed_missing_resume_recovery(target,state,port,home,environment,previous):
+    """Lose only a known synthetic managed leaf; repair through installed UI."""
+    from playwright.sync_api import sync_playwright, expect
+    from executor.autonomy import cli
+    from executor.autonomy.first_use_recovery import _owned_request
+    source=target/'Contents/Resources/release'
+    old_profile=Path(json.loads(previous[0])['profile_path'])
+    assert old_profile.parent==state and old_profile.read_bytes()==previous[1]
+    original=json.loads(previous[1]);missing=Path(original['assets']['resume']['path'])
+    assert missing.parent==state and missing.read_bytes()==previous[2]
+    retained=home/'retained-synthetic-original-resume.pdf'
+    assert not retained.exists();missing.rename(retained)
+    command=[str(target/'Contents/Resources/runtime/bin/python'),'-I','-B','-c',CLI_ENTRY_SCRIPT,
+        str(source),'--runtime',str(state),'--port',str(port),'native-entry','--native-smoke']
+    base='http://127.0.0.1:'+str(port)
+    replacement=b'%PDF-1.4\nSYNTHETIC_EXPLICIT_REPAIR\n%%EOF'
+    writes,external,errors=[],[],[]
+    try:
+        opened=subprocess.run(command,cwd=home,env=environment,capture_output=True,text=True,timeout=90)
+        assert opened.returncode==0,'installed missing-resume repair entry did not open'
+        health=_owned_request(state,port,'/health')
+        assert health['ok'] is True and health['loaded_source_sha256']==source_manifest(source)['source_sha256']
+        with sync_playwright() as playwright:
+            browser=playwright.chromium.launch(headless=True)
+            try:
+                context=browser.new_context(viewport={'width':1000,'height':850})
+                def local_only(route):
+                    if route.request.url.startswith(base+'/'):route.continue_()
+                    else:external.append(route.request.url);route.abort()
+                context.route('**/*',local_only)
+                page=context.new_page()
+                page.on('pageerror',lambda error:errors.append(str(error)))
+                page.on('request',lambda request:writes.append(request.url) if request.method=='POST' else None)
+                ticket=_owned_request(state,port,'/v1/ui-ticket',{})['ticket']
+                page.goto(base+'/ui-login?ticket='+ticket)
+                page.locator('#profile-setup').click()
+                expect(page.locator('#profile-editor-open')).to_be_enabled()
+                page.locator('#profile-editor-open').click()
+                expect(page.locator('#profile-editor-status')).to_contain_text('简历文件缺失')
+                expect(page.locator('#profile-editor-resume')).to_be_enabled()
+                expect(page.locator('#profile-editor-save')).to_be_disabled()
+                page.locator('#profile-editor-resume').set_input_files({
+                    'name':'replacement.pdf','mimeType':'application/pdf','buffer':replacement})
+                assert writes==[] and (state/'settings.json').read_bytes()==previous[0]
+                page.locator('#profile-editor-save').click()
+                expect(page.locator('#profile-editor-status')).to_contain_text('已保存在本机并重新读取确认')
+                assert writes==[base+'/ui/api/profile-editor'] and external==[] and errors==[]
+                expect(page.locator('#profile-editor-field-0')).to_have_value('SYNTHETIC_INSTALLED_PERSON')
+            finally:browser.close()
+        new_settings=(state/'settings.json').read_bytes()
+        new_profile=Path(json.loads(new_settings)['profile_path'])
+        assert new_profile.parent==state and new_profile!=old_profile
+        new_bytes=new_profile.read_bytes();updated=json.loads(new_bytes)
+        assert updated['fields']==original['fields']
+        assert old_profile.read_bytes()==previous[1] and retained.read_bytes()==previous[2]
+        assert not missing.exists()
+        new_resume=Path(updated['assets']['resume']['path'])
+        assert new_resume.parent==state and new_resume!=missing and new_resume.read_bytes()==replacement
+        assert updated['assets']['resume']['sha256']==hashlib.sha256(replacement).hexdigest()
+        return new_settings,new_bytes,replacement
     finally:
         stopped=cli._stop_owned_service(state,port)
         assert stopped.get('ok') is True or stopped.get('reason')=='service_record_missing'

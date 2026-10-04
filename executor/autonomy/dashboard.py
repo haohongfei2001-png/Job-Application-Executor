@@ -140,7 +140,10 @@ button:disabled{opacity:.45}.empty{color:#94a3b8;font-size:13px}.error{color:#b9
   <p><strong>仅用于以后新任务，已有任务仍使用原资料</strong></p>
   <p>这里在本机保存你明确修改的内容，不会发送到招聘网站。已记录不代表资料正确，请本人核对。证件号码不在此展示或编辑。</p>
   <p id="profile-editor-status" role="status"></p>
-  <div id="profile-editor-fields" class="profile-editor-fields"></div>
+  <details id="profile-editor-preserved" hidden>
+    <summary id="profile-editor-preserved-summary" hidden>查看保留的基本资料（只读）</summary>
+    <div id="profile-editor-fields" class="profile-editor-fields"></div>
+  </details>
   <p id="profile-editor-resume-status"></p>
   <label for="profile-editor-resume">选择或替换简历（PDF、DOCX 或 DOC）</label>
   <input id="profile-editor-resume" type="file" accept=".pdf,.docx,.doc" disabled>
@@ -357,16 +360,20 @@ function validEditorState(data){
   if(!data||data.schema_version!==1||!editorHash(data.settings_version)
     ||!(data.profile_version===null||editorHash(data.profile_version))
     ||!['canonical','new','legacy'].includes(data.mode)||data.future_tasks_only!==true||data.submit_capability!==false
-    ||!['ready','reconciliation_required'].includes(data.admission_status)||!Array.isArray(data.fields)
-    ||!data.resume||!['missing','recorded_locally','unsupported'].includes(data.resume.status)
+    ||!['ready','reconciliation_required','resume_replacement_required'].includes(data.admission_status)||!Array.isArray(data.fields)
+    ||!data.resume||!['missing','recorded_locally','unsupported','missing_managed'].includes(data.resume.status)
     ||!(data.resume.kind===null||['resume_pdf','resume_docx','resume_doc'].includes(data.resume.kind)))return false;
+  const repair=data.resume.status==='missing_managed';
+  if(repair&&(data.mode!=='canonical'||!editorHash(data.profile_version)||data.resume.kind===null
+    ||!['resume_replacement_required','reconciliation_required'].includes(data.admission_status)))return false;
+  if(!repair&&data.admission_status==='resume_replacement_required')return false;
   if(data.mode==='legacy')return data.fields.length===0;
   return data.fields.length===editorFieldSpec.length&&editorFieldSpec.every(([key,_,type],index)=>{
     const field=data.fields[index];
     if(!field||field.key!==key||field.type!==type||!['missing','supported','unsupported'].includes(field.status)
       ||typeof field.editable!=='boolean')return false;
     if(field.status==='unsupported')return field.editable===false&&field.value===null;
-    if(!field.editable)return false;
+    if(repair?field.editable:!field.editable)return false;
     return editorSupported(type,field.value);
   });
 }
@@ -383,7 +390,7 @@ function editorChanges(){
 }
 function editorControls(){
   const blocked=uiSessionExpired||editorBusy||editorUncertain||!editorState||editorState.mode==='legacy'
-    ||editorState.admission_status!=='ready';
+    ||!['ready','resume_replacement_required'].includes(editorState.admission_status);
   for(const input of editorFields.querySelectorAll('[data-editor-key]'))
     input.disabled=blocked||input.dataset.editorEditable!=='true';
   editorResume.disabled=blocked;
@@ -395,11 +402,15 @@ function editorControls(){
 function clearEditor(){
   editorEpoch++;editorState=null;editorBusy=false;editorUncertain=false;
   editorFields.replaceChildren();editorResume.value='';editorResumeStatus.textContent='';editorStatus.textContent='';
+  document.getElementById('profile-editor-preserved').hidden=true;
   editorVersion.textContent='';editorVersionDetails.hidden=true;editorVersionDetails.open=false;editorControls();
 }
 function renderEditor(data){
   editorState=data;editorFields.replaceChildren();editorResume.value='';
-  editorUncertain=data.admission_status!=='ready';
+  editorUncertain=data.admission_status==='reconciliation_required';
+  const preserved=document.getElementById('profile-editor-preserved');
+  preserved.hidden=data.mode==='legacy';preserved.open=data.resume.status!=='missing_managed';
+  document.getElementById('profile-editor-preserved-summary').hidden=data.resume.status!=='missing_managed';
   if(data.mode!=='legacy')editorFieldSpec.forEach(([key,label,type],index)=>{
     const field=data.fields[index],multiline=type==='text_list'||(typeof field.value==='string'&&field.value.includes('\n')),
       wrapper=document.createElement('label'),caption=document.createElement('span'),
@@ -410,17 +421,20 @@ function renderEditor(data){
     input.maxLength=type==='text_list'?12831:4096;
     input.value=editorText(field.value,type);input.addEventListener('input',editorControls);
     note.id=input.id+'-status';input.setAttribute('aria-describedby',note.id);
-    note.textContent=field.status==='unsupported'?'此项记录暂不支持在这里修改，原记录将保留；此处不展示。':
+    note.textContent=data.resume.status==='missing_managed'?'本次只替换缺失的简历，其他资料保持不变。':
+      field.status==='unsupported'?'此项记录暂不支持在这里修改，原记录将保留；此处不展示。':
       field.status==='missing'?'缺少记录，请本人填写并核对。':'已记录在本机，仍需本人核对。';
     wrapper.append(caption,input,note);editorFields.append(wrapper);
   });
   const kinds={resume_pdf:'PDF',resume_docx:'DOCX',resume_doc:'DOC'};
   editorResumeStatus.textContent=data.resume.status==='recorded_locally'?
     '当前简历：本机已记录 '+(kinds[data.resume.kind]||'文件')+'，内容仍需本人核对。':
+    data.resume.status==='missing_managed'?'当前简历：本机保存的文件没有找到。请选择新的简历文件并明确保存；不会覆盖旧资料或旧任务。':
     data.resume.status==='missing'?'当前简历：尚无本机记录。':'当前简历记录暂不支持在此核对；未选择替换时原记录保持不变。';
   editorVersion.textContent='资料版本：'+(data.profile_version||'尚未保存')+'；设置版本：'+data.settings_version;
   editorVersionDetails.hidden=false;
   editorStatus.textContent=editorUncertain?'上次保存状态需要核对，请使用“重新读取并核对”；不会自动重试。':
+    data.resume.status==='missing_managed'?'资料记录已读取，但简历文件缺失。本次仅保存你新选择的简历；未修复前不能用这份资料添加新任务。':
     data.mode==='legacy'?'旧版资料格式暂不支持逐项编辑，请关闭后通过资料 JSON 导入完整的新版资料。原资料没有修改。':
     data.mode==='new'?'尚无资料。填写后明确保存，之后的新任务才会使用。':'已读取本机资料。仅保存你明确修改的项目；清空某项会移除该项记录。';
   editorControls();
@@ -455,13 +469,15 @@ function editorUnconfirmed(){
 editorSave.onclick=async()=>{
   if(editorSave.disabled||uiSessionExpired||!editorState)return;
   const epoch=editorEpoch,state=editorState,edits=editorChanges(),file=editorResume.files[0];
+  const repair=state.resume.status==='missing_managed';
+  if(repair&&(!file||Object.keys(edits).length))return;
   const extension=file?.name.toLowerCase().match(/\.(pdf|docx|doc)$/)?.[1];
   if(file&&(!extension||!file.size||file.size>=20*1024*1024)){
     editorStatus.textContent='请选择非空 PDF、DOCX 或 DOC 文件，文件与资料合计须小于 20 MiB。';return;
   }
   const kinds={pdf:'resume_pdf',docx:'resume_docx',doc:'resume_doc'};
   const metadata={schema_version:1,expected_settings_version:state.settings_version,expected_profile_version:state.profile_version,
-    edits,resume_action:file?'replace':'keep',resume_kind:file?kinds[extension]:null};
+    edits,resume_action:repair?'replace_missing':file?'replace':'keep',resume_kind:file?kinds[extension]:null};
   if(Object.entries(edits).some(([key,value])=>!editorSupported(editorFieldSpec.find(item=>item[0]===key)[2],value))){
     editorStatus.textContent='请检查字段格式：每项最多 2048 个字符，城市最多 32 行且每行最多 200 个字符。';return;
   }
@@ -502,8 +518,11 @@ editorReconcile.onclick=async()=>{
     const response=await uiRequest('/ui/api/profile-editor/reconcile',{method:'POST',credentials:'same-origin',
       headers:{'Content-Type':'application/json'},body:'{}'}),data=await response.json();
     if(uiSessionExpired||epoch!==editorEpoch||!editorDialog.open)return;
-    if(!response.ok||data.reconciliation_status!=='reconciled'||!validEditorState(data)||data.admission_status!=='ready')throw new Error();
-    renderEditor(data);editorStatus.textContent='已重新读取本机当前记录。请逐项核对后再决定是否修改；刚才未确认的修改不会自动重试。';
+    if(!response.ok||data.reconciliation_status!=='reconciled'||!validEditorState(data)
+      ||!['ready','resume_replacement_required'].includes(data.admission_status))throw new Error();
+    renderEditor(data);editorStatus.textContent=data.resume.status==='missing_managed'?
+      '已重新读取本机当前记录，简历文件仍然缺失。请选择新的简历后明确保存；其他资料保持不变。':
+      '已重新读取本机当前记录。请逐项核对后再决定是否修改；刚才未确认的修改不会自动重试。';
   }catch(_){if(!uiSessionExpired&&epoch===editorEpoch&&editorDialog.open)
     editorStatus.textContent='当前记录仍未确认，请关闭并重新打开应用后检查。不会自动重试保存。';
   }finally{if(epoch===editorEpoch){editorBusy=false;editorControls();}}

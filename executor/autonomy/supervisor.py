@@ -60,9 +60,10 @@ class Supervisor:
                 "profile_selected": True, "submit_capability": False}
 
     def profile_editor_state(self):
-        _current, view = profile_editor.editor_state()
+        _current, view = profile_editor.editor_state(_allow_missing_resume=True)
         return {**view, "admission_status": "reconciliation_required" if getattr(
-            self.manager, "_profile_selection_uncertain", False) else "ready"}
+            self.manager, "_profile_selection_uncertain", False) else
+            "resume_replacement_required" if view["resume"]["status"] == "missing_managed" else "ready"}
 
     def configure_profile_editor(self, metadata, resume):
         with self._command_lock:
@@ -86,14 +87,15 @@ class Supervisor:
     def reconcile_profile_editor(self):
         with self._command_lock:
             try:
-                current, view = profile_editor.editor_state()
+                current, view = profile_editor.editor_state(_allow_missing_resume=True)
             except Exception:
                 self.manager._profile_selection_uncertain = True
                 raise profile_editor.EditorConflict() from None
             self.manager.settings = current
             self.worker.settings = current
             self.manager._profile_selection_uncertain = False
-            return {**view, "reconciliation_status": "reconciled", "admission_status": "ready"}
+            return {**view, "reconciliation_status": "reconciled", "admission_status":
+                    "resume_replacement_required" if view["resume"]["status"] == "missing_managed" else "ready"}
 
     def load_configured_provider(self):
         """Explicit credential initialization, no model call or task mutation.
