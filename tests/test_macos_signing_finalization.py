@@ -39,6 +39,12 @@ def finish(prepared, **changes):
     return finalization.finalize_signing_workspace(dist, workspace, **{**kwargs, **changes})
 
 
+def nonapple_verifier_boundary(monkeypatch):
+    # A module-local proxy leaves the shared sys module and real preparation
+    # metadata checks untouched on every host. The actual verifier still runs.
+    monkeypatch.setattr(finalization, 'sys', SimpleNamespace(platform='jae-test-nonapple'))
+
+
 def no_output(prepared):
     assert not (prepared[1] / finalization.FINAL_IDENTITY).exists()
 
@@ -113,7 +119,7 @@ def test_finalization_rejects_aliases_extra_paths_and_metadata(prepared, tmp_pat
 
 
 def test_real_nonapple_host_refuses_without_spawning_or_output(prepared, monkeypatch):
-    monkeypatch.setattr(finalization.sys, 'platform', 'linux')
+    nonapple_verifier_boundary(monkeypatch)
     monkeypatch.setattr(subprocess, 'run', lambda *a, **k: pytest.fail('Apple tool unavailable'))
     with pytest.raises(ValueError, match='signing_static_verifier_requires_macos'):
         finish(prepared)
@@ -218,7 +224,7 @@ def test_build_preparation_report_feeds_actual_finalizer_cli(artifact, tmp_path,
         '--publisher-team-id', POLICY['team_id'], '--publisher-bundle-id', BUNDLE_ID]) == 0
     pins = json.loads(capsys.readouterr().out)['signing_preparation']['finalization_inputs']
     assert pins.pop('entry') == 'scripts/finalize_macos_signing.py'
-    monkeypatch.setattr(finalization.sys, 'platform', 'linux')
+    nonapple_verifier_boundary(monkeypatch)
     monkeypatch.setattr(subprocess, 'run', lambda *a, **k: pytest.fail('no Apple on Linux'))
     args = ['--distribution', str(output), '--workspace', str(workspace),
             '--publisher-team-id', POLICY['team_id'], '--publisher-bundle-id', BUNDLE_ID]
