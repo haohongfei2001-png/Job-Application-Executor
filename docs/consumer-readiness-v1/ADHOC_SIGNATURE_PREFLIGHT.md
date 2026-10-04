@@ -49,8 +49,28 @@ but dropped a zero-length xattr. This is a real observed transport failure.
 The next bounded observation retains it as FAIL_INVENTORY_LOSS in report.json
 and continues independent probes. Tamper cases still require an exact, valid
 baseline; any loss makes that case inconclusive before mutation. No copy repair,
-attribute exclusion or transport PASS is substituted. Stop after that observation,
-including an incomplete/refused decision; do not grow further preparation loops.
+attribute exclusion or transport PASS is substituted.
+
+The third attempt, run 37179458231 at 57ca4576, passed 23 contracts and failed
+one report test before signing. That test mocked every platform command,
+including `ditto`, then attempted to inventory its never-created destination.
+No product signing or tamper observation was produced by any of these three
+attempts. The ordinary application CI result is not signature evidence.
+
+The resumed correction separates that pure report test from all real platform
+effects. Contracts now run before standalone-runtime preparation. A small real
+Apple-tool control then signs a freshly generated script-main app, verifies its
+baseline, observes metadata/bytes/tar transport, and modifies the exact verified
+original script to measure rejection. It never executes that script. Any failure
+to establish a valid signature or reject the modified script stops before runtime
+download and product build. Its separate report is explicitly synthetic platform
+evidence, not evidence for the product's bundle or dependencies. Both sanitized
+reports are retained; empty-attribute loss remains a failed transport observation.
+
+Only after those inexpensive checks pass does the existing bounded product
+experiment run once on this candidate. Stop at that observation's supported
+decision, including an incomplete or refused result, and reassess the next step
+from actual evidence rather than repeatedly rerunning the same chain.
 
 Actual Developer ID signing and notarization still require a separately approved
 Apple identity/account workflow. A real consumer release additionally needs

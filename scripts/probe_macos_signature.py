@@ -356,6 +356,69 @@ def tamper_cases(app, work, pinned):
     return results
 
 
+def platform_control(work, report, save):
+    """Cheap real Apple-tool control, before downloading/building the product.
+
+    The script is never executed. This isolates the platform substrate from
+    product layout, third-party Mach-O payloads and build provenance.
+    """
+    report['empty_attribute_transport_control'] = attribute_transport_control(work / 'attribute-control')
+    save()
+    app = work / 'Synthetic.app'
+    launcher = app / 'Contents/MacOS/Synthetic'
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes(b'#!/bin/zsh\n# Synthetic signing control; never executed.\nexit 0\n')
+    launcher.chmod(0o755)
+    (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+        'CFBundleIdentifier': 'org.jae.preflight.synthetic',
+        'CFBundleName': 'Synthetic', 'CFBundlePackageType': 'APPL',
+        'CFBundleExecutable': 'Synthetic', 'CFBundleVersion': '1'}))
+    before = inventory(app)
+    report['seal'] = seal(app)
+    report['verify'] = verify(app)
+    pinned = inventory(app)
+    report['unsigned_inventory'] = before
+    report['signed_inventory'] = pinned
+    report['signature_delta'] = changes(before, pinned)
+    save()
+    if report['seal']['returncode'] or report['verify']['returncode']:
+        report['decision'] = 'SYNTHETIC_SCRIPT_SEAL_REFUSED_PRODUCT_NOT_RUN'
+        return False
+    copied = work / 'metadata-copy'
+    report['metadata_copy'] = metadata_copy(app, copied)
+    report['metadata_copy']['verify'] = verify(copied)
+    copied = work / 'bytes-copy'
+    byte_copy(app, copied)
+    report['bytes_copy'] = {'delta': changes(pinned, inventory(copied)), 'verify': verify(copied)}
+    archive = work / 'control.tar.gz'
+    raw_archive(app, archive)
+    extracted = work / 'archive-copy'; extracted.mkdir()
+    with tarfile.open(archive) as source:
+        source.extractall(extracted, filter='data')
+    report['archive_copy'] = {'delta': changes(pinned, inventory(extracted / app.name)),
+                              'verify': verify(extracted / app.name)}
+    save()
+    # Mutate the exact verified original, so transport loss cannot masquerade
+    # as tamper detection. No copied or already-invalid baseline is admitted.
+    baseline_matches = inventory(app) == pinned
+    baseline_verify = verify(app)
+    report['tamper'] = {'baseline_inventory_matches': baseline_matches,
+                        'baseline_verify': baseline_verify}
+    if not baseline_matches or baseline_verify['returncode']:
+        report['tamper']['status'] = 'INCONCLUSIVE_BASELINE_NOT_ESTABLISHED'
+        report['decision'] = 'SYNTHETIC_BASELINE_CHANGED_PRODUCT_NOT_RUN'
+        return False
+    with launcher.open('ab') as handle:
+        handle.write(b'# JAE SYNTHETIC TAMPER\n')
+    report['tamper'].update(status='MEASURED', pinned_inventory_matches=inventory(app) == pinned,
+                            verify=verify(app))
+    detected = (not report['tamper']['pinned_inventory_matches']
+                and report['tamper']['verify']['returncode'] != 0)
+    report['decision'] = ('PLATFORM_CONTROL_MEASURED_PRODUCT_EXPERIMENT_STILL_REQUIRED' if detected
+                          else 'SYNTHETIC_TAMPER_NOT_REJECTED_PRODUCT_NOT_RUN')
+    return detected
+
+
 def experiment(repo, runtime, work, report, save):
     from executor.autonomy.app_distribution import build_macos_distribution, stage_macos_distribution
     report['empty_attribute_transport_control'] = attribute_transport_control(work / 'attribute-control')
@@ -419,13 +482,16 @@ def experiment(repo, runtime, work, report, save):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--standalone-runtime', type=Path, required=True)
+    parser.add_argument('--standalone-runtime', type=Path)
+    parser.add_argument('--platform-control', action='store_true')
     parser.add_argument('--work', type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.platform_control == (args.standalone_runtime is not None):
+        parser.error('choose --platform-control or --standalone-runtime')
     if sys.platform != 'darwin' or platform.machine() != 'arm64':
         raise SystemExit('Apple Silicon hosted Mac required')
     repo = Path(__file__).resolve().parents[1]
-    runtime = args.standalone_runtime.resolve(strict=True)
+    runtime = args.standalone_runtime.resolve(strict=True) if args.standalone_runtime else None
     work = args.work.absolute()
     if any(p.is_symlink() for p in (work, *work.parents)) or work.exists():
         raise SystemExit('fresh canonical work directory required')
@@ -440,6 +506,7 @@ def main(argv=None):
     os.environ.clear(); os.environ.update(allowed)
     tempfile.tempdir = str(temporary)
     report = {'format': 'jae-adhoc-signature-experiment-v1', 'status': 'INCOMPLETE',
+        'scope': 'SYNTHETIC_PLATFORM_CONTROL' if args.platform_control else 'PRODUCT_EXPERIMENT',
         'publisher_trust': 'ABSENT_ADHOC_ONLY', 'notarization': 'NOT_PERFORMED',
         'certification': 'NOT_CERTIFIED', 'production_admission_changed': False,
         'platform': platform.platform(), 'interpreter': platform.python_version(),
@@ -449,12 +516,19 @@ def main(argv=None):
         # Output paths refer only to repository-owned/synthetic files, sanitized
         # even in fixed-tool diagnostics. No file contents, HOME or token state.
         text = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
-        for original, replacement in ((str(work), '$WORK'), (str(repo), '$SOURCE'), (str(runtime), '$RUNTIME')):
+        replacements = [(str(work), '$WORK'), (str(repo), '$SOURCE')]
+        if runtime is not None:
+            replacements.append((str(runtime), '$RUNTIME'))
+        for original, replacement in replacements:
             text = text.replace(original, replacement)
         (work / 'report.json').write_text(text + '\n', encoding='utf-8')
     save()
+    admitted = True
     try:
-        experiment(repo, runtime, work, report, save)
+        if args.platform_control:
+            admitted = platform_control(work, report, save)
+        else:
+            experiment(repo, runtime, work, report, save)
         report['status'] = 'OBSERVATION_COMPLETE'
         save()
     except BaseException as error:
@@ -463,7 +537,7 @@ def main(argv=None):
         save()
         raise
     print(json.dumps({k: report[k] for k in ('status', 'decision', 'publisher_trust', 'notarization')}))
-    return 0
+    return 0 if admitted else 1
 
 
 if __name__ == '__main__':

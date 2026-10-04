@@ -188,15 +188,21 @@ def test_metadata_control_reports_exact_or_observed_empty_attribute_loss(tmp_pat
 
 
 def test_attribute_transport_failure_is_kept_in_report(tmp_path, monkeypatch):
-    monkeypatch.setattr(probe, 'command', lambda *a, **k: {'returncode': 0})
-    actual_copy = probe.metadata_copy
-    def copy_with_loss(source, target):
-        actual_copy(source, target)
-        return {'status': 'FAIL_INVENTORY_LOSS', 'delta': {'changed': ['synthetic']}}
-    monkeypatch.setattr(probe, 'metadata_copy', copy_with_loss)
+    # Pure report contract: mock every platform boundary. In the previous Mac
+    # run a mocked command disabled ditto, then real inventory read its absent
+    # destination. Real xattr/ditto behavior belongs to the separate control.
+    calls = []
+    monkeypatch.setattr(probe, 'command', lambda argv: calls.append(argv) or {'returncode': 0})
+    before = {'synthetic': {'xattrs': {'empty': 'digest'}}}
+    after = {'synthetic': {'xattrs': {}}}
+    monkeypatch.setattr(probe, 'inventory', lambda path: after if path.name == 'copy' else before)
+    monkeypatch.setattr(probe, 'metadata_copy', lambda *a: {
+        'status': 'FAIL_INVENTORY_LOSS', 'delta': {'changed': ['synthetic']}})
     report = probe.attribute_transport_control(tmp_path / 'control')
     assert report['status'] == 'FAIL_INVENTORY_LOSS'
-    assert report['before'] and report['after']
+    assert report['before'] == before and report['after'] == after
+    assert len(calls) == 2 and all(argv[:3] == ['/usr/bin/xattr', '-w', '-x'] for argv in calls)
+    assert not (tmp_path / 'control/copy').exists()
 
 
 @pytest.mark.parametrize('failure', ['read_error', 'growth', 'bound', 'duplicate'])
@@ -239,3 +245,60 @@ def test_production_install_not_called_if_intake_unexpectedly_accepts(tmp_path, 
     monkeypatch.setattr(app_distribution, 'install_macos_distribution', forbidden)
     with pytest.raises(ValueError, match='signed_intake_unexpectedly_admitted'):
         probe.production_routes(app, {}, tmp_path / 'routes')
+
+
+@pytest.mark.parametrize('outcome', ['valid', 'seal_refused', 'initial_verify_refused',
+                                     'baseline_changed', 'tamper_accepted'])
+def test_platform_control_keeps_reports_and_requires_valid_tamper_baseline(tmp_path, monkeypatch, outcome):
+    # Pure orchestration test. Native commands are forbidden, rather than
+    # selectively mocked while filesystem consumers still expect their effects.
+    monkeypatch.setattr(probe, 'command', lambda *a, **k: pytest.fail('unexpected platform command'))
+    loss = {'status': 'FAIL_INVENTORY_LOSS', 'delta': {'changed': ['synthetic']}}
+    monkeypatch.setattr(probe, 'attribute_transport_control', lambda *a: loss)
+    monkeypatch.setattr(probe, 'metadata_copy', lambda source, target: (
+        probe.byte_copy(source, target) or {'status': 'PASS_EXACT'}))
+    def synthetic_seal(app):
+        directory = app / 'Contents/_CodeSignature'; directory.mkdir()
+        (directory / 'CodeResources').write_bytes(b'SYNTHETIC NOT A SIGNATURE')
+        return {'returncode': int(outcome == 'seal_refused')}
+    monkeypatch.setattr(probe, 'seal', synthetic_seal)
+    original_verifies = 0
+    def synthetic_verify(app):
+        nonlocal original_verifies
+        if app == tmp_path / 'Synthetic.app':
+            original_verifies += 1
+            if outcome == 'initial_verify_refused' or (outcome == 'baseline_changed' and original_verifies == 2):
+                return {'returncode': 1}
+        modified = b'JAE SYNTHETIC TAMPER' in (app / 'Contents/MacOS/Synthetic').read_bytes()
+        return {'returncode': int(modified and outcome != 'tamper_accepted')}
+    monkeypatch.setattr(probe, 'verify', synthetic_verify)
+    report, saved = {}, []
+    admitted = probe.platform_control(tmp_path, report, lambda: saved.append(json.loads(json.dumps(report))))
+    assert admitted == (outcome == 'valid')
+    assert report['empty_attribute_transport_control'] == loss
+    assert saved and saved[0]['empty_attribute_transport_control'] == loss
+    if outcome in ('seal_refused', 'initial_verify_refused'):
+        assert 'metadata_copy' not in report and 'tamper' not in report
+        assert report['decision'] == 'SYNTHETIC_SCRIPT_SEAL_REFUSED_PRODUCT_NOT_RUN'
+    elif outcome == 'baseline_changed':
+        assert report['tamper']['status'] == 'INCONCLUSIVE_BASELINE_NOT_ESTABLISHED'
+        assert 'pinned_inventory_matches' not in report['tamper']
+        assert b'JAE SYNTHETIC TAMPER' not in (tmp_path / 'Synthetic.app/Contents/MacOS/Synthetic').read_bytes()
+    else:
+        assert report['tamper']['baseline_inventory_matches'] is True
+        assert report['tamper']['baseline_verify']['returncode'] == 0
+        assert report['tamper']['status'] == 'MEASURED'
+        assert report['tamper']['pinned_inventory_matches'] is False
+        assert report['tamper']['verify']['returncode'] == int(outcome == 'valid')
+
+
+def test_platform_control_precedes_runtime_download_and_product_build():
+    workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/macos-signature-preflight.yml').read_text()
+    contracts = workflow.index('python -m pytest -q tests/test_macos_signature_probe.py')
+    platform_control = workflow.index('python scripts/probe_macos_signature.py --platform-control')
+    download = workflow.index('python scripts/prepare_standalone_runtime.py')
+    product = workflow.index('python scripts/probe_macos_signature.py --standalone-runtime')
+    assert contracts < platform_control < download < product
+    assert 'continue-on-error' not in workflow
+    assert '${{ runner.temp }}/jae-platform-control/report.json' in workflow
+    assert '${{ runner.temp }}/jae-adhoc-preflight/report.json' in workflow
