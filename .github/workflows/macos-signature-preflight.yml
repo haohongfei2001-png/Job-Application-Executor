@@ -1,0 +1,46 @@
+name: Ad-hoc Mac signature preflight (not a release)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - scripts/probe_macos_signature.py
+      - tests/test_macos_signature_probe.py
+      - .github/workflows/macos-signature-preflight.yml
+
+permissions:
+  contents: read
+
+jobs:
+  adhoc_observation:
+    if: github.head_ref == 'research/adhoc-signature-preflight' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install existing pinned build dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Probe contracts (no Apple trust claim)
+        run: python -m pytest -q tests/test_macos_signature_probe.py
+      - name: Cheap real Apple-tool control (no product build)
+        run: python scripts/probe_macos_signature.py --platform-control --work "$RUNNER_TEMP/jae-platform-control"
+      - name: Prepare existing digest-pinned standalone runtime
+        run: python scripts/prepare_standalone_runtime.py "$RUNNER_TEMP/jae-signature-runtime"
+      - name: One disposable ad-hoc experiment
+        run: python scripts/probe_macos_signature.py --standalone-runtime "$RUNNER_TEMP/jae-signature-runtime/python" --work "$RUNNER_TEMP/jae-adhoc-preflight"
+      - name: Retain only sanitized observation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jae-adhoc-NOT-TRUSTED-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/jae-platform-control/report.json
+            ${{ runner.temp }}/jae-adhoc-preflight/report.json
+          if-no-files-found: error
+          retention-days: 7
