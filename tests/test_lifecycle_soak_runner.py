@@ -221,3 +221,164 @@ def test_real_preparation_delay_is_not_counted_as_observation(tmp_path):
     assert report["observed_seconds"] < total - 4
     assert report["health_observations"] >= 1 and report["completed_cycles"] >= 1
     assert report["full_z04_pass"] is False and report["continuous_24h_observed"] is False
+
+
+# Read-only interruption observability belongs to the same complete owning file
+# already selected by the existing Linux and hosted Mac jobs.
+def _inspector():
+    import importlib.util
+    path = SCRIPT.with_name("inspect_lifecycle_soak.py")
+    spec = importlib.util.spec_from_file_location("soak_inspector", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _checkpoint_chain(tmp_path, *, terminal="COMPLETED_PARTIAL_WINDOW", mutate=None):
+    root = tmp_path / "checkpoints"
+    root.mkdir(mode=0o700)
+    records = []
+    for index in range(3):
+        records.append({
+            "format": "jae-lifecycle-soak-v1", "checkpoint": index,
+            "status": terminal if index == 2 else "RUNNING",
+            "certification": "NOT_CERTIFIED", "full_z04_pass": False,
+            "continuous_24h_observed": False,
+            "observed_seconds": float(index), "requested_seconds": 2.0,
+            "completed_cycles": index, "health_observations": index,
+            "tasks": 3, "source_sha256": "a" * 64, "harness_sha256": "b" * 64,
+            "requirements_sha256": "c" * 64, "source_git_head": "d" * 40,
+            "checkout_dirty": False, "started_at": "2026-10-03T00:00:00+00:00",
+            "cleanup": "child_exited_and_lock_released" if index == 2 else "owned_child_running",
+        })
+    if mutate:
+        mutate(records)
+    previous_bytes = 0
+    for index, record in enumerate(records):
+        total = previous_bytes
+        while True:
+            record["evidence_bytes"] = total
+            raw = (json.dumps(record, sort_keys=True) + "\n").encode()
+            next_total = previous_bytes + len(raw)
+            if next_total == total:
+                break
+            total = next_total
+        path = root / f"checkpoint-{index:06d}.json"
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        previous_bytes = total
+    return root
+
+
+def test_inspector_never_converts_missing_terminal_or_elapsed_gap_to_completion(tmp_path):
+    root = _checkpoint_chain(tmp_path, terminal="RUNNING")
+    last = root / "checkpoint-000002.json"
+    report = _inspector().inspect(root, now=last.stat().st_mtime + 86400)
+    assert report["classification"] == "INCOMPLETE_NO_TERMINAL"
+    assert report["freshness"] == "STALE"
+    assert report["actual_observation_seconds_reported"] == 2
+    assert report["terminal_report_present"] is False
+    assert report["execution_independently_verified"] is False
+    assert report["full_z04_pass"] is False
+
+
+def test_inspector_complete_report_remains_self_reported_and_ignores_private_runtime(tmp_path, monkeypatch):
+    root = _checkpoint_chain(tmp_path)
+    runtime = root / "runtime"
+    runtime.mkdir(mode=0o700)
+    for name in ("auth.token", "task-answers.key", "service.json", "tasks.sqlite3", "service.log"):
+        (runtime / name).write_text("PRIVATE_NEVER_READ")
+    module = _inspector()
+    original_open = os.open
+    opened = []
+    def audited_open(path, *args, **kwargs):
+        opened.append(str(path))
+        assert "runtime" not in str(path)
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(module.os, "open", audited_open)
+    report = module.inspect(root)
+    assert report["classification"] == "COMPLETED_PARTIAL_REPORTED"
+    assert report["execution_independently_verified"] is False
+    assert report["runtime_files_read"] is report["runtime_actions_performed"] is False
+    assert report["evidence_bytes"] == sum(p.stat().st_size for p in root.glob("checkpoint-*.json"))
+    assert report["full_z04_pass"] is False
+    assert "PRIVATE_NEVER_READ" not in json.dumps(report)
+    assert len(opened) == 4
+
+
+@pytest.mark.parametrize("status", ["FAILED", "INTERRUPTED"])
+def test_inspector_retains_failure_and_interruption(tmp_path, status):
+    report = _inspector().inspect(_checkpoint_chain(tmp_path, terminal=status))
+    assert report["classification"] == status + "_REPORTED"
+    assert report["full_z04_pass"] is False
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("checkpoint", 99, "checkpoint_index"),
+    ("source_sha256", "e" * 64, "identity_changed"),
+    ("requested_seconds", 5.0, "identity_changed"),
+    ("observed_seconds", .5, "progress_regressed"),
+    ("completed_cycles", 0, "progress_regressed"),
+    ("health_observations", False, "invalid_progress"),
+    ("observed_seconds", float("nan"), "invalid_duration"),
+    ("status", "PRIVATE_SECRET_MARKER", "unknown_status"),
+    ("cleanup", "forced_owned_child_cleanup", "inconsistent_completion"),
+    ("full_z04_pass", True, "certification_claim"),
+    ("continuous_24h_observed", True, "inconsistent_24h_claim"),
+])
+def test_inspector_rejects_inconsistent_chain_without_echoing_private_values(tmp_path, field, value, reason):
+    root = _checkpoint_chain(tmp_path, mutate=lambda rows: rows[2].update({field: value}))
+    report = _inspector().inspect(root)
+    assert report["classification"] == "INVALID_EVIDENCE"
+    assert report["reason"] == reason
+    assert "PRIVATE_SECRET_MARKER" not in json.dumps(report)
+    assert report["full_z04_pass"] is False
+
+
+def test_inspector_rejects_terminal_chain_with_observation_gap(tmp_path):
+    def change(rows):
+        for row in rows:
+            row["requested_seconds"] = 600
+        rows[2]["observed_seconds"] = 600
+    report = _inspector().inspect(_checkpoint_chain(tmp_path, mutate=change))
+    assert report["classification"] == "INCOMPLETE_OBSERVATION_GAP"
+    assert report["maximum_reported_observation_gap_seconds"] == 599
+    assert report["full_z04_pass"] is False
+
+
+@pytest.mark.parametrize("fault", ["missing_middle", "truncated", "bytes", "symlink", "hardlink", "public_mode", "fifo"])
+def test_inspector_refuses_damaged_or_unowned_checkpoint_without_modification(tmp_path, fault):
+    root = _checkpoint_chain(tmp_path)
+    path = root / "checkpoint-000001.json"
+    if fault == "missing_middle":
+        path.unlink()
+    elif fault == "truncated":
+        path.write_text('{"PRIVATE_SECRET_MARKER":')
+    elif fault == "bytes":
+        path.write_text(path.read_text().replace('"evidence_bytes":', '"evidence_bytes":0,"old_bytes":', 1))
+    elif fault == "symlink":
+        outside = tmp_path / "private-token"
+        outside.write_text("PRIVATE_SECRET_MARKER")
+        path.unlink()
+        path.symlink_to(outside)
+    elif fault == "hardlink":
+        os.link(path, root / "second-link")
+    elif fault == "public_mode":
+        path.chmod(0o644)
+    else:
+        path.unlink()
+        os.mkfifo(path, 0o600)
+    before = [(p.name, p.lstat().st_mode, p.lstat().st_size, p.lstat().st_ino) for p in root.iterdir()]
+    report = _inspector().inspect(root)
+    after = [(p.name, p.lstat().st_mode, p.lstat().st_size, p.lstat().st_ino) for p in root.iterdir()]
+    assert report["classification"] == "INVALID_EVIDENCE"
+    assert before == after
+    assert "PRIVATE_SECRET_MARKER" not in json.dumps(report)
+
+
+def test_inspector_refuses_data_after_terminal_and_aliased_root(tmp_path):
+    root = _checkpoint_chain(tmp_path, mutate=lambda rows: rows[1].update(status="INTERRUPTED"))
+    assert _inspector().inspect(root)["reason"] == "data_after_terminal"
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    assert _inspector().inspect(alias)["reason"] == "workspace_alias"

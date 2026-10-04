@@ -93,3 +93,38 @@ The complete runner file is selected in the existing Linux foundation and
 hosted Mac runtime/distribution jobs, without a new runner allocation or changed
 time budget. The existing production lifecycle, golden/state and final hosted
 gates remain.
+
+## Inspect a surviving checkpoint chain without resuming it
+
+```sh
+python3 -I -B scripts/inspect_lifecycle_soak.py /absolute/private/soak-workspace
+```
+
+The inspector is read-only and uses only matching checkpoint JSON. It never
+opens runtime registries, credentials, keys, logs or databases, probes a service,
+restarts a run, combines durations or performs cleanup. Private owned regular
+files, contiguous sequence, exact cumulative bytes, fixed source/harness identity,
+monotonic progress and consistent terminal claims must all validate. Aliases,
+hardlinks, FIFOs, changed files, corrupt/truncated JSON and false certification
+claims are refused. Directory/file/total-read budgets are finite.
+
+- Exit 0 / `COMPLETED_PARTIAL_REPORTED`: an internally consistent terminal
+  partial-completion report. This does not independently verify the original
+  execution or its exit code and does not certify Z-04.
+- Exit 2: missing terminal, reported failure/interruption or a reported observation
+  gap. A stale `RUNNING` tail never becomes completion just because time passed.
+- Exit 1 / `INVALID_EVIDENCE`: damaged, inconsistent or unadmitted input.
+
+Freshness is separate from process state: a stale checkpoint does not prove why
+an executor stopped, and a recent checkpoint does not prove a process is alive.
+The default 300-second bound only labels stale records/large observation gaps;
+it is not a product acceptance threshold. Actual process/exit evidence must be
+checked separately when available. All outputs remain `NOT_CERTIFIED`, with
+`execution_independently_verified: false` and `full_z04_pass: false`.
+
+The adopted db39 observation demonstrates this case: its last 01:57:21 UTC
+checkpoint remained RUNNING when inspected after 07:13, the execution session and
+exact processes were gone, and no terminal report existed. Only 1,361.510 seconds
+were observed. See the [sanitized interrupted receipt](receipts/LIFECYCLE-DB39-INTERRUPTED.md);
+the unobserved hours were not accumulated, and the original evidence was not
+rewritten or restarted.
