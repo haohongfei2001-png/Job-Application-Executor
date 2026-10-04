@@ -2113,6 +2113,123 @@ def _editor_posts(observed):
     return [(path, body) for method, path, body in observed["requests"] if method == "POST"]
 
 
+def _missing_resume_payload():
+    data = _editor_payload()
+    data["admission_status"] = "resume_replacement_required"
+    data["resume"] = {"status": "missing_managed", "kind": "resume_pdf"}
+    for field in data["fields"]:
+        field["editable"] = False
+    data["fields"][0].update(status="supported", value="SYNTHETIC_RETAINED_NAME")
+    return data
+
+
+def test_task_workspace_missing_resume_requires_explicit_file_and_preserves_readonly_facts(profile_editor_ui):
+    import os
+    from pathlib import Path
+    page, observed = profile_editor_ui
+    observed["payload"] = _missing_resume_payload()
+    _open_editor(page)
+    expect(page.locator("#profile-editor-status")).to_contain_text("简历文件缺失")
+    expect(page.locator("#profile-editor-resume")).to_be_enabled()
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    assert not page.locator("#profile-editor-preserved").get_attribute("open")
+    assert page.locator("#profile-editor-resume").is_visible()
+    assert _editor_posts(observed) == []
+    screenshot_dir = os.environ.get("JAE_UI_SCREENSHOT_DIR")
+    if screenshot_dir:
+        destination = Path(screenshot_dir);destination.mkdir(parents=True, exist_ok=True)
+        page.locator("#profile-editor-dialog").screenshot(path=str(destination / "profile-missing-resume.png"), animations="disabled")
+    page.locator("#profile-editor-preserved-summary").click()
+    expect(page.locator("#profile-editor-field-0")).to_have_value("SYNTHETIC_RETAINED_NAME")
+    assert all(not node.is_enabled() for node in page.locator("#profile-editor-fields input, #profile-editor-fields textarea").all())
+    page.locator("#profile-editor-preserved-summary").click()
+    page.locator("#profile-editor-resume").set_input_files({"name": "chosen-new.pdf", "mimeType": "application/pdf", "buffer": b"SYNTHETIC_NEW_RESUME"})
+    expect(page.locator("#profile-editor-save")).to_be_enabled()
+    assert _editor_posts(observed) == []
+    after = _editor_payload()
+    after.update(settings_version="c" * 64, profile_version="d" * 64)
+    after["resume"] = {"status": "recorded_locally", "kind": "resume_pdf"}
+    after["fields"][0].update(status="supported", value="SYNTHETIC_RETAINED_NAME")
+    observed["payload"] = after
+    observed["save_payload"] = {**after, "save_status": "saved"}
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("已保存在本机并重新读取确认")
+    posts = _editor_posts(observed)
+    assert len(posts) == 1 and posts[0][0] == "/ui/api/profile-editor"
+    assert b'"resume_action":"replace_missing"' in posts[0][1] and b'"edits":{}' in posts[0][1]
+    assert b"SYNTHETIC_NEW_RESUME" in posts[0][1]
+    assert b"SYNTHETIC_RETAINED_NAME" not in posts[0][1] and b"chosen-new.pdf" not in posts[0][1]
+    expect(page.locator("#profile-editor-field-0")).to_have_value("SYNTHETIC_RETAINED_NAME")
+    assert page.locator("#profile-editor-resume").input_value() == ""
+
+
+@pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
+def test_task_workspace_missing_resume_cancel_clears_file_without_save(profile_editor_ui, interruption):
+    page, observed = profile_editor_ui
+    observed["payload"] = _missing_resume_payload()
+    _open_editor(page)
+    page.locator("#profile-editor-resume").set_input_files({"name": "new.pdf", "mimeType": "application/pdf", "buffer": b"SYNTHETIC_NOT_SAVED"})
+    if interruption == "close": page.locator("#profile-editor-close").click()
+    elif interruption == "escape": page.locator("#profile-editor-dialog").press("Escape")
+    else:
+        observed["expired"] = True;page.evaluate("readiness()")
+        expect(page.locator("#session-expired")).to_be_visible()
+    expect(page.locator("#profile-editor-dialog")).not_to_be_visible()
+    assert page.locator("#profile-editor-resume").input_value() == ""
+    assert page.locator("#profile-editor-fields").inner_text() == ""
+    assert _editor_posts(observed) == []
+
+
+def test_task_workspace_missing_resume_reconcile_is_separate_from_replacement(profile_editor_ui):
+    page, observed = profile_editor_ui
+    observed["payload"] = _missing_resume_payload()
+    observed["payload"]["admission_status"] = "reconciliation_required"
+    _open_editor(page)
+    expect(page.locator("#profile-editor-resume")).to_be_disabled()
+    expect(page.locator("#profile-editor-reconcile")).to_be_enabled()
+    observed["payload"]["admission_status"] = "resume_replacement_required"
+    page.locator("#profile-editor-reconcile").click()
+    expect(page.locator("#profile-editor-status")).to_contain_text("简历文件仍然缺失")
+    expect(page.locator("#profile-editor-resume")).to_be_enabled()
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    assert [path for path, _ in _editor_posts(observed)] == ["/ui/api/profile-editor/reconcile"]
+
+
+@pytest.mark.parametrize("failure", ["conflict", "unknown_response"])
+def test_task_workspace_missing_resume_save_uncertainty_never_replays(profile_editor_ui, failure):
+    page, observed = profile_editor_ui
+    observed["payload"] = _missing_resume_payload()
+    _open_editor(page)
+    page.locator("#profile-editor-resume").set_input_files({"name": "new.pdf", "mimeType": "application/pdf", "buffer": b"SYNTHETIC_UNCERTAIN"})
+    observed["save_status"] = 409 if failure == "conflict" else 500
+    observed["save_payload"] = {"error": "state_conflict" if failure == "conflict" else "PRIVATE_UNTRUSTED_ERROR"}
+    page.locator("#profile-editor-save").click()
+    expect(page.locator("#profile-editor-reconcile")).to_be_enabled()
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    assert page.locator("#profile-editor-resume").input_value() == ""
+    page.evaluate("document.querySelector('#profile-editor-save').dispatchEvent(new MouseEvent('click'))")
+    assert len(_editor_posts(observed)) == 1
+    assert "PRIVATE_UNTRUSTED_ERROR" not in page.locator("#profile-editor-dialog").inner_text()
+
+
+@pytest.mark.parametrize("failure", ["new_profile", "missing_version", "missing_kind", "editable_fact", "ready_status"])
+def test_task_workspace_missing_resume_malformed_projection_fails_closed(profile_editor_ui, failure):
+    page, observed = profile_editor_ui
+    data = _missing_resume_payload()
+    if failure == "new_profile": data["mode"] = "new"
+    elif failure == "missing_version": data["profile_version"] = None
+    elif failure == "missing_kind": data["resume"]["kind"] = None
+    elif failure == "editable_fact": data["fields"][0]["editable"] = True
+    else: data["admission_status"] = "ready"
+    observed["payload"] = data
+    _open_editor(page)
+    expect(page.locator("#profile-editor-status")).to_contain_text("无法读取资料")
+    expect(page.locator("#profile-editor-resume")).to_be_disabled()
+    expect(page.locator("#profile-editor-save")).to_be_disabled()
+    assert page.locator("#profile-editor-fields").inner_text() == ""
+    assert _editor_posts(observed) == []
+
+
 @pytest.mark.parametrize("checks,visible", [
     ({"profile_configured": False, "profile_exists": False, "profile_loadable": False}, True),
     ({"profile_configured": True, "profile_exists": True, "profile_loadable": True}, False),

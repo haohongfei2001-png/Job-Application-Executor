@@ -1024,3 +1024,263 @@ def test_shared_raw_reader_rejects_ambiguities_secrets_schema_unicode_and_utf8_s
     from executor.autonomy.profile_setup import validate_profile_text
     with pytest.raises(ValueError, match="^invalid_profile$"):
         validate_profile_text(text)
+
+
+@pytest.fixture
+def missing_managed_resume(configured):
+    authority, _, _, _ = configured
+    current, view = editor.save_profile(metadata(resume_action="replace", resume_kind="resume_pdf"),
+                                        b"SYNTHETIC_MANAGED_RESUME")
+    profile = Path(current["profile_path"])
+    resume = Path(json.loads(profile.read_bytes())["assets"]["resume"]["path"])
+    retained = authority / "retained-managed-resume.bin"
+    resume.rename(retained)
+    return current, view, profile, resume, retained
+
+
+def test_missing_managed_resume_exposes_explicit_ui_repair_without_task_admission(missing_managed_resume, tmp_path):
+    current, _previous, profile, missing, retained = missing_managed_resume
+    before = snapshot(profile), settings.PATH.read_bytes(), snapshot(retained)
+    supervisor = supervisor_for(tmp_path, current)
+    view = supervisor.profile_editor_state()
+    assert view["resume"] == {"status": "missing_managed", "kind": "resume_pdf"}
+    assert view["admission_status"] == "resume_replacement_required"
+    assert view["mode"] == "canonical" and view["profile_version"]
+    assert all(field["editable"] is False for field in view["fields"])
+    assert str(missing) not in json.dumps(view)
+    with pytest.raises(editor.EditorConflict):
+        editor.editor_state()
+    with pytest.raises(RuntimeError, match="reconciliation_required"):
+        supervisor.manager._profile_ref()
+    assert (snapshot(profile), settings.PATH.read_bytes(), snapshot(retained)) == before
+    assert not missing.exists()
+
+
+def test_missing_managed_resume_explicit_reconcile_and_replacement_preserve_facts_and_old_tasks(missing_managed_resume, tmp_path):
+    current, previous, profile, missing, retained = missing_managed_resume
+    old = json.loads(profile.read_bytes())
+    before = snapshot(profile), snapshot(retained)
+    supervisor = supervisor_for(tmp_path, current)
+    task = supervisor.queue.enqueue(TaskSpec(company="Synthetic", role="Prior binding",
+        target_url="https://existing.test/missing-resume", profile_ref=str(profile), live_authorized=False))
+    with pytest.raises(RuntimeError, match="reconciliation_required"):
+        supervisor.manager._profile_ref()
+    assert supervisor.profile_editor_state()["admission_status"] == "reconciliation_required"
+    recovered = supervisor.reconcile_profile_editor()
+    assert recovered["admission_status"] == "resume_replacement_required"
+    with pytest.raises(RuntimeError, match="reconciliation_required"):
+        supervisor.manager._profile_ref()
+    # Reconciliation can disclose the bounded repair view, never admit a task.
+    recovered = supervisor.reconcile_profile_editor()
+    result = supervisor.configure_profile_editor(metadata(recovered,
+        resume_action="replace_missing", resume_kind="resume_docx"), b"SYNTHETIC_REPLACEMENT")
+    assert result["admission_status"] == "ready" and result["save_status"] == "saved"
+    selected = Path(settings.load_settings()["profile_path"])
+    assert selected != profile and supervisor.manager._profile_ref() == str(selected)
+    changed = json.loads(selected.read_bytes())
+    assert changed["fields"] == old["fields"]
+    assert changed["collections"] == old["collections"]
+    assert changed["source_documents"] == old["source_documents"]
+    assert changed["private_extension"] == old["private_extension"]
+    assert changed["assets"]["other"] == old["assets"]["other"]
+    histories = [value for key, value in changed.items() if key.startswith("resume_previous_")]
+    assert old["assets"]["resume"] in histories
+    replacement = Path(changed["assets"]["resume"]["path"])
+    assert replacement != missing and replacement.read_bytes() == b"SYNTHETIC_REPLACEMENT"
+    assert supervisor.queue.get(task["task_id"]) == task
+    assert (snapshot(profile), snapshot(retained)) == before and not missing.exists()
+    assert supervisor.worker.settings == supervisor.manager.settings == settings.load_settings()
+
+
+@pytest.mark.parametrize("change,payload", [
+    ({"edits": {"identity.full_name": "UNREQUESTED"}}, b"new"),
+    ({"expected_profile_version": None}, b"new"),
+    ({"resume_kind": None}, b"new"),
+    ({}, None), ({}, b""),
+])
+def test_missing_managed_resume_repair_requires_new_file_and_no_fact_edits(missing_managed_resume, change, payload):
+    _, view, profile, missing, retained = missing_managed_resume
+    before = snapshot(profile), settings.PATH.read_bytes(), snapshot(retained)
+    request = metadata(view, resume_action="replace_missing", resume_kind="resume_pdf")
+    request.update(change)
+    with pytest.raises(editor.EditorInvalid): editor.save_profile(request, payload)
+    assert (snapshot(profile), settings.PATH.read_bytes(), snapshot(retained)) == before
+    assert not missing.exists()
+
+
+@pytest.mark.parametrize("kind", ["file", "changed", "public", "symlink", "hardlink", "directory", "fifo"])
+def test_missing_managed_resume_arrival_before_save_never_reuses_or_repairs_entry(missing_managed_resume, kind):
+    _, view, profile, missing, retained = missing_managed_resume
+    before = snapshot(profile), settings.PATH.read_bytes(), snapshot(retained)
+    if kind in {"file", "changed", "public"}:
+        missing.write_bytes(retained.read_bytes() if kind == "file" else b"SYNTHETIC_ARRIVAL")
+        missing.chmod(0o644 if kind == "public" else 0o600)
+    elif kind == "symlink": missing.symlink_to(retained)
+    elif kind == "hardlink": os.link(retained, missing)
+    elif kind == "directory": missing.mkdir(mode=0o700)
+    else: os.mkfifo(missing, 0o600)
+    arrived = missing.lstat()
+    if kind != "file":
+        with pytest.raises((editor.EditorConflict, editor.EditorInvalid)):
+            editor.editor_state(_allow_missing_resume=True)
+    with pytest.raises(editor.EditorConflict):
+        editor.save_profile(metadata(view, resume_action="replace_missing", resume_kind="resume_pdf"), b"new")
+    after = missing.lstat()
+    assert (after.st_ino, after.st_mode) == (arrived.st_ino, arrived.st_mode)
+    assert snapshot(profile) == before[0] and settings.PATH.read_bytes() == before[1]
+    assert retained.read_bytes() == before[2][0]
+
+
+@pytest.mark.parametrize("boundary", ["resume_publication", "profile_publication", "settings_switch"])
+def test_missing_managed_resume_arrival_during_publication_preserves_both_versions(missing_managed_resume, monkeypatch, boundary):
+    _, view, profile, missing, retained = missing_managed_resume
+    before = snapshot(profile), settings.PATH.read_bytes(), snapshot(retained)
+    real_publish, real_write = editor._publish_file, settings._write_at
+    def arrive():
+        missing.write_bytes(b"SYNTHETIC_LATE_ARRIVAL");missing.chmod(0o600)
+    def publish(parent, prefix, suffix, payload):
+        result = real_publish(parent, prefix, suffix, payload)
+        if ((prefix == "resume-" and boundary == "resume_publication")
+                or (prefix == "profile-" and boundary == "profile_publication")): arrive()
+        return result
+    def write(parent, encoded):
+        result = real_write(parent, encoded)
+        if boundary == "settings_switch": arrive()
+        return result
+    monkeypatch.setattr(editor, "_publish_file", publish)
+    monkeypatch.setattr(settings, "_write_at", write)
+    expected = editor.PublicationUncertain if boundary == "settings_switch" else editor.EditorConflict
+    with pytest.raises(expected):
+        editor.save_profile(metadata(view, resume_action="replace_missing", resume_kind="resume_pdf"), b"NEW_EXPLICIT_RESUME")
+    assert (snapshot(profile), snapshot(retained)) == (before[0], before[2])
+    assert missing.read_bytes() == b"SYNTHETIC_LATE_ARRIVAL"
+    if boundary != "settings_switch": assert settings.PATH.read_bytes() == before[1]
+    else:
+        selected = Path(settings.load_settings()["profile_path"])
+        assert selected != profile
+        updated = json.loads(selected.read_bytes())
+        assert updated["fields"] == json.loads(before[0][0])["fields"]
+        assert Path(updated["assets"]["resume"]["path"]).read_bytes() == b"NEW_EXPLICIT_RESUME"
+
+
+def test_missing_managed_resume_arrival_during_view_withholds_projection(missing_managed_resume, monkeypatch):
+    _, _, profile, missing, _ = missing_managed_resume
+    before = snapshot(profile), settings.PATH.read_bytes()
+    real = editor._state
+    def arrive(*args):
+        value = real(*args)
+        missing.write_bytes(b"SYNTHETIC_VIEW_ARRIVAL");missing.chmod(0o600)
+        return value
+    monkeypatch.setattr(editor, "_state", arrive)
+    with pytest.raises(editor.EditorConflict): editor.editor_state(_allow_missing_resume=True)
+    assert (snapshot(profile), settings.PATH.read_bytes()) == before
+    assert missing.read_bytes() == b"SYNTHETIC_VIEW_ARRIVAL"
+
+
+def test_missing_managed_resume_root_swap_does_not_publish_in_replacement(missing_managed_resume, monkeypatch):
+    _, view, profile, missing, retained = missing_managed_resume
+    root = settings.PATH.parent;old_settings = settings.PATH.read_bytes();old_profile = profile.read_bytes()
+    retained_root = root.with_name("retained-original-authority")
+    real = editor._publish_file
+    changed = False
+    def replace_root(parent, prefix, suffix, payload):
+        nonlocal changed
+        result = real(parent, prefix, suffix, payload)
+        if not changed:
+            changed = True;root.rename(retained_root);root.mkdir(mode=0o700)
+            (root / "foreign-sentinel").write_bytes(b"PRESERVE_FOREIGN")
+        return result
+    monkeypatch.setattr(editor, "_publish_file", replace_root)
+    with pytest.raises(editor.EditorConflict):
+        editor.save_profile(metadata(view, resume_action="replace_missing", resume_kind="resume_pdf"), b"new")
+    assert list(root.iterdir()) == [root / "foreign-sentinel"]
+    assert (root / "foreign-sentinel").read_bytes() == b"PRESERVE_FOREIGN"
+    assert (retained_root / settings.PATH.name).read_bytes() == old_settings
+    assert (retained_root / profile.name).read_bytes() == old_profile
+    assert not (retained_root / missing.name).exists()
+
+
+@pytest.mark.parametrize("changed", ["settings", "profile"])
+def test_missing_managed_resume_stale_versions_do_not_select_replacement(missing_managed_resume, changed):
+    _, view, profile, missing, retained = missing_managed_resume
+    request = metadata(view, resume_action="replace_missing", resume_kind="resume_pdf")
+    if changed == "settings":
+        settings.save_settings({**settings.load_settings(), "unrelated_setting": "SYNTHETIC_NEW_VERSION"})
+    else:
+        obj = json.loads(profile.read_bytes());obj["private_extension"]["new"] = "SYNTHETIC_CHANGED"
+        profile.write_text(json.dumps(obj))
+    before = snapshot(profile), settings.PATH.read_bytes(), snapshot(retained)
+    with pytest.raises(editor.EditorConflict): editor.save_profile(request, b"new")
+    assert (snapshot(profile), settings.PATH.read_bytes(), snapshot(retained)) == before
+    assert not missing.exists()
+
+
+def test_missing_managed_resume_two_repairs_select_one_immutable_version(missing_managed_resume):
+    _, view, profile, missing, retained = missing_managed_resume
+    before = snapshot(profile), snapshot(retained)
+    barrier = threading.Barrier(2);results = []
+    def save(payload):
+        barrier.wait()
+        try:
+            current, _ = editor.save_profile(metadata(view, resume_action="replace_missing", resume_kind="resume_pdf"), payload)
+            results.append(("saved", current["profile_path"]))
+        except editor.EditorConflict: results.append(("refused", None))
+    workers = [threading.Thread(target=save, args=(payload,)) for payload in (b"SYNTHETIC_A", b"SYNTHETIC_B")]
+    for worker in workers: worker.start()
+    for worker in workers: worker.join(5);assert not worker.is_alive()
+    assert sorted(result[0] for result in results) == ["refused", "saved"]
+    selected = Path(settings.load_settings()["profile_path"])
+    assert selected == Path(next(path for status, path in results if status == "saved"))
+    assert selected != profile and not missing.exists()
+    assert (snapshot(profile), snapshot(retained)) == before
+
+
+@pytest.mark.parametrize("point", ["resume", "profile", "settings_before", "settings_after"])
+def test_missing_managed_resume_write_fault_preserves_honest_publication(missing_managed_resume, monkeypatch, point):
+    _, view, profile, missing, retained = missing_managed_resume
+    before = snapshot(profile), settings.PATH.read_bytes(), snapshot(retained)
+    real_publish, real_write = editor._publish_file, settings._write_at
+    def publish(parent, prefix, suffix, payload):
+        if prefix == point + "-": raise OSError("SYNTHETIC_WRITE_FAILURE")
+        return real_publish(parent, prefix, suffix, payload)
+    def write(parent, encoded):
+        if point == "settings_before": raise OSError("SYNTHETIC_BEFORE_SWITCH")
+        result = real_write(parent, encoded)
+        if point == "settings_after": raise OSError("SYNTHETIC_AFTER_SWITCH")
+        return result
+    monkeypatch.setattr(editor, "_publish_file", publish);monkeypatch.setattr(settings, "_write_at", write)
+    # Strict readback cannot certify the old selection while its resume is
+    # missing, even if this injected fault happened before the settings switch.
+    expected = editor.PublicationUncertain if point.startswith("settings_") else editor.EditorConflict
+    with pytest.raises(expected) as failure:
+        editor.save_profile(metadata(view, resume_action="replace_missing", resume_kind="resume_pdf"), b"EXPLICIT_NEW")
+    assert (snapshot(profile), snapshot(retained)) == (before[0], before[2]) and not missing.exists()
+    if point != "settings_after":
+        assert settings.PATH.read_bytes() == before[1]
+        if point == "settings_before": assert failure.value.current is None
+    else:
+        selected = Path(settings.load_settings()["profile_path"])
+        assert selected != profile
+        assert failure.value.current == settings.load_settings()
+        assert Path(json.loads(selected.read_bytes())["assets"]["resume"]["path"]).read_bytes() == b"EXPLICIT_NEW"
+
+
+@pytest.mark.parametrize("fault", ["unmanaged_profile", "outside_asset", "invalid_digest", "public_root", "profile_alias"])
+def test_missing_managed_resume_ui_option_does_not_relax_authority(missing_managed_resume, monkeypatch, fault):
+    _, _, profile, missing, retained = missing_managed_resume
+    if fault == "unmanaged_profile":
+        external = profile.with_name("not-managed.json");profile.rename(external)
+        settings.save_settings({**settings.load_settings(), "profile_path": str(external)})
+    elif fault in {"outside_asset", "invalid_digest"}:
+        value = json.loads(profile.read_bytes())
+        if fault == "outside_asset": value["assets"]["resume"]["path"] = str(profile.parent.parent / missing.name)
+        else: value["assets"]["resume"]["sha256"] = "not-a-digest"
+        profile.write_text(json.dumps(value))
+    elif fault == "public_root": profile.parent.chmod(0o755)
+    else:
+        target = profile.with_suffix(".retained");profile.rename(target);profile.symlink_to(target)
+    before = settings.PATH.read_bytes(), retained.read_bytes(), profile.parent.stat().st_mode
+    with pytest.raises((editor.EditorInvalid, editor.EditorConflict)):
+        editor.editor_state(_allow_missing_resume=True)
+    assert (settings.PATH.read_bytes(), retained.read_bytes(), profile.parent.stat().st_mode) == before
+    assert not missing.exists()

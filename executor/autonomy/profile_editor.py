@@ -207,10 +207,13 @@ def validate_metadata(metadata, resume):
     if metadata["resume_action"] == "keep":
         if metadata["resume_kind"] is not None or resume is not None:
             raise EditorInvalid()
-    elif metadata["resume_action"] == "replace":
+    elif metadata["resume_action"] in ("replace", "replace_missing"):
         if (not isinstance(metadata["resume_kind"], str)
                 or metadata["resume_kind"] not in RESUME_EXTENSIONS
                 or not isinstance(resume, bytes) or not 0 < len(resume) <= BODY_LIMIT):
+            raise EditorInvalid()
+        if metadata["resume_action"] == "replace_missing" and (
+                metadata["edits"] or metadata["expected_profile_version"] is None):
             raise EditorInvalid()
     else:
         raise EditorInvalid()
@@ -374,7 +377,7 @@ def _editable(profile, key):
     return _supported(key, profile["fields"].get(key, {}).get("value"))
 
 
-def _owned_resume(stack, profile):
+def _managed_resume_name(profile):
     asset = profile.get("assets", {}).get("resume")
     if not isinstance(asset, dict):
         return None
@@ -387,11 +390,29 @@ def _owned_resume(stack, profile):
             or not re.fullmatch(r"resume-[0-9a-f]{32}" + re.escape(RESUME_EXTENSIONS[kind]), Path(path).name)
             or not isinstance(digest, str) or not _HEX.fullmatch(digest)):
         raise EditorConflict()
-    reader = stack.enter_context(_ProfileRead(path, BODY_LIMIT, private=True))
+    return Path(path).name
+
+
+def _owned_resume(stack, profile):
+    name = _managed_resume_name(profile)
+    if name is None:
+        return None
+    asset = profile["assets"]["resume"]
+    reader = stack.enter_context(_ProfileRead(str(settings.PATH.parent / name), BODY_LIMIT, private=True))
     raw = reader.read()
-    if not raw or hashlib.sha256(raw).hexdigest() != digest:
+    if not raw or hashlib.sha256(raw).hexdigest() != asset["sha256"]:
         raise EditorConflict()
     return reader
+
+
+def _missing_managed_resume(parent, current, profile):
+    """Only an absent leaf in the held private authority can be repaired."""
+    if not is_managed_profile_path(current.get("profile_path")) or "fields" not in profile:
+        raise EditorConflict()
+    name = _managed_resume_name(profile)
+    if name is None or _entry(parent, name) is not None:
+        raise EditorConflict()
+    return name
 
 
 def _state(current, profile, version, mode):
@@ -413,11 +434,17 @@ def _state(current, profile, version, mode):
             "future_tasks_only": True, "submit_capability": False}
 
 
-def _observe_at(parent, pin):
+def _observe_at(parent, pin, *, _allow_missing_resume=False):
     with ExitStack() as stack:
         current = settings._read_at(parent)
         profile, version, mode, reader = _read_profile(stack, current)
-        resume_reader = _owned_resume(stack, profile)
+        missing = None
+        if (_allow_missing_resume and mode == "canonical"
+                and is_managed_profile_path(current.get("profile_path"))):
+            name = _managed_resume_name(profile)
+            if name is not None and _entry(parent, name) is None:
+                missing = _missing_managed_resume(parent, current, profile)
+        resume_reader = None if missing else _owned_resume(stack, profile)
         if resume_reader:
             resume_reader.fence()
         if reader:
@@ -425,16 +452,28 @@ def _observe_at(parent, pin):
         if settings.settings_version(settings._read_at(parent)) != settings.settings_version(current):
             raise EditorConflict()
         pin.fence()
-        return current, _state(current, profile, version, mode)
+        view = _state(current, profile, version, mode)
+        if missing:
+            if _entry(parent, missing) is not None:
+                raise EditorConflict()
+            view["resume"]["status"] = "missing_managed"
+            for field in view["fields"]:
+                field["editable"] = False
+        return current, view
 
 
-def editor_state():
+def editor_state(*, _allow_missing_resume=False):
+    # Ordinary task admission and publication readback keep the strict reader.
+    # Only the explicit authenticated editor/reconcile surfaces opt into repair.
+    if type(_allow_missing_resume) is not bool:
+        raise EditorInvalid()
     try:
         with settings._parent(settings.PATH, create=False) as parent:
             with _DirectoryPin(settings.PATH.parent) as pin:
                 if _signature(os.fstat(parent)) != _signature(os.fstat(pin.descriptor)):
                     raise EditorConflict()
-                return _observe_at(parent, pin)
+                return (_observe_at(parent, pin, _allow_missing_resume=True)
+                        if _allow_missing_resume else _observe_at(parent, pin))
     except FileNotFoundError:
         # A missing settings authority is a new profile only if settings agrees.
         current = settings.load_settings()
@@ -537,6 +576,11 @@ def save_profile(metadata, resume=None):
                 raise EditorConflict()
             if mode == "legacy":
                 raise EditorInvalid()
+            missing = (_missing_managed_resume(parent, current, profile)
+                       if metadata["resume_action"] == "replace_missing" else None)
+            def fence_missing():
+                if missing and _entry(parent, missing) is not None:
+                    raise EditorConflict()
             updated = _patch(profile, metadata["edits"])
             published = []
             if resume is not None:
@@ -551,6 +595,7 @@ def save_profile(metadata, resume=None):
                     updated[history_key] = copy.deepcopy(assets["resume"])
                 name, signature = _publish_file(parent, "resume-", RESUME_EXTENSIONS[metadata["resume_kind"]], resume)
                 published.append((name, signature))
+                fence_missing()
                 assets["resume"] = {"path": str(settings.PATH.parent / name),
                                     "kind": metadata["resume_kind"],
                                     "sha256": hashlib.sha256(resume).hexdigest(),
@@ -558,6 +603,7 @@ def save_profile(metadata, resume=None):
             encoded = _encode_profile(updated)
             name, signature = _publish_file(parent, "profile-", ".json", encoded)
             published.append((name, signature))
+            fence_missing()
             selected = {**current, "profile_path": str(settings.PATH.parent / name)}
             if reader:
                 reader.fence()
@@ -567,6 +613,7 @@ def save_profile(metadata, resume=None):
             for filename, signature in published:
                 if _signature(_entry(parent, filename)) != signature:
                     raise EditorConflict()
+            fence_missing()
             try:
                 settings._write_at(parent, settings._encoded(selected))
                 pin.fence()
@@ -577,10 +624,12 @@ def save_profile(metadata, resume=None):
                 for filename, signature in published:
                     if _signature(_entry(parent, filename)) != signature:
                         raise EditorConflict()
+                fence_missing()
                 observed, view = _observe_at(parent, pin)
                 if (settings.settings_version(observed) != settings.settings_version(selected)
                         or view["profile_version"] != hashlib.sha256(encoded).hexdigest()):
                     raise EditorConflict()
+                fence_missing()
             except Exception:
                 # _write_at may already have replaced settings before fsync
                 # failed. A proven old selection is the only safe failure case.
