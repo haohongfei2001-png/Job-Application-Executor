@@ -164,15 +164,39 @@ def test_tamper_requires_exact_valid_baseline(tmp_path, monkeypatch, failure):
     assert probe.inventory(app) == pinned
 
 
-def test_metadata_control_preserves_nonempty_and_empty_xattrs(tmp_path):
+def test_metadata_control_reports_exact_or_observed_empty_attribute_loss(tmp_path):
     app, leaf = tree(tmp_path)
     prefix = 'user.' if os.sys.platform != 'darwin' else 'org.jae.'
     set_attribute(leaf, prefix + 'nonempty', b'synthetic signature metadata')
     set_attribute(leaf, prefix + 'empty', b'')
     pinned = probe.inventory(app)
     target = tmp_path / 'copy'
-    probe.metadata_copy(app, target)
-    assert probe.inventory(target) == pinned
+    result = probe.metadata_copy(app, target)
+    actual = probe.inventory(target)
+    if actual == pinned:
+        assert result == {'status': 'PASS_EXACT', 'delta': {'added': [], 'removed': [], 'changed': []}}
+    else:
+        # Hosted macOS ditto was observed to drop the zero-length attribute.
+        # Preserve this as a failed transport control, never an exact-copy PASS.
+        assert os.sys.platform == 'darwin'
+        expected = json.loads(json.dumps(pinned))
+        del expected['Contents/payload']['xattrs'][prefix + 'empty']
+        assert actual == expected
+        assert result == {'status': 'FAIL_INVENTORY_LOSS',
+                          'delta': {'added': [], 'removed': [], 'changed': ['Contents/payload']}}
+    assert probe.inventory(app) == pinned
+
+
+def test_attribute_transport_failure_is_kept_in_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(probe, 'command', lambda *a, **k: {'returncode': 0})
+    actual_copy = probe.metadata_copy
+    def copy_with_loss(source, target):
+        actual_copy(source, target)
+        return {'status': 'FAIL_INVENTORY_LOSS', 'delta': {'changed': ['synthetic']}}
+    monkeypatch.setattr(probe, 'metadata_copy', copy_with_loss)
+    report = probe.attribute_transport_control(tmp_path / 'control')
+    assert report['status'] == 'FAIL_INVENTORY_LOSS'
+    assert report['before'] and report['after']
 
 
 @pytest.mark.parametrize('failure', ['read_error', 'growth', 'bound', 'duplicate'])

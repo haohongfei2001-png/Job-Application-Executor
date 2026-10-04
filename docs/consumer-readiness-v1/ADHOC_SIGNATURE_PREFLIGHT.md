@@ -43,6 +43,15 @@ The corrected harness uses bounded Darwin descriptor APIs for reading xattrs and
 the system metadata-preserving copy tool for tamper controls. This correction
 does not turn the failed attempt into signing evidence or modify product code.
 
+The second attempt, run 37178920410 at 53322a86, passed 22 contracts and failed
+the strict metadata control: the hosted system copier retained a nonempty xattr
+but dropped a zero-length xattr. This is a real observed transport failure.
+The next bounded observation retains it as FAIL_INVENTORY_LOSS in report.json
+and continues independent probes. Tamper cases still require an exact, valid
+baseline; any loss makes that case inconclusive before mutation. No copy repair,
+attribute exclusion or transport PASS is substituted. Stop after that observation,
+including an incomplete/refused decision; do not grow further preparation loops.
+
 Actual Developer ID signing and notarization still require a separately approved
 Apple identity/account workflow. A real consumer release additionally needs
 verified download/distribution, exact signed DMG/app checks, and fresh quarantined

@@ -130,7 +130,8 @@ def changes(before, after):
 def command(argv, *, timeout=90):
     # Fixed Apple tools only. No shell, keychain, certificate, network or payload
     # execution. Bounded disk capture avoids an unbounded PIPE allocation.
-    if argv[0] not in {'/usr/bin/codesign', '/usr/bin/hdiutil', '/usr/bin/sw_vers', '/usr/bin/ditto'}:
+    if argv[0] not in {'/usr/bin/codesign', '/usr/bin/hdiutil', '/usr/bin/sw_vers',
+                       '/usr/bin/ditto', '/usr/bin/xattr'}:
         raise ValueError('probe_tool_invalid')
     with tempfile.TemporaryFile() as output:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=output,
@@ -252,12 +253,32 @@ def byte_copy(source, target):
 def metadata_copy(source, target):
     if target.exists() or target.is_symlink():
         raise ValueError('probe_copy_target_exists')
+    before = inventory(source)
     if sys.platform == 'darwin':
         result = command(['/usr/bin/ditto', '--rsrc', '--extattr', str(source), str(target)])
         if result['returncode']:
             raise ValueError('probe_metadata_copy_failed')
     else:
         shutil.copytree(source, target, copy_function=shutil.copy2)
+    after = inventory(target)
+    if inventory(source) != before:
+        raise ValueError('probe_copy_source_changed')
+    return {'status': 'PASS_EXACT' if after == before else 'FAIL_INVENTORY_LOSS',
+            'delta': changes(before, after)}
+
+
+def attribute_transport_control(work):
+    """Retain the observed empty-xattr failure; do not repair transport."""
+    work.mkdir()
+    source = work / 'source'; source.mkdir()
+    leaf = source / 'synthetic'; leaf.write_bytes(b'JAE synthetic transport control')
+    for name, value in (('org.jae.empty', ''), ('org.jae.nonempty', '010200ff')):
+        result = command(['/usr/bin/xattr', '-w', '-x', name, value, str(leaf)])
+        if result['returncode']:
+            return {'status': 'INCONCLUSIVE_FIXTURE_FAILED', 'command': result}
+    before = inventory(source)
+    result = metadata_copy(source, work / 'copy')
+    return {**result, 'before': before, 'after': inventory(work / 'copy')}
 
 
 def image_roundtrip(app, work):
@@ -303,11 +324,11 @@ def tamper_cases(app, work, pinned):
         target = work / app.name
         # Tamper controls must begin from the complete signed identity, including
         # xattrs. A failed transport is inconclusive, never tamper detection.
-        metadata_copy(app, target)
+        copy_result = metadata_copy(app, target)
         try:
             baseline_matches = inventory(target) == pinned
             baseline_verify = verify(target)
-            results[name] = {'baseline_inventory_matches': baseline_matches,
+            results[name] = {'copy_control': copy_result, 'baseline_inventory_matches': baseline_matches,
                              'baseline_os_verify': baseline_verify}
             if not baseline_matches or baseline_verify['returncode'] != 0:
                 results[name]['status'] = 'INCONCLUSIVE_BASELINE_NOT_ESTABLISHED'
@@ -337,6 +358,8 @@ def tamper_cases(app, work, pinned):
 
 def experiment(repo, runtime, work, report, save):
     from executor.autonomy.app_distribution import build_macos_distribution, stage_macos_distribution
+    report['empty_attribute_transport_control'] = attribute_transport_control(work / 'attribute-control')
+    save()
     distribution = work / 'unsigned'
     receipt = build_macos_distribution(repo, standalone_runtime=runtime,
         output_dir=distribution, native_presentation=True)
