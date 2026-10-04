@@ -206,4 +206,3 @@ def prepare(root, context, payloads):
             # Keep every partial object on failure; never erase unknown state.
             for handle in reversed(handles):
                 os.close(handle)
-
