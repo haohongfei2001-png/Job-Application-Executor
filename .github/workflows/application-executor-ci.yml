@@ -169,6 +169,8 @@ jobs:
             ${{ runner.temp }}/jae-preparation-ui/preparation-dialog.png
             ${{ runner.temp }}/jae-preparation-ui/profile-editor-dialog.png
             ${{ runner.temp }}/jae-preparation-ui/profile-editor-resume.png
+            ${{ runner.temp }}/jae-preparation-ui/profile-onboarding-start.png
+            ${{ runner.temp }}/jae-preparation-ui/profile-onboarding-settings.png
           if-no-files-found: error
           retention-days: 3
 

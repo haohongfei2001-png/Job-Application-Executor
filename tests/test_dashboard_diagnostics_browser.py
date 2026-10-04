@@ -784,6 +784,7 @@ def test_task_workspace_profile_setup_actual_file_save_and_complete_authority(pr
                 "buffer": json.dumps(profile, ensure_ascii=False).encode("utf-8")})
             expect(page.locator("#profile-save")).to_be_enabled()
             assert writes == [] and settings.load_settings()["profile_path"] == str(old)
+            page.locator("#profile-import summary").click()
             page.locator("#profile-save").click()
             expect(page.locator("#profile-status")).to_contain_text("资料已保存在本机")
             selected = settings.load_settings()
@@ -835,6 +836,7 @@ def test_task_workspace_profile_setup_stale_file_read_never_sends_or_revives_pri
                     window.__finishProfileRead = () => resolve('{"name":"PRIVATE_DELAYED"}');
                 });
             }""")
+            page.locator("#profile-import summary").click()
             page.locator("#profile-save").click()
             page.wait_for_function("typeof window.__finishProfileRead === 'function'")
             if interruption in {"close", "escape"}:
@@ -2049,7 +2051,7 @@ def profile_editor_ui():
     import copy
     observed = {"payload": _editor_payload(), "status": 200, "requests": [], "pending": [],
                 "hold": False, "expired": False, "save_status": 200, "save_payload": None,
-                "reconcile_status": 200, "errors": [], "external": []}
+                "reconcile_status": 200, "errors": [], "external": [], "profile_selected": True, "readiness_checks": {}}
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 600, "height": 800})
@@ -2069,7 +2071,7 @@ def profile_editor_ui():
                 route.fulfill(status=401, content_type="application/json", body='{}')
                 return
             if path == "/ui/api/profile-setup":
-                payload = {"settings_version": "a" * 64, "profile_selected": True, "submit_capability": False}
+                payload = {"settings_version": "a" * 64, "profile_selected": observed["profile_selected"], "submit_capability": False}
             elif path == "/ui/api/profile-editor":
                 if request.method == "POST":
                     payload = observed["save_payload"] or {**copy.deepcopy(observed["payload"]), "save_status": "saved"}
@@ -2086,7 +2088,7 @@ def profile_editor_ui():
                 route.fulfill(status=observed["reconcile_status"], content_type="application/json", body=json.dumps(payload))
                 return
             elif path == "/ui/api/readiness":
-                payload = {"ready_for_live_e2e": False, "submit_capability": False}
+                payload = {"ready_for_live_e2e": False, "submit_capability": False, "checks": observed["readiness_checks"]}
             else:
                 payload = {"tasks": []}
             route.fulfill(content_type="application/json", body=json.dumps(payload))
@@ -2109,6 +2111,180 @@ def _open_editor(page):
 
 def _editor_posts(observed):
     return [(path, body) for method, path, body in observed["requests"] if method == "POST"]
+
+
+@pytest.mark.parametrize("checks,visible", [
+    ({"profile_configured": False, "profile_exists": False, "profile_loadable": False}, True),
+    ({"profile_configured": True, "profile_exists": True, "profile_loadable": True}, False),
+    ({"profile_configured": True, "profile_exists": False, "profile_loadable": False}, False),
+    ({"profile_configured": False}, False),
+    ({"profile_configured": "false", "profile_exists": False, "profile_loadable": False}, False),
+    ({}, False),
+])
+def test_task_workspace_profile_onboarding_uses_observed_missing_state_without_private_reads(profile_editor_ui, checks, visible):
+    page, observed = profile_editor_ui
+    observed["readiness_checks"] = checks
+    page.evaluate("readiness()")
+    assert page.locator("#profile-onboarding").is_visible() is visible
+    assert not any(path == "/ui/api/profile-editor" for _, path, _ in observed["requests"])
+    assert _editor_posts(observed) == []
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+
+
+def test_task_workspace_profile_onboarding_opens_existing_editor_without_json_or_duplicate_read(profile_editor_ui):
+    import os
+    from pathlib import Path
+    page, observed = profile_editor_ui
+    observed["profile_selected"] = False
+    observed["payload"].update(mode="new", profile_version=None)
+    observed["readiness_checks"] = {"profile_configured": False, "profile_exists": False, "profile_loadable": False}
+    page.evaluate("readiness()")
+    expect(page.locator("#profile-onboarding-open")).to_be_visible()
+    expect(page.locator("#profile-onboarding")).to_contain_text("本机还没有选择个人资料")
+    screenshot_dir = os.environ.get("JAE_UI_SCREENSHOT_DIR")
+    destination = Path(screenshot_dir) if screenshot_dir else None
+    if destination:
+        destination.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(destination / "profile-onboarding-start.png"), full_page=True, animations="disabled")
+    page.locator("#profile-onboarding-open").click()
+    expect(page.locator("#profile-editor-dialog")).to_be_visible()
+    expect(page.locator("#profile-editor-status")).to_contain_text("尚无资料")
+    assert not page.locator("#profile-dialog").is_visible()
+    assert not page.locator("#profile-file").is_visible()
+    page.evaluate("document.querySelector('#profile-onboarding-open').click()")
+    assert [path for _, path, _ in observed["requests"]].count("/ui/api/profile-editor") == 1
+    assert _editor_posts(observed) == []
+    page.locator("#profile-editor-field-0").fill("SYNTHETIC_UNSAVED")
+    page.locator("#profile-editor-close").click()
+    expect(page.locator("#profile-editor-dialog")).not_to_be_visible()
+    assert page.locator("#profile-editor-fields").inner_text() == ""
+    assert _editor_posts(observed) == []
+    page.locator("#profile-setup").click()
+    expect(page.locator("#profile-status")).to_contain_text("无需准备资料文件")
+    assert not page.locator("#profile-file").is_visible()
+    if destination:
+        page.locator("#profile-dialog").screenshot(path=str(destination / "profile-onboarding-settings.png"), animations="disabled")
+    page.locator("#profile-import summary").click()
+    expect(page.locator("#profile-file")).to_be_visible()
+
+
+@pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
+def test_task_workspace_profile_onboarding_late_setup_reply_never_opens_private_editor(profile_editor_ui, interruption):
+    page, observed = profile_editor_ui
+    observed["readiness_checks"] = {"profile_configured": False, "profile_exists": False, "profile_loadable": False}
+    page.evaluate("readiness()")
+    pending = []
+    page.route("**/ui/api/profile-setup", lambda route: pending.append(route))
+    page.locator("#profile-onboarding-open").click()
+    expect(page.locator("#profile-dialog")).to_be_visible()
+    assert len(pending) == 1
+    if interruption == "close":
+        page.locator("#profile-close").click()
+    elif interruption == "escape":
+        page.locator("#profile-dialog").press("Escape")
+    else:
+        observed["expired"] = True
+        page.evaluate("readiness()")
+        expect(page.locator("#session-expired")).to_be_visible()
+    with page.expect_response("**/ui/api/profile-setup"):
+        pending[0].fulfill(content_type="application/json", body=json.dumps({
+            "settings_version": "a" * 64, "profile_selected": False, "submit_capability": False}))
+    page.wait_for_function("!document.querySelector('#profile-dialog').open")
+    assert not page.locator("#profile-editor-dialog").is_visible()
+    assert not any(path == "/ui/api/profile-editor" for _, path, _ in observed["requests"])
+    assert _editor_posts(observed) == []
+
+
+def test_task_workspace_profile_onboarding_late_readiness_cannot_replace_newer_saved_observation(profile_editor_ui):
+    page, observed = profile_editor_ui
+    pending = []
+    def hold(route):
+        pending.append(route)
+        page.evaluate("count => window.__onboardingReadinessRequests=count", len(pending))
+    page.route("**/ui/api/readiness", hold)
+    page.evaluate("void readiness()")
+    page.wait_for_function("window.__onboardingReadinessRequests===1")
+    page.evaluate("void readiness()")
+    page.wait_for_function("window.__onboardingReadinessRequests===2")
+    assert len(pending) == 2
+    def answer(route, configured):
+        route.fulfill(content_type="application/json", body=json.dumps({
+            "ready_for_live_e2e": False, "submit_capability": False,
+            "message": "SAVED_OBSERVATION" if configured else "OLD_OBSERVATION",
+            "checks": {name: configured for name in ("profile_configured", "profile_exists", "profile_loadable")}}))
+    answer(pending[1], True)
+    expect(page.locator("#readiness")).to_have_text("SAVED_OBSERVATION")
+    with page.expect_response("**/ui/api/readiness"):
+        answer(pending[0], False)
+    expect(page.locator("#readiness")).to_have_text("SAVED_OBSERVATION")
+    assert not page.locator("#profile-onboarding").is_visible()
+    assert _editor_posts(observed) == []
+
+
+def test_task_workspace_profile_onboarding_actual_save_resume_reopen_preserves_existing_task(profile_setup_service, monkeypatch):
+    from pathlib import Path
+    from executor.autonomy.preflight import collect_live_preflight
+    settings, queue, supervisor, base, tid, calls = profile_setup_service
+    old_task = queue.get(tid)
+    old = Path(old_task["spec"]["profile_ref"])
+    old_bytes = old.read_bytes()
+    previous = settings.load_settings()
+    settings.save_settings({**previous, "profile_path": None})
+    monkeypatch.setattr(supervisor, "readiness", lambda: collect_live_preflight(
+        settings.load_settings(), supervisor_running=True, browser_mode_value="isolated",
+        chrome_exists=False, cdp_alive=False, deepseek_available=False))
+    writes, external, errors = [], [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            context = browser.new_context(viewport={"width": 600, "height": 800})
+            def local_only(route):
+                if route.request.url.startswith(base + "/"):
+                    route.continue_()
+                else:
+                    external.append(route.request.url)
+                    route.abort()
+            context.route("**/*", local_only)
+            page = context.new_page()
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("request", lambda request: writes.append(request.url) if request.method == "POST" else None)
+            page.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            expect(page.locator("#profile-onboarding")).to_be_visible()
+            page.locator("#profile-onboarding-open").click()
+            expect(page.locator("#profile-editor-field-0")).to_be_enabled()
+            page.locator("#profile-editor-field-0").fill("SYNTHETIC_FIRST_USE")
+            resume = b"%PDF-1.4\nSYNTHETIC_LOCAL_RESUME\n%%EOF"
+            page.locator("#profile-editor-resume").set_input_files({
+                "name": "synthetic-resume.pdf", "mimeType": "application/pdf", "buffer": resume})
+            assert writes == [] and settings.load_settings()["profile_path"] is None
+            page.locator("#profile-editor-save").click()
+            expect(page.locator("#profile-editor-status")).to_contain_text("已保存在本机并重新读取确认")
+            page.locator("#profile-editor-close").click()
+            expect(page.locator("#profile-onboarding")).not_to_be_visible()
+            assert "已就绪" not in page.locator("#readiness").inner_text()
+            current = settings.load_settings()
+            selected = Path(current["profile_path"])
+            profile = json.loads(selected.read_text())
+            assert profile["fields"]["identity.full_name"]["value"] == "SYNTHETIC_FIRST_USE"
+            asset = profile["assets"]["resume"]
+            assert Path(asset["path"]).read_bytes() == resume
+            assert queue.get(tid) == old_task and old.read_bytes() == old_bytes
+            assert current["unknown_preference"] == previous["unknown_preference"]
+            assert supervisor.manager._profile_ref() == str(selected)
+            assert writes == [base + "/ui/api/profile-editor"] and calls == []
+            page.close()
+            reopened = context.new_page()
+            reopened.on("pageerror", lambda error: errors.append(str(error)))
+            reopened.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            _open_editor(reopened)
+            expect(reopened.locator("#profile-editor-field-0")).to_have_value("SYNTHETIC_FIRST_USE")
+            expect(reopened.locator("#profile-editor-resume-status")).to_contain_text("本机已记录 PDF")
+            assert not reopened.locator("#profile-onboarding").is_visible()
+            assert reopened.locator("#profile-editor-resume").input_value() == ""
+            assert reopened.evaluate("localStorage.length + sessionStorage.length") == 0
+            assert external == [] and errors == [] and calls == []
+        finally:
+            browser.close()
 
 
 def test_task_workspace_profile_editor_explicit_private_projection_narrow_and_safe_screenshot(profile_editor_ui):
