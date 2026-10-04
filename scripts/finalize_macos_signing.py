@@ -157,7 +157,11 @@ def _validate_delta(source, app, original, current, bridge):
         if (preparation._digest(original_bytes) != before['sha256']
                 or preparation._digest(signed_bytes) != after['sha256']):
             raise ValueError('signing_finalization_input_changed')
-        transitions[name] = verify_signature_only_change(original_bytes, signed_bytes)
+        try:
+            transitions[name] = verify_signature_only_change(original_bytes, signed_bytes)
+        except ValueError as exc:
+            raise ValueError(f'{exc}; signing_object={name!r}, '
+                             f'completed_objects={len(transitions)}') from exc
     return transitions
 
 

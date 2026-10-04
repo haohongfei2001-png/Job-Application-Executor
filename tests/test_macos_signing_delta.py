@@ -259,7 +259,9 @@ def test_malformed_ranges_and_ambiguous_layouts_are_rejected_even_if_unchanged(d
 def test_signature_component_framing_rejects_malformed_or_unframed_bytes(offset, value):
     raw = synthetic_macho()
     if offset == 127:
-        raw = raw[:-1] + b'X'
+        # Keep this negative case inside the declared SuperBlob. Allocation
+        # slack outside that length has its own explicit positive contract.
+        raw = change(raw[:-1] + b'X', SIGNATURE_OFFSET + 4, 128, '>I')
     else:
         raw = change(raw, SIGNATURE_OFFSET + offset, value, '>I')
     with pytest.raises(ValueError, match='macho_delta_signature_'):
@@ -554,3 +556,45 @@ def test_addition_compares_every_preserved_original_byte():
             damaged[offset] ^= 1
             with pytest.raises(ValueError, match='macho_delta_'):
                 delta.verify_signature_only_change(original, bytes(damaged))
+
+
+@pytest.mark.parametrize('region', ['superblob_internal_gap', 'superblob_internal_tail'])
+def test_nonzero_signature_padding_diagnostics_preserve_refusal_without_bytes(region):
+    raw = bytearray(synthetic_signature(payload=b'PRIVATE_SIGNATURE_CANARY'))
+    length = struct.unpack_from('>I', raw, 4)[0]
+    if region == 'superblob_internal_gap':
+        raw[28:28] = b'\x01\0\0\0'
+        del raw[-4:]
+        struct.pack_into('>I', raw, 4, length + 4)
+        struct.pack_into('>I', raw, 16, 32)
+        struct.pack_into('>I', raw, 24, 76)
+        expected = 28
+    else:
+        raw[length] = 1
+        expected = length
+        if region == 'superblob_internal_tail':
+            struct.pack_into('>I', raw, 4, length + 4)
+    with pytest.raises(ValueError, match='macho_delta_signature_unframed_bytes') as caught:
+        delta._signature_frame(bytes(raw))
+    message = str(caught.value)
+    assert f'region={region}' in message
+    assert f'first_nonzero={expected}' in message
+    assert 'component_count=2' in message and 'allocation_bytes=128' in message
+    assert 'nonzero_count=1' in message
+    assert 'PRIVATE_SIGNATURE_CANARY' not in message
+
+
+def test_opaque_allocation_tail_is_allowed_but_remains_in_full_byte_identity():
+    original = synthetic_macho()
+    signed = bytearray(synthetic_macho(b'SYNTHETIC NEW'))
+    signed[-1] = 0x7f  # Outside declared SuperBlob length, inside LC allocation.
+    accepted = delta.verify_signature_only_change(original, bytes(signed))
+    assert accepted['signed_sha256'] == hashlib.sha256(signed).hexdigest()
+    assert accepted['signature_validation'] == accepted['publisher_validation'] == 'NOT_PERFORMED'
+    other_tail = bytearray(signed); other_tail[-1] = 0x5a
+    other = delta.verify_signature_only_change(original, bytes(other_tail))
+    assert accepted['signed_sha256'] != other['signed_sha256']
+    assert accepted['preserved_ranges_sha256'] == other['preserved_ranges_sha256']
+    signed[SIGNATURE_OFFSET - 1] ^= 1
+    with pytest.raises(ValueError, match='macho_delta_payload_changed'):
+        delta.verify_signature_only_change(original, bytes(signed))

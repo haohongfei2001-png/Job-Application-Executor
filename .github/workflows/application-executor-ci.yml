@@ -285,7 +285,8 @@ jobs:
   macos_consumer_release:
     if: github.event.action != 'labeled'
     runs-on: macos-latest
-    timeout-minutes: 25
+    # Complete native tests plus app/DMG production need runner-time headroom; test limits stay unchanged.
+    timeout-minutes: ${{ matrix.suite == 'native_integration' && 30 || 25 }}
     # Every original hosted-Mac file still runs exactly once. Independent
     # transaction, runtime/distribution and native UI suites keep complete fixtures
     # within the existing job budget; one shard failure cannot skip the other.

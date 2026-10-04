@@ -185,7 +185,8 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertNotIn('needs:',smoke)
         self.assertNotIn('continue-on-error',smoke)
         expected_budgets = {"foundation": 30, "packaged_candidate": 20,
-                            "macos_consumer_release": 25, "full_suite": 30, "test": 5,
+                            "macos_consumer_release": "${{ matrix.suite == 'native_integration' && 30 || 25 }}",
+                            "full_suite": 30, "test": 5,
                             "engineering_closure_macos": 20, "preparation_validation": 25}
         for name, budget in expected_budgets.items():
             self.assertIn(f"    timeout-minutes: {budget}\n", JOBS[name])

@@ -83,7 +83,14 @@ def _inline_string(raw, minimum):
 
 
 def _signature_frame(raw):
-    """Check only bounds/framing and zero allocation slack, NOT cryptography."""
+    """Check declared SuperBlob framing, NOT cryptography or allocation slack.
+
+    Apple's writer writes blob.length() bytes into a larger allocated signature
+    region; its reader treats LC datasize as a maximum. Bytes after that declared
+    length can retain old signature data. They stay inside the bounded signature
+    allocation and in the full-file hashes; they are not authenticated code.
+    See the fixed-version writer/reader references in SIGNING_PREPARATION.md.
+    """
     _require(12 <= len(raw) <= MAX_SIGNATURE_BYTES, 'signature_size')
     magic, length, count = struct.unpack_from('>III', raw)
     _require(magic == 0xFADE0CC0 and 1 <= count <= 128
@@ -101,11 +108,25 @@ def _signature_frame(raw):
         spans.append((offset, offset + size))
     _require(0 in slots, 'signature_code_directory')
     _disjoint(spans, 'signature_overlap')
+    def require_zero(start, stop, region):
+        # Structural diagnostics only: never include signature/payload bytes.
+        # Internal framing remains strict; allocation slack is separate.
+        first_nonzero = next((index for index in range(start, stop) if raw[index]), None)
+        if first_nonzero is not None:
+            nonzero_count = sum(bool(value) for value in raw[start:stop])
+            raise ValueError('macho_delta_signature_unframed_bytes: '
+                f'region={region}, region_start={start}, region_end={stop}, '
+                f'first_nonzero={first_nonzero}, nonzero_count={nonzero_count}, '
+                f'superblob_length={length}, component_count={count}, '
+                f'allocation_bytes={len(raw)}')
     cursor = 12 + count * 8
     for start, stop in sorted(spans):
-        _require(not any(raw[cursor:start]), 'signature_unframed_bytes')
+        require_zero(cursor, start, 'superblob_internal_gap')
         cursor = stop
-    _require(not any(raw[cursor:]), 'signature_unframed_bytes')
+    require_zero(cursor, length, 'superblob_internal_tail')
+    # Do not require raw[length:] to be zero. No byte outside LC_CODE_SIGNATURE
+    # is exempted: _verify_thin still compares every original payload range,
+    # and signed_sha256 plus the final inventory hash this complete allocation.
 
 
 @dataclass(frozen=True)
@@ -283,13 +304,18 @@ def _layout(data, *, allow_missing=False):
                      'empty_linkedit_reference')
     _disjoint(occupied, 'linkedit_reference_overlap')
     if signature is not None:
-        _signature_frame(data[sigoff:])
+        try:
+            _signature_frame(data[sigoff:])
+        except ValueError as exc:
+            raise ValueError(f'{exc}; signature_offset={sigoff}, '
+                             f'signature_datasize={sigsize}, cpu=0x{cpu:x}') from exc
     return _Layout(cpu, subtype, ncmds, commands_end, signature_command, sigoff, sigsize, linkedit['command'],
                    linkedit['offset'], linkedit['size'], linkedit['vmsize'])
 
 
 def _verify_thin(original, signed):
-    before, after = _layout(original, allow_missing=True), _layout(signed)
+    before = _layout(original, allow_missing=True)
+    after = _layout(signed)
     _require((before.cpu, before.subtype, before.linkedit_command, before.linkedit_offset) ==
              (after.cpu, after.subtype, after.linkedit_command, after.linkedit_offset), 'layout_changed')
     mutable_fields = [(before.linkedit_command + 32, 8),
@@ -413,10 +439,15 @@ def verify_signature_only_change(original: bytes, signed: bytes) -> dict:
     transitions = []
     for old, new in zip(before, after):
         _require((old[0], old[1]) == (new[0], new[1]), 'fat_arch_changed')
+        try:
+            transition = _verify_thin(old[5], new[5])
+        except ValueError as exc:
+            raise ValueError(f'{exc}; fat_cpu=0x{old[0]:x}, '
+                             f'original_slice_offset={old[2]}, signed_slice_offset={new[2]}') from exc
         transitions.append({'original_offset': old[2], 'signed_offset': new[2],
                             'original_fat_alignment_power': old[4],
                             'signed_fat_alignment_power': new[4],
-                            'transition': _verify_thin(old[5], new[5])})
+                            'transition': transition})
     return {'format': 'jae-macho-signature-delta-v1',
             'evidence': 'STRUCTURAL_FAT_SIGNATURE_CHANGES_ONLY',
             'allocator_contract': ALLOCATOR_CONTRACT,

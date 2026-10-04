@@ -130,6 +130,13 @@ original pinned archive, except a strictly bounded Mach-O signing transition:
 - Other formats, commands, relocation or allocator behavior refuse. In particular,
   this is not a generic Mach-O rewriter or compatibility promise for older
   standalone cctools allocation rules.
+- Bytes between the declared SuperBlob length and the already-bounded
+  `LC_CODE_SIGNATURE.datasize` are opaque allocation slack. Apple's writer may
+  leave old signature bytes there. They remain included in the complete signed
+  SHA-256/inventory; no non-signature byte range is newly exempted. This slack is
+  not authenticated as code by Apple's signature check. Internal blob gaps,
+  indexes, overlaps, boundaries and original payload comparisons stay strict.
+  Refusals include object/slice names and numeric framing locations, never bytes.
 - All other original paths, including manifests, RECORD/METADATA/WHEEL and the
   bridge, remain byte-exact. No hashes or metadata are repaired. The only added
   paths are the current four-file script-main `_CodeSignature` envelope.
@@ -193,7 +200,7 @@ sealed by the outer app. The new delta validator and bridge-coverage check consu
 those actual before/after bytes. The full finalizer must still reject the ad-hoc
 app against the independent Developer ID requirement and create no final identity.
 The oracle never executes signed code or uploads the signed bundle. It reports
-partial counts/elapsed time on failure, keeps the existing Mac owner/job budget,
+partial counts/elapsed time on failure, keeps the runtime owner/job budget,
 and does not replace any original test. Only an actual hosted run can establish
 this oracle's result; local synthetic tests or historical length records cannot.
 `test_macos_signing_finalization.py` and `test_macos_signing_delta.py` cover pinned
@@ -228,8 +235,26 @@ the new byte-delta implementation or establish real Developer ID compatibility.
 
 The modeled allocation formulas are pinned to Apple Security commit
 `db15acbe6a7f257a859ad9a3bb86097bfe0679d9` (Security-61901.0.87.0.1):
-[internal allocator invocation](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/signerutils.cpp#L188-L200),
-[signature and LINKEDIT layout](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/codesign_alloc.cpp#L236-L318),
-and [FAT layout](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/codesign_alloc.cpp#L412-L442).
+[internal allocator invocation](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/signerutils.cpp#L175-L188),
+[signature and LINKEDIT layout](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/codesign_alloc.cpp#L225-L308),
+and [FAT layout](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/codesign_alloc.cpp#L391-L430).
 Source inspection does not prove which allocator produced a historical artifact;
 real signed-byte compatibility and publisher acceptance remain separate evidence.
+
+The allocation-slack distinction is supported by the same fixed Apple source:
+[writer only writes the declared blob](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/signerutils.cpp#L219-L229),
+[reader uses the allocation as a maximum](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_codesigning/lib/machorep.cpp#L304-L323),
+and [strict internal blob framing](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/OSX/libsecurity_utilities/lib/superblob.h#L93-L110).
+PR45's first hosted oracle (`37240392091`, job `111547774601`, head `c967826`)
+retained a real negative result: 159 tests passed, this oracle failed after all
+32 objects and the outer ad-hoc seal had verified, at a zero-unframed-byte check.
+The 12.09-second child segment (12.63 seconds in the parent) did not time out.
+Its original diagnostic did not identify whether bytes were inside the declared
+blob or only allocation slack. The source-backed format correction must not be
+presented as proof of that historical failure's exact location; a later actual
+oracle result is separately required.
+
+The separately reviewed CI headroom adjustment gives only `native_integration`
+30 minutes for its existing tests plus unsigned app/DMG build/upload. All other
+Mac matrix owners retain 25 minutes. The signing-delta oracle remains on
+`runtime_distribution` with its unchanged 90-second child limit.

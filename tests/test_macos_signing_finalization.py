@@ -8,6 +8,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import struct
 import time
 from types import SimpleNamespace
 
@@ -344,3 +345,22 @@ def test_postcommit_mutation_returns_error_and_retains_untrusted_evidence(synthe
     assert stale['consumer_admission'] == 'NOT_ADMITTED'
     assert stale['files'][bridge['signing_order'][0]['path']]['sha256'] != preparation._digest(
         (app / bridge['signing_order'][0]['path']).read_bytes())
+
+
+def test_refused_delta_names_object_and_structural_location_only(synthetic_transition):
+    prepared, _, bridge = synthetic_transition
+    name = bridge['signing_order'][0]['path']
+    path = prepared[1] / prepared[2]['app_name'] / name
+    from test_macos_signing_delta import SIGNATURE_OFFSET
+    raw = bytearray(path.read_bytes())
+    # Keep the nonzero byte INSIDE the declared SuperBlob, not allocation slack.
+    struct.pack_into('>I', raw, SIGNATURE_OFFSET + 4, len(raw) - SIGNATURE_OFFSET)
+    raw[-1] = 1; path.write_bytes(raw)
+    with pytest.raises(ValueError, match='macho_delta_signature_unframed_bytes') as caught:
+        finish(prepared)
+    message = str(caught.value)
+    assert f'signing_object={name!r}' in message and 'completed_objects=' in message
+    assert 'signature_offset=' in message and 'signature_datasize=' in message
+    assert 'region=superblob_internal_tail' in message
+    assert 'SYNTHETIC NEW' not in message
+    no_output(prepared)
