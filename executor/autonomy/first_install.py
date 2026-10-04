@@ -39,6 +39,10 @@ def _fence_path(apps: Path) -> Path:
 
 
 def _fence_record(data: bytes) -> dict:
+    # The original pending JSON is immutable. A single bounded completion
+    # record may follow ASCII RS; only its complete canonical bytes commit.
+    # An exact truncated prefix remains pending, never partial success.
+    initial, separator, completion = data.partition(b"\x1e")
     def unique(pairs):
         result = {}
         for key, value in pairs:
@@ -46,14 +50,30 @@ def _fence_record(data: bytes) -> dict:
                 raise ValueError("first install fence invalid")
             result[key] = value
         return result
-    value = json.loads(data, object_pairs_hook=unique)
+    value = json.loads(initial, object_pairs_hook=unique)
     if (type(value) is not dict or set(value) != {"format", "bundle_tag", "status"}
             or value["format"] != "jae-first-install-fence-v1"
             or type(value["status"]) is not str or value["status"] not in {"pending", "complete"}
             or type(value["bundle_tag"]) is not str or len(value["bundle_tag"]) != 64
             or any(c not in "0123456789abcdef" for c in value["bundle_tag"])):
         raise ValueError("first install fence invalid")
+    if separator:
+        if value["status"] != "pending":
+            raise ValueError("first install fence invalid")
+        expected = _completion_record(initial, value)
+        if completion == expected:
+            return {**value, "status": "complete"}
+        if not expected.startswith(completion):
+            raise ValueError("first install fence invalid")
     return value
+
+
+def _completion_record(initial: bytes, pending: dict) -> bytes:
+    return json.dumps({"format": "jae-first-install-completion-v1",
+                       "bundle_tag": pending["bundle_tag"],
+                       "pending_sha256": hashlib.sha256(initial).hexdigest(),
+                       "status": "complete"},
+                      sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
 def _read_first_fence(apps: Path) -> dict | None:
@@ -98,31 +118,38 @@ def _create_first_fence(apps: Path, identity) -> None:
 
 
 def _complete_first_fence(apps: Path, identity, *, _expected_fence_tag=None) -> None:
-    # Caller owns app + state guards and has just re-admitted the empty default
-    # authority. In-place finite update fails closed if interrupted; no alias,
-    # hardlink, unrelated file replacement or delete is permitted.
+    # Caller owns the existing startup guards and has admitted initialization.
+    # Append only to the same owned inode: a short write must not destroy the
+    # original pending identity. No replacement, truncate or deletion occurs.
     path = _fence_path(apps)
     expected = {"format": "jae-first-install-fence-v1",
                 "bundle_tag": _bundle_tag(identity), "status": "pending"}
     if _read_first_fence(apps) != expected:
         raise ValueError("first install fence changed")
-    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         before, visible = os.fstat(fd), path.stat(follow_symlinks=False)
+        current = os.read(fd, 1025)
         if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
                 or before.st_nlink != 1 or before.st_mode & 0o077 or before.st_size > 1024
                 or (before.st_dev, before.st_ino) != (visible.st_dev, visible.st_ino)
-                or _fence_record(os.read(fd, 1025)) != expected):
+                or _fence_record(current) != expected):
             raise ValueError("first install fence changed")
         if (_expected_fence_tag is not None and hashlib.sha256(json.dumps([
                 (before.st_dev, before.st_ino, stat.S_IMODE(before.st_mode), before.st_uid),
                 expected], sort_keys=True, separators=(",", ":")).encode()).hexdigest() != _expected_fence_tag):
             raise ValueError("first install fence changed")
-        data = json.dumps({**expected, "status": "complete"}, sort_keys=True, separators=(",", ":")).encode()
-        os.lseek(fd, 0, os.SEEK_SET)
-        if os.write(fd, data) != len(data):
+        initial = current.partition(b"\x1e")[0]
+        completed = initial + b"\x1e" + _completion_record(initial, expected)
+        if len(completed) > 1024 or not completed.startswith(current):
+            raise ValueError("first install fence invalid")
+        remaining = completed[len(current):]
+        if os.write(fd, remaining) != len(remaining):
             raise OSError("first install fence incomplete")
-        os.ftruncate(fd, len(data)); os.fsync(fd)
+        os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        if os.read(fd, 1025) != completed:
+            raise ValueError("first install fence changed")
         after = path.stat(follow_symlinks=False)
         if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
             raise ValueError("first install fence changed")
