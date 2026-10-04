@@ -362,12 +362,19 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  test:
+  full_suite:
     if: (github.event.action != 'labeled' && (github.event_name == 'push' || github.event.pull_request.draft == false)) || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.pull_request.head.repo.full_name == github.repository && github.event.label.name == format('eng-{0}', github.event.pull_request.head.sha))
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        shard: [consumer, browser_contract, remainder]
     outputs:
-      closure_head: ${{ steps.closure_head.outputs.sha }}
+      receipt_consumer: ${{ steps.full_suite.outputs.receipt_consumer }}
+      receipt_browser_contract: ${{ steps.full_suite.outputs.receipt_browser_contract }}
+      receipt_remainder: ${{ steps.full_suite.outputs.receipt_remainder }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -429,11 +436,80 @@ jobs:
           python scripts/prepare_standalone_runtime.py "$RUNNER_TEMP/jae-standalone"
           echo "JAE_STANDALONE_RUNTIME=$RUNNER_TEMP/jae-standalone/python" >> "$GITHUB_ENV"
       - name: Full round-closure test suite
+        id: full_suite
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
-        run: python -m pytest -v
+          JAE_FULL_SUITE_SHARD: ${{ matrix.shard }}
+          JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}
+          JAE_FULL_SUITE_RECEIPT: ${{ runner.temp }}/jae-full-suite-${{ matrix.shard }}.json
+        run: python -m pytest -v -p scripts.ci_full_suite
       - name: Compile Python sources
         run: python -m compileall -q executor tests
+
+  test:
+    # Preserve the existing check name and downstream closure authority. Missing,
+    # failed, cancelled and skipped owners are failures, never a skipped gate.
+    needs: full_suite
+    if: always() && ((github.event.action != 'labeled' && (github.event_name == 'push' || github.event.pull_request.draft == false)) || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.pull_request.head.repo.full_name == github.repository && github.event.label.name == format('eng-{0}', github.event.pull_request.head.sha)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      closure_head: ${{ steps.full_aggregate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || '' }}
+      - name: Refuse stale or ineligible engineering closure head
+        id: closure_head
+        if: github.event.action == 'labeled'
+        env:
+          JAE_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -I - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          # Isolated stdlib only: never import code from the checked-out candidate.
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
+              event = json.load(handle)
+          head = event["pull_request"]["head"]
+          sha = head["sha"]
+          if (os.environ["GITHUB_EVENT_NAME"] != "pull_request"
+                  or event["action"] != "labeled"
+                  or head["repo"]["full_name"] != os.environ["GITHUB_REPOSITORY"]
+                  or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+                  or event["label"]["name"] != "eng-" + sha
+                  or os.environ["JAE_EXPECTED_HEAD"] != sha):
+              raise SystemExit("ineligible exact-head engineering closure")
+
+          def git(*args):
+              return subprocess.run(["git", *args], check=True, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=60).stdout.strip()
+
+          # A label event can become stale while the runner is queued. Refuse before
+          # setup, dependency installation, tests or builds if its branch has moved.
+          full_ref = "refs/heads/" + head["ref"]
+          git("check-ref-format", full_ref)
+          if (git("rev-parse", "--verify", "HEAD") != sha
+                  or git("ls-remote", "--exit-code", "--refs", "origin", full_ref)
+                  != sha + "\t" + full_ref):
+              raise SystemExit("engineering closure head changed; no repository code executed")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("sha=" + sha + "\n")
+          print("Exact-head engineering closure admitted; NOT_CERTIFIED")
+          PY
+      - name: Require every complete-file owner and identical source
+        id: full_aggregate
+        env:
+          JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}
+          JAE_FULL_SUITE_RECEIPTS: ${{ toJSON(needs.full_suite.outputs) }}
+          JAE_FULL_SUITE_RESULT: ${{ needs.full_suite.result }}
+          JAE_EVENT_ACTION: ${{ github.event.action }}
+        run: python3 -I scripts/ci_full_suite.py aggregate
 
   engineering_closure_macos:
     # One unsigned build only after the unchanged complete Linux suite succeeds.
