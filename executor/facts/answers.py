@@ -61,7 +61,13 @@ class TaskAnswerStore:
 
     def __init__(self, queue):
         self.queue = queue
-        self.cipher = _private_cipher(queue.root, "task-answers.key")
+        startup = getattr(queue, '_first_use_startup', None)
+        if startup is not None:
+            from ..autonomy.first_use_recovery import _FirstUseStartup
+            if type(startup) is not _FirstUseStartup:
+                raise ValueError('first_use_callback_invalid')
+        self.cipher = (startup.initial_cipher(queue) if startup is not None
+                       else _private_cipher(queue.root, "task-answers.key"))
         with queue.tx() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS task_answer_events (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,

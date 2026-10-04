@@ -2369,11 +2369,21 @@ def test_pending_recovery_post_commit_failures_preserve_honest_partial_state(tmp
     finally:
         startup.__exit__(None,None,None)
         if ack_read is not None:os.close(ack_read)
-    assert (state/'tasks.sqlite3').is_file()  # Effects are retained, never called untouched.
+    if fault=='queue_crash':
+        # Initialization now stays in memory until the prepared checkpoint.
+        assert {p.name for p in state.iterdir()}=={'native-window.lock','worker.lock','migration.lock'}
+    else:
+        assert (state/'tasks.sqlite3').is_file()  # Published effects remain intact.
     assert fence.stat().st_ino==fence_inode
     assert not (state/'service.log').exists() and not (state/'service.json').exists()
     if fault!='lost_ack':
-        with pytest.raises(ValueError):_recovery_record(recovery,app,state)
+        resumed=_recovery_record(recovery,app,state)
+        assert resumed['bundle_tag']==record['bundle_tag']
+        if fault=='completion_short_write':
+            # The new receipt enables only this known initialization. Without
+            # it, retain the original unknown-nonempty refusal assertion.
+            (state/'.first-use-prepared.json').rename(tmp_path/'retained-prepared-receipt')
+            with pytest.raises(ValueError):_recovery_record(recovery,app,state)
     else:
         assert isinstance(refused.value,BrokenPipeError), str(refused.value)
         assert module._read_first_fence(app.parent)['status']=='complete'
@@ -2982,7 +2992,7 @@ def test_first_use_completion_short_append_preserves_pending_identity_and_can_fi
         os.close(lock)
 
 
-def test_first_use_real_queue_short_completion_keeps_pending_proof_but_no_nonempty_adoption(tmp_path,monkeypatch):
+def test_first_use_real_queue_short_completion_keeps_pending_proof_but_no_unknown_nonempty_adoption(tmp_path,monkeypatch):
     import os
     from executor.autonomy.queue import TaskQueue
     module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
@@ -3003,6 +3013,10 @@ def test_first_use_real_queue_short_completion_keeps_pending_proof_but_no_nonemp
     assert module._read_first_fence(app.parent)['status']=='pending'
     assert fence.read_bytes().startswith(before) and fence.stat().st_ino==inode
     assert recovery._fence_tag(app.parent)==record['fence_tag']
+    snapshot=_installer_inventory(state)
+    assert _recovery_record(recovery,app,state)['bundle_tag']==record['bundle_tag']
+    assert _installer_inventory(state)==snapshot
+    (state/'.first-use-prepared.json').rename(tmp_path/'retained-prepared-receipt')
     snapshot=_installer_inventory(state)
     with pytest.raises(ValueError):_recovery_record(recovery,app,state)
     assert _installer_inventory(state)==snapshot

@@ -257,6 +257,11 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 if name in {"packaged_candidate", "macos_consumer_release"}:
                     protected = body[body.index("    strategy:\n"):]
                 if name == "macos_consumer_release":
+                    # Add the prepared-state owning file without weakening any
+                    # byte of the original matrix selectors or job body.
+                    prepared_selector = "tests/test_macos_host_v1.py tests/test_first_use_prepared_v1.py "
+                    self.assertEqual(protected.count(prepared_selector), 1)
+                    protected = protected.replace(prepared_selector, "tests/test_macos_host_v1.py ", 1)
                     self.assertEqual(protected.count(INSTALLER_IMAGE_STEPS), 1)
                     protected = protected.replace(INSTALLER_IMAGE_STEPS, "", 1)
                     self.assertEqual(protected.count(LIFECYCLE_SOAK_MAC_STEP), 1)

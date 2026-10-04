@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import select
+import secrets
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -120,8 +122,24 @@ def capture_startup_record(app, state, identity):
     if record != {'format':'jae-first-install-fence-v1',
                   'bundle_tag':_bundle_tag(identity), 'status':'pending'}:
         raise ValueError('first_use_fence_changed')
+    context, prepared = _prepared_admission(app, state, identity)
+    from .first_use_prepared import admission_tag
     return {'format':_FORMAT, 'bundle_tag':_bundle_tag(identity),
-            'fence_tag':_fence_tag(app.parent), 'authority_tag':_authority_tag(state)}
+            'fence_tag':context['fence_tag'], 'authority_tag':admission_tag(context, prepared)}
+
+
+def _prepared_admission(app, state, identity):
+    from .first_install import _bundle_tag
+    from .first_use_prepared import inspect
+    context = {'bundle_tag':_bundle_tag(identity), 'fence_tag':_fence_tag(app.parent),
+               'root_tag':_authority_tag(state)}
+    return context, inspect(state, context)
+
+
+def _admission_tag(app, state, identity):
+    from .first_use_prepared import admission_tag
+    context, prepared = _prepared_admission(app, state, identity)
+    return admission_tag(context, prepared)
 
 
 def _paths(root):
@@ -163,6 +181,10 @@ class _FirstUseStartup(AbstractContextManager):
         self.components = None
         self.worker_fd = None
         self.committed = False
+        self.queue = None
+        self.context = None
+        self.prepared = None
+        self._key = self._token = None
 
     def verify(self, *, empty):
         from . import consumer
@@ -170,9 +192,8 @@ class _FirstUseStartup(AbstractContextManager):
         identity = consumer._bundle_transaction_identity(self.app)
         if (identity is None or _bundle_tag(identity) != self.record['bundle_tag']
                 or _fence_tag(self.app.parent) != self.record['fence_tag']
-                or _authority_tag(self.state) != self.record['authority_tag']
-                or not _known_legacy_absent(self.source, self.app, self.state)
-                or empty and consumer._legacy_root_has_state(self.state, self.state)):
+                or _admission_tag(self.app, self.state, identity) != self.record['authority_tag']
+                or not _known_legacy_absent(self.source, self.app, self.state)):
             raise ValueError('first_use_admission_changed')
         return identity
 
@@ -227,7 +248,32 @@ class _FirstUseStartup(AbstractContextManager):
                 or self.app_fd is None or self.worker_fd is None):
             raise ValueError('first_use_queue_unverified')
         self.bind_worker(self.worker_fd)
-        self.verify(empty=True)  # Actual worker + migration locks held here.
+        identity = self.verify(empty=True)  # Actual worker + migration locks held here.
+        from cryptography.fernet import Fernet
+        self.context, self.prepared = _prepared_admission(self.app, self.state, identity)
+        self.queue = queue
+        if self.prepared is None:
+            self._key = Fernet.generate_key()
+            self._token = secrets.token_urlsafe(32).encode('ascii')
+        else:
+            self._key = self.prepared.payloads['task-answers.key']
+            self._token = self.prepared.payloads['auth.token']
+        if len(self._key) != 44 or len(self._token) != 43:
+            raise ValueError('first_use_prepared_credentials_invalid')
+        Fernet(self._key)
+        if any(c not in b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_' for c in self._token):
+            raise ValueError('first_use_prepared_credentials_invalid')
+        connection = sqlite3.connect(':memory:', isolation_level=None)
+        if not callable(getattr(connection, 'serialize', None)):
+            connection.close()
+            raise ValueError('first_use_serialization_unavailable')
+        queue._initialization_db = connection
+
+    def initial_cipher(self, queue):
+        from cryptography.fernet import Fernet
+        if queue is not self.queue or queue._initialization_db is None or self._key is None:
+            raise ValueError('first_use_queue_unverified')
+        return Fernet(self._key)
 
     def after_queue(self, queue):
         # Still inside TaskQueue's existing migration lock. No nested flock.
@@ -236,12 +282,24 @@ class _FirstUseStartup(AbstractContextManager):
         from .supervisor import Supervisor, create_server
         from ..otp.bridge import OtpBridge
         from .first_install import _complete_first_fence, _read_first_fence, _bundle_tag
+        from .first_use_prepared import prepare, admission_tag
         self.verify(empty=False)
         worker = Worker(queue, relay=None if browser_mode() in {'test','isolated','headless'} else OtpBridge())
-        supervisor = Supervisor(queue, worker)
+        supervisor = Supervisor(queue, worker, token=self._token.decode('ascii'))
+        payload = queue._initialization_db.serialize()
+        payloads = {'tasks.sqlite3':payload, 'task-answers.key':self._key, 'auth.token':self._token}
+        if self.prepared is None:
+            self.prepared = prepare(self.state, self.context, payloads)
+            self.record = {**self.record, 'authority_tag':admission_tag(self.context, self.prepared)}
+        elif self.prepared.payloads != payloads:
+            # The same unmodified initializer independently proves the recorded
+            # database is initial state. Never restore or empty another journal.
+            raise ValueError('first_use_prepared_initial_state_changed')
+        self.verify(empty=False)
         server = create_server(supervisor, port=self.port)
         self.components = (worker, supervisor, server)
         identity = self.verify(empty=False)
+        queue._initialization_db.close(); queue._initialization_db = None
         # No server/worker thread has been exposed. On failure, preserve pending
         # + created private state and close only our own bound server object.
         _complete_first_fence(self.app.parent, identity, _expected_fence_tag=self.record['fence_tag'])
@@ -249,6 +307,7 @@ class _FirstUseStartup(AbstractContextManager):
                 'format':'jae-first-install-fence-v1', 'bundle_tag':_bundle_tag(identity), 'status':'complete'}:
             raise ValueError('first_use_completion_unverified')
         self.committed = True
+        queue._first_use_startup = None  # Later ordinary stores use the retained disk key.
 
     def acknowledge(self, service):
         from .cli import _service_identity_valid
@@ -263,6 +322,8 @@ class _FirstUseStartup(AbstractContextManager):
     def __exit__(self, *args):
         if self.components is not None:
             self.components[2].server_close()
+        if self.queue is not None and self.queue._initialization_db is not None:
+            self.queue._initialization_db.close(); self.queue._initialization_db = None
         for name in ('ack_fd', 'app_fd'):
             fd = getattr(self, name)
             if fd is not None:
@@ -409,7 +470,7 @@ def bound_native_guard(root, record):
         identity = consumer._bundle_transaction_identity(app)
         if (identity is None or _bundle_tag(identity) != record['bundle_tag']
                 or _fence_tag(app.parent) != record['fence_tag']
-                or _authority_tag(state) != record['authority_tag']):
+                or _admission_tag(app, state, identity) != record['authority_tag']):
             raise ValueError('first_use_native_authority_changed')
     validate()
     root_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -437,9 +498,9 @@ def prepare_recovery(app, state, identity, host, *, confirm=True):
     admitted_state = _state_snapshot(state)
     if admitted_state is None:
         raise ValueError('first_use_authority_missing')
+    admitted_data = _admission_tag(app, state, identity)
     if (_read_first_fence(app.parent)['bundle_tag'] != _bundle_tag(identity)
             or consumer._bundle_transaction_identity(app) != identity
-            or consumer._legacy_root_has_state(state, state)
             or not _known_legacy_absent(source, app, state)):
         raise ValueError('first_use_admission_changed')
     if confirm:
@@ -450,7 +511,8 @@ def prepare_recovery(app, state, identity, host, *, confirm=True):
         if choice != {'action':'resume_first_use'}:
             raise ValueError('first_use_intent_unconfirmed')
     if (consumer._bundle_transaction_identity(app) != identity or _fence_tag(app.parent) != before
-            or _state_snapshot(state) != admitted_state):
+            or _state_snapshot(state) != admitted_state
+            or _admission_tag(app, state, identity) != admitted_data):
         raise ValueError('first_use_admission_changed')
     app_fd = consumer._acquire_app_transaction_lock(app.parent)
     try:
@@ -458,20 +520,20 @@ def prepare_recovery(app, state, identity, host, *, confirm=True):
             admitted_tag = revalidate_authority()
             if (consumer._bundle_transaction_identity(app) != identity
                     or _fence_tag(app.parent) != before
-                    or consumer._legacy_root_has_state(state, state)
+                    or _admission_tag(app, state, identity) != admitted_data
                     or not _known_legacy_absent(source, app, state)):
                 raise ValueError('first_use_admission_changed')
             if confirm and not consumer._candidate_starts(source.parent/'runtime/bin/python', source):
                 raise ValueError('first_use_health_unconfirmed')
             if (consumer._bundle_transaction_identity(app) != identity
                     or _fence_tag(app.parent) != before
-                    or consumer._legacy_root_has_state(state, state)
+                    or _admission_tag(app, state, identity) != admitted_data
                     or not _known_legacy_absent(source, app, state)):
                 raise ValueError('first_use_admission_changed')
             if revalidate_authority() != admitted_tag:
                 raise ValueError('first_use_authority_changed')
             record = capture_startup_record(app, state, identity)
-            if record['authority_tag'] != admitted_tag or revalidate_authority() != admitted_tag:
+            if record['authority_tag'] != admitted_data or revalidate_authority() != admitted_tag:
                 raise ValueError('first_use_authority_changed')
             return record
     finally:

@@ -124,6 +124,8 @@ class TaskQueue:
         self.path = self.root / "tasks.sqlite3"
         self.clock = clock
         self.lock = threading.RLock()
+        self._first_use_startup = _first_use_startup
+        self._initialization_db = None
         # Preserve one consistent pre-migration snapshot. The old executable
         # schema can still read it if a rollback is needed; never overwrite it.
         backup_path = self.root / "tasks.sqlite3.pre-jcr01.sqlite3"
@@ -136,7 +138,7 @@ class TaskQueue:
         with os.fdopen(migration_fd, "a+") as lock_handle:
             if _first_use_startup is not None:
                 _first_use_startup.before_queue(self)
-            if self.path.exists() and not backup_path.exists():
+            if _first_use_startup is None and self.path.exists() and not backup_path.exists():
                 with sqlite3.connect(self.path) as source:
                     columns_before = {row[1] for row in source.execute("PRAGMA table_info(tasks)")}
                     if columns_before and "revision" not in columns_before:
@@ -232,14 +234,18 @@ class TaskQueue:
                     created REAL NOT NULL, updated REAL NOT NULL,
                     UNIQUE(upload_intent_sha,ordinal))''')
                 db.execute("INSERT OR IGNORE INTO task_view_context VALUES(1,NULL,0)")
-            self.path.chmod(0o600)
+            if _first_use_startup is None:
+                self.path.chmod(0o600)
             if _first_use_startup is not None:
                 _first_use_startup.after_queue(self)
 
     @contextmanager
     def tx(self):
         with self.lock:
-            db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
+            # Only the existing strict first-use callback can supply this
+            # temporary connection. Ordinary operation remains file-backed.
+            initial = getattr(self, '_initialization_db', None)
+            db = initial if initial is not None else sqlite3.connect(self.path, timeout=15, isolation_level=None)
             db.row_factory = sqlite3.Row
             try:
                 db.execute("BEGIN IMMEDIATE")
@@ -249,7 +255,8 @@ class TaskQueue:
                 db.rollback()
                 raise
             finally:
-                db.close()
+                if initial is None:
+                    db.close()
 
 
     @staticmethod
