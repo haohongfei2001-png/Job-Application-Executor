@@ -1805,3 +1805,61 @@ def _installed_missing_resume_recovery(target,state,port,home,environment,previo
     finally:
         stopped=cli._stop_owned_service(state,port)
         assert stopped.get('ok') is True or stopped.get('reason')=='service_record_missing'
+
+
+def test_hosted_mac_installed_first_use_short_completion_retains_exact_pending_proof(native_installed_app,tmp_path):
+    from executor.autonomy import consumer,first_install
+    f=native_installed_app;app=f['app'];source=app/'Contents/Resources/release'
+    python=app/'Contents/Resources/runtime/bin/python'
+    identity=consumer._bundle_transaction_identity(app);assert identity is not None
+    assert {p.name for p in f['state'].iterdir()}=={'native-window.lock','worker.lock','migration.lock'}
+    first_install._create_first_fence(app.parent,identity)
+    f['repo'].rename(tmp_path/'removed-completion-checkout')
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
+    probe=r'''
+import json,os,sys,hashlib
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from executor.autonomy import consumer,first_install,first_use_recovery as recovery
+from executor.autonomy.runtime_paths import default_runtime
+from executor.autonomy.queue import TaskQueue
+source=Path(sys.argv[1]);app=source.parent.parent.parent;state=default_runtime(source)
+identity=consumer._bundle_transaction_identity(app);assert identity is not None
+record=recovery.prepare_recovery(app,state,identity,source.parent/'native-host',confirm=False)
+fence=first_install._fence_path(app.parent);before=fence.read_bytes();inode=fence.stat().st_ino
+read_fd,write_fd=os.pipe();startup=recovery._FirstUseStartup(state,int(sys.argv[2]),record,write_fd)
+real_write=os.write
+def short_write(fd,data):
+ return real_write(fd,data[:-3] if os.fstat(fd).st_ino==inode else data)
+first_install.os.write=short_write
+failed=False
+try:
+ try:
+  with startup:
+   with startup.worker_guard():TaskQueue(state,_first_use_startup=startup)
+ except OSError:failed=True
+finally:
+ first_install.os.write=real_write
+ startup.__exit__(None,None,None);os.close(read_fd)
+assert failed and (state/'tasks.sqlite3').is_file()
+assert fence.read_bytes().startswith(before) and fence.stat().st_ino==inode
+assert first_install._read_first_fence(app.parent)['status']=='pending'
+assert recovery._fence_tag(app.parent)==record['fence_tag']
+snapshot={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in state.iterdir()}
+try:recovery.prepare_recovery(app,state,identity,source.parent/'native-host',confirm=False)
+except ValueError:pass
+else:raise AssertionError('unknown nonempty state was adopted')
+assert snapshot=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in state.iterdir()}
+assert not any((state/n).exists() for n in ('service.json','service.log','native-window.json'))
+assert consumer._bundle_transaction_identity(app)==identity
+print(json.dumps({'installed_runtime':True,'pending_identity_preserved':True,'nonempty_still_refused':True}))
+'''
+    env={'HOME':str(f['home']),'PATH':os.defpath,'LANG':'en_US.UTF-8',
+         'APPLICATION_EXECUTOR_BROWSER_MODE':'isolated',
+         'PYTHONHOME':'/nonexistent-synthetic-home','PYTHONPATH':'/nonexistent-synthetic-path'}
+    result=subprocess.run([str(python),'-I','-B','-c',probe,str(source),str(port)],
+                          cwd=f['home'],env=env,capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,'installed first-use completion fault contract failed'
+    assert json.loads(result.stdout)=={'installed_runtime':True,'pending_identity_preserved':True,
+                                      'nonempty_still_refused':True}

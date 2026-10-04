@@ -2951,3 +2951,139 @@ def test_installer_readonly_version_choices_cannot_authorize_replacement(mode):
     assert macos_host.native_installer_choice({'action':'open'},mode)=={'action':'open'}
     assert macos_host.native_installer_choice({'action':'cancel'},mode)=={'action':'cancel'}
     assert macos_host.native_installer_choice({'action':'update'},mode) is None
+
+
+@pytest.mark.parametrize('cut',[0,1,9,-1])
+def test_first_use_completion_short_append_preserves_pending_identity_and_can_finish(tmp_path,monkeypatch,cut):
+    import os
+    from executor.autonomy import first_install as module, first_use_recovery as recovery, consumer
+    apps=tmp_path/'Applications';apps.mkdir()
+    lock=consumer._acquire_app_transaction_lock(apps)
+    try:
+        module._create_first_fence(apps,('synthetic-source',))
+        path=module._fence_path(apps);before=path.read_bytes();inode=path.stat().st_ino
+        tag=recovery._fence_tag(apps)
+        real_write=os.write
+        with monkeypatch.context() as m:
+            m.setattr(module.os,'write',lambda fd,data:real_write(fd,data[:cut]))
+            with pytest.raises(OSError):
+                module._complete_first_fence(apps,('synthetic-source',),_expected_fence_tag=tag)
+        assert module._read_first_fence(apps)['status']=='pending'
+        assert path.read_bytes().startswith(before) and path.stat().st_ino==inode
+        assert recovery._fence_tag(apps)==tag
+        module._complete_first_fence(apps,('synthetic-source',),_expected_fence_tag=tag)
+        assert module._read_first_fence(apps)['status']=='complete'
+        assert path.read_bytes().startswith(before) and path.stat().st_ino==inode
+        completed=path.read_bytes()
+        with pytest.raises(ValueError):
+            module._complete_first_fence(apps,('synthetic-source',),_expected_fence_tag=tag)
+        assert path.read_bytes()==completed
+    finally:
+        os.close(lock)
+
+
+def test_first_use_real_queue_short_completion_keeps_pending_proof_but_no_nonempty_adoption(tmp_path,monkeypatch):
+    import os
+    from executor.autonomy.queue import TaskQueue
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    record=_recovery_record(recovery,app,state)
+    fence=module._fence_path(app.parent);before=fence.read_bytes();inode=fence.stat().st_ino
+    real_write=os.write
+    def short_write(fd,data):
+        return real_write(fd,data[:-3] if os.fstat(fd).st_ino==inode else data)
+    monkeypatch.setattr(module.os,'write',short_write)
+    ack_read,ack_write=os.pipe();startup=recovery._FirstUseStartup(state,_spare_port(),record,ack_write)
+    try:
+        with pytest.raises(OSError):
+            with startup:
+                with startup.worker_guard():TaskQueue(state,_first_use_startup=startup)
+    finally:
+        startup.__exit__(None,None,None);os.close(ack_read)
+    assert (state/'tasks.sqlite3').is_file()
+    assert module._read_first_fence(app.parent)['status']=='pending'
+    assert fence.read_bytes().startswith(before) and fence.stat().st_ino==inode
+    assert recovery._fence_tag(app.parent)==record['fence_tag']
+    snapshot=_installer_inventory(state)
+    with pytest.raises(ValueError):_recovery_record(recovery,app,state)
+    assert _installer_inventory(state)==snapshot
+    assert not (state/'service.json').exists() and not (state/'service.log').exists()
+
+
+def test_first_use_completion_every_torn_prefix_is_pending_and_only_full_record_commits(tmp_path):
+    from executor.autonomy import first_install as module, first_use_recovery as recovery
+    apps=tmp_path/'Applications';apps.mkdir()
+    module._create_first_fence(apps,('synthetic-source',))
+    path=module._fence_path(apps);pending=path.read_bytes();tag=recovery._fence_tag(apps)
+    module._complete_first_fence(apps,('synthetic-source',),_expected_fence_tag=tag)
+    complete=path.read_bytes()
+    assert complete.startswith(pending) and len(complete)<=1024
+    for length in range(len(pending),len(complete)):
+        path.write_bytes(complete[:length])
+        assert module._read_first_fence(apps)['status']=='pending'
+        assert recovery._fence_tag(apps)==tag
+    path.write_bytes(complete)
+    assert module._read_first_fence(apps)['status']=='complete'
+
+
+@pytest.mark.parametrize('fault',['wrong_pending_hash','wrong_bundle','duplicate','junk','extra_separator','complete_base'])
+def test_first_use_completion_invalid_tail_never_authorizes_or_is_repaired(tmp_path,fault):
+    import json
+    from executor.autonomy import first_install as module
+    apps=tmp_path/'Applications';apps.mkdir()
+    module._create_first_fence(apps,('synthetic-source',))
+    path=module._fence_path(apps);pending=path.read_bytes()
+    module._complete_first_fence(apps,('synthetic-source',))
+    complete=path.read_bytes();base,separator,tail=complete.partition(b'\x1e')
+    assert base==pending and separator
+    if fault in {'wrong_pending_hash','wrong_bundle'}:
+        value=json.loads(tail)
+        value['pending_sha256' if fault=='wrong_pending_hash' else 'bundle_tag']='0'*64
+        invalid=base+separator+json.dumps(value,sort_keys=True,separators=(',',':')).encode()+b'\n'
+    elif fault=='duplicate':invalid=complete+tail
+    elif fault=='junk':invalid=base+separator+b'not a completion'
+    elif fault=='extra_separator':invalid=base+separator+separator+tail
+    else:
+        value=json.loads(base);value['status']='complete'
+        invalid=json.dumps(value).encode()+separator+tail
+    path.write_bytes(invalid)
+    with pytest.raises(ValueError):module._read_first_fence(apps)
+    with pytest.raises(ValueError):module._complete_first_fence(apps,('synthetic-source',))
+    assert path.read_bytes()==invalid
+
+
+def test_first_use_completion_keeps_legacy_complete_and_refuses_size_growth(tmp_path):
+    import json
+    from executor.autonomy import first_install as module
+    apps=tmp_path/'Applications';apps.mkdir()
+    module._create_first_fence(apps,('synthetic-source',))
+    path=module._fence_path(apps);value=json.loads(path.read_bytes())
+    legacy=json.dumps({**value,'status':'complete'},indent=2).encode()
+    path.write_bytes(legacy)
+    assert module._read_first_fence(apps)=={**value,'status':'complete'}
+    with pytest.raises(ValueError):module._complete_first_fence(apps,('synthetic-source',))
+    assert path.read_bytes()==legacy
+    oversized_pending=json.dumps(value).encode()+b' '*750
+    assert len(oversized_pending)<=1024
+    path.write_bytes(oversized_pending)
+    assert module._read_first_fence(apps)==value
+    with pytest.raises(ValueError):module._complete_first_fence(apps,('synthetic-source',))
+    assert path.read_bytes()==oversized_pending
+
+
+def test_first_use_completion_appends_to_owned_fd_but_never_accepts_arriving_successor(tmp_path,monkeypatch):
+    import os
+    from executor.autonomy import first_install as module, first_use_recovery as recovery
+    apps=tmp_path/'Applications';apps.mkdir()
+    module._create_first_fence(apps,('synthetic-source',))
+    path=module._fence_path(apps);pending=path.read_bytes();tag=recovery._fence_tag(apps)
+    real_write=os.write
+    def replace_during_append(fd,data):
+        path.rename(apps/'retained-original-fence')
+        path.write_bytes(pending);path.chmod(0o600)
+        return real_write(fd,data)
+    monkeypatch.setattr(module.os,'write',replace_during_append)
+    with pytest.raises(ValueError):
+        module._complete_first_fence(apps,('synthetic-source',),_expected_fence_tag=tag)
+    assert path.read_bytes()==pending and module._read_first_fence(apps)['status']=='pending'
+    assert (apps/'retained-original-fence').read_bytes().startswith(pending)
+    assert recovery._fence_tag(apps)!=tag

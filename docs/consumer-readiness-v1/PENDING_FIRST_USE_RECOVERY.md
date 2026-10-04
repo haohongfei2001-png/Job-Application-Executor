@@ -69,6 +69,21 @@ recovery refuses. The app does not delete or silently adopt it, and does not cla
 that nothing changed. Lost acknowledgement likewise remains an unconfirmed
 startup, never an automatic replay. No registry PID is signaled by recovery.
 
+Build sequence 5 preserves the original pending JSON and inode during completion.
+It appends one bounded completion record, separated by ASCII RS and bound to the
+original pending bytes' SHA-256 and bundle tag. Only the full canonical record,
+including its final newline, projects as complete. An exact truncated prefix
+remains pending; unrelated trailing data, duplicates and changed bindings refuse.
+An explicitly re-admitted completion operation may append only the missing
+suffix. It never truncates, overwrites or replaces the pending evidence. Existing
+v1 complete records remain readable. Earlier binaries need not understand the
+new completed framing and are not credited with this behavior.
+
+This repairs completion-record durability only. It does not yet provide a
+positive native Resume for nonempty partial private state, and cannot manufacture
+missing transaction provenance for older installations. The preserved proof is
+a prerequisite for that separate recovery work, not its completion.
+
 Selected legacy folders, nonempty pending state, changed bundles, missing managed
 activation, automatic cleanup and positive migration remain unsupported. The
 source and tests do not establish owner-device, physical-button/picker, signing,

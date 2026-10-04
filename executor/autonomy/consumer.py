@@ -32,7 +32,7 @@ APP_NAME = "AI 投递经理"
 BUNDLE_ID = "com.local.job-application-executor.ai-application-manager"
 # Increase for each subsequently adopted source release. Equal sequence with
 # different bytes is intentionally not an ordinary installer update.
-RELEASE_SEQUENCE = 4
+RELEASE_SEQUENCE = 5
 
 
 def _owned_bundle_file(path: Path) -> bool:
