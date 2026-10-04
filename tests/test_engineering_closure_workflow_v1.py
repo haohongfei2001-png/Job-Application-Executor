@@ -26,7 +26,7 @@ JOBS = dict(re.findall(
     SOURCE.split("\njobs:\n", 1)[1], re.MULTILINE | re.DOTALL,
 ))
 ORDINARY = {"foundation", "packaged_candidate", "macos_consumer_release", "preparation_validation"}
-CLOSURE = ("test", "engineering_closure_macos")
+CLOSURE = ("full_suite", "test", "engineering_closure_macos")
 SHA = "1234567890abcdef1234567890abcdef12345678"
 OTHER_SHA = "abcdef1234567890abcdef1234567890abcdef1234"
 REPOSITORY = "example/jae"
@@ -111,6 +111,9 @@ def selected(name, payload, *, event_name="pull_request", result="success", test
                 and node.func.id == "format" and not node.keywords):
             template, *args = [evaluate(arg) for arg in node.args]
             return template.format(*args)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "always" and not node.args and not node.keywords):
+            return True
         raise AssertionError("unsupported actual workflow condition: " + ast.dump(node))
 
     return bool(evaluate(ast.parse(expression, mode="eval").body))
@@ -119,7 +122,8 @@ def selected(name, payload, *, event_name="pull_request", result="success", test
 def guard_shell(name):
     step = JOBS[name].split(
         "      - name: Refuse stale or ineligible engineering closure head\n", 1,
-    )[1].split("      - uses: actions/setup-python@v5\n", 1)[0]
+    )[1]
+    step = re.split(r"^      - ", step, maxsplit=1, flags=re.MULTILINE)[0]
     return textwrap.dedent(step.split("        run: |\n", 1)[1])
 
 
@@ -151,12 +155,12 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 self.assert_jobs(event(draft=draft, fork=True), ())
 
     def test_normal_push_and_pr_policies_are_preserved(self):
-        self.assert_jobs({}, {"foundation", "macos_consumer_release", "test", "preparation_validation"}, event_name="push")
+        self.assert_jobs({}, {"foundation", "macos_consumer_release", "full_suite", "test", "preparation_validation"}, event_name="push")
         for action in ("opened", "synchronize", "reopened", "ready_for_review"):
             for draft in (True, False):
                 for fork in (True, False):
                     with self.subTest(action=action, draft=draft, fork=fork):
-                        expected = ORDINARY if draft else {"foundation", "macos_consumer_release", "test", "preparation_validation"}
+                        expected = ORDINARY if draft else {"foundation", "macos_consumer_release", "full_suite", "test", "preparation_validation"}
                         self.assert_jobs(event(action=action, draft=draft, fork=fork), expected)
 
     def test_build_requires_success_and_same_tested_head(self):
@@ -181,7 +185,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertNotIn('needs:',smoke)
         self.assertNotIn('continue-on-error',smoke)
         expected_budgets = {"foundation": 30, "packaged_candidate": 20,
-                            "macos_consumer_release": 25, "test": 70,
+                            "macos_consumer_release": 25, "full_suite": 30, "test": 5,
                             "engineering_closure_macos": 20, "preparation_validation": 25}
         for name, budget in expected_budgets.items():
             self.assertIn(f"    timeout-minutes: {budget}\n", JOBS[name])
@@ -221,11 +225,13 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertLess(body.index('Retain value-free public preflight diagnostic'),body.index('Isolated preparation ownership'))
 
     def test_both_guards_precede_repository_code_and_use_exact_checkout(self):
+        self.assertEqual(guard_shell("full_suite"), guard_shell("test"))
         self.assertEqual(guard_shell("test"), guard_shell("engineering_closure_macos"))
         for name in CLOSURE:
             body = JOBS[name]
             guard = body.index("      - name: Refuse stale or ineligible engineering closure head\n")
-            setup = body.index("      - uses: actions/setup-python@v5\n")
+            setup = body.index("      - name: Require every complete-file owner and identical source\n"
+                               if name == "test" else "      - uses: actions/setup-python@v5\n")
             before_guard = body[body.index("    steps:\n") + len("    steps:\n"):guard]
             self.assertNotIn("run:", before_guard)
             self.assertEqual(re.findall(r"^      - .+$", before_guard, re.MULTILINE),
@@ -239,7 +245,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertIn("        id: closure_head\n        if: github.event.action == 'labeled'\n", JOBS["test"])
         self.assertIn("        id: closure_head\n        env:\n", JOBS["engineering_closure_macos"])
         self.assertIn("ref: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || '' }}", JOBS["test"])
-        self.assertIn("closure_head: ${{ steps.closure_head.outputs.sha }}", JOBS["test"])
+        self.assertIn("closure_head: ${{ steps.full_aggregate.outputs.sha }}", JOBS["test"])
         self.assertIn("JAE_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}", JOBS["test"])
         self.assertIn("ref: ${{ needs.test.outputs.closure_head }}", JOBS["engineering_closure_macos"])
         self.assertIn("JAE_EXPECTED_HEAD: ${{ needs.test.outputs.closure_head }}", JOBS["engineering_closure_macos"])
@@ -251,7 +257,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
             "foundation": "37057629ec752cf5aed62c7e9c2604bd4b5ed9c6c8adf5b3b9bef987440f2d43",
             "packaged_candidate": "2b8dd98e7ae3c12deba1b2b07b0a58092d5effd80de58386057568452c078915",
             "macos_consumer_release": "ed3f87902b40be11d9eafa9d0b6446d9b8dec29c050b42045b305ae78f61bd06",
-            "test": "a3bfe1e0fcbbe489db23a6c04b6d3b22e7981a610a444785968c73a0e5dce996",
+            "full_suite": "a3bfe1e0fcbbe489db23a6c04b6d3b22e7981a610a444785968c73a0e5dce996",
         }
         for name, digest in expected.items():
             with self.subTest(job=name):
@@ -296,13 +302,40 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                         capture_path = f"            ${{{{ runner.temp }}}}/jae-preparation-ui/{image}\n"
                         self.assertEqual(protected.count(capture_path), 1)
                         protected = protected.replace(capture_path, "", 1)
-                if name == "test":
+                if name == "full_suite":
                     protected = body[body.index("      - uses: actions/setup-python@v5"):]
+                    # Normalize ONLY the exact mandatory allocator addition;
+                    # original dependencies, environment and compile gate retain
+                    # the pre-sharding full-suite byte hash above.
+                    old = "      - name: Full round-closure test suite\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -v\n"
+                    new = "      - name: Full round-closure test suite\n        id: full_suite\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n          JAE_FULL_SUITE_SHARD: ${{ matrix.shard }}\n          JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}\n          JAE_FULL_SUITE_RECEIPT: ${{ runner.temp }}/jae-full-suite-${{ matrix.shard }}.json\n        run: python -m pytest -v -p scripts.ci_full_suite\n"
+                    self.assertEqual(protected.count(new), 1)
+                    protected = protected.replace(new, old, 1)
                 protected = protected.rstrip() + "\n"
                 self.assertEqual(hashlib.sha256(protected.encode()).hexdigest(), digest)
         self.assertIn("        suite: [consumer_transactions, recovery_transactions, release_distribution]\n", JOBS["packaged_candidate"])
         self.assertEqual(JOBS["macos_consumer_release"].count("          - suite:"), 4)
-        self.assertEqual(JOBS["test"].count("run: python -m pytest -v\n"), 1)
+        self.assertEqual(JOBS["full_suite"].count("run: python -m pytest -v -p scripts.ci_full_suite\n"), 1)
+
+    def test_three_serial_owners_and_fail_closed_aggregate_preserve_existing_check(self):
+        shards, gate = JOBS["full_suite"], JOBS["test"]
+        self.assertIn("      fail-fast: false\n      max-parallel: 3\n      matrix:\n        shard: [consumer, browser_contract, remainder]\n", shards)
+        self.assertNotIn("needs:", shards)
+        self.assertNotIn("upload-artifact", shards)
+        self.assertNotIn("upload-artifact", gate)
+        self.assertNotIn("matrix:", gate)
+        self.assertIn("    needs: full_suite\n", gate)
+        self.assertEqual(job_condition("test"), "always() && (" + job_condition("full_suite") + ")")
+        self.assertIn("closure_head: ${{ steps.full_aggregate.outputs.sha }}", gate)
+        for owner in ("consumer", "browser_contract", "remainder"):
+            self.assertIn("      receipt_" + owner + ": ${{ steps.full_suite.outputs.receipt_" + owner + " }}\n", shards)
+        self.assertIn("JAE_FULL_SUITE_RECEIPTS: ${{ toJSON(needs.full_suite.outputs) }}", gate)
+        self.assertIn("JAE_FULL_SUITE_RESULT: ${{ needs.full_suite.result }}", gate)
+        self.assertIn("JAE_EVENT_ACTION: ${{ github.event.action }}", gate)
+        self.assertEqual(gate.count("run: python3 -I scripts/ci_full_suite.py aggregate\n"), 1)
+        for result in ("failure", "cancelled", "skipped"):
+            self.assertTrue(selected("test", event(), result=result))
+            self.assertFalse(selected("engineering_closure_macos", event(), result=result))
 
 
 class EngineeringClosureInlineGuardTests(unittest.TestCase):
