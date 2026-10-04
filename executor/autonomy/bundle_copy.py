@@ -49,13 +49,22 @@ def _open_relative(root_fd, relative, entries):
             os.close(parent)
 
 
-def copy_bundle_payload(source: Path, target: Path, expected_identity: tuple) -> None:
+def copy_bundle_payload(source: Path, target: Path, expected_identity: tuple, *,
+                        expected_target_identity: tuple[int, int] | None = None) -> None:
     """Populate one empty owned staging root; preserve all bytes and modes.
+
+A caller preparing a new build workspace can pin the already-created target
+inode. The optional fence is checked before any writes; ordinary callers retain
+their existing target admission.
 
 On refusal retain partial staging evidence. Caller alone decides whether any
 later cleanup is safe. No source data, target app or private state is removed.
 """
     from .consumer import _bundle_transaction_identity
+    if expected_target_identity is not None and (
+            type(expected_target_identity) is not tuple or len(expected_target_identity) != 2
+            or any(type(value) is not int or value < 0 for value in expected_target_identity)):
+        raise ValueError('installer_stage_unverified')
     source, target = Path(source).absolute(), Path(target).absolute()
     if (any(p.is_symlink() for p in (source, *source.parents, target, *target.parents))
             or _bundle_transaction_identity(source) != expected_identity):
@@ -68,7 +77,9 @@ later cleanup is safe. No source data, target app or private state is removed.
             raise ValueError('installer_bundle_changed')
         target_fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
         target_entry = os.fstat(target_fd)
-        if (target_entry.st_uid != os.geteuid() or os.listdir(target_fd)
+        if ((expected_target_identity is not None
+                and (target_entry.st_dev, target_entry.st_ino) != expected_target_identity)
+                or target_entry.st_uid != os.geteuid() or os.listdir(target_fd)
                 or (target_entry.st_dev, target_entry.st_ino) !=
                    (target.lstat().st_dev, target.lstat().st_ino)):
             raise ValueError('installer_stage_unverified')

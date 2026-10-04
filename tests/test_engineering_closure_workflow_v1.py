@@ -36,6 +36,9 @@ STATIC_STEP = (
 )
 
 
+SIGNING_PREPARATION_STEP = "      - name: Validate unsigned signing preparation boundaries\n        if: github.event_name == 'pull_request' && github.event.pull_request.draft && matrix.suite == 'release_distribution'\n        run: python -m pytest -q tests/test_macos_signing_preparation.py\n"
+SIGNING_PREPARATION_MAC_STEP = "      - name: Validate unsigned signing preparation boundaries on hosted Mac\n        if: matrix.suite == 'runtime_distribution'\n        run: python -m pytest -q tests/test_macos_signing_preparation.py\n"
+
 LIFECYCLE_SOAK_STEP = '      - name: Complete partial lifecycle-soak runner contract\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n'
 LIFECYCLE_SOAK_MAC_STEP = "      - name: Complete partial lifecycle-soak runner contract on hosted Mac\n        if: matrix.suite == 'runtime_distribution'\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n"
 
@@ -256,7 +259,12 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 protected = body[body.index("    steps:\n"):]
                 if name in {"packaged_candidate", "macos_consumer_release"}:
                     protected = body[body.index("    strategy:\n"):]
+                if name == "packaged_candidate":
+                    self.assertEqual(protected.count(SIGNING_PREPARATION_STEP), 1)
+                    protected = protected.replace(SIGNING_PREPARATION_STEP, "", 1)
                 if name == "macos_consumer_release":
+                    self.assertEqual(protected.count(SIGNING_PREPARATION_MAC_STEP), 1)
+                    protected = protected.replace(SIGNING_PREPARATION_MAC_STEP, "", 1)
                     # Add the prepared-state owning file without weakening any
                     # byte of the original matrix selectors or job body.
                     prepared_selector = "tests/test_macos_host_v1.py tests/test_first_use_prepared_v1.py "
