@@ -1847,13 +1847,17 @@ assert fence.read_bytes().startswith(before) and fence.stat().st_ino==inode
 assert first_install._read_first_fence(app.parent)['status']=='pending'
 assert recovery._fence_tag(app.parent)==record['fence_tag']
 snapshot={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in state.iterdir()}
+assert recovery.prepare_recovery(app,state,identity,source.parent/'native-host',confirm=False)['bundle_tag']==record['bundle_tag']
+assert snapshot=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in state.iterdir()}
+(state/'.first-use-prepared.json').rename(state.parent/'retained-synthetic-prepared-receipt')
+snapshot={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in state.iterdir()}
 try:recovery.prepare_recovery(app,state,identity,source.parent/'native-host',confirm=False)
 except ValueError:pass
 else:raise AssertionError('unknown nonempty state was adopted')
 assert snapshot=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in state.iterdir()}
 assert not any((state/n).exists() for n in ('service.json','service.log','native-window.json'))
 assert consumer._bundle_transaction_identity(app)==identity
-print(json.dumps({'installed_runtime':True,'pending_identity_preserved':True,'nonempty_still_refused':True}))
+print(json.dumps({'installed_runtime':True,'pending_identity_preserved':True,'unreceipted_nonempty_refused':True}))
 '''
     env={'HOME':str(f['home']),'PATH':os.defpath,'LANG':'en_US.UTF-8',
          'APPLICATION_EXECUTOR_BROWSER_MODE':'isolated',
@@ -1862,4 +1866,109 @@ print(json.dumps({'installed_runtime':True,'pending_identity_preserved':True,'no
                           cwd=f['home'],env=env,capture_output=True,text=True,timeout=30)
     assert result.returncode==0,'installed first-use completion fault contract failed'
     assert json.loads(result.stdout)=={'installed_runtime':True,'pending_identity_preserved':True,
-                                      'nonempty_still_refused':True}
+                                      'unreceipted_nonempty_refused':True}
+
+
+@pytest.mark.parametrize('interruption', ['before_completion', 'short_completion'])
+def test_hosted_mac_prepared_first_use_explicit_resume_reuses_objects_and_real_child_ack(
+    native_installed_app, tmp_path, interruption
+):
+    from executor.autonomy import consumer, first_install
+    f = native_installed_app; app = f['app']; source = app/'Contents/Resources/release'
+    python = app/'Contents/Resources/runtime/bin/python'
+    identity = consumer._bundle_transaction_identity(app); assert identity is not None
+    assert {p.name for p in f['state'].iterdir()} == {'native-window.lock','worker.lock','migration.lock'}
+    first_install._create_first_fence(app.parent, identity)
+    f['repo'].rename(tmp_path/'removed-prepared-checkout')
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1', 0)); port = reservation.getsockname()[1]
+    probe = r'''
+import json,os,sys,hashlib,sqlite3
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from executor.autonomy import consumer,first_install,first_use_recovery as recovery,macos_host,cli
+from executor.autonomy.runtime_paths import default_runtime
+from executor.autonomy.queue import TaskQueue
+source=Path(sys.argv[1]);app=source.parent.parent.parent;state=default_runtime(source)
+port=int(sys.argv[2]);mode=sys.argv[3]
+identity=consumer._bundle_transaction_identity(app);assert identity is not None
+record=recovery.prepare_recovery(app,state,identity,source.parent/'native-host',confirm=False)
+fence=first_install._fence_path(app.parent);pending=fence.read_bytes();inode=fence.stat().st_ino
+read_fd,write_fd=os.pipe();startup=recovery._FirstUseStartup(state,port,record,write_fd)
+real_write=os.write;real_complete=first_install._complete_first_fence
+def short_write(fd,data):
+ return real_write(fd,data[:-3] if os.fstat(fd).st_ino==inode else data)
+def interrupt(*a,**k):raise OSError('synthetic prepared completion interruption')
+if mode=='short_completion':first_install.os.write=short_write
+else:first_install._complete_first_fence=interrupt
+failed=False
+try:
+ try:
+  with startup:
+   with startup.worker_guard():TaskQueue(state,_first_use_startup=startup)
+ except OSError:failed=True
+finally:
+ first_install.os.write=real_write;first_install._complete_first_fence=real_complete
+ startup.__exit__(None,None,None);os.close(read_fd)
+assert failed and (state/'.first-use-prepared.json').is_file()
+assert first_install._read_first_fence(app.parent)['status']=='pending'
+assert fence.read_bytes().startswith(pending) and fence.stat().st_ino==inode
+assert not any((state/n).exists() for n in ('service.json','service.log','native-window.json'))
+def fingerprint(name):
+ p=state/name;s=p.stat();return [s.st_dev,s.st_ino,s.st_mode,hashlib.sha256(p.read_bytes()).hexdigest()]
+names=['tasks.sqlite3','task-answers.key','auth.token','.first-use-prepared.json']
+before={n:fingerprint(n) for n in names};cancel_fence=fence.read_bytes()
+real_prompt=macos_host.present_native_first_use_recovery;choice={'action':'cancel'};prompts=[];children=[]
+def prompt(directory,**options):
+ assert real_prompt(directory,smoke=True)=={'action':'cancel'}
+ prompts.append(True);return dict(choice)
+macos_host.present_native_first_use_recovery=prompt
+def forbidden_compile(*a,**k):raise AssertionError('prepared recovery required compiler')
+consumer._stage_native_host=forbidden_compile
+real_popen=recovery.subprocess.Popen
+def popen(args,**options):
+ child=real_popen(args,**options)
+ if 'first-use-serve' in args:children.append(child)
+ return child
+recovery.subprocess.Popen=popen
+try:
+ cancelled=first_install.launch_native_entry(state,port,smoke=True)
+ assert cancelled.get('cancelled') is True and not children
+ assert before=={n:fingerprint(n) for n in names} and fence.read_bytes()==cancel_fence
+ choice={'action':'resume_first_use'}
+ result=first_install.launch_native_entry(state,port,smoke=True)
+ assert result.get('ok') is True and result.get('native_page') is True
+ assert len(prompts)==2 and len(children)==1 and children[0].poll() is None
+ observed=cli._service_record(state/'service.json')
+ assert observed['pid']==children[0].pid and cli.request(state,port,'/v1/service-identity')==observed
+ assert cli.request(state,port,'/health')['ok'] is True
+ assert first_install._read_first_fence(app.parent)['status']=='complete'
+ assert fence.stat().st_ino==inode and fence.read_bytes().startswith(pending)
+ # The actual worker may execute empty maintenance SQL; it must retain the
+ # original database inode and all sensitive objects exactly.
+ assert fingerprint('tasks.sqlite3')[:3]==before['tasks.sqlite3'][:3]
+ assert {n:fingerprint(n) for n in names[1:]}=={n:before[n] for n in names[1:]}
+ with sqlite3.connect('file:'+str(state/'tasks.sqlite3')+'?mode=ro',uri=True) as db:
+  for table in ('tasks','events','commands','run_attempts','field_actions','task_answer_events'):
+   assert db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==0
+ reopened=first_install.launch_native_entry(state,port,smoke=True)
+ assert reopened.get('ok') is True and reopened.get('native_page') is True
+ assert cli._service_record(state/'service.json')==observed and len(children)==1
+ print(json.dumps({'installed_runtime':True,'prepared_resume':True,'interruption':mode,
+  'cancel_preserved':True,'same_objects':True,'actual_child_ack':True,'native_reopen':True,'tasks_executed':0}))
+finally:
+ stopped=cli._stop_owned_service(state,port)
+ assert stopped.get('ok') is True or stopped.get('reason')=='service_record_missing'
+ for child in children:child.wait(timeout=10)
+'''
+    env = {'HOME':str(f['home']), 'PATH':os.defpath, 'LANG':'en_US.UTF-8',
+           'APPLICATION_EXECUTOR_BROWSER_MODE':'isolated', 'BROWSER':'/usr/bin/false',
+           'PYTHONHOME':'/nonexistent-synthetic-home', 'PYTHONPATH':'/nonexistent-synthetic-path'}
+    result = subprocess.run([str(python),'-I','-B','-c',probe,str(source),str(port),interruption],
+                            cwd=f['home'], env=env, capture_output=True, text=True, timeout=180)
+    assert result.returncode == 0, 'installed prepared first-use recovery journey failed'
+    assert json.loads(result.stdout) == {'installed_runtime':True, 'prepared_resume':True,
+        'interruption':interruption, 'cancel_preserved':True, 'same_objects':True,
+        'actual_child_ack':True, 'native_reopen':True, 'tasks_executed':0}
+    assert _trusted_bundle(app) and not (f['state']/'service.json').exists()
+    assert not list(source.rglob('__pycache__'))

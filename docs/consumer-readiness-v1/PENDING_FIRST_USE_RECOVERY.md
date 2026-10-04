@@ -9,7 +9,8 @@ bundles do not acquire recovery behavior merely from this document.
 ## Consumer path
 
 Open the managed application normally. If its exact private pending fence and
-bundle match and no known/default task authority is present, a native prompt
+bundle match and the default root is lock-only or has the same installation's
+verified initial prepared checkpoint, a native prompt
 allows “Recheck and complete first use” or “Cancel”. Cancellation does not start
 a health probe or service. A malformed/mismatched initial continuity pipe cannot
 fall back to this prompt as fresh authority. Existing complete installations keep
@@ -38,13 +39,33 @@ from the child's managed source. There is no browser/model/remote approval input
 
 The child takes nonblocking application and actual worker/migration ownership.
 Before the first SQLite open it rechecks the exact bundle, pending fence, default
-root and lock inodes, and requires lock-only default state and absent known legacy
+root and lock inodes, and requires lock-only default state or the exact prepared
+checkpoint described below, plus absent known legacy
 authority. Replacing even an empty root or identical fence does not count as the
 same admission. Busy ownership refuses promptly. Ordinary queue construction
 keeps its existing behavior; its strict callback is a private static object.
 
-The admitted initialization creates a fresh empty queue, answer key, local token
-and a bound server while migration ownership remains held. No worker or HTTP
+Build sequence 6 runs the existing queue, worker, answer and supervisor schema
+initializers against one private in-memory SQLite connection. Ordinary startup
+still uses its existing file-backed transactions. The bundled SQLite must support
+serialization; otherwise strict first use refuses before creating payload files.
+No separate schema implementation or SQLite pathname is used during preparation.
+The initializer creates an empty queue and generates the initial answer key/local
+token in memory. While migration ownership remains held, it writes the three
+canonical payload objects exactly once through exclusive, no-follow creation
+descriptors. Each is flushed and read back against the actual creation descriptor.
+A bounded private `.first-use-prepared.json` receipt is written last. It binds the
+exact bundle, original pending fence, root/lock identities, each payload's actual
+inode/mode/owner/size/hash and its own inode. There is no rename, promotion, deletion
+or replacement of payloads.
+
+After a complete prepared checkpoint, an explicit Resume reuses those same three
+objects. It revalidates the receipt and exact namespace before the prompt, after
+health and in the actual child under worker/migration ownership. The unchanged
+initializer must independently reproduce the recorded initial database bytes;
+even an edited receipt cannot authorize adopting a journal with existing tasks or
+other private records. The retained key/token must match exactly and are never
+regenerated. A bound server is then constructed. No worker or HTTP
 thread is exposed until the same pending fence has been completed and read back.
 The child acknowledges its exact process/service instance and source binding;
 the parent revalidates that instance before native presentation. Recovery UI
@@ -63,10 +84,12 @@ dependencies work, or an application was completed.
 ## Failure and interruption
 
 Before admitted initialization, refusal preserves existing private data. After
-that point, a crash or failed fence write can leave a pending fence plus newly
-created partial private state. This state is retained and subsequent empty-only
-recovery refuses. The app does not delete or silently adopt it, and does not claim
-that nothing changed. Lost acknowledgement likewise remains an unconfirmed
+that point, a crash before the complete prepared receipt can leave partial private
+objects. They are retained and recovery refuses. A completed, unchanged prepared
+checkpoint can survive a later server-bind failure or interrupted completion;
+the next explicit Resume can finish the same first-use transaction. No unknown
+nonempty root is accepted, and the app does not claim nothing changed after a
+partial write. Lost acknowledgement likewise remains an unconfirmed
 startup, never an automatic replay. No registry PID is signaled by recovery.
 
 Build sequence 5 preserves the original pending JSON and inode during completion.
@@ -79,12 +102,14 @@ suffix. It never truncates, overwrites or replaces the pending evidence. Existin
 v1 complete records remain readable. Earlier binaries need not understand the
 new completed framing and are not credited with this behavior.
 
-This repairs completion-record durability only. It does not yet provide a
-positive native Resume for nonempty partial private state, and cannot manufacture
-missing transaction provenance for older installations. The preserved proof is
-a prerequisite for that separate recovery work, not its completion.
+Sequence 5's completion durability alone did not provide positive nonempty
+recovery. Sequence 6 adds only the fully prepared initial checkpoint described
+above. Neither can manufacture missing transaction provenance for older
+installations, recover arbitrary historical databases or transfer old tasks,
+answers, profiles or attachments. Earlier interrupted sequence-5 state without a
+prepared receipt remains unsupported.
 
-Selected legacy folders, nonempty pending state, changed bundles, missing managed
+Selected legacy folders, unreceipted or changed nonempty pending state, changed bundles, missing managed
 activation, automatic cleanup and positive migration remain unsupported. The
 source and tests do not establish owner-device, physical-button/picker, signing,
 real-site, 24-hour soak, five-day use, or whole A-01 acceptance.
@@ -97,10 +122,21 @@ during health and at native handoff; nonblocking busy
 ownership; actual migration-held admission before SQLite; queue crashes, short
 fence writes, lost acknowledgement, wrong service instance and missing-token
 preservation. Existing service-retirement and native owning tests remain intact.
+Prepared-state tests additionally cover zero SQLite pathname opens during
+initialization, agreement with the ordinary initializer, unavailable serialization,
+short payload/receipt writes, failed flushes, unknown entries, exact inode and
+content changes, aliases, permission changes, prompt/health/child arrival races,
+and a retagged noninitial journal. Incomplete objects are retained, not repaired.
 
 Hosted tests use complete actual native bundles with their own interpreter and
 no build checkout/compiler. The real static Cocoa prompt is observed through its
 cancellation oracle; a clearly synthetic intent then drives real recovery/native
 opening or injects an authority after parent admission and proves the actual
 child refuses before private initialization. This does not certify a physical
-owner click. Exact-head full CI and post-merge verification are still required.
+owner click. A separate installed test requires the bundled interpreter to create
+an actual prepared checkpoint, survive pre-completion and short-completion faults,
+preserve cancellation, Resume through the real child/service acknowledgement,
+open the native page and reopen the same service. It checks retained private
+object identities and zero task/answer activity. These hosted assertions are
+requirements, not a claim that an unrun candidate passed. Exact-head full CI and
+post-merge verification are still required.
