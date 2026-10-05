@@ -156,12 +156,13 @@ def coverage_record(unsigned_paths, current_paths, unsigned_wheels, observed):
 # that same signed source. They alter explicit user choices / smoke UI lifetime,
 # never signature, manifest, health, service retirement or transaction outcomes.
 ENTRY_DIAGNOSTICS = r'''
-import functools, itertools, json, sys, time
+import functools, itertools, json, os, sys, time
 _trace_started = time.monotonic()
 _trace_calls = itertools.count(1)
-def _trace_event(stage, call, event, started):
+def _trace_event(stage, call, event, started, error_type=None):
     print('JAE_ORACLE_STAGE ' + json.dumps({
-        'stage':stage, 'call':call, 'event':event,
+        'stage':stage, 'call':call, 'event':event, 'pid':os.getpid(),
+        **({'error_type':error_type} if error_type is not None else {}),
         'elapsed_seconds':round(time.monotonic()-_trace_started, 3),
         'duration_seconds':round(time.monotonic()-started, 3),
     }, sort_keys=True), file=sys.stderr, flush=True)
@@ -174,8 +175,8 @@ def _trace_function(module, name):
         _trace_event(stage, call, 'begin', started)
         try:
             result = original(*args, **kwargs)
-        except BaseException:
-            _trace_event(stage, call, 'raise', started)
+        except BaseException as error:
+            _trace_event(stage, call, 'raise', started, type(error).__name__)
             raise
         _trace_event(stage, call, 'return', started)
         return result
@@ -190,7 +191,25 @@ def _trace_native_timeout(child, error):
     }, sort_keys=True), file=sys.stderr, flush=True)
 '''
 
-REOPEN_DIAGNOSTICS = ENTRY_DIAGNOSTICS + r'''
+SERVICE_DIAGNOSTICS = ENTRY_DIAGNOSTICS + r'''
+from pathlib import Path
+_service_source = Path(sys.argv[1])
+sys.path.insert(0, str(_service_source))
+from executor.autonomy import consumer, first_use_recovery
+assert all(Path(module.__file__).is_relative_to(_service_source)
+           for module in (consumer, first_use_recovery))
+for module, names in (
+    (consumer, ('_bundle_transaction_identity',)),
+    (first_use_recovery, ('serve_first_use', '_read_pipe', '_write_pipe')),
+    (first_use_recovery._FirstUseStartup, ('__enter__', 'verify', 'bound_lock_fd',
+        'before_queue', 'after_queue', 'acknowledge', '__exit__')),
+):
+    for name in names: _trace_function(module, name)
+# The original service CLI program follows with the same source and arguments.
+'''
+
+REOPEN_DIAGNOSTICS = ENTRY_DIAGNOSTICS + '\n_service_diagnostics = ' + repr(SERVICE_DIAGNOSTICS) + r'''
+import subprocess
 from pathlib import Path
 _reopen_source = Path(sys.argv[1])
 sys.path.insert(0, str(_reopen_source))
@@ -202,6 +221,34 @@ for module, names in (
 ):
     assert Path(module.__file__).is_relative_to(_reopen_source)
     for name in names: _trace_function(module, name)
+_service_children = []
+_service_popen = subprocess.Popen
+def _observe_service(args, *a, **kw):
+    if 'first-use-serve' in args:
+        assert args[:5] == [str(_reopen_source.parent/'runtime/bin/python'), '-I', '-B', '-c', args[4]]
+        assert args[5] == str(_reopen_source)
+        observed_args = list(args)
+        observed_args[4] = _service_diagnostics + '\n' + args[4]
+        # A daemon can outlive the finite native CLI. Observe stderr in a
+        # private fixture file, never a PIPE that could keep communicate open.
+        fd = os.open(_oracle_service_log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'ab', buffering=0) as stream:
+            child = _service_popen(observed_args, *a, **{**kw, 'stderr':stream})
+        _service_children.append(child)
+        return child
+    return _service_popen(args, *a, **kw)
+subprocess.Popen = _observe_service
+_start_first_use = first_use_recovery.start_first_use
+@functools.wraps(_start_first_use)
+def _observe_start(*a, **kw):
+    try:
+        return _start_first_use(*a, **kw)
+    finally:
+        for child in _service_children:
+            print('JAE_ORACLE_SERVICE_STATUS ' + json.dumps({
+                'pid':child.pid, 'returncode':child.poll(),
+            }, sort_keys=True), file=sys.stderr, flush=True)
+first_use_recovery.start_first_use = _observe_start
 # The original -c program follows unchanged and owns argv parsing/execution.
 '''
 
@@ -236,7 +283,9 @@ def smoke_reopen(args, *a, **kw):
         args = [*args, '--native-smoke']
         # Prepend transparent observations, then execute the exact original
         # entry program against the same sealed app-owned source and argv.
-        args[4] = _reopen_diagnostics + '\n' + args[4]
+        assert Path.home().name == 'home'
+        args[4] = ('_oracle_service_log_path = ' + repr(str(Path.home().parent/'first-use-service-diagnostic.log'))
+                   + '\n' + _reopen_diagnostics + '\n' + args[4])
         kw.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         child = real_popen(args, *a, **kw); children.append(child); return child
     return real_popen(args, *a, **kw)
@@ -884,6 +933,13 @@ def main(argv=None):
             raise RuntimeError('signed DMG acceptance exceeded 30 minutes; WIP, not acceptance') from None
         finally:
             cleanup_test_processes(root)
+            diagnostic = root / 'first-use-service-diagnostic.log'
+            if diagnostic.is_file() and not diagnostic.is_symlink():
+                with diagnostic.open('rb') as handle:
+                    handle.seek(max(0, diagnostic.stat().st_size - 32768))
+                    tail = handle.read(32768).decode('utf-8', errors='replace')
+                print(json.dumps({'oracle_service_diagnostics':tail,
+                    'certification':'NOT_CERTIFIED'}, sort_keys=True), file=sys.stderr, flush=True)
             # A failed image producer may leave its read-only test volume. Do
             # not delete its mountpoint before detaching it.
             for mount in [*root.glob('mount-*'),*root.glob('.jae-installer-image-*/mounted')]:

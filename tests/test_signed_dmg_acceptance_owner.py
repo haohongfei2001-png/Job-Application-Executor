@@ -202,7 +202,7 @@ def test_owner_budget_aggregate_and_no_test_artifact_upload_are_mandatory():
     assert 'terminate_tree(process.pid)' in script
     assert 'WIP, not acceptance' in script
     assert 'pytest.skip' not in script
-    for name in ('ENTRY_DIAGNOSTICS','REOPEN_DIAGNOSTICS','ENTRY_FIXTURE','ROLLBACK_FIXTURE','READERS',
+    for name in ('ENTRY_DIAGNOSTICS','SERVICE_DIAGNOSTICS','REOPEN_DIAGNOSTICS','ENTRY_FIXTURE','ROLLBACK_FIXTURE','READERS',
                  'PRODUCTION_REFUSAL','SEED_STATE','VERIFY_STATE'):
         ast.parse(getattr(oracle,name))
 
@@ -355,6 +355,8 @@ def test_diagnostic_wrapper_calls_original_once_with_exact_values_and_reraises(c
     assert [event['event'] for event in events] == ['begin', 'return', 'begin', 'raise']
     assert [event['call'] for event in events] == [1, 1, 2, 2]
     assert all(event['stage'] == 'owner.actual' and event['duration_seconds'] >= 0 for event in events)
+    assert all(event['pid'] == os.getpid() for event in events)
+    assert events[-1]['error_type'] == 'ValueError'
 
 
 def test_actual_timeout_keeps_captured_output_and_remains_failure(tmp_path, capsys):
@@ -519,3 +521,94 @@ def test_all_three_real_images_are_built_at_their_use_points_before_mounting():
     assert "'readonly_images':len(images)" in worker_text
     builder = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == 'build_image')
     assert 'build_installer_image(output=image_root,signed_app=signed,required_publisher_policy=POLICY)' in ast.get_source_segment(source, builder)
+
+
+@pytest.mark.parametrize('mode', ['success', 'failure'])
+def test_service_observer_runs_original_child_and_records_real_exit_and_ack(tmp_path, mode):
+    source = tmp_path / 'app/Contents/Resources/release'
+    package = source / 'executor/autonomy'
+    package.mkdir(parents=True)
+    binary = source.parent / 'runtime/bin/python'
+    binary.parent.mkdir(parents=True)
+    binary.symlink_to(sys.executable)
+    (source / 'executor/__init__.py').write_text('')
+    (package / '__init__.py').write_text('')
+    (package / 'consumer.py').write_text('def _bundle_transaction_identity(*args, **kwargs): return "EXACT ORIGINAL IDENTITY"\n')
+    (package / 'first_install.py').write_text('def launch_native_entry(*args, **kwargs): return args,kwargs\n')
+    service_program = ('import sys;from executor.autonomy.first_use_recovery import serve_first_use;'
+                       'serve_first_use(int(sys.argv[3]),sys.argv[4])')
+    recovery = r'''
+import json,os,subprocess,sys
+from pathlib import Path
+def prepare_recovery(*args, **kwargs): return args,kwargs
+def _read_pipe(fd, *, seconds=15):
+    assert seconds==15
+    try: return json.loads(os.read(fd,4096))
+    finally: os.close(fd)
+def _write_pipe(fd,value):
+    os.write(fd,json.dumps(value).encode());os.close(fd)
+class _FirstUseStartup:
+    def __enter__(self): return self
+    def verify(self, *, empty):
+        from .consumer import _bundle_transaction_identity
+        return _bundle_transaction_identity()
+    def bound_lock_fd(self,*args): return args
+    def before_queue(self,*args): return args
+    def after_queue(self,*args): return args
+    def acknowledge(self,fd):
+        _write_pipe(fd,{'argv':sys.argv[1:],'identity':self.verify(empty=True)})
+    def __exit__(self,*args): return None
+def serve_first_use(fd, mode):
+    with _FirstUseStartup() as startup:
+        if mode=='failure': raise RuntimeError('SYNTHETIC ACTUAL SERVICE FAILURE')
+        startup.acknowledge(fd)
+        print('SERVICE STDOUT MUST REMAIN DEVNULL',flush=True)
+def start_first_use(source, mode):
+    source=Path(source);read_fd,write_fd=os.pipe()
+    try:
+        child=subprocess.Popen([str(source.parent/'runtime/bin/python'),'-I','-B','-c',
+            SERVICE_PROGRAM,str(source),'first-use-serve',str(write_fd),mode],
+            stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+            close_fds=True,pass_fds=(write_fd,))
+    finally: os.close(write_fd)
+    child.wait(timeout=2)
+    return _read_pipe(read_fd)
+'''
+    (package / 'first_use_recovery.py').write_text('SERVICE_PROGRAM = '+repr(service_program)+'\n'+recovery)
+    diagnostic = tmp_path / 'service.log'
+    original = ('import json,sys;from executor.autonomy.first_use_recovery import start_first_use;'
+                'print(json.dumps(start_first_use(sys.argv[1],sys.argv[2])))')
+    program = '_oracle_service_log_path = '+repr(str(diagnostic))+'\n'+oracle.REOPEN_DIAGNOSTICS+'\n'+original
+    result = subprocess.run([sys.executable,'-I','-B','-c',program,str(source),mode],
+                            capture_output=True,text=True,timeout=5)
+    assert diagnostic.is_file() and diagnostic.stat().st_mode & 0o777 == 0o600
+    assert 'SERVICE STDOUT MUST REMAIN DEVNULL' not in result.stdout
+    status = [json.loads(line.removeprefix('JAE_ORACLE_SERVICE_STATUS '))
+              for line in result.stderr.splitlines() if line.startswith('JAE_ORACLE_SERVICE_STATUS ')]
+    assert len(status)==1 and status[0]['pid'] > 0
+    logged = diagnostic.read_text()
+    events = [json.loads(line.removeprefix('JAE_ORACLE_STAGE '))
+              for line in logged.splitlines() if line.startswith('JAE_ORACLE_STAGE ')]
+    assert events and all(event['pid']==status[0]['pid'] for event in events)
+    if mode=='success':
+        assert result.returncode==0, result.stderr
+        observed=json.loads(result.stdout)
+        assert observed['argv'][0:2]==[str(source),'first-use-serve']
+        assert observed['argv'][3]=='success'
+        assert observed['identity']=='EXACT ORIGINAL IDENTITY'
+        assert status[0]['returncode']==0
+        assert any(e['stage']=='_FirstUseStartup.acknowledge' and e['event']=='return' for e in events)
+    else:
+        assert result.returncode!=0 and status[0]['returncode']==1
+        assert 'SYNTHETIC ACTUAL SERVICE FAILURE' in logged
+        assert any(e['stage']=='first_use_recovery.serve_first_use' and e['event']=='raise' for e in events)
+
+
+def test_service_trace_does_not_change_production_deadlines_or_result_checks():
+    recovery=(ROOT/'executor/autonomy/first_use_recovery.py').read_text()
+    assert 'def _read_pipe(fd, *, seconds=15):' in recovery
+    assert 'child.communicate(timeout=90)' in oracle.ENTRY_FIXTURE
+    assert oracle.WALL_SECONDS==1800
+    assert "assert child.returncode == 0" in oracle.ENTRY_FIXTURE
+    assert "'stderr':stream" in oracle.REOPEN_DIAGNOSTICS
+    assert 'observed_args[4] = _service_diagnostics' in oracle.REOPEN_DIAGNOSTICS
