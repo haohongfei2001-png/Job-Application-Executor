@@ -156,7 +156,7 @@ def coverage_record(unsigned_paths, current_paths, unsigned_wheels, observed):
 # that same signed source. They alter explicit user choices / smoke UI lifetime,
 # never signature, manifest, health, service retirement or transaction outcomes.
 ENTRY_DIAGNOSTICS = r'''
-import faulthandler, functools, itertools, json, sys, time
+import functools, itertools, json, sys, time
 _trace_started = time.monotonic()
 _trace_calls = itertools.count(1)
 def _trace_event(stage, call, event, started):
@@ -180,9 +180,32 @@ def _trace_function(module, name):
         _trace_event(stage, call, 'return', started)
         return result
     setattr(module, name, observed)
+def _trace_native_timeout(child, error):
+    def tail(value, limit):
+        if isinstance(value, bytes): value = value.decode('utf-8', errors='replace')
+        return (value or '')[-limit:]
+    print('JAE_ORACLE_NATIVE_TIMEOUT ' + json.dumps({
+        'returncode':child.poll(), 'timeout_seconds':error.timeout,
+        'stdout_tail':tail(error.stdout, 4096), 'stderr_tail':tail(error.stderr, 16384),
+    }, sort_keys=True), file=sys.stderr, flush=True)
 '''
 
-ENTRY_FIXTURE = ENTRY_DIAGNOSTICS + r'''
+REOPEN_DIAGNOSTICS = ENTRY_DIAGNOSTICS + r'''
+from pathlib import Path
+_reopen_source = Path(sys.argv[1])
+sys.path.insert(0, str(_reopen_source))
+from executor.autonomy import consumer, first_install, first_use_recovery
+for module, names in (
+    (consumer, ('_bundle_transaction_identity',)),
+    (first_install, ('launch_native_entry',)),
+    (first_use_recovery, ('prepare_recovery', 'start_first_use', '_read_pipe')),
+):
+    assert Path(module.__file__).is_relative_to(_reopen_source)
+    for name in names: _trace_function(module, name)
+# The original -c program follows unchanged and owns argv parsing/execution.
+'''
+
+ENTRY_FIXTURE = ENTRY_DIAGNOSTICS + '\n_reopen_diagnostics = ' + repr(REOPEN_DIAGNOSTICS) + r'''
 import os, subprocess
 from pathlib import Path
 source = Path(sys.argv[1]); sys.path.insert(0, str(source))
@@ -211,23 +234,29 @@ def smoke_reopen(args, *a, **kw):
     if 'native-entry' in args or 'native-launch' in args:
         assert args[:5] == [str(Path(args[5]).parent/'runtime/bin/python'), '-I', '-B', '-c', args[4]]
         args = [*args, '--native-smoke']
+        # Prepend transparent observations, then execute the exact original
+        # entry program against the same sealed app-owned source and argv.
+        args[4] = _reopen_diagnostics + '\n' + args[4]
         kw.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         child = real_popen(args, *a, **kw); children.append(child); return child
     return real_popen(args, *a, **kw)
 subprocess.Popen = smoke_reopen
-faulthandler.dump_traceback_later(45, repeat=True, file=sys.stderr)
-try:
-    result = first_install.launch_native_entry(default_runtime(source), port)
-    for child in children:
-        call, started = next(_trace_calls), time.monotonic()
-        _trace_event('fixture.native_reopen_wait', call, 'begin', started)
+result = first_install.launch_native_entry(default_runtime(source), port)
+for child in children:
+    call, started = next(_trace_calls), time.monotonic()
+    _trace_event('fixture.native_reopen_wait', call, 'begin', started)
+    try:
         out, err = child.communicate(timeout=90)
-        _trace_event('fixture.native_reopen_wait', call, 'return', started)
-        assert child.returncode == 0, (out[-2000:], err[-2000:])
-        report = json.loads(out)
-        assert report.get('ok') is True and report.get('native_window') is True and report.get('native_page') is True, report
-finally:
-    faulthandler.cancel_dump_traceback_later()
+    except subprocess.TimeoutExpired as error:
+        _trace_native_timeout(child, error)
+        raise
+    _trace_event('fixture.native_reopen_wait', call, 'return', started)
+    # Keep native-child observations even when its original CLI reports a
+    # refusal. Diagnostics do not supply or rewrite its native/health result.
+    if err: print(err[-16384:], file=sys.stderr, flush=True)
+    assert child.returncode == 0, (out[-2000:], err[-2000:])
+    report = json.loads(out)
+    assert report.get('ok') is True and report.get('native_window') is True and report.get('native_page') is True, report
 result['actual_native_reopens'] = len(children)
 print(json.dumps(result, sort_keys=True))
 '''
@@ -326,11 +355,7 @@ from executor.autonomy import consumer
 for name in ('rollback_macos_app', '_rollback_macos_app_unlocked',
              '_bundle_transaction_identity', '_candidate_starts', '_isolated_bundle_startup'):
     _trace_function(consumer, name)
-faulthandler.dump_traceback_later(45, repeat=True, file=sys.stderr)
-try:
-    runpy.run_module('executor.autonomy.cli', run_name='__main__', alter_sys=True)
-finally:
-    faulthandler.cancel_dump_traceback_later()
+runpy.run_module('executor.autonomy.cli', run_name='__main__', alter_sys=True)
 '''
 
 

@@ -201,7 +201,7 @@ def test_owner_budget_aggregate_and_no_test_artifact_upload_are_mandatory():
     assert 'terminate_tree(process.pid)' in script
     assert 'WIP, not acceptance' in script
     assert 'pytest.skip' not in script
-    for name in ('ENTRY_DIAGNOSTICS','ENTRY_FIXTURE','ROLLBACK_FIXTURE','READERS',
+    for name in ('ENTRY_DIAGNOSTICS','REOPEN_DIAGNOSTICS','ENTRY_FIXTURE','ROLLBACK_FIXTURE','READERS',
                  'PRODUCTION_REFUSAL','SEED_STATE','VERIFY_STATE'):
         ast.parse(getattr(oracle,name))
 
@@ -424,4 +424,63 @@ def test_only_complete_positive_transactions_receive_six_hundred_second_outer_bu
             assert isinstance(node.args[1], ast.Name) and node.args[1].id == 'ENTRY_FIXTURE'
             assert ast.literal_eval(node.args[2]) in {'accept', 'update'}
     assert 'child.communicate(timeout=90)' in oracle.ENTRY_FIXTURE
-    assert 'dump_traceback_later(45, repeat=True, file=sys.stderr)' in oracle.ENTRY_FIXTURE
+    assert 'faulthandler' not in oracle.ENTRY_FIXTURE + oracle.ROLLBACK_FIXTURE
+
+
+def test_native_timeout_diagnostics_are_bounded_and_preserve_poll(capsys):
+    scope = {}
+    exec(oracle.ENTRY_DIAGNOSTICS, scope)
+    calls = []
+    child = SimpleNamespace(poll=lambda: calls.append('poll') or None)
+    error = subprocess.TimeoutExpired(['synthetic'], 90, output=b'O' * 5000, stderr=b'E' * 20000)
+    scope['_trace_native_timeout'](child, error)
+    assert calls == ['poll']
+    record = json.loads(capsys.readouterr().err.removeprefix('JAE_ORACLE_NATIVE_TIMEOUT '))
+    assert record == {'returncode':None, 'timeout_seconds':90,
+                      'stdout_tail':'O' * 4096, 'stderr_tail':'E' * 16384}
+
+
+def test_actual_nested_timeout_is_reported_without_blocking_diagnostic_cleanup(tmp_path):
+    code = oracle.ENTRY_DIAGNOSTICS + r'''
+import subprocess
+child = subprocess.Popen([sys.executable, '-I', '-B', '-c', 'import time;time.sleep(5)'],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    child.communicate(timeout=.2)
+except subprocess.TimeoutExpired as error:
+    _trace_native_timeout(child, error)
+    raise
+finally:
+    child.kill()
+    child.communicate(timeout=.5)
+'''
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', code],
+                            capture_output=True, text=True, timeout=2)
+    assert result.returncode == 1
+    assert 'JAE_ORACLE_NATIVE_TIMEOUT ' in result.stderr
+    assert 'TimeoutExpired' in result.stderr
+
+
+def test_reopen_prefix_executes_original_program_and_read_pipe_budget_unchanged(tmp_path):
+    source = tmp_path / 'sealed-source'
+    package = source / 'executor/autonomy'
+    package.mkdir(parents=True)
+    (source / 'executor/__init__.py').write_text('')
+    (package / '__init__.py').write_text('')
+    (package / 'consumer.py').write_text('def _bundle_transaction_identity(*args, **kwargs): return args,kwargs\n')
+    (package / 'first_install.py').write_text('def launch_native_entry(*args, **kwargs): return args,kwargs\n')
+    (package / 'first_use_recovery.py').write_text(
+        'def prepare_recovery(*args, **kwargs): return args,kwargs\n'
+        'def start_first_use(*args, **kwargs): return args,kwargs\n'
+        'def _read_pipe(fd, *, seconds=15): return {"fd":fd,"seconds":seconds}\n')
+    original = ('import json,sys;from executor.autonomy.first_use_recovery import _read_pipe;'
+                'print(json.dumps({"argv":sys.argv[1:],"pipe":_read_pipe(17)}))')
+    result = subprocess.run([sys.executable, '-I', '-B', '-c',
+        oracle.REOPEN_DIAGNOSTICS + '\n' + original, str(source), '--port', '12345', 'native-entry'],
+        capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {'argv':[str(source),'--port','12345','native-entry'],
+                                         'pipe':{'fd':17,'seconds':15}}
+    events = [json.loads(line.removeprefix('JAE_ORACLE_STAGE ')) for line in result.stderr.splitlines()]
+    assert [event['stage'] for event in events] == ['first_use_recovery._read_pipe'] * 2
+    assert [event['event'] for event in events] == ['begin','return']
