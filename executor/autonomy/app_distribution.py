@@ -14,6 +14,7 @@ import stat
 import sys
 import tarfile
 import tempfile
+import unicodedata
 from pathlib import Path, PurePosixPath
 
 from .consumer import APP_NAME, _owned_bundle_text, _trusted_bundle, install_macos_app
@@ -74,6 +75,93 @@ def _bundle_members(app: Path) -> list[Path]:
                 or name.startswith("Contents/Resources/runtime/"))):
             raise ValueError("distribution_private_payload")
     return members
+
+
+def _signed_bundle_members(app: Path, *, required_publisher_policy=None) -> list[Path]:
+    """Admit only the current finalizer's no-xattr script-main signed layout.
+
+    This is deliberately separate from unsigned archives and their intake. The
+    current payload reader authenticates the publisher and actual bytes; names,
+    a caller flag, or an adjacent build receipt never establish signing trust.
+    """
+    from .bundle_copy import _no_xattrs, _open_relative, _signature
+    from .signed_payload import RELATIVE_PATH, has_current_payload, read_current_payload
+    app = Path(app).absolute()
+    _no_alias_path(app)
+    if not has_current_payload(app):
+        raise ValueError("distribution_signed_payload_required")
+    signature = "Contents/_CodeSignature"
+    directories = {".", "Contents", "Contents/MacOS", "Contents/Resources",
+                   "Contents/Resources/native-host", "Contents/Resources/release",
+                   "Contents/Resources/runtime", signature}
+    files = {
+        "Contents/Info.plist": 0o644,
+        "Contents/MacOS/AIApplicationManager": 0o755,
+        "Contents/Resources/native-host/AIApplicationWindow": 0o755,
+        "Contents/Resources/native-host/native-host-manifest.json": 0o644,
+        "Contents/Resources/runtime/signing-input-bridge.json": 0o644,
+        RELATIVE_PATH: 0o644,
+        **{signature + "/" + name: 0o644 for name in (
+            "CodeDirectory", "CodeRequirements", "CodeResources", "CodeSignature")},
+    }
+
+    def snapshot():
+        entries, normalized, total = {}, set(), 0
+        for path in (app, *sorted(app.rglob("*"))):
+            relative = path.relative_to(app)
+            name = relative.as_posix()
+            key = unicodedata.normalize("NFC", name).casefold()
+            if key in normalized:
+                raise ValueError("distribution_member_collision")
+            normalized.add(key)
+            if (_private_name(Path(key)) or not (
+                    name in directories or name in files
+                    or name.startswith("Contents/Resources/release/")
+                    or name.startswith("Contents/Resources/runtime/"))):
+                raise ValueError("distribution_private_payload")
+            metadata = path.lstat()
+            mode = stat.S_IMODE(metadata.st_mode)
+            directory = stat.S_ISDIR(metadata.st_mode)
+            regular = stat.S_ISREG(metadata.st_mode)
+            if (metadata.st_uid != os.geteuid() or not (directory or regular)
+                    or regular and metadata.st_nlink != 1
+                    or directory and mode != 0o755
+                    or regular and mode not in (0o644, 0o755)
+                    or name in directories and not directory
+                    or name in files and (not regular or mode != files[name])):
+                raise ValueError("distribution_member_invalid")
+            total += metadata.st_size if regular else 0
+            if (len(entries) >= MAX_DISTRIBUTION_MEMBERS
+                    or total > MAX_DISTRIBUTION_EXPANDED_BYTES):
+                raise ValueError("distribution_inventory_bound")
+            entries[name] = _signature(metadata)
+        if not directories | files.keys() <= entries.keys():
+            raise ValueError("distribution_signed_layout_invalid")
+        return entries
+
+    entries = snapshot()
+    root = os.open(app, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    try:
+        def check_metadata():
+            if _signature(os.fstat(root)) != entries["."]:
+                raise ValueError("distribution_member_changed")
+            for name in entries:
+                fd = os.dup(root) if name == "." else _open_relative(root, name, entries)
+                try:
+                    _no_xattrs(fd)
+                    if _signature(os.fstat(fd)) != entries[name]:
+                        raise ValueError("distribution_member_changed")
+                finally:
+                    os.close(fd)
+        check_metadata()
+        read_current_payload(app, required_publisher_policy=required_publisher_policy)
+        check_metadata()
+        _no_alias_path(app)
+        if snapshot() != entries:
+            raise ValueError("distribution_member_changed")
+        return [app if name == "." else app / name for name in entries]
+    finally:
+        os.close(root)
 
 
 def _archive_app(app: Path, archive: Path) -> None:

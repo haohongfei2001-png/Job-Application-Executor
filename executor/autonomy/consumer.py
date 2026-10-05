@@ -32,7 +32,7 @@ APP_NAME = "AI 投递经理"
 BUNDLE_ID = "com.local.job-application-executor.ai-application-manager"
 # Increase for each subsequently adopted source release. Equal sequence with
 # different bytes is intentionally not an ordinary installer update.
-RELEASE_SEQUENCE = 9
+RELEASE_SEQUENCE = 10
 
 
 def _owned_bundle_file(path: Path) -> bool:
@@ -415,6 +415,9 @@ def _trusted_bundle(app: Path, *, required_publisher_policy=None) -> bool:
     if app.is_symlink() or not app.is_dir():
         return False
     from .signed_payload import has_current_payload
+    envelope = app / "Contents/_CodeSignature"
+    if not has_current_payload(app) and (envelope.exists() or envelope.is_symlink()):
+        return False
     if required_publisher_policy is not None and not has_current_payload(app):
         return False
     contents = app / "Contents"
@@ -485,7 +488,16 @@ def _bundle_transaction_identity(app: Path, *, required_publisher_policy=None) -
             paths.append(native / "native-host-manifest.json")
         from .signed_payload import has_current_payload, RELATIVE_PATH
         if has_current_payload(app):
-            paths.append(app / RELATIVE_PATH)
+            from .app_distribution import _signed_bundle_members
+            _signed_bundle_members(app, required_publisher_policy=required_publisher_policy)
+            # Preserve the exact selected seal as well as its authenticated
+            # current manifest across copy/activation/recovery waits.
+            paths.extend(app / name for name in (RELATIVE_PATH,
+                'Contents/Resources/runtime/signing-input-bridge.json',
+                'Contents/_CodeSignature/CodeDirectory',
+                'Contents/_CodeSignature/CodeRequirements',
+                'Contents/_CodeSignature/CodeResources',
+                'Contents/_CodeSignature/CodeSignature'))
         if any(path.is_symlink() or not path.is_dir() for path in directories):
             raise ValueError("bundle_directory_invalid")
         evidence = []
@@ -768,6 +780,9 @@ def _approved_first_install_matches(approved, staging: Path | None = None) -> bo
     staged = _bundle_transaction_identity(staging)
     if staged is None:
         return False
+    from .signed_payload import has_current_payload
+    if has_current_payload(candidate):
+        return staged[2] == identity[2]
     # Staging may normalize control-file modes/plist formatting, but all
     # approved source/runtime/native manifests and launcher bytes stay exact.
     bound = lambda value: {name: digest for name, mode, digest in value[2]
@@ -799,6 +814,16 @@ def install_macos_bundle(
             raise ValueError("bundle_alias")
         if type(_preserve_bundle) is not bool:
             raise ValueError("bundle_mode_invalid")
+        from .signed_payload import has_current_payload
+        if has_current_payload(candidate):
+            # A signed app is an indivisible payload. Reconstructing its source,
+            # runtime manifests, launcher or plist would invalidate its seal.
+            identity = _bundle_transaction_identity(candidate)
+            if identity is None:
+                raise ValueError("bundle_unverified")
+            if _approved_identity is None and not _first_install:
+                _approved_identity = identity
+            _preserve_bundle = True
         approved = (candidate, _approved_identity) if _first_install or _preserve_bundle else None
         if (_first_install or _preserve_bundle) and (type(_approved_identity) is not tuple or not _approved_first_install_matches(approved)):
             return {"ok": False, "reason": "first_install_source_changed"}
@@ -952,6 +977,21 @@ def _install_macos_app_unlocked(
     )
     apps_dir.mkdir(parents=True, exist_ok=True)
     app = apps_dir / f"{APP_NAME}.app"
+    from .signed_payload import app_for_runtime, has_current_payload
+    candidate_app = app_for_runtime(repo.parent / "runtime", repo)
+    signed_candidate = candidate_app is not None and has_current_payload(candidate_app)
+    if (candidate_app is not None and not signed_candidate
+            and ((candidate_app / "Contents/_CodeSignature").exists()
+                 or (candidate_app / "Contents/_CodeSignature").is_symlink())):
+        return {"ok": False, "reason": "signed_bundle_manifest_required",
+                "message": "签名应用缺少当前完整清单；没有重建或替换任何应用。"}
+    if signed_candidate and _bundle_payload is None:
+        return {"ok": False, "reason": "signed_bundle_copy_required",
+                "message": "签名应用需要完整保真复制；没有重建或替换任何应用。"}
+    if ((app.exists() or app.is_symlink())
+            and signed_candidate != has_current_payload(app)):
+        return {"ok": False, "reason": "bundle_kind_transition_unsupported",
+                "message": "签名与未签名版本暂不支持互相替换；现有应用和任务保持不变。"}
     if _first_install and (app.exists() or app.is_symlink()):
         return {"ok": False, "reason": "first_install_target_occupied"}
     if _first_install and (task_state_root is None or _legacy_root_has_state(task_state_root, task_state_root)):
@@ -1078,7 +1118,8 @@ def _install_macos_app_unlocked(
 
     if (not _trusted_bundle(staging) or not verify_source_candidate(release)
             or not verify_runtime_candidate(runtime, release)):
-        shutil.rmtree(staging)
+        if not signed_candidate:
+            shutil.rmtree(staging)
         return {
             "ok": False,
             "reason": "candidate_invalid",
@@ -1097,7 +1138,8 @@ def _install_macos_app_unlocked(
     if (not _candidate_starts(runtime / "bin" / "python", release)
             or not verify_source_candidate(release)
             or not verify_runtime_candidate(runtime, release)):
-        shutil.rmtree(staging)
+        if not signed_candidate:
+            shutil.rmtree(staging)
         return {
             "ok": False,
             "reason": "candidate_start_failed",
@@ -1106,7 +1148,8 @@ def _install_macos_app_unlocked(
 
     rollback = apps_dir / f".{APP_NAME}.app.previous"
     if rollback.exists() or rollback.is_symlink():
-        shutil.rmtree(staging)
+        if not signed_candidate:
+            shutil.rmtree(staging)
         return {
             "ok": False,
             "reason": "rollback_pending",
@@ -1114,7 +1157,8 @@ def _install_macos_app_unlocked(
         }
     failed = apps_dir / f".{APP_NAME}.app.failed"
     if failed.exists() or failed.is_symlink():
-        shutil.rmtree(staging)
+        if not signed_candidate:
+            shutil.rmtree(staging)
         return {
             "ok": False,
             "reason": "failed_candidate_pending",
@@ -1130,7 +1174,8 @@ def _install_macos_app_unlocked(
         _installer_guard.verify()
     if (task_state_root is None or not _prepare_task_state_release(
             runtime / "bin" / "python", release, task_state_root, apps_dir, backup_evidence)):
-        shutil.rmtree(staging)
+        if not signed_candidate:
+            shutil.rmtree(staging)
         return {
             "ok": False,
             "reason": "candidate_state_incompatible",
@@ -1228,7 +1273,8 @@ def _install_macos_app_unlocked(
             except OSError:
                 restored = False
         # Recovery failure preserves the candidate for diagnosis as well.
-        if restored and _bundle_transaction_identity(staging) == candidate_identity:
+        if (not signed_candidate and restored
+                and _bundle_transaction_identity(staging) == candidate_identity):
             shutil.rmtree(staging)
         return {
             "ok": False,
@@ -1396,6 +1442,10 @@ def _rollback_macos_app_unlocked(destination: str | Path, *, task_state_root: Pa
     app = apps_dir / f"{APP_NAME}.app"
     previous = apps_dir / f".{APP_NAME}.app.previous"
     failed = apps_dir / f".{APP_NAME}.app.failed"
+    from .signed_payload import has_current_payload
+    if has_current_payload(app) != has_current_payload(previous):
+        return {"ok": False, "reason": "rollback_bundle_kind_mismatch",
+                "message": "签名与未签名版本暂不支持互相回退；两个版本保持原位。"}
     if (not _trusted_bundle(app) or not _trusted_bundle(previous)
             or failed.exists() or failed.is_symlink()):
         return {

@@ -1,15 +1,16 @@
-"""Copy an admitted unsigned bundle without reconstructing its payload.
+"""Copy an admitted bundle without reconstructing any payload or signing bytes.
 
-This is a local installer staging primitive, not publisher authentication. The
-existing distribution inventory remains authoritative; signed envelopes are
-not silently admitted by this engineering path.
+Unsigned staging retains its existing inventory. Current signed bundles require
+an independent publisher policy and the narrow authenticated signed inventory.
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 from pathlib import Path
 import stat
+import sys
 
 
 def _signature(value):
@@ -17,9 +18,29 @@ def _signature(value):
             value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
 
-def _inventory(app):
-    from .app_distribution import _bundle_members
-    members = _bundle_members(app)
+def _no_xattrs(fd):
+    """No metadata transport is supported; refuse every attribute, even empty."""
+    if sys.platform == 'darwin':
+        library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+        call = library.flistxattr
+        call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        call.restype = ctypes.c_ssize_t
+        size = call(fd, None, 0, 0)
+        if size < 0:
+            raise OSError(ctypes.get_errno(), 'signing_metadata_unavailable')
+        if size:
+            raise ValueError('signing_metadata_unsupported')
+    elif sys.platform == 'linux':
+        if os.listxattr(fd):
+            raise ValueError('signing_metadata_unsupported')
+    else:
+        raise ValueError('signing_metadata_platform_unsupported')
+
+
+def _inventory(app, *, required_publisher_policy=None):
+    from .app_distribution import _bundle_members, _signed_bundle_members
+    members = (_bundle_members(app) if required_publisher_policy is None else
+               _signed_bundle_members(app, required_publisher_policy=required_publisher_policy))
     return {p.relative_to(app).as_posix(): _signature(p.lstat()) for p in members}
 
 
@@ -50,12 +71,14 @@ def _open_relative(root_fd, relative, entries):
 
 
 def copy_bundle_payload(source: Path, target: Path, expected_identity: tuple, *,
-                        expected_target_identity: tuple[int, int] | None = None) -> None:
+                        expected_target_identity: tuple[int, int] | None = None,
+                        required_publisher_policy=None) -> None:
     """Populate one empty owned staging root; preserve all bytes and modes.
 
 A caller preparing a new build workspace can pin the already-created target
 inode. The optional fence is checked before any writes; ordinary callers retain
-their existing target admission.
+their existing target admission. Signed bundles resolve one independent policy
+before copying and retain it across source and destination verification.
 
 On refusal retain partial staging evidence. Caller alone decides whether any
 later cleanup is safe. No source data, target app or private state is removed.
@@ -66,10 +89,18 @@ later cleanup is safe. No source data, target app or private state is removed.
             or any(type(value) is not int or value < 0 for value in expected_target_identity)):
         raise ValueError('installer_stage_unverified')
     source, target = Path(source).absolute(), Path(target).absolute()
-    if (any(p.is_symlink() for p in (source, *source.parents, target, *target.parents))
-            or _bundle_transaction_identity(source) != expected_identity):
+    from .signed_payload import has_current_payload
+    options = {}
+    signed = has_current_payload(source)
+    if signed:
+        from .publisher_policy import resolve_policy
+        options['required_publisher_policy'] = resolve_policy(required_publisher_policy)
+    elif required_publisher_policy is not None:
         raise ValueError('installer_bundle_changed')
-    entries = _inventory(source)
+    if (expected_identity is None or any(p.is_symlink() for p in (source, *source.parents, target, *target.parents))
+            or _bundle_transaction_identity(source, **options) != expected_identity):
+        raise ValueError('installer_bundle_changed')
+    entries = _inventory(source, **options)
     source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
     target_fd = None
     try:
@@ -83,6 +114,8 @@ later cleanup is safe. No source data, target app or private state is removed.
                 or (target_entry.st_dev, target_entry.st_ino) !=
                    (target.lstat().st_dev, target.lstat().st_ino)):
             raise ValueError('installer_stage_unverified')
+        if signed:
+            _no_xattrs(target_fd)
         destination_dirs = {'.': (target_entry.st_dev, target_entry.st_ino)}
         for relative, saved in entries.items():
             if relative == '.':
@@ -91,6 +124,8 @@ later cleanup is safe. No source data, target app or private state is removed.
             source_file = _open_relative(source_fd, relative, entries)
             destination_parent = os.dup(target_fd)
             try:
+                if signed:
+                    _no_xattrs(source_file)
                 for index, part in enumerate(path.parts[:-1]):
                     child = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY,
                                     dir_fd=destination_parent)
@@ -127,6 +162,8 @@ later cleanup is safe. No source data, target app or private state is removed.
                         os.fsync(output)
                     finally:
                         os.close(output)
+                if signed:
+                    _no_xattrs(source_file)
                 if _signature(os.fstat(source_file)) != saved:
                     raise ValueError('installer_bundle_changed')
             finally:
@@ -134,11 +171,11 @@ later cleanup is safe. No source data, target app or private state is removed.
                 os.close(destination_parent)
         os.fchmod(target_fd, stat.S_IMODE(entries['.'][2]))
         os.fsync(target_fd)
-        if (_inventory(source) != entries
-                or _bundle_transaction_identity(source) != expected_identity
+        if (_inventory(source, **options) != entries
+                or _bundle_transaction_identity(source, **options) != expected_identity
                 or (target.lstat().st_dev, target.lstat().st_ino) != destination_dirs['.']):
             raise ValueError('installer_bundle_changed')
-        copied = _inventory(target)
+        copied = _inventory(target, **options)
         if set(copied) != set(entries):
             raise ValueError('installer_copy_incomplete')
         for relative, expected in entries.items():
@@ -159,9 +196,14 @@ later cleanup is safe. No source data, target app or private state is removed.
                 finally:
                     os.close(original)
                     os.close(staged)
-        if (_inventory(source) != entries or _inventory(target) != copied
-                or _bundle_transaction_identity(source) != expected_identity
-                or _bundle_transaction_identity(target) is None):
+        if (_inventory(source, **options) != entries or _inventory(target, **options) != copied
+                or _bundle_transaction_identity(source, **options) != expected_identity):
+            raise ValueError('installer_bundle_changed')
+        final_identity = _bundle_transaction_identity(target, **options)
+        if (final_identity is None or final_identity[:2] != destination_dirs['.']
+                or signed and final_identity[2] != expected_identity[2]
+                or _signature(os.fstat(target_fd)) != copied['.']
+                or _signature(target.lstat()) != copied['.']):
             raise ValueError('installer_bundle_changed')
     finally:
         os.close(source_fd)

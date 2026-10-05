@@ -25,8 +25,8 @@ JOBS = dict(re.findall(
     r"^  ([a-z_]+):\n(.*?)(?=^  [a-z_]+:\n|\Z)",
     SOURCE.split("\njobs:\n", 1)[1], re.MULTILINE | re.DOTALL,
 ))
-ORDINARY = {"foundation", "packaged_candidate", "macos_consumer_release", "preparation_validation"}
-CLOSURE = ("full_suite", "test", "engineering_closure_macos")
+ORDINARY = {"foundation", "packaged_candidate", "macos_consumer_release", "preparation_validation", "signed_dmg_acceptance"}
+CLOSURE = ("full_suite", "test", "engineering_closure_macos", "signed_dmg_acceptance")
 SHA = "1234567890abcdef1234567890abcdef12345678"
 OTHER_SHA = "abcdef1234567890abcdef1234567890abcdef1234"
 REPOSITORY = "example/jae"
@@ -132,7 +132,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         actual = {name for name in JOBS if selected(name, payload, **kwargs)}
         self.assertEqual(actual, set(expected))
 
-    def test_matching_exact_head_label_only_selects_full_suite_then_single_build(self):
+    def test_matching_exact_head_label_requires_full_suite_and_signed_owner_before_build(self):
         for draft in (True, False):
             with self.subTest(draft=draft):
                 payload = event(draft=draft)
@@ -155,12 +155,12 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 self.assert_jobs(event(draft=draft, fork=True), ())
 
     def test_normal_push_and_pr_policies_are_preserved(self):
-        self.assert_jobs({}, {"foundation", "macos_consumer_release", "full_suite", "test", "preparation_validation"}, event_name="push")
+        self.assert_jobs({}, {"foundation", "macos_consumer_release", "full_suite", "test", "preparation_validation", "signed_dmg_acceptance"}, event_name="push")
         for action in ("opened", "synchronize", "reopened", "ready_for_review"):
             for draft in (True, False):
                 for fork in (True, False):
                     with self.subTest(action=action, draft=draft, fork=fork):
-                        expected = ORDINARY if draft else {"foundation", "macos_consumer_release", "full_suite", "test", "preparation_validation"}
+                        expected = ORDINARY if draft else {"foundation", "macos_consumer_release", "full_suite", "test", "preparation_validation", "signed_dmg_acceptance"}
                         self.assert_jobs(event(action=action, draft=draft, fork=fork), expected)
 
     def test_build_requires_success_and_same_tested_head(self):
@@ -187,7 +187,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         expected_budgets = {"foundation": 30, "packaged_candidate": 20,
                             "macos_consumer_release": "${{ matrix.suite == 'native_integration' && 30 || 25 }}",
                             "full_suite": 30, "test": 5,
-                            "engineering_closure_macos": 20, "preparation_validation": 25}
+                            "engineering_closure_macos": 20, "preparation_validation": 25, "signed_dmg_acceptance": 25}
         for name, budget in expected_budgets.items():
             self.assertIn(f"    timeout-minutes: {budget}\n", JOBS[name])
         build = JOBS["engineering_closure_macos"]
@@ -228,6 +228,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
     def test_both_guards_precede_repository_code_and_use_exact_checkout(self):
         self.assertEqual(guard_shell("full_suite"), guard_shell("test"))
         self.assertEqual(guard_shell("test"), guard_shell("engineering_closure_macos"))
+        self.assertEqual(guard_shell("test"), guard_shell("signed_dmg_acceptance"))
         for name in CLOSURE:
             body = JOBS[name]
             guard = body.index("      - name: Refuse stale or ineligible engineering closure head\n")
@@ -325,7 +326,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertNotIn("upload-artifact", shards)
         self.assertNotIn("upload-artifact", gate)
         self.assertNotIn("matrix:", gate)
-        self.assertIn("    needs: full_suite\n", gate)
+        self.assertIn("    needs: [full_suite, signed_dmg_acceptance]\n", gate)
         self.assertEqual(job_condition("test"), "always() && (" + job_condition("full_suite") + ")")
         self.assertIn("closure_head: ${{ steps.full_aggregate.outputs.sha }}", gate)
         for owner in ("consumer", "browser_contract", "remainder"):
