@@ -110,6 +110,17 @@ def copy_source_candidate(repo_root: str | Path, destination: str | Path) -> dic
 
 
 RUNTIME_MANIFEST_NAME = "release-runtime-manifest.json"
+CURRENT_PAYLOAD_NAME = "current-signed-payload.json"
+
+
+def _current_payload_app(root, release):
+    """Recognize the signed marker without adding imports to unsigned releases."""
+    root, release = Path(root).absolute(), Path(release).absolute()
+    if (root.name != 'runtime' or release != root.parent / 'release'
+            or root.parent.name != 'Resources' or root.parent.parent.name != 'Contents'):
+        return None
+    marker = root.parent / CURRENT_PAYLOAD_NAME
+    return root.parent.parent.parent if marker.exists() or marker.is_symlink() else None
 
 
 def runtime_manifest(root: str | Path, release: str | Path, *, include_manifest=False) -> dict:
@@ -152,13 +163,13 @@ def runtime_manifest(root: str | Path, release: str | Path, *, include_manifest=
 
 def read_runtime_candidate(root: str | Path, release: str | Path, *, required_publisher_policy=None) -> dict | None:
     """Return the current verified inventory, never an unsigned origin as current."""
-    from .signed_payload import app_for_runtime, has_current_payload, read_current_payload
     root = Path(root).expanduser()
-    app = app_for_runtime(root, release)
-    if app is not None and has_current_payload(app):
+    app = _current_payload_app(root, release)
+    if app is not None:
         try:
+            from .signed_payload import read_current_payload
             return read_current_payload(app, required_publisher_policy=required_publisher_policy)['runtime']
-        except (OSError, UnicodeError, ValueError, TypeError, KeyError):
+        except (ImportError, OSError, UnicodeError, ValueError, TypeError, KeyError):
             return None
     if required_publisher_policy is not None:
         return None
@@ -278,14 +289,14 @@ def installed_dependencies_match(root: str | Path, *, required_publisher_policy=
         # Authenticate the signed branch before importing any third-party
         # dependency from this interpreter. An explicit policy never downgrades
         # to an unsigned payload when the current manifest is absent.
-        from .signed_payload import app_for_runtime, has_current_payload, read_current_payload
         prefix = Path(sys.prefix).resolve()
         expected_runtime = Path(root).absolute().parent / 'runtime'
-        app = app_for_runtime(expected_runtime, root)
+        app = _current_payload_app(expected_runtime, root)
         current_files = None
-        if app is not None and has_current_payload(app):
+        if app is not None:
             if prefix != expected_runtime or expected_runtime.is_symlink():
                 return False
+            from .signed_payload import read_current_payload
             current = read_current_payload(app, required_publisher_policy=required_publisher_policy)
             current_files = {entry['path']: entry for entry in current['runtime']['files']}
         elif required_publisher_policy is not None:

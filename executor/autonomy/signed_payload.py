@@ -16,8 +16,9 @@ import stat
 from xml.parsers.expat import ExpatError
 
 from .publisher_policy import verify_publisher
+from .release import CURRENT_PAYLOAD_NAME
 
-RELATIVE_PATH = 'Contents/Resources/current-signed-payload.json'
+RELATIVE_PATH = 'Contents/Resources/' + CURRENT_PAYLOAD_NAME
 FORMAT = 'jae-current-signed-payload-v1'
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 

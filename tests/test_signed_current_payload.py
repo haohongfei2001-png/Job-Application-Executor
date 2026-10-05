@@ -275,6 +275,31 @@ def test_real_probe_and_health_scripts_preserve_old_candidate_function_signature
         assert calls == [source]
 
 
+def test_unsigned_release_reader_needs_no_signed_helper_modules(tmp_path):
+    """The retained release-only test/bootstrap contract remains executable."""
+    repo = tmp_path / 'unsigned-source'
+    repo.mkdir()
+    module = repo / 'release.py'
+    module.write_bytes(Path(release.__file__).read_bytes())
+    (repo / 'requirements.txt').write_bytes((Path(__file__).parents[1] / 'requirements.txt').read_bytes())
+    script = '''import importlib.util,json,pathlib,sys
+path=pathlib.Path(sys.argv[1]); source=path.parent
+spec=importlib.util.spec_from_file_location('retained_unsigned_release',path)
+module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+assert module.installed_dependencies_match(source)
+runtime=source/'runtime'; (runtime/'bin').mkdir(parents=True)
+python=runtime/'bin/python'; python.write_bytes(b'INERT'); python.chmod(0o755)
+(runtime/module.RUNTIME_MANIFEST_NAME).write_text(json.dumps(module.runtime_manifest(runtime,source)))
+assert module.verify_runtime_candidate(runtime,source)
+assert not module.verify_runtime_candidate(runtime,source,required_publisher_policy={})
+print('unsigned release-only compatibility verified')
+'''
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', script, str(module)],
+                            text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'unsigned release-only compatibility verified'
+
+
 def test_preparation_rejects_original_payload_tamper(synthetic_transition):
     prepared, _, _ = synthetic_transition
     dist, workspace, identity, kwargs = prepared
