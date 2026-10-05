@@ -18,7 +18,7 @@ import unicodedata
 from pathlib import Path, PurePosixPath
 
 from .consumer import APP_NAME, _owned_bundle_text, _trusted_bundle, install_macos_app
-from .release import (RUNTIME_MANIFEST_NAME, source_manifest,
+from .release import (RUNTIME_MANIFEST_NAME, _inventory_relative_name, source_manifest,
                       verify_runtime_candidate, verify_source_candidate)
 from .standalone_runtime import verify_standalone_runtime
 
@@ -108,8 +108,7 @@ def _signed_bundle_members(app: Path, *, required_publisher_policy=None) -> list
     def snapshot():
         entries, normalized, total = {}, set(), 0
         for path in (app, *sorted(app.rglob("*"))):
-            relative = path.relative_to(app)
-            name = relative.as_posix()
+            name = _inventory_relative_name(path, app)
             key = unicodedata.normalize("NFC", name).casefold()
             if key in normalized:
                 raise ValueError("distribution_member_collision")

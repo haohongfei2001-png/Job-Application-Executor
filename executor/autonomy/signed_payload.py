@@ -16,7 +16,7 @@ import stat
 from xml.parsers.expat import ExpatError
 
 from .publisher_policy import verify_publisher
-from .release import CURRENT_PAYLOAD_NAME
+from .release import CURRENT_PAYLOAD_NAME, _inventory_relative_name
 
 RELATIVE_PATH = 'Contents/Resources/' + CURRENT_PAYLOAD_NAME
 FORMAT = 'jae-current-signed-payload-v1'
@@ -45,7 +45,7 @@ def _tree_fence(app):
                 or not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode))
                 or stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1):
             raise ValueError('signed_payload_tree_invalid')
-        result[path.relative_to(app).as_posix()] = _signature(metadata)
+        result[_inventory_relative_name(path, app)] = _signature(metadata)
     return result
 
 

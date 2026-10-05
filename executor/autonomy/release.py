@@ -113,6 +113,18 @@ RUNTIME_MANIFEST_NAME = "release-runtime-manifest.json"
 CURRENT_PAYLOAD_NAME = "current-signed-payload.json"
 
 
+def _inventory_relative_name(path: Path, root: Path) -> str:
+    """Name one lexical traversal member without rebuilding its ancestors.
+
+    This does not resolve paths or establish filesystem ownership. Every caller
+    retains its existing alias, metadata, content and mutation checks.
+    """
+    parts, prefix = path.parts, root.parts
+    if path.anchor != root.anchor or parts[:len(prefix)] != prefix:
+        raise ValueError("inventory_member_outside_root")
+    return "/".join(parts[len(prefix):]) or "."
+
+
 def _current_payload_app(root, release):
     """Recognize the signed marker without adding imports to unsigned releases."""
     root, release = Path(root).absolute(), Path(release).absolute()
@@ -142,7 +154,7 @@ def runtime_manifest(root: str | Path, release: str | Path, *, include_manifest=
         metadata = path.stat(follow_symlinks=False)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ValueError("release_runtime_invalid")
-        relative = path.relative_to(root).as_posix()
+        relative = _inventory_relative_name(path, root)
         if relative == RUNTIME_MANIFEST_NAME and not include_manifest:
             continue
         data = path.read_bytes()
