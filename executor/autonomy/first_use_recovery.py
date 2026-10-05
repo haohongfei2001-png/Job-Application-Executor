@@ -24,6 +24,16 @@ import urllib.request
 _FORMAT = 'jae-first-use-startup-v1'
 _FIELDS = {'format', 'bundle_tag', 'fence_tag', 'authority_tag'}
 _LOCKS = ('native-window.lock', 'worker.lock', 'migration.lock')
+# These are completed admission boundaries, never heartbeats or authority.
+# Each retains the finite record transport's 15-second no-progress limit.
+_STARTUP_STAGES = (
+    'before_app_lock', 'after_app_lock',
+    'before_worker_lock', 'after_worker_lock',
+    'before_migration_lock', 'after_migration_lock',
+    'before_queue', 'before_prepare', 'after_prepare', 'before_commit',
+)
+_STARTUP_STAGE_SECONDS = 15
+_STARTUP_TOTAL_SECONDS = (len(_STARTUP_STAGES) + 1) * _STARTUP_STAGE_SECONDS
 
 
 def _tag(value):
@@ -75,16 +85,80 @@ def _read_pipe(fd, *, seconds=15):
         os.close(fd)
 
 
-def _write_pipe(fd, value):
+def _write_pipe(fd, value, *, framed=False):
     entry = os.fstat(fd)
     if not stat.S_ISFIFO(entry.st_mode) or entry.st_uid != os.geteuid():
         raise ValueError('first_use_pipe_invalid')
-    data = json.dumps(value, separators=(',', ':')).encode()
+    data = json.dumps(value, separators=(',', ':')).encode() + (b'\n' if framed else b'')
     if len(data) > 4096:
         raise ValueError('first_use_record_invalid')
     os.set_blocking(fd, False)
     if os.write(fd, data) != len(data):
         raise OSError('first_use_pipe_incomplete')
+
+
+def _read_startup_reply(fd, bundle_tag):
+    """Finite ordered preparation, followed by the original success ACK + EOF.
+
+    Bytes and partial frames never renew a lease. Ten independently verified
+    boundaries permit at most 165 seconds overall, not an unbounded heartbeat.
+    No progress message admits a service or changes the final health checks.
+    """
+    if type(fd) is not int or not 3 <= fd <= 2147483647 or not _digest(bundle_tag):
+        raise ValueError('first_use_pipe_invalid')
+    try:
+        entry = os.fstat(fd)
+        if (not stat.S_ISFIFO(entry.st_mode) or entry.st_uid != os.geteuid()
+                or fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY):
+            raise ValueError('first_use_pipe_invalid')
+        os.set_blocking(fd, False)
+        started = time.monotonic()
+        deadline = started + _STARTUP_TOTAL_SECONDS
+        lease = started + _STARTUP_STAGE_SECONDS
+        data, total, stage, reply = bytearray(), 0, 0, None
+        while True:
+            remaining = min(deadline, lease) - time.monotonic()
+            if remaining <= 0:
+                raise ValueError('first_use_pipe_incomplete')
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                raise ValueError('first_use_pipe_incomplete')
+            chunk = os.read(fd, min(1024, 4097 - total))
+            if time.monotonic() >= min(deadline, lease):
+                raise ValueError('first_use_pipe_incomplete')
+            if not chunk:
+                if data or reply is None:
+                    raise ValueError('first_use_pipe_incomplete')
+                return reply
+            total += len(chunk)
+            if total > 4096:
+                raise ValueError('first_use_record_invalid')
+            data.extend(chunk)
+            while b'\n' in data:
+                if time.monotonic() >= min(deadline, lease):
+                    raise ValueError('first_use_pipe_incomplete')
+                line, _, tail = data.partition(b'\n')
+                data = bytearray(tail)
+                value = json.loads(line, object_pairs_hook=_unique)
+                if reply is not None:
+                    raise ValueError('first_use_progress_invalid')
+                if stage < len(_STARTUP_STAGES):
+                    if value != {'format':'jae-first-use-preparing-v1',
+                            'bundle_tag':bundle_tag, 'stage':_STARTUP_STAGES[stage]}:
+                        raise ValueError('first_use_progress_invalid')
+                    now = time.monotonic()
+                    if now >= min(deadline, lease):
+                        raise ValueError('first_use_pipe_incomplete')
+                    stage += 1
+                    lease = now + _STARTUP_STAGE_SECONDS
+                else:
+                    if (type(value) is not dict or set(value) != {'format','bundle_tag','service'}
+                            or value['format'] != 'jae-first-use-started-v1'
+                            or value['bundle_tag'] != bundle_tag):
+                        raise ValueError('first_use_ack_unverified')
+                    reply = value
+    finally:
+        os.close(fd)
 
 
 def _entry(path, *, directory=False):
@@ -185,8 +259,9 @@ class _FirstUseStartup(AbstractContextManager):
         self.context = None
         self.prepared = None
         self._key = self._token = None
+        self.stage = 0
 
-    def verify(self, *, empty):
+    def verify(self, *, empty, stage):
         from . import consumer
         from .first_install import _bundle_tag
         identity = consumer._bundle_transaction_identity(self.app)
@@ -195,15 +270,22 @@ class _FirstUseStartup(AbstractContextManager):
                 or _admission_tag(self.app, self.state, identity) != self.record['authority_tag']
                 or not _known_legacy_absent(self.source, self.app, self.state)):
             raise ValueError('first_use_admission_changed')
+        if self.stage >= len(_STARTUP_STAGES) or stage != _STARTUP_STAGES[self.stage]:
+            raise ValueError('first_use_progress_invalid')
+        # Cancellation is observed only after a complete read-only admission
+        # check. A lost reader cannot interrupt prepared-state/fence writes.
+        _write_pipe(self.ack_fd, {'format':'jae-first-use-preparing-v1',
+            'bundle_tag':self.record['bundle_tag'], 'stage':stage}, framed=True)
+        self.stage += 1
         return identity
 
     def __enter__(self):
         from .consumer import _acquire_app_transaction_lock
         # Preliminary identity before ProcessLock/private_dir can mkdir/chmod.
-        self.verify(empty=True)
+        self.verify(empty=True, stage='before_app_lock')
         self.app_fd = _acquire_app_transaction_lock(self.app.parent)
         try:
-            self.verify(empty=True)
+            self.verify(empty=True, stage='after_app_lock')
         except BaseException:
             self.__exit__(None, None, None)
             raise
@@ -212,7 +294,8 @@ class _FirstUseStartup(AbstractContextManager):
     def bound_lock_fd(self, name):
         if name not in {'worker.lock', 'migration.lock'} or self.app_fd is None:
             raise ValueError('first_use_lock_invalid')
-        self.verify(empty=True)
+        stage = name.removesuffix('.lock')
+        self.verify(empty=True, stage='before_' + stage + '_lock')
         path = self.state/name
         fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
@@ -220,7 +303,7 @@ class _FirstUseStartup(AbstractContextManager):
             if (owned.st_dev, owned.st_ino, stat.S_IMODE(owned.st_mode), owned.st_uid) != _entry(path):
                 raise ValueError('first_use_lock_changed')
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.verify(empty=True)
+            self.verify(empty=True, stage='after_' + stage + '_lock')
             return fd
         except BaseException:
             os.close(fd)
@@ -248,7 +331,7 @@ class _FirstUseStartup(AbstractContextManager):
                 or self.app_fd is None or self.worker_fd is None):
             raise ValueError('first_use_queue_unverified')
         self.bind_worker(self.worker_fd)
-        identity = self.verify(empty=True)  # Actual worker + migration locks held here.
+        identity = self.verify(empty=True, stage='before_queue')  # Both actual locks held.
         from cryptography.fernet import Fernet
         self.context, self.prepared = _prepared_admission(self.app, self.state, identity)
         self.queue = queue
@@ -283,7 +366,7 @@ class _FirstUseStartup(AbstractContextManager):
         from ..otp.bridge import OtpBridge
         from .first_install import _complete_first_fence, _read_first_fence, _bundle_tag
         from .first_use_prepared import prepare, admission_tag
-        self.verify(empty=False)
+        self.verify(empty=False, stage='before_prepare')
         worker = Worker(queue, relay=None if browser_mode() in {'test','isolated','headless'} else OtpBridge())
         supervisor = Supervisor(queue, worker, token=self._token.decode('ascii'))
         payload = queue._initialization_db.serialize()
@@ -295,10 +378,10 @@ class _FirstUseStartup(AbstractContextManager):
             # The same unmodified initializer independently proves the recorded
             # database is initial state. Never restore or empty another journal.
             raise ValueError('first_use_prepared_initial_state_changed')
-        self.verify(empty=False)
+        self.verify(empty=False, stage='after_prepare')
         server = create_server(supervisor, port=self.port)
         self.components = (worker, supervisor, server)
-        identity = self.verify(empty=False)
+        identity = self.verify(empty=False, stage='before_commit')
         queue._initialization_db.close(); queue._initialization_db = None
         # No server/worker thread has been exposed. On failure, preserve pending
         # + created private state and close only our own bound server object.
@@ -311,10 +394,11 @@ class _FirstUseStartup(AbstractContextManager):
 
     def acknowledge(self, service):
         from .cli import _service_identity_valid
-        if not self.committed or not _service_identity_valid(service):
+        if (not self.committed or self.stage != len(_STARTUP_STAGES)
+                or not _service_identity_valid(service)):
             raise ValueError('first_use_service_unverified')
         _write_pipe(self.ack_fd, {'format':'jae-first-use-started-v1',
-            'bundle_tag':self.record['bundle_tag'], 'service':service})
+            'bundle_tag':self.record['bundle_tag'], 'service':service}, framed=True)
         os.close(self.ack_fd); self.ack_fd = None
         if self.app_fd is not None:
             os.close(self.app_fd); self.app_fd = None
@@ -353,6 +437,7 @@ def start_first_use(root, port, record):
     if identity is None or _bundle_tag(identity) != record['bundle_tag']:
         raise ValueError('first_use_source_unverified')
     descriptors = []
+    child = None
     try:
         record_read, record_write = os.pipe(); descriptors.extend((record_read, record_write))
         ack_read, ack_write = os.pipe(); descriptors.extend((ack_read, ack_write))
@@ -367,7 +452,7 @@ def start_first_use(root, port, record):
         for fd in (record_read, ack_write):
             os.close(fd); descriptors.remove(fd)
         descriptors.remove(ack_read)
-        reply = _read_pipe(ack_read)
+        reply = _read_startup_reply(ack_read, record['bundle_tag'])
         if (type(reply) is not dict or set(reply) != {'format','bundle_tag','service'}
                 or reply['format'] != 'jae-first-use-started-v1'
                 or reply['bundle_tag'] != record['bundle_tag']
@@ -392,6 +477,11 @@ def start_first_use(root, port, record):
     finally:
         for fd in descriptors:
             os.close(fd)
+        # Reap only our already-exited child. Closing the private reply reader
+        # cancels preparation at the next verified boundary. Never signal a
+        # half-written transaction or stop a committed service on ACK loss.
+        if child is not None:
+            child.poll()
 
 
 

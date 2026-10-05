@@ -93,7 +93,7 @@ def test_prepared_first_use_resumes_same_objects_after_completion_interruption(t
                 from executor.facts.answers import TaskAnswerStore
                 assert TaskAnswerStore(queue).cipher is not None
                 retry.acknowledge(retry.components[1].service_identity())
-                reply=recovery._read_pipe(read_fd);read_fd=None
+                reply=recovery._read_startup_reply(read_fd,record['bundle_tag']);read_fd=None
                 assert reply['bundle_tag']==record['bundle_tag']
     finally:
         retry.__exit__(None,None,None)
@@ -290,3 +290,264 @@ def test_prepared_creation_keeps_actual_fd_ownership_and_never_overwrites(tmp_pa
             with startup_for(recovery, app, state) as startup:TaskQueue(state, _first_use_startup=startup)
     assert changed and fingerprints(state) == changed[-1]
     assert not (state/prepared.RECEIPT).exists()
+
+
+def _startup_frames(recovery, tag='a'*64):
+    progress = [{'format':'jae-first-use-preparing-v1', 'bundle_tag':tag, 'stage':stage}
+                for stage in recovery._STARTUP_STAGES]
+    ack = {'format':'jae-first-use-started-v1', 'bundle_tag':tag,
+           'service':{'pid':123, 'port':9344, 'instance':'b'*32}}
+    return [json.dumps(value, separators=(',', ':')).encode()+b'\n'
+            for value in [*progress, ack]]
+
+
+def _read_startup_bytes(recovery, payload):
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, payload); os.close(write_fd)
+    try:
+        return recovery._read_startup_reply(read_fd, 'a'*64)
+    finally:
+        with pytest.raises(OSError):os.fstat(read_fd)
+
+
+def test_startup_progress_coalesced_frames_require_all_boundaries_and_terminal_eof():
+    from executor.autonomy import first_use_recovery as recovery
+    frames = _startup_frames(recovery)
+    assert len(b''.join(frames)) < 4096
+    assert _read_startup_bytes(recovery, b''.join(frames)) == json.loads(frames[-1])
+    assert recovery._STARTUP_STAGE_SECONDS == 15
+    assert recovery._STARTUP_TOTAL_SECONDS == 165
+
+
+@pytest.mark.parametrize('fault', [
+    'empty', 'early_ack', 'repeat', 'skip', 'unknown', 'wrong_tag', 'extra_field',
+    'duplicate_key', 'oversized', 'missing_ack', 'partial_ack', 'trailing',
+    'extra_ack', 'extra_progress', 'empty_line', 'non_object',
+])
+def test_startup_progress_rejects_incomplete_unordered_or_unbounded_stream(fault):
+    from executor.autonomy import first_use_recovery as recovery
+    frames = _startup_frames(recovery)
+    if fault == 'empty':frames=[]
+    elif fault == 'early_ack':frames=[frames[-1]]
+    elif fault == 'repeat':frames.insert(1, frames[0])
+    elif fault == 'skip':frames.pop(1)
+    elif fault == 'unknown':frames[0]=frames[0].replace(b'before_app_lock',b'heartbeat')
+    elif fault == 'wrong_tag':frames[0]=frames[0].replace(b'a'*64,b'c'*64)
+    elif fault == 'extra_field':frames[0]=frames[0].replace(b'}',b',"extra":true}')
+    elif fault == 'duplicate_key':frames[0]=frames[0].replace(b'{',b'{"stage":"before_app_lock",',1)
+    elif fault == 'oversized':frames=[b'x'*4097]
+    elif fault == 'missing_ack':frames.pop()
+    elif fault == 'partial_ack':frames[-1]=frames[-1][:-1]
+    elif fault == 'trailing':frames.append(b'x')
+    elif fault == 'extra_ack':frames.append(frames[-1])
+    elif fault == 'extra_progress':frames.append(frames[0])
+    elif fault == 'empty_line':frames.insert(1,b'\n')
+    elif fault == 'non_object':frames[0]=b'[]\n'
+    with pytest.raises((ValueError,UnicodeError)):
+        _read_startup_bytes(recovery,b''.join(frames))
+
+
+def test_startup_progress_fragmented_real_child_cannot_be_mistaken_for_ack(tmp_path):
+    import subprocess, sys
+    from executor.autonomy import first_use_recovery as recovery
+    frames=_startup_frames(recovery)
+    read_fd,write_fd=os.pipe()
+    program=('import os,sys,time;fd=int(sys.argv[1]);data=bytes.fromhex(sys.argv[2]);'
+             '\nfor value in data:\n os.write(fd,bytes([value]));time.sleep(.0001)\n'
+             'os.close(fd)')
+    child=subprocess.Popen([sys.executable,'-I','-B','-c',program,str(write_fd),
+                            b''.join(frames).hex()],pass_fds=(write_fd,))
+    os.close(write_fd)
+    try:
+        assert recovery._read_startup_reply(read_fd,'a'*64)==json.loads(frames[-1])
+        assert child.wait(timeout=5)==0
+    finally:
+        if child.poll() is None:child.kill();child.wait(timeout=5)
+
+
+@pytest.mark.parametrize('mode', ['near_boundary', 'slow_stage', 'drip', 'total_bound', 'ack_no_eof'])
+def test_startup_progress_deadlines_reset_only_on_real_bounded_stages(monkeypatch,mode):
+    from executor.autonomy import first_use_recovery as recovery
+    frames=_startup_frames(recovery); read_fd,write_fd=os.pipe()
+    clock=[0.0]; sent=[]; closed=[False]
+    monkeypatch.setattr(recovery.time,'monotonic',lambda:clock[0])
+    if mode=='total_bound':monkeypatch.setattr(recovery,'_STARTUP_TOTAL_SECONDS',30)
+    def select_ready(readers,writers,errors,remaining):
+        assert readers==[read_fd] and not writers and not errors and remaining>0
+        index=len(sent)
+        if mode=='slow_stage':clock[0]+=15.001;payload=frames[0]
+        elif mode=='drip':clock[0]+=8;payload=b'{' if index==0 else b' '
+        elif mode=='ack_no_eof':
+            clock[0]+=14.9 if index<10 else .05 if index==10 else 15
+            payload=frames[index] if index<len(frames) else b' '
+        else:
+            clock[0]+=14.9
+            payload=frames[index]
+        os.write(write_fd,payload);sent.append(payload)
+        if mode=='near_boundary' and len(sent)==len(frames):
+            os.close(write_fd);closed[0]=True
+        return [read_fd],[],[]
+    monkeypatch.setattr(recovery.select,'select',select_ready)
+    # The final EOF is immediate, not another prepared boundary.
+    original=select_ready
+    def ready(*args):
+        return ([read_fd],[],[]) if closed[0] else original(*args)
+    monkeypatch.setattr(recovery.select,'select',ready)
+    try:
+        if mode=='near_boundary':
+            assert recovery._read_startup_reply(read_fd,'a'*64)==json.loads(frames[-1])
+            assert clock[0]==pytest.approx(163.9)
+        else:
+            with pytest.raises(ValueError,match='first_use_pipe_incomplete'):
+                recovery._read_startup_reply(read_fd,'a'*64)
+            assert len(sent)<=12
+    finally:
+        if not closed[0]:os.close(write_fd)
+
+
+@pytest.mark.parametrize('boundary', ['before_app_lock','before_prepare','after_prepare','before_commit'])
+def test_startup_reader_disconnect_cancels_only_at_verified_boundary_and_preserves_state(tmp_path,monkeypatch,boundary):
+    from executor.autonomy.queue import TaskQueue
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    record=_recovery_record(recovery,app,state)
+    read_fd,write_fd=os.pipe(); closed=False; retained=None; emitted=[]
+    original=recovery._write_pipe
+    def observe(fd,value,**kwargs):
+        nonlocal closed,retained
+        if value.get('stage')==boundary:
+            retained=fingerprints(state)
+            os.close(read_fd);closed=True
+        original(fd,value,**kwargs)
+        emitted.append(value['stage'])
+    monkeypatch.setattr(recovery,'_write_pipe',observe)
+    startup=recovery._FirstUseStartup(state,_spare_port(),record,write_fd)
+    try:
+        with pytest.raises(BrokenPipeError):
+            with startup:
+                with startup.worker_guard():TaskQueue(state,_first_use_startup=startup)
+    finally:
+        startup.__exit__(None,None,None)
+        if not closed:os.close(read_fd)
+    index=recovery._STARTUP_STAGES.index(boundary)
+    assert emitted==list(recovery._STARTUP_STAGES[:index])
+    assert module._read_first_fence(app.parent)['status']=='pending'
+    assert fingerprints(state)==retained
+    assert not (state/'service.json').exists()
+    if boundary in {'before_app_lock','before_prepare'}:
+        assert set(p.name for p in state.iterdir())==set(recovery._LOCKS)
+    else:
+        assert (state/'.first-use-prepared.json').is_file()
+        assert _recovery_record(recovery,app,state)['bundle_tag']==record['bundle_tag']
+
+
+def test_startup_progress_contains_only_successful_complete_verifications(tmp_path,monkeypatch):
+    from executor.autonomy.queue import TaskQueue
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    record=_recovery_record(recovery,app,state); read_fd,write_fd=os.pipe()
+    original=consumer._bundle_transaction_identity; calls=[]
+    def identity(path):
+        calls.append(path)
+        return original(path) if len(calls)<4 else None
+    monkeypatch.setattr(consumer,'_bundle_transaction_identity',identity)
+    startup=recovery._FirstUseStartup(state,_spare_port(),record,write_fd)
+    try:
+        with pytest.raises(ValueError,match='first_use_admission_changed'):
+            with startup:
+                with startup.worker_guard():TaskQueue(state,_first_use_startup=startup)
+    finally:startup.__exit__(None,None,None)
+    raw=os.read(read_fd,4096);os.close(read_fd)
+    assert [json.loads(line)['stage'] for line in raw.splitlines()]==list(recovery._STARTUP_STAGES[:3])
+    assert len(calls)==4 and module._read_first_fence(app.parent)['status']=='pending'
+
+
+def test_startup_lost_ack_after_commit_retains_exact_data_and_normal_reopen(tmp_path,monkeypatch):
+    from executor.autonomy import cli
+    from executor.autonomy.queue import TaskQueue
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    record=_recovery_record(recovery,app,state); read_fd,write_fd=os.pipe()
+    startup=recovery._FirstUseStartup(state,_spare_port(),record,write_fd)
+    with startup:
+        with startup.worker_guard():
+            TaskQueue(state,_first_use_startup=startup)
+            retained=fingerprints(state);fence=module._fence_path(app.parent).read_bytes()
+            assert startup.committed and startup.stage==len(recovery._STARTUP_STAGES)
+            os.close(read_fd)
+            with pytest.raises(BrokenPipeError):
+                startup.acknowledge(startup.components[1].service_identity())
+    assert fingerprints(state)==retained
+    assert module._read_first_fence(app.parent)['status']=='complete'
+    assert module._fence_path(app.parent).read_bytes()==fence
+    with pytest.raises(ValueError):_recovery_record(recovery,app,state)
+    launches=[]
+    def ordinary(root,port,**options):
+        assert '_first_use_record' not in options
+        launches.append(root)
+        return {'ok':True,'opened':True}
+    monkeypatch.setattr(cli,'launch_native_consumer',ordinary)
+    assert module.launch_native_entry(state,9344)['opened'] is True
+    assert launches==[state] and fingerprints(state)==retained
+    assert module._fence_path(app.parent).read_bytes()==fence
+
+
+@pytest.mark.parametrize('fault',['wrong_registry','wrong_health','wrong_ack_pid','bad_progress'])
+def test_startup_refusal_only_polls_its_real_child_and_never_signals_or_adopts_service(tmp_path,monkeypatch,fault):
+    import subprocess, sys
+    from executor.autonomy import cli,process_entry
+    module,recovery,consumer,host,app,state=_pending_recovery_fixture(tmp_path,monkeypatch)
+    record=_recovery_record(recovery,app,state)
+    frames=_startup_frames(recovery,record['bundle_tag'])
+    port=_spare_port()
+    program=('import json,os,sys,time;'
+        'args=sys.argv;fd=int(args[args.index("--ack-fd")+1]);'
+        'frames=json.loads(args[1]);reply=json.loads(frames[-1]);'
+        'reply["service"]["pid"]=os.getpid()'+(' + 1' if fault=='wrong_ack_pid' else '')+';'
+        'reply["service"]["port"]='+str(port)+';'
+        'frames[-1]=json.dumps(reply)+chr(10);'
+        'os.write(fd,"".join(frames).encode());os.close(fd);time.sleep(10)')
+    if fault=='bad_progress':frames[0]=frames[0].replace(b'before_app_lock',b'wrong_stage')
+    monkeypatch.setattr(process_entry,'isolated_cli_command',lambda *args,**kw:
+        [sys.executable,'-I','-B','-c',program,json.dumps([frame.decode() for frame in frames]),*args])
+    real_popen=subprocess.Popen;children=[];polls=[]
+    def spawn(*args,**kwargs):
+        child=real_popen(*args,**kwargs);children.append(child)
+        original_poll=child.poll
+        def poll():polls.append(child.pid);return original_poll()
+        child.poll=poll
+        return child
+    monkeypatch.setattr(recovery.subprocess,'Popen',spawn)
+    registry_calls=[];request_calls=[]
+    def registry(path):
+        registry_calls.append(path)
+        return {'pid':children[0].pid if fault!='wrong_registry' else 1,
+                'port':port,'instance':'b'*32}
+    monkeypatch.setattr(cli,'_service_record',registry)
+    monkeypatch.setattr(cli,'lifecycle',lambda *a,**kw:pytest.fail('startup refusal used lifecycle'))
+    monkeypatch.setattr(cli,'_stop_owned_service',lambda *a,**kw:pytest.fail('startup refusal stopped a service'))
+    def request(*args,**kwargs):
+        request_calls.append(args)
+        raise ValueError('synthetic unverified health')
+    monkeypatch.setattr(recovery,'_owned_request',request)
+    try:
+        with pytest.raises(ValueError):recovery.start_first_use(state,port,record)
+        assert len(children)==1 and polls and set(polls)=={children[0].pid}
+        assert bool(registry_calls)==(fault in {'wrong_registry','wrong_health'})
+        assert bool(request_calls)==(fault=='wrong_health')
+        assert children[0].poll() is None  # A committed/ambiguous child is not killed.
+        assert set(p.name for p in state.iterdir())==set(recovery._LOCKS)
+    finally:
+        # Only this test's known sleep-only fixture child is terminated here.
+        for child in children:child.kill();child.wait(timeout=5)
+
+
+def test_startup_progress_parsing_cannot_renew_an_expired_lease(monkeypatch):
+    from executor.autonomy import first_use_recovery as recovery
+    frames=_startup_frames(recovery);clock=[0.0]
+    original=json.loads
+    def slow_parse(*args,**kwargs):
+        value=original(*args,**kwargs)
+        clock[0]=15.001
+        return value
+    monkeypatch.setattr(recovery.time,'monotonic',lambda:clock[0])
+    monkeypatch.setattr(recovery.json,'loads',slow_parse)
+    with pytest.raises(ValueError,match='first_use_pipe_incomplete'):
+        _read_startup_bytes(recovery,b''.join(frames))

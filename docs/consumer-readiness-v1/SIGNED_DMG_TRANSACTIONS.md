@@ -49,6 +49,34 @@ bytes before writing a receipt. A signed receipt records
 `notarization: not_performed` and `certification: NOT_CERTIFIED`. The receipt is
 not a trust root. Normal release jobs continue to produce unsigned artifacts.
 
+## Finite first-use preparation
+
+The first-use child still performs every original full identity, app/worker/
+migration lock, private prepared-state and fence check. After each successful
+named boundary it writes one compact, ordered preparation frame to its private
+reply pipe. Preparation frames do not admit a service, open UI, or acknowledge
+success. Unknown, repeated, skipped, malformed or extra stages refuse.
+
+Each complete valid preparation frame renews a 15-second no-progress deadline;
+partial bytes never do. The ten named boundaries plus final acknowledgement are
+bounded by 165 seconds and 4096 aggregate bytes. The original final success ACK
+is still sent only after prepared-state/fence commitment and service registry
+publication, followed by EOF and the unchanged exact-child/service/health checks.
+This addresses the measured signed-child path in run 37296852919: ten successful
+full identity checks took 8.764–13.081 seconds each, and the child reached ACK at
+102.085 seconds, after its original reader had closed. The overall bound has
+about 63 seconds of margin against that observation; the slowest measured stage
+has only 1.919 seconds before the unchanged idle limit. A slower or stalled stage
+still fails, so the measurement is not a future timing or acceptance guarantee.
+
+On refusal the parent closes only its reply reader and polls only its own Popen
+child. A still-preparing child observes cancellation at its next verified frame,
+not in the middle of private-state writes. Existing prepared objects and a
+completed fence survive lost ACKs. An already committed service is not killed,
+restarted, or adopted on ambiguous acknowledgement; no registry PID is signaled.
+The synthetic native observer uses the existing complete-transaction 600-second
+outer allowance, still capped by the oracle's remaining 1800 seconds.
+
 ## Evidence and limits
 
 Local tests exercise inert signed fixtures at explicitly identified publisher

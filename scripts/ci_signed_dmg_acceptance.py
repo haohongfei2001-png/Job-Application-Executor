@@ -297,7 +297,9 @@ for child in children:
     call, started = next(_trace_calls), time.monotonic()
     _trace_event('fixture.native_reopen_wait', call, 'begin', started)
     try:
-        out, err = child.communicate(timeout=90)
+        # The real finite preparation protocol can span multiple verified
+        # stages; observe it within the enclosing complete-transaction budget.
+        out, err = child.communicate(timeout=600)
     except subprocess.TimeoutExpired as error:
         _trace_native_timeout(child, error)
         raise

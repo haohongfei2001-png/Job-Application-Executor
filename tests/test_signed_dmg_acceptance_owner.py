@@ -426,7 +426,7 @@ def test_only_complete_positive_transactions_receive_six_hundred_second_outer_bu
         else:
             assert isinstance(node.args[1], ast.Name) and node.args[1].id == 'ENTRY_FIXTURE'
             assert ast.literal_eval(node.args[2]) in {'accept', 'update'}
-    assert 'child.communicate(timeout=90)' in oracle.ENTRY_FIXTURE
+    assert 'child.communicate(timeout=600)' in oracle.ENTRY_FIXTURE
     assert 'faulthandler' not in oracle.ENTRY_FIXTURE + oracle.ROLLBACK_FIXTURE
 
 
@@ -614,7 +614,7 @@ def start_first_use(source, mode):
 def test_service_trace_does_not_change_production_deadlines_or_result_checks():
     recovery=(ROOT/'executor/autonomy/first_use_recovery.py').read_text()
     assert 'def _read_pipe(fd, *, seconds=15):' in recovery
-    assert 'child.communicate(timeout=90)' in oracle.ENTRY_FIXTURE
+    assert 'child.communicate(timeout=600)' in oracle.ENTRY_FIXTURE
     assert oracle.WALL_SECONDS==1800
     assert "assert child.returncode == 0" in oracle.ENTRY_FIXTURE
     assert "'stderr':stream" in oracle.REOPEN_DIAGNOSTICS
