@@ -181,7 +181,7 @@ static BOOL releaseResult(NSDictionary *command) {
         // Static local install/continuity choice. No WebView, URL or service.
         NSAlert *alert = [NSAlert new];
         alert.messageText = @"首次安装 AI 投递经理";
-        alert.informativeText = @"应用将安装到当前用户的“应用程序”文件夹，不需要终端。已有应用不会覆盖，旧任务不会自动搬迁。若使用过旧版，请选择旧版项目文件夹核对；发现旧任务时会保留并停止安装。";
+        alert.informativeText = @"应用将安装到当前用户的“应用程序”文件夹，不需要终端。已有应用不会覆盖。旧版资料迁移暂未支持；若使用过旧版，请查看迁移说明并取消此次安装，保留原应用和旧资料。";
         if (self.firstInstallResult) {
             alert.messageText = @"安装尚未完成";
             NSDictionary *messages = @{
@@ -196,39 +196,65 @@ static BOOL releaseResult(NSDictionary *command) {
             alert.informativeText = message;
             [alert addButtonWithTitle:@"关闭"];
         } else {
-            [alert addButtonWithTitle:@"选择旧版项目文件夹…"];
+            [alert addButtonWithTitle:@"已有旧版资料（暂不支持迁移）"];
             [alert addButtonWithTitle:@"首次使用，没有旧版任务"];
             [alert addButtonWithTitle:@"取消"];
         }
         [NSApp activateIgnoringOtherApps:YES];
+        __block BOOL smokeVerified = YES;
+        NSModalResponse (^runFirstInstallAlert)(NSAlert *, NSString *) = ^NSModalResponse(NSAlert *shown, NSString *title) {
+            if (!self.firstInstallSmoke) return [shown runModal];
+            __block BOOL clicked = NO;
+            NSTimer *timer = [NSTimer timerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *tick) {
+                if (!shown.window.isVisible) return;
+                [tick invalidate];
+                BOOL staticOnly = self.view == nil;
+                for (NSWindow *window in NSApp.windows) {
+                    if ([window isKindOfClass:NSOpenPanel.class]) staticOnly = NO;
+                }
+                NSButton *button = nil;
+                for (NSButton *candidate in shown.buttons) {
+                    if ([candidate.title isEqualToString:title]) button = candidate;
+                }
+                if (!staticOnly || !button || !button.isEnabled || button.window != shown.window) {
+                    [NSApp abortModal]; return;
+                }
+                clicked = YES;
+                [button performClick:nil];
+            }];
+            [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSModalPanelRunLoopMode];
+            NSModalResponse answer = [shown runModal];
+            [timer invalidate];
+            smokeVerified = smokeVerified && clicked && !shown.window.isVisible;
+            return answer;
+        };
+        // Smoke retains a real first-screen Cancel before exercising the real
+        // legacy explanation branch. Its synthetic clicks never authorize install.
+        BOOL directCancelled = YES;
         if (self.firstInstallSmoke) {
-            [alert.window makeKeyAndOrderFront:nil];
-            BOOL visible = alert.window.isVisible && self.view == nil;
-            [alert.window close]; self.finished = YES;
-            report(@{@"ok": @(visible), @"first_install_prompt_visible": @(visible),
-                     @"first_install_choice": @{@"action": @"cancel"}});
-            [NSApp terminate:nil]; return;
+            directCancelled = runFirstInstallAlert(alert, @"取消") == NSAlertThirdButtonReturn;
         }
-        NSModalResponse response = [alert runModal];
+        NSModalResponse response = directCancelled && smokeVerified
+            ? runFirstInstallAlert(alert, @"已有旧版资料（暂不支持迁移）") : NSModalResponseAbort;
+        BOOL legacyCancelled = NO;
         NSDictionary *choice = @{@"action": @"cancel"};
-        if (!self.firstInstallResult && response == NSAlertSecondButtonReturn) {
+        if (!self.firstInstallSmoke && !self.firstInstallResult && response == NSAlertSecondButtonReturn) {
             choice = @{@"action": @"install", @"continuity": @"first_use"};
         } else if (!self.firstInstallResult && response == NSAlertFirstButtonReturn) {
-            NSOpenPanel *panel = [NSOpenPanel openPanel];
-            panel.title = @"选择旧版 Job-Application-Executor 项目文件夹";
-            panel.canChooseFiles = NO; panel.canChooseDirectories = YES;
-            panel.allowsMultipleSelection = NO; panel.canCreateDirectories = NO;
-            if ([panel runModal] == NSModalResponseOK && panel.URLs.count == 1) {
-                NSURL *selected = panel.URLs.firstObject;
-                if (selected.isFileURL && selected.path.isAbsolutePath && selected.path.length <= 2048
-                    && [selected.path rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound) {
-                    choice = @{@"action": @"install", @"continuity": @"selected_legacy_directory",
-                               @"legacy_directory": selected.path};
-                }
-            }
+            NSAlert *legacy = [NSAlert new];
+            legacy.messageText = @"旧版资料迁移暂未支持";
+            legacy.informativeText = @"本版本暂不支持迁移旧版项目、任务或已保存答案。请保留原应用和全部旧资料，不要删除旧文件或改选空文件夹绕过检查。本次安装将取消。";
+            [legacy addButtonWithTitle:@"保留旧资料并取消安装"];
+            legacyCancelled = runFirstInstallAlert(legacy, @"保留旧资料并取消安装") == NSAlertFirstButtonReturn;
         }
         self.finished = YES;
-        report(@{@"ok": @YES, @"first_install_choice": choice});
+        if (self.firstInstallSmoke) {
+            BOOL verified = directCancelled && smokeVerified && legacyCancelled;
+            report(@{@"ok": @(verified), @"first_install_prompt_visible": @(verified),
+                     @"first_install_choice": @{@"action": @"cancel"}});
+        } else {
+            report(@{@"ok": @YES, @"first_install_choice": choice});
+        }
         [NSApp terminate:nil]; return;
     }
     if (self.releaseResultMode) {

@@ -1520,7 +1520,7 @@ def test_single_installer_builder_refuses_wrong_platform_before_read_or_output(t
 
 @pytest.mark.skipif(sys.platform!='darwin',reason='Real readonly DMG and Cocoa installation require hosted macOS')
 def test_hosted_mac_single_dmg_install_open_update_preserves_private_authority(native_installed_app,tmp_path):
-    """Actual bundle/DMG/service; only local native decision input is synthetic."""
+    """Actual bundle/DMG/service; automatic Cocoa clicks never grant install intent."""
     import plistlib
     from contextlib import contextmanager
     from executor.autonomy import consumer
@@ -1556,7 +1556,7 @@ def test_hosted_mac_single_dmg_install_open_update_preserves_private_authority(n
             closed=subprocess.run(['/usr/bin/hdiutil','detach',str(mount)],capture_output=True,timeout=60)
             assert closed.returncode==0,'synthetic installer mount remained in use'
     bootstrap=r'''
-import json,sys,os
+import hashlib,json,sys,os,socket,stat
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from executor.autonomy import first_install,consumer,macos_host,cli
@@ -1564,14 +1564,17 @@ from executor.autonomy.runtime_paths import default_runtime
 source=Path(sys.argv[1]);port=int(sys.argv[2]);mode=sys.argv[3]
 state=default_runtime(source);target=Path.home()/'Applications'/(consumer.APP_NAME+'.app')
 assert Path(cli.__file__).is_relative_to(source)
-children=[];choices=[];allow_first=[False]
+children=[];service_children=[];choices=[];allow_first=[False]
 original_first=macos_host.present_native_first_install
 original_installer=macos_host.present_native_installer
 def first(directory,**options):
- if options:return {'action':'cancel'}
- assert original_first(directory,smoke=True)=={'action':'cancel'}
+ assert not options,'unexpected first-install result prompt'
+ decision=original_first(directory,smoke=True)
+ assert decision=={'action':'cancel'}
  choices.append('first')
- return {'action':'install','continuity':'first_use'} if allow_first[0] else {'action':'cancel'}
+ # Cancellation is the real Cocoa result. The separate existing synthetic
+ # positive fixture below, never a smoke click, supplies first-use intent.
+ return {'action':'install','continuity':'first_use'} if allow_first[0] else decision
 def existing(directory,kind,**options):
  assert original_installer(directory,kind,smoke=True)=={'action':'cancel'}
  choices.append(kind)
@@ -1584,8 +1587,49 @@ def launch(args,**options):
  native=('native-entry' in args or str(args[0]).endswith('/Contents/MacOS/AIApplicationManager'))
  child=real(args+(['--native-smoke'] if native else []),**options)
  if native:children.append(child)
+ if any(command in args for command in ('serve','first-use-serve','bootstrap-serve')):service_children.append(child)
  return child
 first_install.subprocess.Popen=launch
+if mode=='legacy-cancel':
+ from executor.autonomy.queue import TaskQueue,TaskSpec
+ from executor.facts.answers import TaskAnswerStore
+ legacy=Path.home()/'Job-Application-Executor'
+ old_state=legacy/'runtime/autonomy'
+ queue=TaskQueue(old_state)
+ task=queue.enqueue(TaskSpec(company='Synthetic legacy',role='Engineer',
+  target_url='https://example.test/retained-legacy',profile_ref='synthetic-profile'))
+ queue.pause(task['task_id'])
+ answers=TaskAnswerStore(queue)
+ with queue.tx() as db:
+  db.execute('INSERT INTO task_answer_events(task_id,field_key,ciphertext,answer_version,source,task_revision,created) VALUES(?,?,?,?,?,?,?)',
+   (task['task_id'],'preferences.accept_travel',answers.cipher.encrypt(b'false'),1,'user_explicit_task',1,2))
+ tasks_before=queue.tasks();answers_before=answers.load(task['task_id'])
+ def inventory(root):
+  result={}
+  for path in [root,*sorted(root.rglob('*'))]:
+   entry=path.lstat()
+   assert not path.is_symlink()
+   digest=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+   result[path.relative_to(root).as_posix()]=(entry.st_dev,entry.st_ino,stat.S_IMODE(entry.st_mode),digest)
+  return result
+ old_inventory=inventory(legacy)
+ app=source.parent.parent.parent
+ original_identity=consumer._bundle_transaction_identity(app)
+ assert original_identity is not None
+ for attempt in range(2):
+  result=first_install.launch_native_entry(state,port)
+  assert result=={'ok':True,'cancelled':True,'installed':False,'final_click_actor':'user','submit_capability':False}
+  assert not target.exists() and not target.parent.exists() and not state.exists()
+  assert not first_install._fence_path(target.parent).exists() and not (state/'service.json').exists()
+  assert children==[] and service_children==[]
+  with socket.socket() as probe:assert probe.connect_ex(('127.0.0.1',port))!=0
+  assert inventory(legacy)==old_inventory
+  assert consumer._bundle_transaction_identity(app)==original_identity
+ assert queue.tasks()==tasks_before and answers.load(task['task_id'])==answers_before
+ assert inventory(legacy)==old_inventory
+ assert choices==['first','first']
+ print(json.dumps({'actual_cocoa_cancel_paths':True,'unchanged_legacy_authority':True,'no_install_or_service':True}))
+ sys.exit(0)
 try:
  if mode=='fresh':
   result=first_install.launch_native_entry(state,port)
@@ -1611,6 +1655,15 @@ finally:
     fixture['repo'].rename(tmp_path/'removed-build-checkout')
     with mounted(tmp_path/'image-one'/IMAGE_NAME,'mounted-one') as app:
         source=app/'Contents/Resources/release';python=app/'Contents/Resources/runtime/bin/python'
+        # This separate synthetic HOME has a real old journal and encrypted
+        # answer. Both Cocoa cancellation branches run twice without changing
+        # that authority or creating a new app, fence, service or task root.
+        cancel_home=tmp_path/'legacy-cancel-home';cancel_home.mkdir(mode=0o700)
+        cancelled=subprocess.run([str(python),'-I','-B','-c',bootstrap,str(source),str(port),'legacy-cancel'],
+            cwd=cancel_home,env={**environment,'HOME':str(cancel_home)},capture_output=True,text=True,timeout=120)
+        assert cancelled.returncode==0,'single DMG real Cocoa cancellation did not preserve state: '+cancelled.stderr[-1800:]
+        assert json.loads(cancelled.stdout)=={'actual_cocoa_cancel_paths':True,
+            'unchanged_legacy_authority':True,'no_install_or_service':True}
         run=subprocess.run([str(python),'-I','-B','-c',bootstrap,str(source),str(port),'fresh'],
             cwd=home,env=environment,capture_output=True,text=True,timeout=240)
         assert run.returncode==0,'single DMG first install/native reopen did not complete: '+run.stderr[-1800:]
