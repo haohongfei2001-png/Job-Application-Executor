@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from .release import (is_packaged_source, read_release_identity, MANIFEST_NAME,
-                      verify_runtime_candidate, RUNTIME_MANIFEST_NAME)
+                      verify_runtime_candidate, read_runtime_candidate, RUNTIME_MANIFEST_NAME)
 
 
 def current_packaged_source(repo_root: str | Path) -> dict:
@@ -35,7 +35,7 @@ def current_packaged_source(repo_root: str | Path) -> dict:
     return {"status": "unverified", "source_sha256": ""}
 
 
-def packaged_provenance(repo_root: str | Path) -> dict | None:
+def packaged_provenance(repo_root: str | Path, *, required_publisher_policy=None) -> dict | None:
     """Current payload integrity, distinct from the process's startup identity.
 
     Hash only declared app source/runtime payloads. Never execute the candidate
@@ -75,11 +75,19 @@ def packaged_provenance(repo_root: str | Path) -> dict | None:
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             return report
         manifest_text = manifest_file.read_text(encoding="utf-8")
-        if not verify_runtime_candidate(runtime, supplied):
-            return report
+        from .signed_payload import has_current_payload
+        if has_current_payload(supplied.parent.parent.parent):
+            manifest = read_runtime_candidate(runtime, supplied, required_publisher_policy=required_publisher_policy)
+            if manifest is None:
+                return report
+        else:
+            if required_publisher_policy is not None:
+                return report
+            if not verify_runtime_candidate(runtime, supplied):
+                return report
+            manifest = json.loads(manifest_text)
         if manifest_file.read_text(encoding="utf-8") != manifest_text:
             return report
-        manifest = json.loads(manifest_text)
         runtime_digest = manifest.get("runtime_sha256")
         requirements_digest = manifest.get("requirements_sha256")
         if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
@@ -160,7 +168,8 @@ def _loaded_module_origins_owned(root: Path, release: Path) -> bool:
     except (OSError, UnicodeError, ValueError, RuntimeError, TypeError, AttributeError):
         return False
 
-def loaded_process_provenance(repo_root: str | Path, *, source_identity: dict) -> dict | None:
+def loaded_process_provenance(repo_root: str | Path, *, source_identity: dict,
+                              required_publisher_policy=None) -> dict | None:
     """Observe this process, never infer loaded provenance from payload hashes.
 
     This is an explicit diagnostic observation, not a startup/health subprocess,
@@ -225,7 +234,8 @@ def loaded_process_provenance(repo_root: str | Path, *, source_identity: dict) -
                   "search_paths_owned", "loaded_modules_owned")
         if all(report[key] for key in checks):
             from .release import installed_dependencies_match
-            report["dependency_lock_matches"] = installed_dependencies_match(release) is True
+            options = {} if required_publisher_policy is None else {'required_publisher_policy': required_publisher_policy}
+            report["dependency_lock_matches"] = installed_dependencies_match(release, **options) is True
             report["loaded_modules_owned"] = _loaded_module_origins_owned(root, release)
             report["search_paths_owned"] = bool(sys.path) and all(
                 inside(path, allow_release=True) for path in tuple(sys.path))

@@ -58,6 +58,14 @@ def main(argv=None):
                 "expected_receipt_sha256": hashlib.sha256(encoded).hexdigest(),
                 "expected_prepared_identity_sha256": hashlib.sha256(identity_bytes).hexdigest(),
                 "expected_policy_sha256": hashlib.sha256(_encoded(policy)).hexdigest(),
+            },
+            "current_payload_stages": {
+                "entry": "scripts/finalize_macos_signing.py",
+                "inputs": "same trusted finalization_inputs and publisher policy",
+                "after_nested_signing": "--current-payload-stage prepare",
+                "after_outer_signing": "--current-payload-stage finalize",
+                "output_contract": "jae-build-bundle-identity-v3",
+                "consumer_admission": "NOT_ADMITTED",
             }}}
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
     return 0

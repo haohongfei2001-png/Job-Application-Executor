@@ -184,6 +184,68 @@ consumer admission and runtime/update/rollback integration remain developer work
 The original cold installer continues to refuse these workspaces. Optional legacy
 migration remains separate from ordinary fresh installation.
 
+## Explicit v3 current-payload path (not consumer admission)
+
+The original v2 finalizer is unchanged in scope: it rejects the additional
+current-payload resource. A separate explicit path now connects the existing
+build report to the current-byte readers used by runtime/native validation and
+candidate health. This is local engineering, not a signed installer release.
+
+1. Build and prepare with the same trusted receipt/prepared/policy pins above.
+2. After independently authorized nested signing, invoke the same finalizer CLI
+   and pins with `--current-payload-stage prepare`. It checks every original byte
+   with the existing build-only signing-delta proof, and requires Apple's actual
+   Developer ID verification of every nested object before writing
+   `Contents/Resources/current-signed-payload.json`. It does not sign or execute
+   anything. Missing identity or an ad-hoc signature refuses.
+3. Seal the outer app, including both the input bridge and this new resource.
+4. Invoke with `--current-payload-stage finalize`. It reconstructs the current
+   manifest deterministically from actual bytes, checks its explicit seal
+   coverage, and writes only `signed-build-identity-v3.json` outside the app.
+   The v2 output filename/contract is never reused for this larger inventory.
+
+The original source/runtime/native manifests and wheel RECORD/METADATA/WHEEL
+remain byte-exact. They describe the unsigned input. The new current manifest
+hashes the signed runtime, including the retained original runtime manifest,
+and the current native image. It lives outside the runtime tree, avoiding a
+self-hash cycle. No original RECORD is rewritten to impersonate an upstream
+signature or to make its old hash match transformed native code.
+
+`publisher_policy.py` contains an unconfigured `BUILT_IN_PUBLISHER_POLICY=None`.
+Only an already trusted verifier's explicitly supplied policy, or its separately
+reviewed fixed build configuration, can enable current-payload validation.
+Malformed explicit policies refuse, without fallback. Candidate Team ID claims,
+environment variables, writable settings and adjacent JSON are never trust roots.
+The candidate's own source constant does not independently authenticate a first
+Finder launch: that entry already executes the candidate's Python. Initial
+publisher trust still requires the actual macOS distribution/installation chain.
+
+The current-payload reader authenticates the outer app with a fixed independent
+Apple/Developer ID/team/bundle requirement before trusting the new manifest,
+then checks explicit resource coverage, current bytes and a before/after tree
+fence. These are quiescent-workspace static checks, not hostile-writer isolation.
+Runtime/native cold checks and the existing candidate-health/dependency probe
+accept a trusted caller's explicit policy. They do not discover one. Dependency
+name/version/Requires-Python/Requires-Dist closure and interpreter/module/path
+ownership remain mandatory. Original RECORD hashes are replaced by authenticated
+current-inventory hashes only in that branch. Diagnostics report the current
+runtime digest, while keeping signed consumer certification false.
+
+The installed service also requires a real fixed publisher configuration in its
+already authenticated source. Passing a policy for one build/health call does
+not persist a grant or configure the installed service. With the shipped default,
+all ordinary signed consumer paths refuse before a candidate health process.
+Unsigned compatibility remains unchanged. Signed archive/copy/DMG intake,
+first-install/update/rollback transport and release admission are NOT enabled by
+this increment; their existing unsigned contracts remain in force. Changing the
+fixed configuration alone is not a complete signed installer implementation.
+
+Real Developer ID positive results, hardened-runtime/entitlements compatibility,
+notarization, stapling and quarantined fresh-install/update evidence remain
+unverified. Synthetic post-verifier seams test wiring and refusals only; they do
+not certify Apple acceptance. No credentials, signatures or user installation
+are produced by these changes. Delivered source advances release sequence to 8.
+
 ## Verification
 
 `tests/test_macos_signing_preparation.py` uses explicitly synthetic static app
