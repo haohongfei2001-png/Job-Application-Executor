@@ -57,17 +57,20 @@ named boundary it writes one compact, ordered preparation frame to its private
 reply pipe. Preparation frames do not admit a service, open UI, or acknowledge
 success. Unknown, repeated, skipped, malformed or extra stages refuse.
 
-Each complete valid preparation frame renews a 15-second no-progress deadline;
+Each complete valid preparation frame renews a 30-second no-progress deadline;
 partial bytes never do. The ten named boundaries plus final acknowledgement are
 bounded by 165 seconds and 4096 aggregate bytes. The original final success ACK
 is still sent only after prepared-state/fence commitment and service registry
 publication, followed by EOF and the unchanged exact-child/service/health checks.
 This addresses the measured signed-child path in run 37296852919: ten successful
 full identity checks took 8.764–13.081 seconds each, and the child reached ACK at
-102.085 seconds, after its original reader had closed. The overall bound has
-about 63 seconds of margin against that observation; the slowest measured stage
-has only 1.919 seconds before the unchanged idle limit. A slower or stalled stage
-still fails, so the measurement is not a future timing or acceptance guarantee.
+102.085 seconds, after its original reader had closed. The protocol run
+37300392241 subsequently completed all ten checks and ACK at 101.018 seconds;
+its slowest check took 14.841 seconds. The 30-second no-progress bound gives
+approximately twice that measured stage duration, while the absolute bound stays
+165 seconds and cannot be renewed. The initial private startup-record transport
+remains bounded by 15 seconds. A slower/stalled stage or absolute-limit expiry
+still fails; the measurements are not a future timing or acceptance guarantee.
 
 On refusal the parent closes only its reply reader and polls only its own Popen
 child. A still-preparing child observes cancellation at its next verified frame,
@@ -75,7 +78,7 @@ not in the middle of private-state writes. Existing prepared objects and a
 completed fence survive lost ACKs. An already committed service is not killed,
 restarted, or adopted on ambiguous acknowledgement; no registry PID is signaled.
 The synthetic native observer uses the existing complete-transaction 600-second
-outer allowance, still capped by the oracle's remaining 1800 seconds.
+outer allowance, still capped by the oracle's remaining 3900 seconds.
 
 ## Evidence and limits
 
@@ -85,8 +88,8 @@ metadata drift, changing source/target paths, retained evidence, cross-kind
 refusal, same-kind installation/update/rollback and image-tool wiring. Those
 tests do not prove Apple signing, native execution or an actual mounted DMG.
 
-The separate `signed_dmg_acceptance` hosted-Mac owner has a 40-minute job budget
-and one 30-minute acceptance subprocess. It must perform the full signed-runtime,
+The separate `signed_dmg_acceptance` hosted-Mac owner has a 75-minute job budget
+and one 65-minute acceptance subprocess. It must perform the full signed-runtime,
 read-only DMG, Cocoa cancellation, explicit synthetic first install, actual native
 reopen/service health, same-kind update, explicit rollback and failed-final-path
 recovery journey. The test-only fixed publisher adapter is placed in an isolated
@@ -100,9 +103,24 @@ The first hosted attempt exhausted the original 900-second engineering budget:
 three complete signed builds and verified DMGs consumed 817.15 seconds before
 the production/damage refusals, and the installation journey never started.
 That failed run remains negative evidence, not a performance or acceptance pass.
-The revised 1800-second bound allows those measured 817 seconds, an estimated
-348-second complete journey and 635 seconds for additional signed checks and
-variation. This is a scheduling estimate; a complete real run is still required.
+The next 1800-second bound estimated those measured 817 seconds, a 348-second
+journey and 635 seconds of additional signed checks. Actual signed work exceeded
+that estimate. Run 37300392241 passed real first install/native/health and signed
+update/private-state preservation, but only reached rollback refusal work at
+1756.42 seconds, then failed the 1800-second limit. Rollback, the third image and
+failed-update restoration were not completed; no full receipt exists.
+
+The 3900-second bound accounts for that measured 1756.42-second prefix, the two
+remaining complete transactions at their existing 600-second outer limits,
+estimated 400 seconds for version-three build/sign/image work and 300 seconds
+for refusal/identity/reopen/state checks. That 3656.42-second model leaves 243.58
+seconds of contingency. The 400/300 allocations are empirical estimates, not
+mathematical sums of all individual timeouts; a complete real run is required.
+The four transaction limits remain 600 seconds, ordinary commands 180 seconds,
+and failure-only observation remains inside the total. Independent jobs would
+need to repeat real setup rather than transfer private state or trust receipts;
+this owner retains the same actual apps, service history and private-state
+identity through the complete journey without uploading them.
 
 Every old CI owner, owning test and timeout remains in force. The required
 aggregate also requires the new Mac owner to succeed; skip/cancel/failure is not

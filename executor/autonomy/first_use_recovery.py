@@ -25,15 +25,16 @@ _FORMAT = 'jae-first-use-startup-v1'
 _FIELDS = {'format', 'bundle_tag', 'fence_tag', 'authority_tag'}
 _LOCKS = ('native-window.lock', 'worker.lock', 'migration.lock')
 # These are completed admission boundaries, never heartbeats or authority.
-# Each retains the finite record transport's 15-second no-progress limit.
+# Real signed verification measured up to 14.841 seconds per boundary.
+# A 30-second idle limit adds per-stage margin; the absolute bound stays 165.
 _STARTUP_STAGES = (
     'before_app_lock', 'after_app_lock',
     'before_worker_lock', 'after_worker_lock',
     'before_migration_lock', 'after_migration_lock',
     'before_queue', 'before_prepare', 'after_prepare', 'before_commit',
 )
-_STARTUP_STAGE_SECONDS = 15
-_STARTUP_TOTAL_SECONDS = (len(_STARTUP_STAGES) + 1) * _STARTUP_STAGE_SECONDS
+_STARTUP_STAGE_SECONDS = 30
+_STARTUP_TOTAL_SECONDS = 165
 
 
 def _tag(value):

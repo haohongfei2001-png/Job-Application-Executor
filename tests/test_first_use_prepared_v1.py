@@ -315,7 +315,7 @@ def test_startup_progress_coalesced_frames_require_all_boundaries_and_terminal_e
     frames = _startup_frames(recovery)
     assert len(b''.join(frames)) < 4096
     assert _read_startup_bytes(recovery, b''.join(frames)) == json.loads(frames[-1])
-    assert recovery._STARTUP_STAGE_SECONDS == 15
+    assert recovery._STARTUP_STAGE_SECONDS == 30
     assert recovery._STARTUP_TOTAL_SECONDS == 165
 
 
@@ -371,17 +371,18 @@ def test_startup_progress_deadlines_reset_only_on_real_bounded_stages(monkeypatc
     frames=_startup_frames(recovery); read_fd,write_fd=os.pipe()
     clock=[0.0]; sent=[]; closed=[False]
     monkeypatch.setattr(recovery.time,'monotonic',lambda:clock[0])
-    if mode=='total_bound':monkeypatch.setattr(recovery,'_STARTUP_TOTAL_SECONDS',30)
+    waits=[]
     def select_ready(readers,writers,errors,remaining):
         assert readers==[read_fd] and not writers and not errors and remaining>0
+        waits.append(remaining)
         index=len(sent)
-        if mode=='slow_stage':clock[0]+=15.001;payload=frames[0]
-        elif mode=='drip':clock[0]+=8;payload=b'{' if index==0 else b' '
+        if mode=='slow_stage':clock[0]+=30.001;payload=frames[0]
+        elif mode=='drip':clock[0]+=16;payload=b'{' if index==0 else b' '
         elif mode=='ack_no_eof':
-            clock[0]+=14.9 if index<10 else .05 if index==10 else 15
+            clock[0]+=.01 if index<10 else 29.8 if index==10 else .4
             payload=frames[index] if index<len(frames) else b' '
         else:
-            clock[0]+=14.9
+            clock[0]+=29.9 if index==0 or mode=='total_bound' else 13.4
             payload=frames[index]
         os.write(write_fd,payload);sent.append(payload)
         if mode=='near_boundary' and len(sent)==len(frames):
@@ -401,6 +402,9 @@ def test_startup_progress_deadlines_reset_only_on_real_bounded_stages(monkeypatc
             with pytest.raises(ValueError,match='first_use_pipe_incomplete'):
                 recovery._read_startup_reply(read_fd,'a'*64)
             assert len(sent)<=12
+            if mode=='total_bound':
+                assert len(sent)==6 and waits[-1]==pytest.approx(15.5)
+                assert recovery._STARTUP_TOTAL_SECONDS==165
     finally:
         if not closed[0]:os.close(write_fd)
 
@@ -545,9 +549,26 @@ def test_startup_progress_parsing_cannot_renew_an_expired_lease(monkeypatch):
     original=json.loads
     def slow_parse(*args,**kwargs):
         value=original(*args,**kwargs)
-        clock[0]=15.001
+        clock[0]=30.001
         return value
     monkeypatch.setattr(recovery.time,'monotonic',lambda:clock[0])
     monkeypatch.setattr(recovery.json,'loads',slow_parse)
     with pytest.raises(ValueError,match='first_use_pipe_incomplete'):
         _read_startup_bytes(recovery,b''.join(frames))
+
+
+def test_startup_no_progress_wait_is_thirty_seconds_but_input_record_stays_fifteen(monkeypatch):
+    import inspect
+    from executor.autonomy import first_use_recovery as recovery
+    read_fd,write_fd=os.pipe();waits=[]
+    monkeypatch.setattr(recovery.time,'monotonic',lambda:0.0)
+    def stalled(readers,writers,errors,seconds):
+        waits.append(seconds)
+        return [],[],[]
+    monkeypatch.setattr(recovery.select,'select',stalled)
+    try:
+        with pytest.raises(ValueError,match='first_use_pipe_incomplete'):
+            recovery._read_startup_reply(read_fd,'a'*64)
+    finally:os.close(write_fd)
+    assert waits==[30] and recovery._STARTUP_TOTAL_SECONDS==165
+    assert inspect.signature(recovery._read_pipe).parameters['seconds'].default==15

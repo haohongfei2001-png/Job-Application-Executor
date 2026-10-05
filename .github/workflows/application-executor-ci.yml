@@ -367,7 +367,7 @@ jobs:
     # Independent synthetic owner only. Never upload its ad-hoc apps or images.
     if: github.event.action != 'labeled' || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.pull_request.head.repo.full_name == github.repository && github.event.label.name == format('eng-{0}', github.event.pull_request.head.sha))
     runs-on: macos-latest
-    timeout-minutes: 40
+    timeout-minutes: 75
     outputs:
       source_sha: ${{ steps.signed_dmg_oracle.outputs.source_sha }}
     steps:
@@ -426,7 +426,7 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Prepare one digest-pinned unsigned runtime
         run: python scripts/prepare_standalone_runtime.py "$RUNNER_TEMP/jae-signed-oracle-runtime"
-      - name: Complete independent signed DMG acceptance within thirty minutes
+      - name: Complete independent signed DMG acceptance within sixty-five minutes
         id: signed_dmg_oracle
         env:
           APPLICATION_EXECUTOR_BROWSER_MODE: isolated
