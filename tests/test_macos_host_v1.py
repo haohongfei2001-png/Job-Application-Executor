@@ -2006,8 +2006,11 @@ def test_managed_first_entry_retains_known_old_authority_even_without_prompt(tmp
     assert (canary.stat().st_ino,canary.read_bytes())==before and not state.exists()
 
 
-def test_hosted_mac_first_install_prompt_is_actual_static_cocoa_and_cancel_only(compiled_host):
+def test_hosted_mac_first_install_prompt_clicks_cancel_and_legacy_explanation_in_actual_cocoa(compiled_host):
     from executor.autonomy.macos_host import present_native_first_install
+    # The source-bound smoke clicks first-screen Cancel, then the old-data
+    # button and its explanation's Cancel. All visible modal responses must
+    # pass; it cannot emit installation intent or substitute a picker result.
     assert present_native_first_install(compiled_host, smoke=True)=={'action':'cancel'}
 
 
