@@ -399,6 +399,8 @@ def test_completed_child_retains_stage_diagnostics_without_changing_stdout(tmp_p
 
 
 def test_transaction_subbudget_remains_capped_by_same_total_wall(tmp_path, monkeypatch):
+    # Keep the fake elapsed-time calculation independent of host uptime/ULPs.
+    monkeypatch.setattr(oracle.time, 'monotonic', lambda: 1000.0)
     driver = oracle.Oracle(tmp_path)
     monkeypatch.setattr(oracle.time, 'monotonic', lambda: driver.started + oracle.WALL_SECONDS - 37)
     observed = []
