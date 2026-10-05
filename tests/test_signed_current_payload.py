@@ -6,7 +6,7 @@ import ast
 import builtins
 import importlib.metadata
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import plistlib
 import shutil
 import subprocess
@@ -196,6 +196,73 @@ def test_original_unsigned_path_remains_available(artifact):
     runtime, source, _ = paths(app)
     assert release.verify_runtime_candidate(runtime, source)
     assert consumer._trusted_bundle(app)
+
+
+def test_inventory_names_match_posix_relative_to_for_lexical_boundaries():
+    # The helper must preserve lexical names, including unresolved '..', and
+    # refuse siblings/anchor mismatches without resolving or normalizing Unicode.
+    prefixes = ['', '.', '..', 'a', 'a/b', 'a/..', '/', '//', '/a', '//a', '/a/b']
+    suffixes = ['', '.', '..', 'b', 'b/c', 'b/../c', 'b//./c', 'a-b',
+                'AI 投递经理.app', 'caf\u00e9', 'cafe\u0301', 'with space', 'line\nbreak', r'back\slash']
+    paths = {PurePosixPath(prefix) / suffix for prefix in prefixes for suffix in suffixes}
+    for root in map(PurePosixPath, prefixes):
+        for path in paths:
+            try:
+                expected = path.relative_to(root).as_posix()
+            except ValueError:
+                with pytest.raises(ValueError):
+                    release._inventory_relative_name(path, root)
+            else:
+                assert release._inventory_relative_name(path, root) == expected
+
+
+def test_inventory_names_never_resolve_aliases_or_read_targets(tmp_path, monkeypatch):
+    root = tmp_path / 'bundle'
+    root.mkdir()
+    outside = tmp_path / 'private'
+    outside.mkdir()
+    (outside / 'canary').write_bytes(b'SYNTHETIC PRIVATE CANARY')
+    alias = root / 'alias'
+    alias.symlink_to(outside, target_is_directory=True)
+    def no_filesystem(*args, **kwargs):
+        pytest.fail('lexical inventory naming accessed the filesystem')
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'stat', no_filesystem)
+        patch.setattr(Path, 'resolve', no_filesystem)
+        patch.setattr(Path, 'open', no_filesystem)
+        assert release._inventory_relative_name(alias / 'canary', root) == 'alias/canary'
+    # Naming is not admission: the existing complete tree fence rejects aliases.
+    with pytest.raises(ValueError, match='signed_payload_tree_invalid'):
+        signed_payload._tree_fence(root)
+    assert (outside / 'canary').read_bytes() == b'SYNTHETIC PRIVATE CANARY'
+
+
+def test_inventory_naming_preserves_signed_evidence_and_every_full_read(
+        current_transition, monkeypatch):
+    from executor.autonomy import app_distribution
+    _, app, _ = current_transition
+    calls = inert_publisher_seam(monkeypatch)
+
+    def capture():
+        calls.clear()
+        result = (
+            signed_payload._tree_fence(app),
+            signed_payload.read_current_payload(app, required_publisher_policy=POLICY),
+            app_distribution._signed_bundle_members(app, required_publisher_policy=POLICY),
+            consumer._bundle_transaction_identity(app, required_publisher_policy=POLICY),
+        )
+        assert result[-1] is not None
+        return result, list(calls)
+
+    optimized = capture()
+    with monkeypatch.context() as patch:
+        original_naming = lambda path, root: path.relative_to(root).as_posix()
+        for module in (release, signed_payload, app_distribution):
+            patch.setattr(module, '_inventory_relative_name', original_naming)
+        original = capture()
+    assert optimized == original
+    # One explicit current read, one inventory, and all four identity reads.
+    assert optimized[1] == [app] * 6
 
 
 @pytest.mark.parametrize('policy', [{}, POLICY, {**POLICY, 'team_id': 'WRONGTEAM1'}])
