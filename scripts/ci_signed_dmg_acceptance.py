@@ -155,12 +155,47 @@ def coverage_record(unsigned_paths, current_paths, unsigned_wheels, observed):
 # These fixtures run INSIDE the app's own isolated interpreter, importing only
 # that same signed source. They alter explicit user choices / smoke UI lifetime,
 # never signature, manifest, health, service retirement or transaction outcomes.
-ENTRY_FIXTURE = r'''
-import json, os, subprocess, sys
+ENTRY_DIAGNOSTICS = r'''
+import faulthandler, functools, itertools, json, sys, time
+_trace_started = time.monotonic()
+_trace_calls = itertools.count(1)
+def _trace_event(stage, call, event, started):
+    print('JAE_ORACLE_STAGE ' + json.dumps({
+        'stage':stage, 'call':call, 'event':event,
+        'elapsed_seconds':round(time.monotonic()-_trace_started, 3),
+        'duration_seconds':round(time.monotonic()-started, 3),
+    }, sort_keys=True), file=sys.stderr, flush=True)
+def _trace_function(module, name):
+    original = getattr(module, name)
+    stage = module.__name__.rsplit('.', 1)[-1] + '.' + name
+    @functools.wraps(original)
+    def observed(*args, **kwargs):
+        call, started = next(_trace_calls), time.monotonic()
+        _trace_event(stage, call, 'begin', started)
+        try:
+            result = original(*args, **kwargs)
+        except BaseException:
+            _trace_event(stage, call, 'raise', started)
+            raise
+        _trace_event(stage, call, 'return', started)
+        return result
+    setattr(module, name, observed)
+'''
+
+ENTRY_FIXTURE = ENTRY_DIAGNOSTICS + r'''
+import os, subprocess
 from pathlib import Path
 source = Path(sys.argv[1]); sys.path.insert(0, str(source))
-from executor.autonomy import first_install, macos_host
+from executor.autonomy import first_install, macos_host, consumer, bundle_copy
 from executor.autonomy.runtime_paths import default_runtime
+for module, names in (
+    (first_install, ('launch_native_entry',)),
+    (consumer, ('_bundle_transaction_identity', 'install_macos_bundle',
+                '_install_macos_app_unlocked', '_candidate_starts',
+                '_prepare_task_state_release', '_activate_first_install_exclusive')),
+    (bundle_copy, ('copy_bundle_payload',)),
+):
+    for name in names: _trace_function(module, name)
 mode, port = sys.argv[2], int(sys.argv[3])
 actual = macos_host.present_native_first_install
 if mode == 'cancel':
@@ -180,12 +215,19 @@ def smoke_reopen(args, *a, **kw):
         child = real_popen(args, *a, **kw); children.append(child); return child
     return real_popen(args, *a, **kw)
 subprocess.Popen = smoke_reopen
-result = first_install.launch_native_entry(default_runtime(source), port)
-for child in children:
-    out, err = child.communicate(timeout=90)
-    assert child.returncode == 0, (out[-2000:], err[-2000:])
-    report = json.loads(out)
-    assert report.get('ok') is True and report.get('native_window') is True and report.get('native_page') is True, report
+faulthandler.dump_traceback_later(45, repeat=True, file=sys.stderr)
+try:
+    result = first_install.launch_native_entry(default_runtime(source), port)
+    for child in children:
+        call, started = next(_trace_calls), time.monotonic()
+        _trace_event('fixture.native_reopen_wait', call, 'begin', started)
+        out, err = child.communicate(timeout=90)
+        _trace_event('fixture.native_reopen_wait', call, 'return', started)
+        assert child.returncode == 0, (out[-2000:], err[-2000:])
+        report = json.loads(out)
+        assert report.get('ok') is True and report.get('native_window') is True and report.get('native_page') is True, report
+finally:
+    faulthandler.cancel_dump_traceback_later()
 result['actual_native_reopens'] = len(children)
 print(json.dumps(result, sort_keys=True))
 '''
@@ -277,6 +319,19 @@ print(json.dumps({'ok':True}))
 '''
 
 CLI_SCRIPT = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('executor.autonomy.cli',run_name='__main__',alter_sys=True)"
+ROLLBACK_FIXTURE = ENTRY_DIAGNOSTICS + r'''
+import runpy
+sys.path.insert(0, sys.argv.pop(1))
+from executor.autonomy import consumer
+for name in ('rollback_macos_app', '_rollback_macos_app_unlocked',
+             '_bundle_transaction_identity', '_candidate_starts', '_isolated_bundle_startup'):
+    _trace_function(consumer, name)
+faulthandler.dump_traceback_later(45, repeat=True, file=sys.stderr)
+try:
+    runpy.run_module('executor.autonomy.cli', run_name='__main__', alter_sys=True)
+finally:
+    faulthandler.cancel_dump_traceback_later()
+'''
 
 
 class Oracle:
@@ -300,15 +355,34 @@ class Oracle:
         print(json.dumps({'phase': value, 'elapsed_seconds': self.phases[value],
                           'certification': 'NOT_CERTIFIED'}), flush=True)
 
+    def child_diagnostics(self, outcome, stdout, stderr):
+        # This owner has only disposable synthetic children. Preserve bounded
+        # diagnostic tails, never command arguments, keys or fixture files.
+        def decoded(value):
+            return value.decode('utf-8', errors='replace') if isinstance(value, bytes) else (value or '')
+        stdout, stderr = decoded(stdout), decoded(stderr)
+        if outcome != 'completed' or 'JAE_ORACLE_STAGE ' in stderr:
+            print(json.dumps({'oracle_child_diagnostics':outcome,
+                'stdout_tail':stdout[-4096:] if outcome != 'completed' else '',
+                'stderr_tail':stderr[-32768:],
+                'certification':'NOT_CERTIFIED'}, sort_keys=True),
+                file=sys.stderr, flush=True)
+
     def run(self, argv, *, timeout=180, expected_returncode=0):
         if type(expected_returncode) is not int or expected_returncode not in (0, 1):
             raise ValueError("oracle only admits exact success or explicit refusal")
         remaining = WALL_SECONDS - (time.monotonic() - self.started)
         if remaining <= 0:
             raise TimeoutError('signed DMG oracle 30-minute wall budget exhausted')
-        result = subprocess.run(list(map(str, argv)), cwd=self.root, env=self.env,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=min(timeout, remaining), check=False)
+        try:
+            result = subprocess.run(list(map(str, argv)), cwd=self.root, env=self.env,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=min(timeout, remaining), check=False)
+        except subprocess.TimeoutExpired as error:
+            self.child_diagnostics('timeout', error.stdout, error.stderr)
+            raise
+        self.child_diagnostics('completed' if result.returncode == expected_returncode
+                               else 'unexpected_exit', result.stdout, result.stderr)
         if result.returncode != expected_returncode:
             raise AssertionError('oracle child failed: ' + result.stdout[-2500:] + result.stderr[-2500:])
         return result.stdout
@@ -326,9 +400,11 @@ class Oracle:
             raise ValueError('oracle child must return one JSON object')
         return result
 
-    def cli(self, command, *, app=None, expected_refusal=None):
-        result = self.app_run(app or self.target, CLI_SCRIPT, '--port', self.port, *command,
-                              expected_returncode=1 if expected_refusal is not None else 0)
+    def cli(self, command, *, app=None, expected_refusal=None, timeout=180):
+        code = ROLLBACK_FIXTURE if command == ['restore-app'] and expected_refusal is None else CLI_SCRIPT
+        result = self.app_run(app or self.target, code, '--port', self.port, *command,
+                              expected_returncode=1 if expected_refusal is not None else 0,
+                              timeout=timeout)
         if expected_refusal is not None:
             assert result.get('ok') is False and result.get('reason') == expected_refusal, result
         return result
@@ -522,7 +598,7 @@ class Oracle:
             assert cancel['actual_native_reopens'] == 0
             assert not self.target.exists() and not self.state.exists()
             self.checked.add('real_cocoa_cancel')
-            first = self.app_run(mounted, ENTRY_FIXTURE, 'accept', self.port)
+            first = self.app_run(mounted, ENTRY_FIXTURE, 'accept', self.port, timeout=600)
             assert first.get('installed') is True and first.get('replaced') is False
             assert first.get('reopen_requested') is True and first['actual_native_reopens'] == 1, first
             assert _bundle_transaction_identity(self.target)[2] == expected_identities[0][2]
@@ -547,7 +623,7 @@ class Oracle:
         before_service = json.loads((self.state / 'service.json').read_bytes())
         self.phase('real_stopped_service_update')
         with self.mounted(images[1], 'second') as mounted:
-            update = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port)
+            update = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=600)
             assert update.get('ok') is True and update.get('updated') is True and update['actual_native_reopens'] == 1, update
         after_service = json.loads((self.state / 'service.json').read_bytes())
         assert before_service != after_service
@@ -586,7 +662,7 @@ class Oracle:
         assert _bundle_transaction_identity(self.target)[2] == expected_identities[1][2]
         failed.rename(self.root / 'retained-occupied-slot')
         self.checked.add('occupied_slot_refused')
-        restored = self.cli(['restore-app'])
+        restored = self.cli(['restore-app'], timeout=600)
         assert restored.get('ok') is True and restored.get('restored') is True, restored
         assert _bundle_transaction_identity(self.target)[2] == expected_identities[0][2]
         assert _bundle_transaction_identity(failed)[2] == expected_identities[1][2]
@@ -597,7 +673,7 @@ class Oracle:
         trace.unlink(missing_ok=True)
         self.phase('signed_final_path_failure_and_actual_restoration')
         with self.mounted(images[2], 'third') as mounted:
-            fault = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port)
+            fault = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=600)
         assert fault.get('ok') is False and fault.get('reason') == 'post_activation_unhealthy', fault
         assert fault['actual_native_reopens'] == 0
         attempts = trace.read_text().splitlines()

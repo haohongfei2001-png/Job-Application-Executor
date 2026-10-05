@@ -201,7 +201,8 @@ def test_owner_budget_aggregate_and_no_test_artifact_upload_are_mandatory():
     assert 'terminate_tree(process.pid)' in script
     assert 'WIP, not acceptance' in script
     assert 'pytest.skip' not in script
-    for name in ('ENTRY_FIXTURE','READERS','PRODUCTION_REFUSAL','SEED_STATE','VERIFY_STATE'):
+    for name in ('ENTRY_DIAGNOSTICS','ENTRY_FIXTURE','ROLLBACK_FIXTURE','READERS',
+                 'PRODUCTION_REFUSAL','SEED_STATE','VERIFY_STATE'):
         ast.parse(getattr(oracle,name))
 
 
@@ -327,3 +328,100 @@ def test_receipt_requires_each_complete_dynamic_runtime_and_wheel_coverage(fault
     else:record['wheels'][0][1]='2.0'
     with pytest.raises(ValueError,match='coverage incomplete'):
         oracle.validate_receipt(value)
+
+
+def test_diagnostic_wrapper_calls_original_once_with_exact_values_and_reraises(capsys):
+    scope = {}
+    exec(oracle.ENTRY_DIAGNOSTICS, scope)
+    calls, argument, returned = [], object(), object()
+    failure = ValueError('synthetic diagnostic failure')
+    def actual(value, *, fail=False):
+        calls.append((value, fail))
+        if fail: raise failure
+        return returned
+    module = SimpleNamespace(__name__='synthetic.owner', actual=actual)
+    scope['_trace_function'](module, 'actual')
+    assert module.actual.__wrapped__ is actual
+    assert module.actual(argument) is returned
+    with pytest.raises(ValueError) as caught:
+        module.actual(argument, fail=True)
+    assert caught.value is failure
+    assert calls == [(argument, False), (argument, True)]
+    captured = capsys.readouterr()
+    assert captured.out == ''
+    events = [json.loads(line.removeprefix('JAE_ORACLE_STAGE '))
+              for line in captured.err.splitlines()]
+    assert [event['event'] for event in events] == ['begin', 'return', 'begin', 'raise']
+    assert [event['call'] for event in events] == [1, 1, 2, 2]
+    assert all(event['stage'] == 'owner.actual' and event['duration_seconds'] >= 0 for event in events)
+
+
+def test_actual_timeout_keeps_captured_output_and_remains_failure(tmp_path, capsys):
+    driver = oracle.Oracle(tmp_path)
+    code = ('import sys,time;print("SYNTHETIC PARTIAL",flush=True);'
+            'print("JAE_ORACLE_STAGE synthetic pending",file=sys.stderr,flush=True);time.sleep(5)')
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        driver.run([sys.executable, '-I', '-B', '-c', code], timeout=.2)
+    assert b'SYNTHETIC PARTIAL' in caught.value.stdout
+    record = json.loads(capsys.readouterr().err)
+    assert record['oracle_child_diagnostics'] == 'timeout'
+    assert 'SYNTHETIC PARTIAL' in record['stdout_tail']
+    assert 'synthetic pending' in record['stderr_tail']
+    assert record['certification'] == 'NOT_CERTIFIED'
+
+
+def test_child_diagnostics_are_bounded_and_do_not_turn_bad_exit_into_success(tmp_path, capsys):
+    driver = oracle.Oracle(tmp_path)
+    driver.child_diagnostics('timeout', b'O' * 5000, b'E' * 40000)
+    record = json.loads(capsys.readouterr().err)
+    assert record['stdout_tail'] == 'O' * 4096
+    assert record['stderr_tail'] == 'E' * 32768
+    with pytest.raises(AssertionError, match='oracle child failed'):
+        driver.run([sys.executable, '-I', '-B', '-c',
+                    'import sys;print("SYNTHETIC FAILURE");sys.exit(1)'])
+    record = json.loads(capsys.readouterr().err)
+    assert record['oracle_child_diagnostics'] == 'unexpected_exit'
+    assert 'SYNTHETIC FAILURE' in record['stdout_tail']
+
+
+def test_completed_child_retains_stage_diagnostics_without_changing_stdout(tmp_path, capsys):
+    driver = oracle.Oracle(tmp_path)
+    code = ('import sys;print("SYNTHETIC RESULT");'
+            'print("JAE_ORACLE_STAGE synthetic returned",file=sys.stderr)')
+    assert driver.run([sys.executable, '-I', '-B', '-c', code]) == 'SYNTHETIC RESULT\n'
+    record = json.loads(capsys.readouterr().err)
+    assert record['oracle_child_diagnostics'] == 'completed'
+    assert record['stdout_tail'] == ''
+    assert 'synthetic returned' in record['stderr_tail']
+
+
+def test_transaction_subbudget_remains_capped_by_same_total_wall(tmp_path, monkeypatch):
+    driver = oracle.Oracle(tmp_path)
+    monkeypatch.setattr(oracle.time, 'monotonic', lambda: driver.started + oracle.WALL_SECONDS - 37)
+    observed = []
+    def run(argv, **kwargs):
+        observed.append(kwargs['timeout'])
+        return SimpleNamespace(returncode=0, stdout='{}', stderr='')
+    monkeypatch.setattr(oracle.subprocess, 'run', run)
+    assert driver.run(['synthetic'], timeout=600) == '{}'
+    assert observed == [37]
+    assert oracle.Oracle.run.__kwdefaults__['timeout'] == 180
+    assert oracle.Oracle.app_run.__kwdefaults__['timeout'] == 180
+    assert oracle.Oracle.cli.__kwdefaults__['timeout'] == 180
+    assert oracle.WALL_SECONDS == 1800
+
+
+def test_only_complete_positive_transactions_receive_six_hundred_second_outer_budget():
+    module = ast.parse((ROOT / 'scripts/ci_signed_dmg_acceptance.py').read_text())
+    calls = [node for node in ast.walk(module) if isinstance(node, ast.Call)
+             and any(keyword.arg == 'timeout' and isinstance(keyword.value, ast.Constant)
+                     and keyword.value.value == 600 for keyword in node.keywords)]
+    assert len(calls) == 4
+    assert sorted(node.func.attr for node in calls) == ['app_run', 'app_run', 'app_run', 'cli']
+    for node in calls:
+        if node.func.attr == 'cli': assert ast.literal_eval(node.args[0]) == ['restore-app']
+        else:
+            assert isinstance(node.args[1], ast.Name) and node.args[1].id == 'ENTRY_FIXTURE'
+            assert ast.literal_eval(node.args[2]) in {'accept', 'update'}
+    assert 'child.communicate(timeout=90)' in oracle.ENTRY_FIXTURE
+    assert 'dump_traceback_later(45, repeat=True, file=sys.stderr)' in oracle.ENTRY_FIXTURE
