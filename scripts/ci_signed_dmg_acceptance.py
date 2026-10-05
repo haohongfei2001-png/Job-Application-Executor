@@ -603,8 +603,20 @@ class Oracle:
             assert consumer._trusted_bundle(negative)
             self.checked.add(case)
 
-    def journey(self, versions, images, expected_identities, source_roots):
+    def build_image(self, signed, number):
+        from executor.autonomy.macos_installer_image import build_installer_image, IMAGE_NAME
+        self.phase('build_verify_readonly_dmg_' + str(number))
+        image_root = self.root / ('image-' + str(number))
+        report = build_installer_image(output=image_root,signed_app=signed,required_publisher_policy=POLICY)
+        assert report['signing'] == 'static_publisher_verified' and report['consumer_admission'] == 'NOT_ADMITTED'
+        assert report['certification'] == 'NOT_CERTIFIED'
+        return image_root / IMAGE_NAME
+
+    def journey(self, versions, expected_identities, source_roots):
         from executor.autonomy.consumer import _bundle_transaction_identity
+        # Load and exercise the unchanged real image builder before moving the
+        # source roots. Each later sealed app stays at its own signed-N path.
+        images = [self.build_image(versions[0], 1)]
         # Move the adapted build paths aside. Signed readers run with -I from
         # each app-owned source/runtime; reader module paths and health source
         # digests prove what actually loaded. The original repository and input
@@ -647,6 +659,7 @@ class Oracle:
         self.reopen()
         before_service = json.loads((self.state / 'service.json').read_bytes())
         self.phase('real_stopped_service_update')
+        images.append(self.build_image(versions[1], 2))
         with self.mounted(images[1], 'second') as mounted:
             update = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=600)
             assert update.get('ok') is True and update.get('updated') is True and update['actual_native_reopens'] == 1, update
@@ -697,6 +710,7 @@ class Oracle:
         trace = self.root / 'fault-serve-trace'
         trace.unlink(missing_ok=True)
         self.phase('signed_final_path_failure_and_actual_restoration')
+        images.append(self.build_image(versions[2], 3))
         with self.mounted(images[2], 'third') as mounted:
             fault = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=600)
         assert fault.get('ok') is False and fault.get('reason') == 'post_activation_unhealthy', fault
@@ -711,6 +725,7 @@ class Oracle:
         self.reopen();self.verify_state(state_before,tasks)
         self.checked.update({'real_failed_activation_restoration','failed_signed_version_retained'})
         self.stop()
+        return images
 
 
 def worker(repo, runtime, root, receipt):
@@ -723,9 +738,8 @@ def worker(repo, runtime, root, receipt):
     adapt_test_source(source,root)
     sys.path.insert(0,str(source))
     from executor.autonomy.consumer import _bundle_transaction_identity
-    from executor.autonomy.macos_installer_image import build_installer_image, IMAGE_NAME
     sources = [source]
-    versions, unsigned, catalogs, images, identities, coverage = [], [], [], [], [], []
+    versions, unsigned, catalogs, identities, coverage = [], [], [], [], []
     for number in (1,2,3):
         if number > 1:
             current_source = root / ('source-' + str(number))
@@ -742,24 +756,19 @@ def worker(repo, runtime, root, receipt):
             None if number == 1 else unsigned[0] / 'Contents/Resources/native-host')
         versions.append(signed);unsigned.append(original);catalogs.append(count);coverage.append(covered)
         identities.append(_bundle_transaction_identity(signed))
-        oracle.phase('build_verify_readonly_dmg_' + str(number))
-        image_root = root / ('image-' + str(number))
-        report = build_installer_image(output=image_root,signed_app=signed,required_publisher_policy=POLICY)
-        assert report['signing'] == 'static_publisher_verified' and report['consumer_admission'] == 'NOT_ADMITTED'
-        assert report['certification'] == 'NOT_CERTIFIED'
-        images.append(image_root / IMAGE_NAME)
     assert len(set(catalogs)) == 1 and len({identity[2] for identity in identities}) == 3
     oracle.checked.add('three_complete_signed_versions')
     oracle.phase('production_and_damage_refusals')
     oracle.negatives(versions[0],pristine)
-    oracle.journey(versions,images,identities,[*sources,pristine,*[root / ('unsigned-'+str(n)) for n in (1,2,3)]])
+    images = oracle.journey(versions,identities,[*sources,pristine,*[root / ('unsigned-'+str(n)) for n in (1,2,3)]])
     if oracle.checked != REQUIRED:
         raise AssertionError('incomplete signed DMG owner: ' + repr(sorted(REQUIRED-oracle.checked)))
     oracle.phase('complete')
     result = {'format':FORMAT,'status':'SYNTHETIC_SIGNED_DMG_ACCEPTANCE_CHECKED',
         'certification':'NOT_CERTIFIED','publisher':'ADHOC_TEST_COPY_ONLY',
         'consumer_admission':'NOT_ADMITTED','checked':sorted(oracle.checked),
-        'signed_versions':3,'macho_objects_per_version':catalogs,'coverage_per_version':coverage,
+        'signed_versions':3,'readonly_images':len(images),
+        'macho_objects_per_version':catalogs,'coverage_per_version':coverage,
         'elapsed_seconds':round(time.monotonic()-oracle.started,2),'phases':oracle.phases}
     receipt.write_bytes(encoded(result));print(json.dumps(result,sort_keys=True),flush=True)
 
@@ -772,6 +781,7 @@ def validate_receipt(value):
             or value.get('consumer_admission') != 'NOT_ADMITTED'
             or value.get('checked') != sorted(REQUIRED)
             or value.get('signed_versions') != 3
+            or type(value.get('readonly_images')) is not int or value['readonly_images'] != 3
             or type(value.get('elapsed_seconds')) not in (int,float)
             or not 0 < value['elapsed_seconds'] < WALL_SECONDS
             or not isinstance(value.get('macho_objects_per_version'),list)

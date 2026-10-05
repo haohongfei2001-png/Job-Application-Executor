@@ -134,7 +134,7 @@ def receipt():
     return {'format':oracle.FORMAT,'status':'SYNTHETIC_SIGNED_DMG_ACCEPTANCE_CHECKED',
         'certification':'NOT_CERTIFIED','publisher':'ADHOC_TEST_COPY_ONLY',
         'consumer_admission':'NOT_ADMITTED','checked':sorted(oracle.REQUIRED),
-        'signed_versions':3,'macho_objects_per_version':[32,32,32],
+        'signed_versions':3,'readonly_images':3,'macho_objects_per_version':[32,32,32],
         'elapsed_seconds':1799,'phases':{'complete':1799},
         'coverage_per_version':[{'unsigned_runtime_files':30,'current_runtime_files':32,
             'added_runtime_files':['release-runtime-manifest.json','signing-input-bridge.json'],
@@ -142,7 +142,7 @@ def receipt():
 
 
 @pytest.mark.parametrize('fault',['missing_case','duplicate_case','no_macos','too_long','no_time',
-    'no_complete','missing_version','shrunk_runtime','different_catalog','certified'])
+    'no_complete','missing_version','missing_image','shrunk_runtime','different_catalog','certified'])
 def test_acceptance_receipt_fails_closed_on_missing_or_skipped_evidence(fault):
     value=receipt()
     if fault=='missing_case':value['checked'].pop()
@@ -152,6 +152,7 @@ def test_acceptance_receipt_fails_closed_on_missing_or_skipped_evidence(fault):
     elif fault=='no_time':value['elapsed_seconds']=0
     elif fault=='no_complete':value['phases']={}
     elif fault=='missing_version':value['signed_versions']=2
+    elif fault=='missing_image':value['readonly_images']=2
     elif fault=='shrunk_runtime':value['macho_objects_per_version']=[2,2,2]
     elif fault=='different_catalog':value['macho_objects_per_version']=[31,32,32]
     else:value['certification']='CERTIFIED'
@@ -484,3 +485,37 @@ def test_reopen_prefix_executes_original_program_and_read_pipe_budget_unchanged(
     events = [json.loads(line.removeprefix('JAE_ORACLE_STAGE ')) for line in result.stderr.splitlines()]
     assert [event['stage'] for event in events] == ['first_use_recovery._read_pipe'] * 2
     assert [event['event'] for event in events] == ['begin','return']
+
+
+@pytest.mark.parametrize('count', [None, 0, 1, 2, 3.0, True])
+def test_receipt_cannot_accept_incomplete_or_unverified_image_count(count):
+    value = receipt()
+    if count is None: value.pop('readonly_images')
+    else: value['readonly_images'] = count
+    with pytest.raises(ValueError, match='receipt incomplete'):
+        oracle.validate_receipt(value)
+
+
+def test_all_three_real_images_are_built_at_their_use_points_before_mounting():
+    source = (ROOT / 'scripts/ci_signed_dmg_acceptance.py').read_text()
+    module = ast.parse(source)
+    cls = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == 'Oracle')
+    journey = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == 'journey')
+    calls = [node for node in ast.walk(journey) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr == 'build_image']
+    calls.sort(key=lambda node:node.lineno)
+    assert [ast.literal_eval(node.args[1]) for node in calls] == [1,2,3]
+    assert [ast.literal_eval(node.args[0].slice) for node in calls] == [0,1,2]
+    text = ast.get_source_segment(source, journey)
+    assert text.index('self.build_image(versions[0], 1)') < text.index('source.rename(')
+    for number, label in enumerate(('first','second','third'), 1):
+        assert text.index(f'self.build_image(versions[{number-1}], {number})') < text.index(f"self.mounted(images[{number-1}], '{label}')")
+    assert text.index('return images') > text.index("self.checked.update({'real_failed_activation_restoration'")
+    worker = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'worker')
+    worker_text = ast.get_source_segment(source, worker)
+    assert 'for number in (1,2,3):' in worker_text
+    assert 'oracle.sign_version(' in worker_text and 'oracle.negatives(' in worker_text
+    assert 'build_installer_image(' not in worker_text
+    assert "'readonly_images':len(images)" in worker_text
+    builder = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == 'build_image')
+    assert 'build_installer_image(output=image_root,signed_app=signed,required_publisher_policy=POLICY)' in ast.get_source_segment(source, builder)
