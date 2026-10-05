@@ -1975,7 +1975,7 @@ finally:
 
 
 def test_hosted_mac_real_build_prepares_noninstallable_signing_workspace(tmp_path, capsys):
-    """Real build, static ad-hoc delta oracle and publisher refusal; no app execution."""
+    """Real bytes and test-only post-publisher compatibility; no app execution."""
     if sys.platform != "darwin":
         pytest.skip("Real native unsigned builder requires hosted macOS")
     from scripts import build_macos_app
@@ -2026,6 +2026,12 @@ def test_hosted_mac_real_build_prepares_noninstallable_signing_workspace(tmp_pat
     from scripts import finalize_macos_signing as finalizer
     pins = report["signing_preparation"]["finalization_inputs"]
     assert pins["entry"] == "scripts/finalize_macos_signing.py"
+    assert report["signing_preparation"]["current_payload_stages"] == {
+        "entry": pins["entry"], "inputs": "same trusted finalization_inputs and publisher policy",
+        "after_nested_signing": "--current-payload-stage prepare",
+        "after_outer_signing": "--current-payload-stage finalize",
+        "output_contract": "jae-build-bundle-identity-v3", "consumer_admission": "NOT_ADMITTED",
+    }
     args = ["--distribution", str(distribution), "--workspace", str(workspace),
             "--publisher-team-id", "SYNTHETIC1", "--publisher-bundle-id", BUNDLE_ID]
     for key in ("expected_receipt_sha256", "expected_prepared_identity_sha256", "expected_policy_sha256"):
@@ -2069,33 +2075,65 @@ def test_hosted_mac_real_build_prepares_noninstallable_signing_workspace(tmp_pat
     assert process.returncode == 0, stderr[-4000:]
     assert last["status"] == "ADHOC_DELTA_CHECKED_PUBLISHER_REFUSED"
     assert last["real_unsigned_layouts"] == last["real_adhoc_deltas"] == len(catalog)
+    assert last["real_v3_deltas"] == last["test_only_nested_verifications"] == len(catalog)
+    assert last["current_payload_engineering"] == "REAL_ADHOC_BYTES_CHECKED_TEST_SEAM_ONLY"
+    assert last["v3_prepare_publisher_validation"] == last["v3_publisher_validation"] == last["reader_publisher_validation"] == "REFUSED_ADHOC"
+    assert last["current_payload_coverage"] == "EXPLICIT_SHA256"
+    assert last["current_runtime_files"] > 0 and last["wheel_records_checked"] > 0
+    assert last["original_record_mismatches"] > 0
+    assert last["missing_current_payload"] == last["unsealed_tamper"] == last["resealed_wrong_digest"] == "REFUSED"
+    assert last["ad_hoc_outer_seals"] == 3 and last["signed_candidate_executions"] == 0
+    assert last["codesign_processes"] > 0 and last["unexpected_process_attempts"] == 0
+    assert last["consumer_admission"] == "NOT_ADMITTED"
+    assert last["certification"] == "NOT_CERTIFIED" and last["v3_final_identity_created"] is False
     assert not (workspace / finalizer.FINAL_IDENTITY).exists()
+    assert not (workspace / finalizer.CURRENT_FINAL_IDENTITY).exists()
     assert _trusted_bundle(prepared) is False
 
 
 def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
     """Private hosted test child: real signed bytes, no publisher acceptance."""
+    import importlib.metadata
     import time
     from scripts import prepare_macos_signing as signing
     from scripts import finalize_macos_signing as finalizer
     from executor.autonomy.app_distribution import stage_macos_distribution
     from executor.autonomy.consumer import BUNDLE_ID
+    from executor.autonomy import release, macos_host, signed_payload, publisher_policy
     prepared = workspace / (APP_NAME + ".app")
     started = time.monotonic()
     observation = {"real_unsigned_layouts": 0, "signed_objects": 0,
         "real_adhoc_deltas": 0, "publisher_validation": "NOT_PERFORMED",
         "consumer_admission": "NOT_ADMITTED", "signed_candidate_executions": 0,
+        "certification": "NOT_CERTIFIED", "ad_hoc_outer_seals": 0,
+        "codesign_processes": 0, "unexpected_process_attempts": 0,
+        "real_v3_deltas": 0, "test_only_nested_verifications": 0,
+        "current_payload_engineering": "NOT_PERFORMED",
+        "v3_prepare_publisher_validation": "NOT_PERFORMED",
+        "v3_publisher_validation": "NOT_PERFORMED", "reader_publisher_validation": "NOT_PERFORMED",
         "status": "INCOMPLETE"}
+    def only_codesign_processes(event, values):
+        if event == "subprocess.Popen":
+            if values[0] != "/usr/bin/codesign":
+                observation["unexpected_process_attempts"] += 1
+                raise AssertionError("signed oracle may execute only the system static/signing tool")
+            observation["codesign_processes"] += 1
+    # This child exits after the oracle. A process audit guard makes the zero
+    # candidate-execution observation an enforced boundary, not just a counter.
+    sys.addaudithook(only_codesign_processes)
     def emit():
         observation["elapsed_seconds"] = round(time.monotonic() - started, 2)
         observation["final_identity_created"] = (workspace / finalizer.FINAL_IDENTITY).exists()
+        observation["v3_final_identity_created"] = (workspace / finalizer.CURRENT_FINAL_IDENTITY).exists()
         print(json.dumps(observation, sort_keys=True), flush=True)
-    def apple(*args):
+    def apple(*args, must_succeed=True):
         result = subprocess.run(["/usr/bin/codesign", *args],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
             timeout=20, check=False)
-        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")[-2000:]
+        if must_succeed:
+            assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")[-2000:]
+        return result
     emit()
     try:
         with stage_macos_distribution(distribution) as original:
@@ -2114,6 +2152,7 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
                 observation["signed_objects"] += 1
                 emit()
             apple("--force", "--sign", "-", "--timestamp=none", "--identifier", BUNDLE_ID, str(prepared))
+            observation["ad_hoc_outer_seals"] += 1
             apple("--verify", "--strict", "--all-architectures", str(prepared))
             signed_names = names | {signing.BRIDGE, finalizer.SIGNATURE_DIRECTORY} | finalizer.SIGNATURE_FILES
             signed_inventory = signing._capture(prepared, signed_names)
@@ -2125,13 +2164,146 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
             finalizer._bridge_coverage(
                 finalizer._read(prepared / (finalizer.SIGNATURE_DIRECTORY + "/CodeResources")),
                 finalizer._read(prepared / signing.BRIDGE))
-        # Independent Developer ID policy still refuses the ad-hoc app.
-        with pytest.raises(ValueError, match="signing_static_requirement_refused"):
-            finalizer.main(arguments)
-        observation["publisher_validation"] = "REFUSED_ADHOC"
-        assert not (workspace / finalizer.FINAL_IDENTITY).exists()
-        assert signing._capture(prepared, signed_names) == signed_inventory
-        assert _trusted_bundle(prepared) is False
-        observation["status"] = "ADHOC_DELTA_CHECKED_PUBLISHER_REFUSED"
+            # Preserve the complete original v2 oracle before changing its app.
+            with pytest.raises(ValueError, match="signing_static_requirement_refused"):
+                finalizer.main(arguments)
+            observation["publisher_validation"] = "REFUSED_ADHOC"
+            assert not (workspace / finalizer.FINAL_IDENTITY).exists()
+            assert signing._capture(prepared, signed_names) == signed_inventory
+            assert _trusted_bundle(prepared) is False
+            emit()
+
+            # Only this test's own outer envelope is removed. The same 32-ish
+            # actual nested signatures, original archive and v2 proof are reused.
+            shutil.rmtree(prepared / finalizer.SIGNATURE_DIRECTORY)
+            current_path = prepared / signed_payload.RELATIVE_PATH
+            policy = signing.publisher_policy("SYNTHETIC1", BUNDLE_ID)
+            with pytest.raises(ValueError, match="signing_static_requirement_refused"):
+                finalizer.main([*arguments, "--current-payload-stage", "prepare"])
+            observation["v3_prepare_publisher_validation"] = "REFUSED_ADHOC"
+            assert not current_path.exists()
+
+            def static_nested_test_seam(path, supplied_policy, identifier, deadline):
+                # Engineering seam ONLY: Apple still verifies actual signature
+                # integrity, every architecture and our fixed path identifier.
+                # No Apple anchor/Developer ID claim is made for '-' signatures.
+                assert supplied_policy == policy and time.monotonic() < deadline
+                relative = path.relative_to(prepared).as_posix()
+                assert relative in catalog
+                assert identifier == BUNDLE_ID + ".component." + hashlib.sha256(relative.encode()).hexdigest()
+                apple("--verify", "--strict", "--all-architectures", "--test-requirement",
+                      '=identifier = "' + identifier + '"', str(path))
+                observation["test_only_nested_verifications"] += 1
+
+            with pytest.MonkeyPatch.context() as seam:
+                seam.setattr(finalizer, "_verify_static", static_nested_test_seam)
+                assert finalizer.main([*arguments, "--current-payload-stage", "prepare"]) == 0
+            assert not (workspace / finalizer.CURRENT_FINAL_IDENTITY).exists()
+            assert not (prepared / finalizer.SIGNATURE_DIRECTORY).exists()
+            # The producer output is explicitly uncertified even under the seam.
+            saved_bytes = current_path.read_bytes()
+            saved = json.loads(saved_bytes)
+            assert saved["consumer_admission"] == "NOT_ADMITTED" and saved["certification"] == "NOT_CERTIFIED"
+            assert saved["input_record_role"] == "ORIGINAL_UNSIGNED_PROVENANCE"
+            apple("--force", "--sign", "-", "--timestamp=none", "--identifier", BUNDLE_ID, str(prepared))
+            observation["ad_hoc_outer_seals"] += 1
+            apple("--verify", "--strict", "--all-architectures", str(prepared))
+            current_names = signed_names | {signed_payload.RELATIVE_PATH}
+            current_inventory = signing._capture(prepared, current_names)
+            with pytest.raises(ValueError, match="signing_output_layout_unsupported"):
+                finalizer._validate_delta(original, prepared, baseline, current_inventory, bridge)
+            transitions = finalizer._validate_delta(original, prepared, baseline, current_inventory,
+                                                   bridge, current_payload=True)
+            assert set(transitions) == set(catalog)
+            observation["real_v3_deltas"] = len(transitions)
+            # This full delta check also preserves every original runtime/native
+            # manifest and wheel RECORD/METADATA/WHEEL byte from the pinned build.
+            envelope = finalizer._read(prepared / (finalizer.SIGNATURE_DIRECTORY + "/CodeResources"))
+            finalizer._bridge_coverage(envelope, finalizer._read(prepared / signing.BRIDGE))
+            finalizer._bridge_coverage(envelope, saved_bytes, resource_path=signed_payload.RELATIVE_PATH)
+            observation["current_payload_coverage"] = "EXPLICIT_SHA256"
+
+            # Both production entrypoints remain entirely unpatched here.
+            with pytest.raises(ValueError, match="signing_static_requirement_refused"):
+                finalizer.main([*arguments, "--current-payload-stage", "finalize"])
+            observation["v3_publisher_validation"] = "REFUSED_ADHOC"
+            with pytest.raises(ValueError, match="signed_payload_publisher_refused"):
+                signed_payload.read_current_payload(prepared, required_publisher_policy=policy)
+            observation["reader_publisher_validation"] = "REFUSED_ADHOC"
+            assert not (workspace / finalizer.CURRENT_FINAL_IDENTITY).exists()
+            emit()
+
+            def static_reader_test_seam(app, supplied_policy=None):
+                assert app == prepared and publisher_policy.resolve_policy(supplied_policy) == policy
+                checked = apple("--verify", "--strict", "--all-architectures", "--test-requirement",
+                    '=identifier = "' + BUNDLE_ID + '"', str(app), must_succeed=False)
+                if checked.returncode:
+                    raise ValueError("test_adhoc_static_refused")
+                return policy
+
+            resources = prepared / "Contents/Resources"
+            runtime, source, native = resources / "runtime", resources / "release", resources / "native-host"
+            with pytest.MonkeyPatch.context() as seam:
+                seam.setattr(signed_payload, "verify_publisher", static_reader_test_seam)
+                current = signed_payload.read_current_payload(prepared, required_publisher_policy=policy)
+                assert current == saved
+                manifest = release.read_runtime_candidate(runtime, source, required_publisher_policy=policy)
+                assert manifest == current["runtime"] == release.runtime_manifest(runtime, source, include_manifest=True)
+                assert manifest["runtime_sha256"] != json.loads((runtime / release.RUNTIME_MANIFEST_NAME).read_bytes())["runtime_sha256"]
+                assert macos_host.verify_native_host(native, required_publisher_policy=policy)
+                assert current["native"]["executable_sha256"] != json.loads((native / macos_host.HOST_RECEIPT).read_bytes())["executable_sha256"]
+                observation["current_runtime_files"] = len(manifest["files"])
+                # Parse real wheel records with the trusted test interpreter's
+                # stdlib, never import or execute the signed candidate runtime.
+                sites = list(runtime.glob("lib/python*/site-packages"))
+                assert len(sites) == 1
+                wheels = list(importlib.metadata.distributions(path=[str(sites[0])]))
+                assert wheels
+                current_files = {entry["path"]: entry for entry in manifest["files"]}
+                assert all(release._distribution_payload_owned(wheel, runtime, current_files=current_files)
+                           for wheel in wheels)
+                observation["wheel_records_checked"] = len(wheels)
+                observation["original_record_mismatches"] = sum(
+                    not release._distribution_payload_owned(wheel, runtime) for wheel in wheels)
+                assert observation["original_record_mismatches"] > 0
+                emit()
+
+                # Missing current data cannot downgrade to the unsigned path.
+                current_path.unlink()
+                try:
+                    assert not release.verify_runtime_candidate(runtime, source, required_publisher_policy=policy)
+                    assert not macos_host.verify_native_host(native, required_publisher_policy=policy)
+                    with pytest.raises(ValueError, match="test_adhoc_static_refused"):
+                        signed_payload.read_current_payload(prepared, required_publisher_policy=policy)
+                finally:
+                    current_path.write_bytes(saved_bytes)
+                    current_path.chmod(0o644)
+                observation["missing_current_payload"] = "REFUSED"
+                # A well-formed wrong digest first breaks the real seal. After
+                # re-sealing, Apple static verification passes but the current
+                # payload recomputation must independently reject the lie.
+                wrong = json.loads(saved_bytes)
+                entry = wrong["runtime"]["files"][0]
+                digest = entry["sha256"]
+                entry["sha256"] = ("0" if digest[0] != "0" else "1") + digest[1:]
+                current_path.write_bytes(signing._encoded(wrong))
+                with pytest.raises(ValueError, match="test_adhoc_static_refused"):
+                    signed_payload.read_current_payload(prepared, required_publisher_policy=policy)
+                observation["unsealed_tamper"] = "REFUSED"
+                apple("--force", "--sign", "-", "--timestamp=none", "--identifier", BUNDLE_ID, str(prepared))
+                observation["ad_hoc_outer_seals"] += 1
+                apple("--verify", "--strict", "--all-architectures", str(prepared))
+                with pytest.raises(ValueError, match="signed_payload_mismatch"):
+                    signed_payload.read_current_payload(prepared, required_publisher_policy=policy)
+                observation["resealed_wrong_digest"] = "REFUSED"
+            # No seam survives this process-local scope; the retained test app
+            # is deliberately invalid and no signed app/identity is published.
+            with pytest.raises(ValueError, match="signed_payload_publisher_refused"):
+                signed_payload.read_current_payload(prepared, required_publisher_policy=policy)
+            assert not (workspace / finalizer.FINAL_IDENTITY).exists()
+            assert not (workspace / finalizer.CURRENT_FINAL_IDENTITY).exists()
+            assert _trusted_bundle(prepared) is False
+            observation["current_payload_engineering"] = "REAL_ADHOC_BYTES_CHECKED_TEST_SEAM_ONLY"
+            observation["status"] = "ADHOC_DELTA_CHECKED_PUBLISHER_REFUSED"
     finally:
         emit()

@@ -243,8 +243,8 @@ fixed configuration alone is not a complete signed installer implementation.
 Real Developer ID positive results, hardened-runtime/entitlements compatibility,
 notarization, stapling and quarantined fresh-install/update evidence remain
 unverified. Synthetic post-verifier seams test wiring and refusals only; they do
-not certify Apple acceptance. No credentials, signatures or user installation
-are produced by these changes. Delivered source advances release sequence to 8.
+not certify Apple acceptance. The production components do not obtain credentials,
+sign code or install for the user. Delivered source advances release sequence to 8.
 
 ## Verification
 
@@ -256,11 +256,36 @@ claim Apple acceptance. The hosted-Mac test in `test_app_distribution_v1.py` use
 the actual unsigned builder/runtime/native host, feeds its emitted pins into the
 actual finalizer CLI, and requires rejection by Apple's static verifier with no
 output identity. A further bounded 90-second section reuses that workspace for a
-real ad-hoc-only signing-delta oracle: each nested object is signed explicitly
+real ad-hoc-only signing-delta/current-payload oracle: each nested object is signed explicitly
 with the `-` identity, checked with all-architecture static verification, and then
 sealed by the outer app. The new delta validator and bridge-coverage check consume
 those actual before/after bytes. The full finalizer must still reject the ad-hoc
 app against the independent Developer ID requirement and create no final identity.
+The same child then removes only its own outer envelope and reuses all signed
+nested bytes for the actual v3 current-payload producer. A scoped **test-only**
+publisher seam retains real Apple strict/all-architecture and fixed-identifier
+verification while omitting the Developer ID identity requirement. After another
+outer ad-hoc seal, actual v3 delta/explicit SHA-256 resource-coverage checks and
+the cold current/runtime/native readers must accept those bytes under the same
+limited static-only test seam. Original wheel RECORD bytes are read without
+importing candidate code; current payload hashes must cover real signed wheel
+files whose original RECORD hashes no longer match. The v2 path must still reject
+the extra current resource. These cold checks do not prove interpreter execution,
+complete installed dependency/loaded-module health or consumer installation.
+
+Missing current data cannot fall back to unsigned validation. A changed but valid
+current JSON is first rejected by the actual outer seal; after re-sealing the
+wrong digest, Apple static integrity must pass while the current reader separately
+rejects `signed_payload_mismatch`. Unpatched production v3 preparation,
+finalization and publisher reading must still refuse ad-hoc signatures. No v3
+identity is emitted under a seam. The report separates real-byte engineering
+compatibility from `REFUSED_ADHOC` publisher validation and `NOT_CERTIFIED`,
+including observed runtime/wheel counts and elapsed time. A child process audit
+guard permits only `/usr/bin/codesign`, never the candidate interpreter or host.
+The whole combined section retains the same 90-second parent-enforced deadline;
+there is no second build, repeated nested signing, new job or timeout expansion.
+Until this updated hosted test actually completes, v3 real-byte compatibility is
+**unverified**; adding the oracle or passing synthetic tests is not its result.
 The oracle never executes signed code or uploads the signed bundle. It reports
 partial counts/elapsed time on failure, keeps the runtime owner/job budget,
 and does not replace any original test. Only an actual hosted run can establish

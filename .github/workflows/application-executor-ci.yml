@@ -279,7 +279,7 @@ jobs:
           PY
       - name: Validate unsigned signing preparation boundaries
         if: github.event_name == 'pull_request' && github.event.pull_request.draft && matrix.suite == 'release_distribution'
-        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py
+        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py tests/test_signed_current_payload.py
 
 
   macos_consumer_release:
@@ -323,7 +323,7 @@ jobs:
 
       - name: Validate unsigned signing preparation boundaries on hosted Mac
         if: matrix.suite == 'runtime_distribution'
-        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py
+        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py tests/test_signed_current_payload.py
       - name: Complete partial lifecycle-soak runner contract on hosted Mac
         if: matrix.suite == 'runtime_distribution'
         env:
