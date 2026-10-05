@@ -1,4 +1,4 @@
-"""Finite downloaded-app update/open path for the unsigned Mac installer.
+"""Finite downloaded-app update/open path for the Mac installer.
 
 The running candidate, managed target and default state determine every path.
 There is no remote selector, migration, forced window closure or task replay.
@@ -273,6 +273,12 @@ def run_downloaded_installer(candidate, target, state, port, candidate_identity)
             or candidate == target or state != Path(default_runtime(target / 'Contents/Resources/release')).absolute()
             or type(port) is not int or not 0 < port < 65536):
         return {'ok': False, 'reason': 'installer_target_unverified', **boundary}
+    from .signed_payload import has_current_payload
+    # No cross-kind migration/downgrade protocol is implied by legacy support.
+    # Refuse before a prompt, service retirement or any task/app lock is taken.
+    if has_current_payload(candidate) != has_current_payload(target):
+        return {'ok': False, 'reason': 'installer_bundle_kind_mismatch',
+                'installed': True, **boundary}
     host = candidate / 'Contents/Resources/native-host'
     attempted = False
     try:

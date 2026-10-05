@@ -7,7 +7,7 @@ input to a future trusted signing stage, never a signed-output trust decision.
 from __future__ import annotations
 
 import argparse
-import ctypes
+import ctypes  # Retain the existing OS-adapter test seam for the shared helper.
 import hashlib
 import json
 from itertools import chain
@@ -69,22 +69,10 @@ def _requirement(policy, identifier):
 
 
 def _no_xattrs(fd):
-    """This unsigned preparation supports no xattrs; never silently drop one."""
-    if sys.platform == 'darwin':
-        library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
-        call = library.flistxattr
-        call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-        call.restype = ctypes.c_ssize_t
-        size = call(fd, None, 0, 0)
-        if size < 0:
-            raise OSError(ctypes.get_errno(), 'signing_metadata_unavailable')
-        if size:
-            raise ValueError('signing_metadata_unsupported')
-    elif sys.platform == 'linux':
-        if os.listxattr(fd):
-            raise ValueError('signing_metadata_unsupported')
-    else:
-        raise ValueError('signing_metadata_platform_unsupported')
+    # Retain the build helper's public seam while sharing runtime-safe metadata
+    # refusal with the byte-preserving signed copy path.
+    from executor.autonomy.bundle_copy import _no_xattrs as check
+    return check(fd)
 
 
 def _capture(app, names):

@@ -31,7 +31,12 @@ checkpoint. Redirects from authenticated loopback endpoints are refused.
 The new path copies the complete admitted bundle, including exact launcher and
 Info.plist bytes and modes, instead of reconstructing them. Existing source,
 runtime and native manifests and the full unsigned distribution inventory stay
-mandatory. Unverified signing envelopes remain rejected. App/native/worker/
+mandatory for unsigned artifacts. A separate, mutually exclusive signed-app
+build input now requires an independent publisher policy and authenticated
+current-payload inventory; it does not broaden the unsigned archive parser.
+Production's built-in publisher policy remains unset, so unconfigured signed
+consumer intake remains refused. See [signed transaction boundaries](SIGNED_DMG_TRANSACTIONS.md).
+Unverified signing envelopes remain rejected. App/native/worker/
 migration locks, WAL/typed-answer compatibility, atomic activation and retained
 version recovery remain in the owning transaction. Missing or replaced state,
 uncertain acknowledgement or interrupted activation preserves evidence and
@@ -46,8 +51,8 @@ typed encrypted answers. These fixtures do not establish physical owner intent,
 Gatekeeper acceptance, or compatibility on every supported OS version.
 
 Consumer delivery still requires a stable public download destination, actual
-Developer ID signing/notarization of the final installed bytes, verified signed
-envelope intake, clear real-device permission onboarding, positive old-data
+Developer ID signing/notarization of the final installed bytes, an independently
+configured production publisher, clear real-device permission onboarding, positive old-data
 migration and recovery beyond the current empty-first-use boundary. Merely
 wrapping an unsigned app in a DMG does not close these gates. Apple account,
 credential, enrollment and spending actions are not part of this increment.

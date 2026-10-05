@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from collections import Counter
 import hashlib
 import json
 import os
@@ -25,8 +26,8 @@ JOBS = dict(re.findall(
     r"^  ([a-z_]+):\n(.*?)(?=^  [a-z_]+:\n|\Z)",
     SOURCE.split("\njobs:\n", 1)[1], re.MULTILINE | re.DOTALL,
 ))
-ORDINARY = {"foundation", "packaged_candidate", "macos_consumer_release", "preparation_validation"}
-CLOSURE = ("full_suite", "test", "engineering_closure_macos")
+ORDINARY = {"foundation", "packaged_candidate", "macos_consumer_release", "macos_consumer_gate", "preparation_validation", "signed_dmg_acceptance"}
+CLOSURE = ("full_suite", "test", "engineering_closure_macos", "signed_dmg_acceptance")
 SHA = "1234567890abcdef1234567890abcdef12345678"
 OTHER_SHA = "abcdef1234567890abcdef1234567890abcdef1234"
 REPOSITORY = "example/jae"
@@ -37,10 +38,10 @@ STATIC_STEP = (
 
 
 SIGNING_PREPARATION_STEP = "      - name: Validate unsigned signing preparation boundaries\n        if: github.event_name == 'pull_request' && github.event.pull_request.draft && matrix.suite == 'release_distribution'\n        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py tests/test_signed_current_payload.py\n"
-SIGNING_PREPARATION_MAC_STEP = "      - name: Validate unsigned signing preparation boundaries on hosted Mac\n        if: matrix.suite == 'runtime_distribution'\n        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py tests/test_signed_current_payload.py\n"
+SIGNING_PREPARATION_MAC_STEP = "      - name: Validate unsigned signing preparation boundaries on hosted Mac\n        if: matrix.suite == 'runtime_candidate'\n        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py tests/test_signed_current_payload.py\n"
 
 LIFECYCLE_SOAK_STEP = '      - name: Complete partial lifecycle-soak runner contract\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n'
-LIFECYCLE_SOAK_MAC_STEP = "      - name: Complete partial lifecycle-soak runner contract on hosted Mac\n        if: matrix.suite == 'runtime_distribution'\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n"
+LIFECYCLE_SOAK_MAC_STEP = "      - name: Complete partial lifecycle-soak runner contract on hosted Mac\n        if: matrix.suite == 'runtime_candidate'\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n"
 
 # Additive delivery steps are frozen independently; original owning gates keep
 # their original byte hash after removing this exact, mandatory block.
@@ -52,6 +53,36 @@ PREPARATION_MAC_STEP = "      - name: Anonymous preparation early Mac oracle\n  
 
 PUBLIC_PROBE_STEP = '      - name: Observe public Qiyunfang preflight without applicant data\n        timeout-minutes: 2\n        run: python scripts/probe_qiyunfang_preflight.py --output "$RUNNER_TEMP/jae-qiyunfang-public-preflight.json"\n'
 PUBLIC_PROBE_ARTIFACT = '      - name: Retain value-free public preflight diagnostic\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: jae-qiyunfang-public-preflight-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/jae-qiyunfang-public-preflight.json\n          if-no-files-found: ignore\n          retention-days: 3\n'
+
+MAC_RUNTIME_ORIGINAL = "          - suite: runtime_distribution\n            tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py\n"
+MAC_RUNTIME_SPLIT = "          - suite: runtime_candidate\n            tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py\n          - suite: runtime_distribution\n            tests: tests/test_app_distribution_v1.py\n"
+MAC_WHOLE_FILES = {
+    'consumer_transactions': ('tests/test_consumer_entry_v1.py', 'tests/test_task_state_compatibility_v1.py'),
+    'recovery_transactions': ('tests/test_consumer_recovery_transactions_v1.py',),
+    'runtime_candidate': ('tests/test_release_candidate_v1.py', 'tests/test_standalone_runtime_v1.py'),
+    'runtime_distribution': ('tests/test_app_distribution_v1.py',),
+    'native_integration': (
+        'tests/test_macos_host_v1.py', 'tests/test_first_use_prepared_v1.py',
+        'tests/test_task_view_context_v1.py', 'tests/test_native_window_ownership_v1.py',
+        'tests/test_jcr01_synthetic_oracle.py', 'tests/test_jcr06_react_fixture.py',
+        'tests/test_jcr06_vue_fixture.py', 'tests/test_service_lifecycle_v1.py',
+        'tests/test_profile_import_v1.py', 'tests/test_profile_editor_v1.py',
+        'tests/test_task_preparation_v1.py', 'tests/test_manager_v1.py', 'tests/test_jcr03_discovery.py'),
+}
+
+
+def whole_mac_matrix(body):
+    pairs = re.findall(r'^          - suite: ([a-z_]+)\n            tests: (.+)\n', body, re.MULTILINE)
+    if len(pairs) != body.count('          - suite:') or len(pairs) != len(MAC_WHOLE_FILES):
+        raise ValueError('Mac owning matrix changed')
+    observed = {name: tuple(files.split()) for name, files in pairs}
+    files = [path for _, paths in pairs for path in paths.split()]
+    if (len(observed) != len(pairs) or observed != MAC_WHOLE_FILES
+            or any(re.fullmatch(r'tests/test_[a-z0-9_]+\.py', path) is None for path in files)
+            or any(count != 1 for count in Counter(files).values())):
+        raise ValueError('Mac complete-file ownership changed')
+    return observed
+
 
 def event(sha=SHA, label=None, *, draft=True, fork=False, action="labeled"):
     return {
@@ -132,7 +163,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         actual = {name for name in JOBS if selected(name, payload, **kwargs)}
         self.assertEqual(actual, set(expected))
 
-    def test_matching_exact_head_label_only_selects_full_suite_then_single_build(self):
+    def test_matching_exact_head_label_requires_full_suite_and_signed_owner_before_build(self):
         for draft in (True, False):
             with self.subTest(draft=draft):
                 payload = event(draft=draft)
@@ -155,12 +186,12 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 self.assert_jobs(event(draft=draft, fork=True), ())
 
     def test_normal_push_and_pr_policies_are_preserved(self):
-        self.assert_jobs({}, {"foundation", "macos_consumer_release", "full_suite", "test", "preparation_validation"}, event_name="push")
+        self.assert_jobs({}, {"foundation", "macos_consumer_release", "macos_consumer_gate", "full_suite", "test", "preparation_validation", "signed_dmg_acceptance"}, event_name="push")
         for action in ("opened", "synchronize", "reopened", "ready_for_review"):
             for draft in (True, False):
                 for fork in (True, False):
                     with self.subTest(action=action, draft=draft, fork=fork):
-                        expected = ORDINARY if draft else {"foundation", "macos_consumer_release", "full_suite", "test", "preparation_validation"}
+                        expected = ORDINARY if draft else {"foundation", "macos_consumer_release", "macos_consumer_gate", "full_suite", "test", "preparation_validation", "signed_dmg_acceptance"}
                         self.assert_jobs(event(action=action, draft=draft, fork=fork), expected)
 
     def test_build_requires_success_and_same_tested_head(self):
@@ -187,7 +218,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         expected_budgets = {"foundation": 30, "packaged_candidate": 20,
                             "macos_consumer_release": "${{ matrix.suite == 'native_integration' && 30 || 25 }}",
                             "full_suite": 30, "test": 5,
-                            "engineering_closure_macos": 20, "preparation_validation": 25}
+                            "engineering_closure_macos": 20, "preparation_validation": 25, "signed_dmg_acceptance": 75, "macos_consumer_gate": 5}
         for name, budget in expected_budgets.items():
             self.assertIn(f"    timeout-minutes: {budget}\n", JOBS[name])
         build = JOBS["engineering_closure_macos"]
@@ -228,6 +259,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
     def test_both_guards_precede_repository_code_and_use_exact_checkout(self):
         self.assertEqual(guard_shell("full_suite"), guard_shell("test"))
         self.assertEqual(guard_shell("test"), guard_shell("engineering_closure_macos"))
+        self.assertEqual(guard_shell("test"), guard_shell("signed_dmg_acceptance"))
         for name in CLOSURE:
             body = JOBS[name]
             guard = body.index("      - name: Refuse stale or ineligible engineering closure head\n")
@@ -270,6 +302,9 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                     self.assertEqual(protected.count(SIGNING_PREPARATION_STEP), 1)
                     protected = protected.replace(SIGNING_PREPARATION_STEP, "", 1)
                 if name == "macos_consumer_release":
+                    self.assertEqual(protected.count(MAC_RUNTIME_SPLIT), 1)
+                    self.assertNotIn(MAC_RUNTIME_ORIGINAL, protected)
+                    protected = protected.replace(MAC_RUNTIME_SPLIT, MAC_RUNTIME_ORIGINAL, 1)
                     self.assertEqual(protected.count(SIGNING_PREPARATION_MAC_STEP), 1)
                     protected = protected.replace(SIGNING_PREPARATION_MAC_STEP, "", 1)
                     # Add the prepared-state owning file without weakening any
@@ -315,8 +350,57 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 protected = protected.rstrip() + "\n"
                 self.assertEqual(hashlib.sha256(protected.encode()).hexdigest(), digest)
         self.assertIn("        suite: [consumer_transactions, recovery_transactions, release_distribution]\n", JOBS["packaged_candidate"])
-        self.assertEqual(JOBS["macos_consumer_release"].count("          - suite:"), 4)
+        self.assertEqual(JOBS["macos_consumer_release"].count("          - suite:"), 5)
         self.assertEqual(JOBS["full_suite"].count("run: python -m pytest -v -p scripts.ci_full_suite\n"), 1)
+
+    def test_mac_split_preserves_every_original_whole_file_exactly_once(self):
+        body = JOBS['macos_consumer_release']
+        self.assertEqual(whole_mac_matrix(body), MAC_WHOLE_FILES)
+        files = [path for paths in MAC_WHOLE_FILES.values() for path in paths]
+        self.assertEqual(len(files), 19)
+        self.assertEqual(len(set(files)), 19)
+        self.assertEqual(body.count(SIGNING_PREPARATION_MAC_STEP), 1)
+        self.assertEqual(body.count(LIFECYCLE_SOAK_MAC_STEP), 1)
+        self.assertIn("if: matrix.suite == 'runtime_candidate'", SIGNING_PREPARATION_MAC_STEP)
+        self.assertIn("if: matrix.suite == 'runtime_candidate'", LIFECYCLE_SOAK_MAC_STEP)
+        faults = [
+            ('tests/test_release_candidate_v1.py ', ''),
+            ('tests/test_release_candidate_v1.py ', 'tests/test_release_candidate_v1.py tests/test_release_candidate_v1.py '),
+            ('tests/test_app_distribution_v1.py', 'tests/test_app_distribution_v1.py::test_one'),
+            ('tests/test_app_distribution_v1.py', 'tests/test_app_distribution_v1.py -k quick'),
+            ('tests/test_app_distribution_v1.py', 'tests/test_app_distribution_v1.py -m selected'),
+            ('suite: runtime_candidate', 'suite: unknown_owner'),
+            ('suite: runtime_candidate', 'suite: runtime_distribution'),
+            (MAC_RUNTIME_SPLIT, MAC_RUNTIME_ORIGINAL),
+        ]
+        for before, after in faults:
+            with self.subTest(before=before, after=after):
+                changed = body.replace(before, after, 1)
+                self.assertNotEqual(changed, body)
+                with self.assertRaises(ValueError):whole_mac_matrix(changed)
+
+    def test_mac_aggregate_cannot_pass_missing_failed_or_cancelled_shards(self):
+        gate = JOBS['macos_consumer_gate']
+        self.assertIn('    needs: macos_consumer_release\n', gate)
+        self.assertEqual(job_condition('macos_consumer_gate'), "always() && github.event.action != 'labeled'")
+        self.assertIn('JAE_MAC_RESULT: ${{ needs.macos_consumer_release.result }}', gate)
+        self.assertNotIn('upload-artifact', gate)
+        self.assertNotIn('continue-on-error', gate)
+        ordinary = JOBS['test'].split('      - name: Require the ordinary Mac whole-file aggregate\n', 1)[1].split('      - name:', 1)[0]
+        self.assertIn("        if: github.event.action != 'labeled'\n", ordinary)
+        self.assertIn('JAE_MAC_GATE_RESULT: ${{ needs.macos_consumer_gate.result }}', ordinary)
+        for body, variable in ((gate, 'JAE_MAC_RESULT'), (ordinary, 'JAE_MAC_GATE_RESULT')):
+            shell = textwrap.dedent(body.split('        run: |\n', 1)[1])
+            for value in ('success', 'failure', 'cancelled', 'skipped', '', 'pending', 'SUCCESS'):
+                with self.subTest(variable=variable, result=value):
+                    env = {'PATH': os.environ['PATH'], variable: value}
+                    result = subprocess.run(['bash', '-e'], input=shell, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=10)
+                    self.assertEqual(result.returncode == 0, value == 'success')
+            missing = subprocess.run(['bash', '-e'], input=shell, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={'PATH': os.environ['PATH']}, timeout=10)
+            self.assertNotEqual(missing.returncode, 0)
 
     def test_three_serial_owners_and_fail_closed_aggregate_preserve_existing_check(self):
         shards, gate = JOBS["full_suite"], JOBS["test"]
@@ -325,7 +409,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertNotIn("upload-artifact", shards)
         self.assertNotIn("upload-artifact", gate)
         self.assertNotIn("matrix:", gate)
-        self.assertIn("    needs: full_suite\n", gate)
+        self.assertIn("    needs: [full_suite, signed_dmg_acceptance, macos_consumer_gate]\n", gate)
         self.assertEqual(job_condition("test"), "always() && (" + job_condition("full_suite") + ")")
         self.assertIn("closure_head: ${{ steps.full_aggregate.outputs.sha }}", gate)
         for owner in ("consumer", "browser_contract", "remainder"):
