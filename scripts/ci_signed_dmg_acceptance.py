@@ -21,12 +21,14 @@ import shutil
 import signal
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 
 WALL_SECONDS = 30 * 60
+FAILURE_OBSERVATION_SECONDS = 180
 FORMAT = 'jae-signed-dmg-acceptance-v1'
 BUNDLE_ID = 'com.local.job-application-executor.ai-application-manager'
 APP_NAME = 'AI 投递经理.app'
@@ -661,7 +663,12 @@ class Oracle:
         assert report['certification'] == 'NOT_CERTIFIED'
         return image_root / IMAGE_NAME
 
-    def journey(self, versions, expected_identities, source_roots):
+    def hide_build_roots(self, roots):
+        for source in roots:
+            source.rename(source.with_name(source.name + '-unavailable'))
+            assert not source.exists()
+
+    def journey(self, versions, expected_identities, source_roots, build_version):
         from executor.autonomy.consumer import _bundle_transaction_identity
         # Load and exercise the unchanged real image builder before moving the
         # source roots. Each later sealed app stays at its own signed-N path.
@@ -671,8 +678,7 @@ class Oracle:
         # digests prove what actually loaded. The original repository and input
         # runtime remain readable. A relocated unsigned app is used only for
         # the explicit cross-kind refusal, never to support signed activation.
-        for source in source_roots:
-            source.rename(source.with_name(source.name + '-unavailable'))
+        self.hide_build_roots(source_roots)
         self.checked.add('checkout_independent')
         self.phase('first_install_readonly_dmg')
         with self.mounted(images[0], 'first') as mounted:
@@ -708,7 +714,9 @@ class Oracle:
         self.reopen()
         before_service = json.loads((self.state / 'service.json').read_bytes())
         self.phase('real_stopped_service_update')
+        later_roots = build_version(2)
         images.append(self.build_image(versions[1], 2))
+        self.hide_build_roots(later_roots)
         with self.mounted(images[1], 'second') as mounted:
             update = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=600)
             assert update.get('ok') is True and update.get('updated') is True and update['actual_native_reopens'] == 1, update
@@ -759,7 +767,9 @@ class Oracle:
         trace = self.root / 'fault-serve-trace'
         trace.unlink(missing_ok=True)
         self.phase('signed_final_path_failure_and_actual_restoration')
+        later_roots = build_version(3)
         images.append(self.build_image(versions[2], 3))
+        self.hide_build_roots(later_roots)
         with self.mounted(images[2], 'third') as mounted:
             fault = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=600)
         assert fault.get('ok') is False and fault.get('reason') == 'post_activation_unhealthy', fault
@@ -787,12 +797,14 @@ def worker(repo, runtime, root, receipt):
     adapt_test_source(source,root)
     sys.path.insert(0,str(source))
     from executor.autonomy.consumer import _bundle_transaction_identity
-    sources = [source]
     versions, unsigned, catalogs, identities, coverage = [], [], [], [], []
-    for number in (1,2,3):
+    def build_version(number):
+        # Build every complete version when the existing journey needs it.
+        # A failed first startup never spends time building future candidates.
+        assert number == len(versions) + 1 and number in (1,2,3)
         if number > 1:
             current_source = root / ('source-' + str(number))
-            copy_unmanifested_source(source,current_source);sources.append(current_source)
+            copy_unmanifested_source(root / 'source-1-unavailable',current_source)
             with (current_source / 'executor/__init__.py').open('a') as handle:
                 handle.write('\n# Independent synthetic signed version ' + str(number) + '\n')
             if number == 3:
@@ -800,16 +812,20 @@ def worker(repo, runtime, root, receipt):
         else:
             current_source = source
         oracle.phase('build_sign_complete_version_' + str(number))
+        retained_unsigned = root / 'unsigned-1-unavailable/Applications' / APP_NAME
         signed, original, count, covered = oracle.sign_version(current_source,number,
-            runtime if number == 1 else unsigned[0] / 'Contents/Resources/runtime',
-            None if number == 1 else unsigned[0] / 'Contents/Resources/native-host')
+            runtime if number == 1 else retained_unsigned / 'Contents/Resources/runtime',
+            None if number == 1 else retained_unsigned / 'Contents/Resources/native-host')
         versions.append(signed);unsigned.append(original);catalogs.append(count);coverage.append(covered)
         identities.append(_bundle_transaction_identity(signed))
-    assert len(set(catalogs)) == 1 and len({identity[2] for identity in identities}) == 3
-    oracle.checked.add('three_complete_signed_versions')
+        return [current_source, root / ('unsigned-' + str(number))]
+    first_roots = build_version(1)
     oracle.phase('production_and_damage_refusals')
     oracle.negatives(versions[0],pristine)
-    images = oracle.journey(versions,identities,[*sources,pristine,*[root / ('unsigned-'+str(n)) for n in (1,2,3)]])
+    images = oracle.journey(versions,identities,[*first_roots,pristine],build_version)
+    assert len(versions) == len(catalogs) == len(images) == 3
+    assert len(set(catalogs)) == 1 and len({identity[2] for identity in identities}) == 3
+    oracle.checked.add('three_complete_signed_versions')
     if oracle.checked != REQUIRED:
         raise AssertionError('incomplete signed DMG owner: ' + repr(sorted(REQUIRED-oracle.checked)))
     oracle.phase('complete')
@@ -859,6 +875,65 @@ def validate_receipt(value):
                 or record != coverage[0]):
             raise ValueError('signed DMG acceptance coverage incomplete')
     return value
+
+
+def service_diagnostic_tail(root):
+    """Read only the private synthetic log; never keys, profiles or ACK values."""
+    path = root / 'first-use-service-diagnostic.log'
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            entry = os.fstat(fd)
+            if (not stat.S_ISREG(entry.st_mode) or entry.st_uid != os.geteuid()
+                    or entry.st_nlink != 1 or entry.st_mode & 0o077):
+                return None
+            os.lseek(fd, max(0, entry.st_size - 32768), os.SEEK_SET)
+            return os.read(fd, 32768).decode('utf-8', errors='replace')
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+
+
+def observe_failed_service(root, global_deadline):
+    """An already failed acceptance stays failed; observe without replay/signals.
+
+The same-run real child may still be finishing authentication after its parent
+refused. Its synthetic file is read until ACK completion or its original serve
+raises, at most 180 seconds and never beyond the original total wall limit.
+The existing fixture-only process cleanup still runs immediately afterwards.
+"""
+    started = time.monotonic()
+    deadline = min(global_deadline, started + FAILURE_OBSERVATION_SECONDS)
+    reason = 'global_budget_exhausted'
+    while time.monotonic() < deadline:
+        tail = service_diagnostic_tail(root)
+        if tail is None:
+            reason = 'no_service_trace'
+            break
+        terminal = None
+        for line in tail.splitlines():
+            if not line.startswith('JAE_ORACLE_STAGE '):
+                continue
+            try:
+                event = json.loads(line.removeprefix('JAE_ORACLE_STAGE '))
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get('stage') == '_FirstUseStartup.acknowledge' and event.get('event') == 'return':
+                terminal = 'observed_ack_completion'
+            if event.get('stage') == 'first_use_recovery.serve_first_use' and event.get('event') in ('return','raise'):
+                terminal = 'observed_service_' + event['event']
+        if terminal is not None:
+            reason = terminal
+            break
+        reason = 'bounded_observation_exhausted'
+        time.sleep(min(.1, max(0, deadline - time.monotonic())))
+    print(json.dumps({'oracle_failed_service_observation':reason,
+        'elapsed_seconds':round(time.monotonic()-started,3),
+        'acceptance':'FAILED_UNCHANGED','certification':'NOT_CERTIFIED'}, sort_keys=True),
+        file=sys.stderr, flush=True)
 
 
 def cleanup_test_processes(root):
@@ -925,19 +1000,24 @@ def main(argv=None):
         command = [sys.executable,'-I','-B',str(Path(__file__).resolve()),
             '--standalone-runtime',str(runtime),'--receipt',str(private_receipt),
             '--worker-root',str(root),'--repo',str(repo)]
+        parent_started = time.monotonic()
         process = subprocess.Popen(command,start_new_session=True)
+        code = None
         try:
             code = process.wait(timeout=WALL_SECONDS)
         except subprocess.TimeoutExpired:
             terminate_tree(process.pid);process.wait(timeout=10)
             raise RuntimeError('signed DMG acceptance exceeded 30 minutes; WIP, not acceptance') from None
         finally:
-            cleanup_test_processes(root)
-            diagnostic = root / 'first-use-service-diagnostic.log'
-            if diagnostic.is_file() and not diagnostic.is_symlink():
-                with diagnostic.open('rb') as handle:
-                    handle.seek(max(0, diagnostic.stat().st_size - 32768))
-                    tail = handle.read(32768).decode('utf-8', errors='replace')
+            try:
+                if code not in (None, 0):
+                    observe_failed_service(root, parent_started + WALL_SECONDS)
+            except Exception:
+                print('Failed-service observation unavailable; acceptance remains failed.', file=sys.stderr, flush=True)
+            finally:
+                cleanup_test_processes(root)
+            tail = service_diagnostic_tail(root)
+            if tail is not None:
                 print(json.dumps({'oracle_service_diagnostics':tail,
                     'certification':'NOT_CERTIFIED'}, sort_keys=True), file=sys.stderr, flush=True)
             # A failed image producer may leave its read-only test volume. Do

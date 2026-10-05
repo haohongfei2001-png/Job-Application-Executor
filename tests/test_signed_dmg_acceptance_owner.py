@@ -509,14 +509,21 @@ def test_all_three_real_images_are_built_at_their_use_points_before_mounting():
     assert [ast.literal_eval(node.args[1]) for node in calls] == [1,2,3]
     assert [ast.literal_eval(node.args[0].slice) for node in calls] == [0,1,2]
     text = ast.get_source_segment(source, journey)
-    assert text.index('self.build_image(versions[0], 1)') < text.index('source.rename(')
+    assert text.index('self.build_image(versions[0], 1)') < text.index('self.hide_build_roots(source_roots)')
     for number, label in enumerate(('first','second','third'), 1):
         assert text.index(f'self.build_image(versions[{number-1}], {number})') < text.index(f"self.mounted(images[{number-1}], '{label}')")
+    assert text.index('build_version(2)') > text.index("self.checked.add('native_reopen_health')")
+    assert text.index('build_version(3)') > text.index("self.checked.add('explicit_signed_rollback_health')")
+    assert text.count('self.hide_build_roots(later_roots)') == 2
     assert text.index('return images') > text.index("self.checked.update({'real_failed_activation_restoration'")
     worker = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'worker')
     worker_text = ast.get_source_segment(source, worker)
-    assert 'for number in (1,2,3):' in worker_text
+    assert 'number == len(versions) + 1 and number in (1,2,3)' in worker_text
+    assert 'first_roots = build_version(1)' in worker_text
     assert 'oracle.sign_version(' in worker_text and 'oracle.negatives(' in worker_text
+    assert worker_text.index('images = oracle.journey(') < worker_text.index('assert len(versions) == len(catalogs) == len(images) == 3')
+    assert worker_text.index('assert len(versions) == len(catalogs) == len(images) == 3') < worker_text.index("oracle.checked.add('three_complete_signed_versions')")
+    assert "copy_unmanifested_source(root / 'source-1-unavailable',current_source)" in worker_text
     assert 'build_installer_image(' not in worker_text
     assert "'readonly_images':len(images)" in worker_text
     builder = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == 'build_image')
@@ -612,3 +619,82 @@ def test_service_trace_does_not_change_production_deadlines_or_result_checks():
     assert "assert child.returncode == 0" in oracle.ENTRY_FIXTURE
     assert "'stderr':stream" in oracle.REOPEN_DIAGNOSTICS
     assert 'observed_args[4] = _service_diagnostics' in oracle.REOPEN_DIAGNOSTICS
+
+
+def test_future_sources_use_the_same_hidden_template_without_restoring_build_paths(tmp_path):
+    driver=oracle.Oracle(tmp_path)
+    source=tmp_path/'source-1';oracle.copy_unmanifested_source(ROOT,source)
+    unsigned=tmp_path/'unsigned-1';unsigned.mkdir()
+    marker=unsigned/'unchanged-input';marker.write_bytes(b'SYNTHETIC COMPLETE INPUT')
+    before=(source/'executor/autonomy/first_use_recovery.py').read_bytes()
+    driver.hide_build_roots([source,unsigned])
+    assert not source.exists() and not unsigned.exists()
+    next_source=tmp_path/'source-2'
+    oracle.copy_unmanifested_source(tmp_path/'source-1-unavailable',next_source)
+    assert (next_source/'executor/autonomy/first_use_recovery.py').read_bytes()==before
+    assert (tmp_path/'unsigned-1-unavailable/unchanged-input').read_bytes()==b'SYNTHETIC COMPLETE INPUT'
+    assert not source.exists() and not unsigned.exists()
+
+
+@pytest.mark.parametrize('outcome', ['ack', 'raise'])
+def test_failed_observation_sees_real_child_terminal_trace_without_changing_failure(tmp_path,capsys,outcome):
+    import time
+    path=tmp_path/'first-use-service-diagnostic.log'
+    path.touch(mode=0o600)
+    event={'stage':'_FirstUseStartup.acknowledge' if outcome=='ack' else 'first_use_recovery.serve_first_use',
+           'event':'return' if outcome=='ack' else 'raise'}
+    code=('import pathlib,sys,time;time.sleep(.05);'
+          'p=pathlib.Path(sys.argv[1]);p.write_text(sys.argv[2])')
+    child=subprocess.Popen([sys.executable,'-I','-B','-c',code,str(path),
+                            'JAE_ORACLE_STAGE '+json.dumps(event)+'\n'])
+    try:
+        oracle.observe_failed_service(tmp_path,time.monotonic()+2)
+        child.wait(timeout=2)
+    finally:
+        if child.poll() is None:child.kill();child.wait(timeout=2)
+    record=json.loads(capsys.readouterr().err)
+    assert record['oracle_failed_service_observation']==('observed_ack_completion' if outcome=='ack' else 'observed_service_raise')
+    assert record['acceptance']=='FAILED_UNCHANGED'
+    assert record['certification']=='NOT_CERTIFIED'
+    assert not (tmp_path/'receipt.json').exists()
+
+
+def test_failed_observation_never_extends_total_wall_or_replays_actions(tmp_path,monkeypatch,capsys):
+    ticks=[100.0]
+    monkeypatch.setattr(oracle.time,'monotonic',lambda:ticks[0])
+    monkeypatch.setattr(oracle.time,'sleep',lambda seconds:ticks.__setitem__(0,ticks[0]+seconds))
+    path=tmp_path/'first-use-service-diagnostic.log';path.touch(mode=0o600)
+    monkeypatch.setattr(oracle.os,'kill',lambda *a:pytest.fail('observer signalled a process'))
+    monkeypatch.setattr(oracle.subprocess,'Popen',lambda *a,**k:pytest.fail('observer replayed a process'))
+    oracle.observe_failed_service(tmp_path,100.25)
+    assert ticks[0]<=100.25
+    record=json.loads(capsys.readouterr().err)
+    assert record['acceptance']=='FAILED_UNCHANGED' and record['elapsed_seconds']==.25
+    ticks[0]=100.0
+    oracle.observe_failed_service(tmp_path,1000)
+    assert ticks[0]<=280.0
+    record=json.loads(capsys.readouterr().err)
+    assert record['elapsed_seconds']==180.0
+
+
+@pytest.mark.parametrize('fault',['symlink','hardlink','public','fifo'])
+def test_service_diagnostic_reader_refuses_nonprivate_or_aliased_files(tmp_path,fault):
+    path=tmp_path/'first-use-service-diagnostic.log'
+    other=tmp_path/'retained';other.write_text('SYNTHETIC PRIVATE');other.chmod(0o600)
+    if fault=='symlink':path.symlink_to(other)
+    elif fault=='hardlink':os.link(other,path)
+    elif fault=='fifo':os.mkfifo(path,0o600)
+    else:path.write_text('SYNTHETIC');path.chmod(0o644)
+    assert oracle.service_diagnostic_tail(tmp_path) is None
+    assert other.read_text()=='SYNTHETIC PRIVATE'
+
+
+def test_failed_observation_is_failure_only_and_precedes_existing_cleanup():
+    source=(ROOT/'scripts/ci_signed_dmg_acceptance.py').read_text()
+    main=source.split('def main(argv=None):',1)[1]
+    assert 'if code not in (None, 0):' in main
+    assert 'observe_failed_service(root, parent_started + WALL_SECONDS)' in main
+    assert main.index('observe_failed_service(')<main.index('cleanup_test_processes(root)')
+    assert main.index('if code != 0:')<main.index('result = validate_receipt(')
+    assert 'raise RuntimeError(\'signed DMG acceptance child failed; WIP, not acceptance\')' in main
+    assert oracle.FAILURE_OBSERVATION_SECONDS==180 and oracle.WALL_SECONDS==1800
