@@ -191,7 +191,7 @@ def test_owner_budget_aggregate_and_no_test_artifact_upload_are_mandatory():
     assert 'python -I -B scripts/ci_signed_dmg_acceptance.py' in job
     assert 'Refuse stale or ineligible engineering closure head' in job
     aggregate=workflow.split('\n  test:\n',1)[1].split('\n  engineering_closure_macos:\n',1)[0]
-    assert 'needs: [full_suite, signed_dmg_acceptance]' in aggregate
+    assert 'needs: [full_suite, signed_dmg_acceptance, macos_consumer_gate]' in aggregate
     assert 'needs.signed_dmg_acceptance.result' in aggregate
     assert 'needs.signed_dmg_acceptance.outputs.source_sha' in aggregate
     assert "os.environ['JAE_SIGNED_DMG_RESULT'] != 'success'" in aggregate

@@ -288,7 +288,7 @@ jobs:
     # Complete native tests plus app/DMG production need runner-time headroom; test limits stay unchanged.
     timeout-minutes: ${{ matrix.suite == 'native_integration' && 30 || 25 }}
     # Every original hosted-Mac file still runs exactly once. Independent
-    # transaction, runtime/distribution and native UI suites keep complete fixtures
+    # transaction, runtime candidate, distribution and native UI suites keep complete fixtures
     # within the existing job budget; one shard failure cannot skip the other.
     strategy:
       fail-fast: false
@@ -298,8 +298,10 @@ jobs:
             tests: tests/test_consumer_entry_v1.py tests/test_task_state_compatibility_v1.py
           - suite: recovery_transactions
             tests: tests/test_consumer_recovery_transactions_v1.py
+          - suite: runtime_candidate
+            tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py
           - suite: runtime_distribution
-            tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py
+            tests: tests/test_app_distribution_v1.py
           - suite: native_integration
             tests: tests/test_macos_host_v1.py tests/test_first_use_prepared_v1.py tests/test_task_view_context_v1.py tests/test_native_window_ownership_v1.py tests/test_jcr01_synthetic_oracle.py tests/test_jcr06_react_fixture.py tests/test_jcr06_vue_fixture.py tests/test_service_lifecycle_v1.py tests/test_profile_import_v1.py tests/test_profile_editor_v1.py tests/test_task_preparation_v1.py tests/test_manager_v1.py tests/test_jcr03_discovery.py
     steps:
@@ -362,6 +364,24 @@ jobs:
             ${{ runner.temp }}/jae-installer-image/installer-manifest.json
           if-no-files-found: error
           retention-days: 7
+
+  macos_consumer_gate:
+    # An ordinary run cannot hide a failed, cancelled or skipped matrix owner.
+    # Exact-head label closure retains its separate, previously reviewed routing.
+    needs: macos_consumer_release
+    if: always() && github.event.action != 'labeled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every complete-file Mac matrix owner
+        env:
+          JAE_MAC_RESULT: ${{ needs.macos_consumer_release.result }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          if os.environ.get('JAE_MAC_RESULT') != 'success':
+              raise SystemExit('failed, skipped, cancelled or missing complete-file Mac owner')
+          PY
 
   signed_dmg_acceptance:
     # Independent synthetic owner only. Never upload its ad-hoc apps or images.
@@ -522,7 +542,7 @@ jobs:
   test:
     # Preserve the existing check name and downstream closure authority. Missing,
     # failed, cancelled and skipped owners are failures, never a skipped gate.
-    needs: [full_suite, signed_dmg_acceptance]
+    needs: [full_suite, signed_dmg_acceptance, macos_consumer_gate]
     if: always() && ((github.event.action != 'labeled' && (github.event_name == 'push' || github.event.pull_request.draft == false)) || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.pull_request.head.repo.full_name == github.repository && github.event.label.name == format('eng-{0}', github.event.pull_request.head.sha)))
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -589,6 +609,16 @@ jobs:
                   or re.fullmatch(r'[0-9a-f]{40}', expected) is None
                   or os.environ['JAE_SIGNED_DMG_SHA'] != expected):
               raise SystemExit('failed, skipped, cancelled, missing or wrong-head signed DMG owner')
+          PY
+      - name: Require the ordinary Mac whole-file aggregate
+        if: github.event.action != 'labeled'
+        env:
+          JAE_MAC_GATE_RESULT: ${{ needs.macos_consumer_gate.result }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          if os.environ.get('JAE_MAC_GATE_RESULT') != 'success':
+              raise SystemExit('complete-file Mac aggregate did not succeed')
           PY
       - name: Require every complete-file owner and identical source
         id: full_aggregate
