@@ -26,7 +26,7 @@ import sys
 import tempfile
 import time
 
-WALL_SECONDS = 15 * 60
+WALL_SECONDS = 30 * 60
 FORMAT = 'jae-signed-dmg-acceptance-v1'
 BUNDLE_ID = 'com.local.job-application-executor.ai-application-manager'
 APP_NAME = 'AI 投递经理.app'
@@ -305,7 +305,7 @@ class Oracle:
             raise ValueError("oracle only admits exact success or explicit refusal")
         remaining = WALL_SECONDS - (time.monotonic() - self.started)
         if remaining <= 0:
-            raise TimeoutError('signed DMG oracle 15-minute wall budget exhausted')
+            raise TimeoutError('signed DMG oracle 30-minute wall budget exhausted')
         result = subprocess.run(list(map(str, argv)), cwd=self.root, env=self.env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, timeout=min(timeout, remaining), check=False)
@@ -770,7 +770,7 @@ def main(argv=None):
             code = process.wait(timeout=WALL_SECONDS)
         except subprocess.TimeoutExpired:
             terminate_tree(process.pid);process.wait(timeout=10)
-            raise RuntimeError('signed DMG acceptance exceeded 15 minutes; WIP, not acceptance') from None
+            raise RuntimeError('signed DMG acceptance exceeded 30 minutes; WIP, not acceptance') from None
         finally:
             cleanup_test_processes(root)
             # A failed image producer may leave its read-only test volume. Do

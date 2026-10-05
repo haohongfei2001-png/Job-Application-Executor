@@ -187,7 +187,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         expected_budgets = {"foundation": 30, "packaged_candidate": 20,
                             "macos_consumer_release": "${{ matrix.suite == 'native_integration' && 30 || 25 }}",
                             "full_suite": 30, "test": 5,
-                            "engineering_closure_macos": 20, "preparation_validation": 25, "signed_dmg_acceptance": 25}
+                            "engineering_closure_macos": 20, "preparation_validation": 25, "signed_dmg_acceptance": 40}
         for name, budget in expected_budgets.items():
             self.assertIn(f"    timeout-minutes: {budget}\n", JOBS[name])
         build = JOBS["engineering_closure_macos"]

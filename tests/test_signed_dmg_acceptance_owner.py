@@ -135,7 +135,7 @@ def receipt():
         'certification':'NOT_CERTIFIED','publisher':'ADHOC_TEST_COPY_ONLY',
         'consumer_admission':'NOT_ADMITTED','checked':sorted(oracle.REQUIRED),
         'signed_versions':3,'macho_objects_per_version':[32,32,32],
-        'elapsed_seconds':899,'phases':{'complete':899},
+        'elapsed_seconds':1799,'phases':{'complete':1799},
         'coverage_per_version':[{'unsigned_runtime_files':30,'current_runtime_files':32,
             'added_runtime_files':['release-runtime-manifest.json','signing-input-bridge.json'],
             'wheel_count':1,'wheels':[['example-package','1.0']]} for _ in range(3)]}
@@ -148,7 +148,7 @@ def test_acceptance_receipt_fails_closed_on_missing_or_skipped_evidence(fault):
     if fault=='missing_case':value['checked'].pop()
     elif fault=='duplicate_case':value['checked'].append(value['checked'][0])
     elif fault=='no_macos':value['status']='SKIPPED'
-    elif fault=='too_long':value['elapsed_seconds']=900
+    elif fault=='too_long':value['elapsed_seconds']=1800
     elif fault=='no_time':value['elapsed_seconds']=0
     elif fault=='no_complete':value['phases']={}
     elif fault=='missing_version':value['signed_versions']=2
@@ -184,7 +184,7 @@ def test_real_seed_and_typed_answer_readback_preserve_paused_journal(tmp_path):
 def test_owner_budget_aggregate_and_no_test_artifact_upload_are_mandatory():
     workflow=(ROOT/'.github/workflows/application-executor-ci.yml').read_text()
     job=workflow.split('\n  signed_dmg_acceptance:\n',1)[1].split('\n  full_suite:\n',1)[0]
-    assert '    timeout-minutes: 25\n' in job
+    assert '    timeout-minutes: 40\n' in job
     assert '    runs-on: macos-latest\n' in job
     assert 'upload-artifact' not in job and 'continue-on-error' not in job
     assert 'python -I -B scripts/ci_signed_dmg_acceptance.py' in job
@@ -195,7 +195,7 @@ def test_owner_budget_aggregate_and_no_test_artifact_upload_are_mandatory():
     assert 'needs.signed_dmg_acceptance.outputs.source_sha' in aggregate
     assert "os.environ['JAE_SIGNED_DMG_RESULT'] != 'success'" in aggregate
     assert "os.environ['JAE_SIGNED_DMG_SHA'] != expected" in aggregate
-    assert oracle.WALL_SECONDS==900
+    assert oracle.WALL_SECONDS==1800
     script=(ROOT/'scripts/ci_signed_dmg_acceptance.py').read_text()
     assert 'process.wait(timeout=WALL_SECONDS)' in script
     assert 'terminate_tree(process.pid)' in script

@@ -57,8 +57,8 @@ metadata drift, changing source/target paths, retained evidence, cross-kind
 refusal, same-kind installation/update/rollback and image-tool wiring. Those
 tests do not prove Apple signing, native execution or an actual mounted DMG.
 
-The separate `signed_dmg_acceptance` hosted-Mac owner has a 25-minute job budget
-and one 15-minute acceptance subprocess. It must perform the full signed-runtime,
+The separate `signed_dmg_acceptance` hosted-Mac owner has a 40-minute job budget
+and one 30-minute acceptance subprocess. It must perform the full signed-runtime,
 read-only DMG, Cocoa cancellation, explicit synthetic first install, actual native
 reopen/service health, same-kind update, explicit rollback and failed-final-path
 recovery journey. The test-only fixed publisher adapter is placed in an isolated
@@ -67,6 +67,14 @@ copy. It keeps real strict/all-architecture code-sign verification while omittin
 certificate identity only. Unmodified production must independently refuse the
 same ad-hoc bytes. No environment switch or post-sign source patch is permitted.
 The fixture has no authority to upload signed packages or confer owner intent.
+
+The first hosted attempt exhausted the original 900-second engineering budget:
+three complete signed builds and verified DMGs consumed 817.15 seconds before
+the production/damage refusals, and the installation journey never started.
+That failed run remains negative evidence, not a performance or acceptance pass.
+The revised 1800-second bound allows those measured 817 seconds, an estimated
+348-second complete journey and 635 seconds for additional signed checks and
+variation. This is a scheduling estimate; a complete real run is still required.
 
 Every old CI owner, owning test and timeout remains in force. The required
 aggregate also requires the new Mac owner to succeed; skip/cancel/failure is not
