@@ -276,16 +276,36 @@ complete installed dependency/loaded-module health or consumer installation.
 Missing current data cannot fall back to unsigned validation. A changed but valid
 current JSON is first rejected by the actual outer seal; after re-sealing the
 wrong digest, Apple static integrity must pass while the current reader separately
-rejects `signed_payload_mismatch`. Unpatched production v3 preparation,
-finalization and publisher reading must still refuse ad-hoc signatures. No v3
+rejects `signed_payload_mismatch`. Unpatched production v3 finalization and
+publisher reading must still refuse ad-hoc signatures. The producer's actual
+nested `_verify_static` dependency is independently required to reject the same
+ad-hoc object; the whole unpatched prepare entry is **not** rerun in this oracle.
+Separate first/last-refusal unit tests invoke the actual prepare entry and prove
+that every nested publisher check must finish before current-resource creation
+or writing. No v3
 identity is emitted under a seam. The report separates real-byte engineering
 compatibility from `REFUSED_ADHOC` publisher validation and `NOT_CERTIFIED`,
-including observed runtime/wheel counts and elapsed time. A child process audit
+including observed runtime/wheel counts and phase start/elapsed times. Both cold
+wrappers perform their complete current verification, without a redundant third
+direct read. All current wheel payloads are still checked against actual bytes;
+the original SHA-256 RECORD mismatch count then reuses that verified inventory
+instead of hashing the same payloads again. Other RECORD hash algorithms are not
+miscompared with SHA-256 or included in this narrowly labeled difference count.
+A child process audit
 guard permits only `/usr/bin/codesign`, never the candidate interpreter or host.
 The whole combined section retains the same 90-second parent-enforced deadline;
 there is no second build, repeated nested signing, new job or timeout expansion.
 Until this updated hosted test actually completes, v3 real-byte compatibility is
 **unverified**; adding the oracle or passing synthetic tests is not its result.
+
+The first v3 run, `37248440392` / job `111570937429`, at head `a64412a`, is retained
+as a failure: the child hit its 90-second hard bound (90.05 seconds in the parent).
+Its last record at 84.81 seconds had verified 32 v2/v3 deltas, current resource
+coverage, 3,215 runtime files, and 20 wheels (8 original RECORD mismatches), with
+all tested production publisher gates refusing, no final identity and zero
+candidate executions. The missing-resource/tampering tail did not complete, so
+this is not a successful oracle. Removing only duplicate test work does not
+predict the next run's duration or substitute for completing that same bound.
 The oracle never executes signed code or uploads the signed bundle. It reports
 partial counts/elapsed time on failure, keeps the runtime owner/job budget,
 and does not replace any original test. Only an actual hosted run can establish

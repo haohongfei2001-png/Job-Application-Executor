@@ -2077,15 +2077,17 @@ def test_hosted_mac_real_build_prepares_noninstallable_signing_workspace(tmp_pat
     assert last["real_unsigned_layouts"] == last["real_adhoc_deltas"] == len(catalog)
     assert last["real_v3_deltas"] == last["test_only_nested_verifications"] == len(catalog)
     assert last["current_payload_engineering"] == "REAL_ADHOC_BYTES_CHECKED_TEST_SEAM_ONLY"
-    assert last["v3_prepare_publisher_validation"] == last["v3_publisher_validation"] == last["reader_publisher_validation"] == "REFUSED_ADHOC"
+    assert last["prepare_dependency_publisher_validation"] == last["v3_publisher_validation"] == last["reader_publisher_validation"] == "REFUSED_ADHOC"
+    assert last["unpatched_prepare_entry"] == "NOT_RUN_IN_THIS_ORACLE"
     assert last["current_payload_coverage"] == "EXPLICIT_SHA256"
     assert last["current_runtime_files"] > 0 and last["wheel_records_checked"] > 0
-    assert last["original_record_mismatches"] > 0
+    assert last["original_sha256_record_mismatches"] > 0
     assert last["missing_current_payload"] == last["unsealed_tamper"] == last["resealed_wrong_digest"] == "REFUSED"
     assert last["ad_hoc_outer_seals"] == 3 and last["signed_candidate_executions"] == 0
     assert last["codesign_processes"] > 0 and last["unexpected_process_attempts"] == 0
     assert last["consumer_admission"] == "NOT_ADMITTED"
     assert last["certification"] == "NOT_CERTIFIED" and last["v3_final_identity_created"] is False
+    assert last["phase"] == "complete" and last["phase_started_seconds"]["complete"] < 90
     assert not (workspace / finalizer.FINAL_IDENTITY).exists()
     assert not (workspace / finalizer.CURRENT_FINAL_IDENTITY).exists()
     assert _trusted_bundle(prepared) is False
@@ -2093,6 +2095,7 @@ def test_hosted_mac_real_build_prepares_noninstallable_signing_workspace(tmp_pat
 
 def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
     """Private hosted test child: real signed bytes, no publisher acceptance."""
+    import base64
     import importlib.metadata
     import time
     from scripts import prepare_macos_signing as signing
@@ -2109,7 +2112,8 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
         "codesign_processes": 0, "unexpected_process_attempts": 0,
         "real_v3_deltas": 0, "test_only_nested_verifications": 0,
         "current_payload_engineering": "NOT_PERFORMED",
-        "v3_prepare_publisher_validation": "NOT_PERFORMED",
+        "prepare_dependency_publisher_validation": "NOT_PERFORMED",
+        "unpatched_prepare_entry": "NOT_RUN_IN_THIS_ORACLE", "phase_started_seconds": {},
         "v3_publisher_validation": "NOT_PERFORMED", "reader_publisher_validation": "NOT_PERFORMED",
         "status": "INCOMPLETE"}
     def only_codesign_processes(event, values):
@@ -2126,6 +2130,10 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
         observation["final_identity_created"] = (workspace / finalizer.FINAL_IDENTITY).exists()
         observation["v3_final_identity_created"] = (workspace / finalizer.CURRENT_FINAL_IDENTITY).exists()
         print(json.dumps(observation, sort_keys=True), flush=True)
+    def phase(name):
+        observation["phase"] = name
+        observation["phase_started_seconds"][name] = round(time.monotonic() - started, 2)
+        emit()
     def apple(*args, must_succeed=True):
         result = subprocess.run(["/usr/bin/codesign", *args],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -2134,7 +2142,7 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
         if must_succeed:
             assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")[-2000:]
         return result
-    emit()
+    phase("v2_stage")
     try:
         with stage_macos_distribution(distribution) as original:
             names = {p.relative_to(original).as_posix() for p in original.rglob("*")} | {"."}
@@ -2143,7 +2151,7 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
             observation["real_unsigned_layouts"] = len(catalog)
             bridge = json.loads((prepared / signing.BRIDGE).read_text())
             assert {item["path"] for item in bridge["signing_order"]} == set(catalog)
-            emit()
+            phase("v2_nested_signing")
             # Explicit '-' identity only: no identity discovery, keychain or notary.
             for item in bridge["signing_order"]:
                 apple("--force", "--sign", "-", "--timestamp=none", "--identifier",
@@ -2151,6 +2159,7 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
                 apple("--verify", "--strict", "--all-architectures", str(prepared / item["path"]))
                 observation["signed_objects"] += 1
                 emit()
+            phase("v2_outer_delta")
             apple("--force", "--sign", "-", "--timestamp=none", "--identifier", BUNDLE_ID, str(prepared))
             observation["ad_hoc_outer_seals"] += 1
             apple("--verify", "--strict", "--all-architectures", str(prepared))
@@ -2165,6 +2174,7 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
                 finalizer._read(prepared / (finalizer.SIGNATURE_DIRECTORY + "/CodeResources")),
                 finalizer._read(prepared / signing.BRIDGE))
             # Preserve the complete original v2 oracle before changing its app.
+            phase("v2_production_refusal")
             with pytest.raises(ValueError, match="signing_static_requirement_refused"):
                 finalizer.main(arguments)
             observation["publisher_validation"] = "REFUSED_ADHOC"
@@ -2178,9 +2188,15 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
             shutil.rmtree(prepared / finalizer.SIGNATURE_DIRECTORY)
             current_path = prepared / signed_payload.RELATIVE_PATH
             policy = signing.publisher_policy("SYNTHETIC1", BUNDLE_ID)
+            phase("prepare_dependency_publisher_refusal")
+            # Exercise prepare's real dependency on an actual nested signature,
+            # not another full archive stage. Unit tests separately prove that
+            # every prepare verification must finish before any resource write.
+            nested = bridge["signing_order"][0]
             with pytest.raises(ValueError, match="signing_static_requirement_refused"):
-                finalizer.main([*arguments, "--current-payload-stage", "prepare"])
-            observation["v3_prepare_publisher_validation"] = "REFUSED_ADHOC"
+                finalizer._verify_static(prepared / nested["path"], policy,
+                    nested["required_identifier"], time.monotonic() + 30)
+            observation["prepare_dependency_publisher_validation"] = "REFUSED_ADHOC"
             assert not current_path.exists()
 
             def static_nested_test_seam(path, supplied_policy, identifier, deadline):
@@ -2195,6 +2211,7 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
                       '=identifier = "' + identifier + '"', str(path))
                 observation["test_only_nested_verifications"] += 1
 
+            phase("v3_actual_prepare")
             with pytest.MonkeyPatch.context() as seam:
                 seam.setattr(finalizer, "_verify_static", static_nested_test_seam)
                 assert finalizer.main([*arguments, "--current-payload-stage", "prepare"]) == 0
@@ -2205,9 +2222,11 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
             saved = json.loads(saved_bytes)
             assert saved["consumer_admission"] == "NOT_ADMITTED" and saved["certification"] == "NOT_CERTIFIED"
             assert saved["input_record_role"] == "ORIGINAL_UNSIGNED_PROVENANCE"
+            phase("v3_outer_delta_coverage")
             apple("--force", "--sign", "-", "--timestamp=none", "--identifier", BUNDLE_ID, str(prepared))
             observation["ad_hoc_outer_seals"] += 1
-            apple("--verify", "--strict", "--all-architectures", str(prepared))
+            # The real reader below verifies this seal with the stronger fixed
+            # identifier requirement; no duplicate outer scan is needed here.
             current_names = signed_names | {signed_payload.RELATIVE_PATH}
             current_inventory = signing._capture(prepared, current_names)
             with pytest.raises(ValueError, match="signing_output_layout_unsupported"):
@@ -2224,6 +2243,7 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
             observation["current_payload_coverage"] = "EXPLICIT_SHA256"
 
             # Both production entrypoints remain entirely unpatched here.
+            phase("v3_production_refusals")
             with pytest.raises(ValueError, match="signing_static_requirement_refused"):
                 finalizer.main([*arguments, "--current-payload-stage", "finalize"])
             observation["v3_publisher_validation"] = "REFUSED_ADHOC"
@@ -2245,16 +2265,19 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
             runtime, source, native = resources / "runtime", resources / "release", resources / "native-host"
             with pytest.MonkeyPatch.context() as seam:
                 seam.setattr(signed_payload, "verify_publisher", static_reader_test_seam)
-                current = signed_payload.read_current_payload(prepared, required_publisher_policy=policy)
-                assert current == saved
+                phase("v3_runtime_native_readers")
+                # Both production wrappers independently run the complete
+                # current reader, static verifier and byte recomputation.
+                # Do not add a third identical direct read or runtime hash pass.
                 manifest = release.read_runtime_candidate(runtime, source, required_publisher_policy=policy)
-                assert manifest == current["runtime"] == release.runtime_manifest(runtime, source, include_manifest=True)
+                assert manifest == saved["runtime"]
                 assert manifest["runtime_sha256"] != json.loads((runtime / release.RUNTIME_MANIFEST_NAME).read_bytes())["runtime_sha256"]
                 assert macos_host.verify_native_host(native, required_publisher_policy=policy)
-                assert current["native"]["executable_sha256"] != json.loads((native / macos_host.HOST_RECEIPT).read_bytes())["executable_sha256"]
+                assert saved["native"]["executable_sha256"] != json.loads((native / macos_host.HOST_RECEIPT).read_bytes())["executable_sha256"]
                 observation["current_runtime_files"] = len(manifest["files"])
                 # Parse real wheel records with the trusted test interpreter's
                 # stdlib, never import or execute the signed candidate runtime.
+                phase("v3_wheel_current_coverage")
                 sites = list(runtime.glob("lib/python*/site-packages"))
                 assert len(sites) == 1
                 wheels = list(importlib.metadata.distributions(path=[str(sites[0])]))
@@ -2263,12 +2286,31 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
                 assert all(release._distribution_payload_owned(wheel, runtime, current_files=current_files)
                            for wheel in wheels)
                 observation["wheel_records_checked"] = len(wheels)
-                observation["original_record_mismatches"] = sum(
-                    not release._distribution_payload_owned(wheel, runtime) for wheel in wheels)
-                assert observation["original_record_mismatches"] > 0
+                def original_sha256_record_differs(wheel):
+                    # The current reader and per-wheel check above have just
+                    # rehashed these exact bytes. Compare original RECORD data
+                    # to that verified inventory instead of re-reading payloads.
+                    for entry in wheel.files:
+                        relative_record = Path(str(entry))
+                        if relative_record.suffix == ".pyc" and "__pycache__" in relative_record.parts:
+                            continue
+                        if entry.hash is None or entry.hash.mode != "sha256":
+                            continue
+                        relative = Path(wheel.locate_file(entry)).resolve().relative_to(runtime).as_posix()
+                        item = current_files.get(relative)
+                        if item is not None:
+                            digest = base64.urlsafe_b64encode(bytes.fromhex(item["sha256"])).rstrip(b"=").decode("ascii")
+                            if (entry.size is not None and item["bytes"] != entry.size
+                                    or digest != entry.hash.value):
+                                return True
+                    return False
+                observation["original_sha256_record_mismatches"] = sum(
+                    original_sha256_record_differs(wheel) for wheel in wheels)
+                assert observation["original_sha256_record_mismatches"] > 0
                 emit()
 
                 # Missing current data cannot downgrade to the unsigned path.
+                phase("v3_missing_current")
                 current_path.unlink()
                 try:
                     assert not release.verify_runtime_candidate(runtime, source, required_publisher_policy=policy)
@@ -2282,6 +2324,7 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
                 # A well-formed wrong digest first breaks the real seal. After
                 # re-sealing, Apple static verification passes but the current
                 # payload recomputation must independently reject the lie.
+                phase("v3_unsealed_tamper")
                 wrong = json.loads(saved_bytes)
                 entry = wrong["runtime"]["files"][0]
                 digest = entry["sha256"]
@@ -2290,9 +2333,11 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
                 with pytest.raises(ValueError, match="test_adhoc_static_refused"):
                     signed_payload.read_current_payload(prepared, required_publisher_policy=policy)
                 observation["unsealed_tamper"] = "REFUSED"
+                phase("v3_resealed_wrong_digest")
                 apple("--force", "--sign", "-", "--timestamp=none", "--identifier", BUNDLE_ID, str(prepared))
                 observation["ad_hoc_outer_seals"] += 1
-                apple("--verify", "--strict", "--all-architectures", str(prepared))
+                # A specific payload mismatch is possible only after the seam's
+                # real strict/all-architecture/fixed-identifier check succeeds.
                 with pytest.raises(ValueError, match="signed_payload_mismatch"):
                     signed_payload.read_current_payload(prepared, required_publisher_policy=policy)
                 observation["resealed_wrong_digest"] = "REFUSED"
@@ -2305,5 +2350,6 @@ def _hosted_ad_hoc_delta_oracle(distribution, workspace, arguments):
             assert _trusted_bundle(prepared) is False
             observation["current_payload_engineering"] = "REAL_ADHOC_BYTES_CHECKED_TEST_SEAM_ONLY"
             observation["status"] = "ADHOC_DELTA_CHECKED_PUBLISHER_REFUSED"
+            phase("complete")
     finally:
         emit()

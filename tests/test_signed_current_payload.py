@@ -309,3 +309,32 @@ def test_preparation_rejects_original_payload_tamper(synthetic_transition):
     with pytest.raises(ValueError, match='original_payload_changed'):
         finalization.prepare_current_signed_payload(dist, workspace, **kwargs)
     assert not (app / signed_payload.RELATIVE_PATH).exists()
+
+
+@pytest.mark.parametrize('refuse_at', ['first', 'last'])
+def test_actual_prepare_requires_every_nested_publisher_before_current_write(
+        synthetic_transition, monkeypatch, refuse_at):
+    """Entry wiring only; the Mac oracle separately exercises Apple's refusal."""
+    prepared, _, bridge = synthetic_transition
+    dist, workspace, identity, kwargs = prepared
+    app = workspace / identity['app_name']
+    shutil.rmtree(app / finalization.SIGNATURE_DIRECTORY)
+    calls = []
+    refused = 1 if refuse_at == 'first' else len(bridge['signing_order'])
+    def reject_nested(path, policy, identifier, deadline):
+        planned = bridge['signing_order'][len(calls)]
+        assert path == app / planned['path'] and policy == POLICY
+        assert identifier == planned['required_identifier']
+        calls.append(path)
+        if len(calls) == refused:
+            raise ValueError('test_nested_publisher_refused')
+    monkeypatch.setattr(finalization, '_verify_static', reject_nested)
+    monkeypatch.setattr(signed_payload, 'current_payload',
+        lambda *a, **k: pytest.fail('current payload before every publisher verified'))
+    monkeypatch.setattr(preparation, '_write_at',
+        lambda *a, **k: pytest.fail('output write after publisher refusal'))
+    with pytest.raises(ValueError, match='test_nested_publisher_refused'):
+        finalization.prepare_current_signed_payload(dist, workspace, **kwargs)
+    assert len(calls) == refused
+    assert not (app / signed_payload.RELATIVE_PATH).exists()
+    assert not (workspace / finalization.CURRENT_FINAL_IDENTITY).exists()
