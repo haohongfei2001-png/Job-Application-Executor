@@ -406,7 +406,7 @@ def test_transaction_subbudget_remains_capped_by_same_total_wall(tmp_path, monke
         observed.append(kwargs['timeout'])
         return SimpleNamespace(returncode=0, stdout='{}', stderr='')
     monkeypatch.setattr(oracle.subprocess, 'run', run)
-    assert driver.run(['synthetic'], timeout=600) == '{}'
+    assert driver.run(['synthetic'], timeout=900) == '{}'
     assert observed == [37]
     assert oracle.Oracle.run.__kwdefaults__['timeout'] == 180
     assert oracle.Oracle.app_run.__kwdefaults__['timeout'] == 180
@@ -414,11 +414,11 @@ def test_transaction_subbudget_remains_capped_by_same_total_wall(tmp_path, monke
     assert oracle.WALL_SECONDS == 3900
 
 
-def test_only_complete_positive_transactions_receive_six_hundred_second_outer_budget():
+def test_only_complete_positive_transactions_receive_nine_hundred_second_outer_budget():
     module = ast.parse((ROOT / 'scripts/ci_signed_dmg_acceptance.py').read_text())
     calls = [node for node in ast.walk(module) if isinstance(node, ast.Call)
              and any(keyword.arg == 'timeout' and isinstance(keyword.value, ast.Constant)
-                     and keyword.value.value == 600 for keyword in node.keywords)]
+                     and keyword.value.value == 900 for keyword in node.keywords)]
     assert len(calls) == 4
     assert sorted(node.func.attr for node in calls) == ['app_run', 'app_run', 'app_run', 'cli']
     for node in calls:

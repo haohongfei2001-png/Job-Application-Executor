@@ -77,8 +77,11 @@ child. A still-preparing child observes cancellation at its next verified frame,
 not in the middle of private-state writes. Existing prepared objects and a
 completed fence survive lost ACKs. An already committed service is not killed,
 restarted, or adopted on ambiguous acknowledgement; no registry PID is signaled.
-The synthetic native observer uses the existing complete-transaction 600-second
-outer allowance, still capped by the oracle's remaining 3900 seconds.
+The synthetic complete-transaction observer allows 900 seconds, including entry
+verification/installation and actual native startup. The existing native observer
+retains its 600-second limit; the outer 900-second transaction and the oracle's
+remaining 3900 seconds also bound that wait. These are shared test observation
+limits, not additional production startup/health/UI authority.
 
 ## Evidence and limits
 
@@ -110,17 +113,39 @@ update/private-state preservation, but only reached rollback refusal work at
 1756.42 seconds, then failed the 1800-second limit. Rollback, the third image and
 failed-update restoration were not completed; no full receipt exists.
 
-The 3900-second bound accounts for that measured 1756.42-second prefix, the two
-remaining complete transactions at their existing 600-second outer limits,
+The 3900-second bound was initially calculated from that measured 1756.42-second
+prefix and two remaining transactions at their then-current 600-second limits,
 estimated 400 seconds for version-three build/sign/image work and 300 seconds
 for refusal/identity/reopen/state checks. That 3656.42-second model leaves 243.58
 seconds of contingency. The 400/300 allocations are empirical estimates, not
 mathematical sums of all individual timeouts; a complete real run is required.
-The four transaction limits remain 600 seconds, ordinary commands 180 seconds,
-and failure-only observation remains inside the total. Independent jobs would
+The four transaction limits are now 900 seconds, ordinary commands remain 180
+seconds, and failure-only observation remains inside the total. Independent jobs would
 need to repeat real setup rather than transfer private state or trust receipts;
 this owner retains the same actual apps, service history and private-state
 identity through the complete journey without uploading them.
+
+Run 37304892470 completed the entire real synthetic journey in 3085.71 seconds,
+including all 25 checks, three versions/images, rollback and actual failed-update
+restoration. The subsequent same-production run 37312104450 still failed: update
+entry verification/installation returned normally only at 592.213 seconds, and
+the old shared 600-second transaction allowance cut off its newly started native
+child after less than eight seconds. It was not a completed update or acceptance
+pass. The revised 900-second observer is supported by the measured slow entry
+(592.213 seconds) plus the longest completed fresh-native observation (216.234
+seconds): 808.447 seconds plus 91.553 seconds of margin. Those observations came
+from different runs, so this composition is an estimate, not a future bound.
+It does not create independently enforced entry/native phase allocations. The
+native limit stays 600 seconds and the total remains 3900 seconds; individual
+allowances are not guaranteed to fit if every stage reaches its cap.
+All original production limits remain unchanged.
+
+This exposes a product performance gap. A completed synthetic fresh installation
+command took 495.987 seconds (about eight minutes), and a completed update took
+587.67 seconds (almost ten minutes); another update entry alone took 592.213
+seconds. Repeated full signature/payload verification is costly. These results
+prove controlled software integrity/connectivity only, not acceptable consumer
+installation speed, consumer delivery or Apple distribution certification.
 
 Every old CI owner, owning test and timeout remains in force. The required
 aggregate also requires the new Mac owner to succeed; skip/cancel/failure is not

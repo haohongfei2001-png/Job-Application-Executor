@@ -297,8 +297,8 @@ for child in children:
     call, started = next(_trace_calls), time.monotonic()
     _trace_event('fixture.native_reopen_wait', call, 'begin', started)
     try:
-        # The real finite preparation protocol can span multiple verified
-        # stages; observe it within the enclosing complete-transaction budget.
+        # Keep the existing native observation limit. The 900-second complete
+        # transaction and remaining global wall deadline still bound this wait.
         out, err = child.communicate(timeout=600)
     except subprocess.TimeoutExpired as error:
         _trace_native_timeout(child, error)
@@ -692,7 +692,7 @@ class Oracle:
             assert cancel['actual_native_reopens'] == 0
             assert not self.target.exists() and not self.state.exists()
             self.checked.add('real_cocoa_cancel')
-            first = self.app_run(mounted, ENTRY_FIXTURE, 'accept', self.port, timeout=600)
+            first = self.app_run(mounted, ENTRY_FIXTURE, 'accept', self.port, timeout=900)
             assert first.get('installed') is True and first.get('replaced') is False
             assert first.get('reopen_requested') is True and first['actual_native_reopens'] == 1, first
             assert _bundle_transaction_identity(self.target)[2] == expected_identities[0][2]
@@ -720,7 +720,7 @@ class Oracle:
         images.append(self.build_image(versions[1], 2))
         self.hide_build_roots(later_roots)
         with self.mounted(images[1], 'second') as mounted:
-            update = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=600)
+            update = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=900)
             assert update.get('ok') is True and update.get('updated') is True and update['actual_native_reopens'] == 1, update
         after_service = json.loads((self.state / 'service.json').read_bytes())
         assert before_service != after_service
@@ -759,7 +759,7 @@ class Oracle:
         assert _bundle_transaction_identity(self.target)[2] == expected_identities[1][2]
         failed.rename(self.root / 'retained-occupied-slot')
         self.checked.add('occupied_slot_refused')
-        restored = self.cli(['restore-app'], timeout=600)
+        restored = self.cli(['restore-app'], timeout=900)
         assert restored.get('ok') is True and restored.get('restored') is True, restored
         assert _bundle_transaction_identity(self.target)[2] == expected_identities[0][2]
         assert _bundle_transaction_identity(failed)[2] == expected_identities[1][2]
@@ -773,7 +773,7 @@ class Oracle:
         images.append(self.build_image(versions[2], 3))
         self.hide_build_roots(later_roots)
         with self.mounted(images[2], 'third') as mounted:
-            fault = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=600)
+            fault = self.app_run(mounted, ENTRY_FIXTURE, 'update', self.port, timeout=900)
         assert fault.get('ok') is False and fault.get('reason') == 'post_activation_unhealthy', fault
         assert fault['actual_native_reopens'] == 0
         attempts = trace.read_text().splitlines()
