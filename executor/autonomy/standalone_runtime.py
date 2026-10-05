@@ -32,7 +32,10 @@ try:
     sys.path.insert(0,str(release))
     from executor.autonomy.release import installed_dependencies_match
     stage=12
-    assert installed_dependencies_match(release)
+    import json
+    policy=json.loads(sys.argv[3]) if len(sys.argv)>3 else None
+    assert (installed_dependencies_match(release) if policy is None else
+            installed_dependencies_match(release,required_publisher_policy=policy))
     stage=13
     for name in ('ssl','sqlite3','ctypes','hashlib','lzma','bz2','http.server',
                  'cryptography.fernet','pydantic','pydantic_core','greenlet',
@@ -77,11 +80,12 @@ except BaseException:
     sys.exit(stage)
 """
 
-def _probe_code(root: Path, release: Path) -> int:
+def _probe_code(root: Path, release: Path, *, required_publisher_policy=None) -> int:
     try:
         result = subprocess.run(
             [str(root / "bin" / "python"), "-I", "-B", "-c", PROBE,
-             str(root), str(release)],
+             str(root), str(release)] + ([json.dumps(required_publisher_policy, sort_keys=True)]
+                                       if required_publisher_policy is not None else []),
             cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, timeout=30,
         )
@@ -90,7 +94,7 @@ def _probe_code(root: Path, release: Path) -> int:
         return 90
 
 
-def verify_standalone_runtime(root: str | Path, release: str | Path) -> bool:
+def verify_standalone_runtime(root: str | Path, release: str | Path, *, required_publisher_policy=None) -> bool:
     root, release = Path(root), Path(release)
     marker = root / STANDALONE_MARKER
     try:
@@ -101,7 +105,17 @@ def verify_standalone_runtime(root: str | Path, release: str | Path) -> bool:
             return False
     except (OSError, UnicodeError, ValueError):
         return False
-    return verify_runtime_candidate(root, release) and _probe_code(root, release) == 0
+    from .signed_payload import app_for_runtime, has_current_payload
+    from .publisher_policy import resolve_policy
+    app = app_for_runtime(root, release)
+    if app is not None and has_current_payload(app):
+        try:
+            required_publisher_policy = resolve_policy(required_publisher_policy)
+        except ValueError:
+            return False
+    options = {} if required_publisher_policy is None else {'required_publisher_policy': required_publisher_policy}
+    return (verify_runtime_candidate(root, release, **options)
+            and _probe_code(root, release, **options) == 0)
 
 
 def copy_standalone_runtime_candidate(source: str | Path, target: str | Path,

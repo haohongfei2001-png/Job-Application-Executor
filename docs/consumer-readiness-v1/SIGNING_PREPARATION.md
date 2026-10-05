@@ -184,6 +184,68 @@ consumer admission and runtime/update/rollback integration remain developer work
 The original cold installer continues to refuse these workspaces. Optional legacy
 migration remains separate from ordinary fresh installation.
 
+## Explicit v3 current-payload path (not consumer admission)
+
+The original v2 finalizer is unchanged in scope: it rejects the additional
+current-payload resource. A separate explicit path now connects the existing
+build report to the current-byte readers used by runtime/native validation and
+candidate health. This is local engineering, not a signed installer release.
+
+1. Build and prepare with the same trusted receipt/prepared/policy pins above.
+2. After independently authorized nested signing, invoke the same finalizer CLI
+   and pins with `--current-payload-stage prepare`. It checks every original byte
+   with the existing build-only signing-delta proof, and requires Apple's actual
+   Developer ID verification of every nested object before writing
+   `Contents/Resources/current-signed-payload.json`. It does not sign or execute
+   anything. Missing identity or an ad-hoc signature refuses.
+3. Seal the outer app, including both the input bridge and this new resource.
+4. Invoke with `--current-payload-stage finalize`. It reconstructs the current
+   manifest deterministically from actual bytes, checks its explicit seal
+   coverage, and writes only `signed-build-identity-v3.json` outside the app.
+   The v2 output filename/contract is never reused for this larger inventory.
+
+The original source/runtime/native manifests and wheel RECORD/METADATA/WHEEL
+remain byte-exact. They describe the unsigned input. The new current manifest
+hashes the signed runtime, including the retained original runtime manifest,
+and the current native image. It lives outside the runtime tree, avoiding a
+self-hash cycle. No original RECORD is rewritten to impersonate an upstream
+signature or to make its old hash match transformed native code.
+
+`publisher_policy.py` contains an unconfigured `BUILT_IN_PUBLISHER_POLICY=None`.
+Only an already trusted verifier's explicitly supplied policy, or its separately
+reviewed fixed build configuration, can enable current-payload validation.
+Malformed explicit policies refuse, without fallback. Candidate Team ID claims,
+environment variables, writable settings and adjacent JSON are never trust roots.
+The candidate's own source constant does not independently authenticate a first
+Finder launch: that entry already executes the candidate's Python. Initial
+publisher trust still requires the actual macOS distribution/installation chain.
+
+The current-payload reader authenticates the outer app with a fixed independent
+Apple/Developer ID/team/bundle requirement before trusting the new manifest,
+then checks explicit resource coverage, current bytes and a before/after tree
+fence. These are quiescent-workspace static checks, not hostile-writer isolation.
+Runtime/native cold checks and the existing candidate-health/dependency probe
+accept a trusted caller's explicit policy. They do not discover one. Dependency
+name/version/Requires-Python/Requires-Dist closure and interpreter/module/path
+ownership remain mandatory. Original RECORD hashes are replaced by authenticated
+current-inventory hashes only in that branch. Diagnostics report the current
+runtime digest, while keeping signed consumer certification false.
+
+The installed service also requires a real fixed publisher configuration in its
+already authenticated source. Passing a policy for one build/health call does
+not persist a grant or configure the installed service. With the shipped default,
+all ordinary signed consumer paths refuse before a candidate health process.
+Unsigned compatibility remains unchanged. Signed archive/copy/DMG intake,
+first-install/update/rollback transport and release admission are NOT enabled by
+this increment; their existing unsigned contracts remain in force. Changing the
+fixed configuration alone is not a complete signed installer implementation.
+
+Real Developer ID positive results, hardened-runtime/entitlements compatibility,
+notarization, stapling and quarantined fresh-install/update evidence remain
+unverified. Synthetic post-verifier seams test wiring and refusals only; they do
+not certify Apple acceptance. The production components do not obtain credentials,
+sign code or install for the user. Delivered source advances release sequence to 8.
+
 ## Verification
 
 `tests/test_macos_signing_preparation.py` uses explicitly synthetic static app
@@ -194,11 +256,56 @@ claim Apple acceptance. The hosted-Mac test in `test_app_distribution_v1.py` use
 the actual unsigned builder/runtime/native host, feeds its emitted pins into the
 actual finalizer CLI, and requires rejection by Apple's static verifier with no
 output identity. A further bounded 90-second section reuses that workspace for a
-real ad-hoc-only signing-delta oracle: each nested object is signed explicitly
+real ad-hoc-only signing-delta/current-payload oracle: each nested object is signed explicitly
 with the `-` identity, checked with all-architecture static verification, and then
 sealed by the outer app. The new delta validator and bridge-coverage check consume
 those actual before/after bytes. The full finalizer must still reject the ad-hoc
 app against the independent Developer ID requirement and create no final identity.
+The same child then removes only its own outer envelope and reuses all signed
+nested bytes for the actual v3 current-payload producer. A scoped **test-only**
+publisher seam retains real Apple strict/all-architecture and fixed-identifier
+verification while omitting the Developer ID identity requirement. After another
+outer ad-hoc seal, actual v3 delta/explicit SHA-256 resource-coverage checks and
+the cold current/runtime/native readers must accept those bytes under the same
+limited static-only test seam. Original wheel RECORD bytes are read without
+importing candidate code; current payload hashes must cover real signed wheel
+files whose original RECORD hashes no longer match. The v2 path must still reject
+the extra current resource. These cold checks do not prove interpreter execution,
+complete installed dependency/loaded-module health or consumer installation.
+
+Missing current data cannot fall back to unsigned validation. A changed but valid
+current JSON is first rejected by the actual outer seal; after re-sealing the
+wrong digest, Apple static integrity must pass while the current reader separately
+rejects `signed_payload_mismatch`. Unpatched production v3 finalization and
+publisher reading must still refuse ad-hoc signatures. The producer's actual
+nested `_verify_static` dependency is independently required to reject the same
+ad-hoc object; the whole unpatched prepare entry is **not** rerun in this oracle.
+Separate first/last-refusal unit tests invoke the actual prepare entry and prove
+that every nested publisher check must finish before current-resource creation
+or writing. No v3
+identity is emitted under a seam. The report separates real-byte engineering
+compatibility from `REFUSED_ADHOC` publisher validation and `NOT_CERTIFIED`,
+including observed runtime/wheel counts and phase start/elapsed times. Both cold
+wrappers perform their complete current verification, without a redundant third
+direct read. All current wheel payloads are still checked against actual bytes;
+the original SHA-256 RECORD mismatch count then reuses that verified inventory
+instead of hashing the same payloads again. Other RECORD hash algorithms are not
+miscompared with SHA-256 or included in this narrowly labeled difference count.
+A child process audit
+guard permits only `/usr/bin/codesign`, never the candidate interpreter or host.
+The whole combined section retains the same 90-second parent-enforced deadline;
+there is no second build, repeated nested signing, new job or timeout expansion.
+Until this updated hosted test actually completes, v3 real-byte compatibility is
+**unverified**; adding the oracle or passing synthetic tests is not its result.
+
+The first v3 run, `37248440392` / job `111570937429`, at head `a64412a`, is retained
+as a failure: the child hit its 90-second hard bound (90.05 seconds in the parent).
+Its last record at 84.81 seconds had verified 32 v2/v3 deltas, current resource
+coverage, 3,215 runtime files, and 20 wheels (8 original RECORD mismatches), with
+all tested production publisher gates refusing, no final identity and zero
+candidate executions. The missing-resource/tampering tail did not complete, so
+this is not a successful oracle. Removing only duplicate test work does not
+predict the next run's duration or substitute for completing that same bound.
 The oracle never executes signed code or uploads the signed bundle. It reports
 partial counts/elapsed time on failure, keeps the runtime owner/job budget,
 and does not replace any original test. Only an actual hosted run can establish

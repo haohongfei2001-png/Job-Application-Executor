@@ -36,8 +36,8 @@ STATIC_STEP = (
 )
 
 
-SIGNING_PREPARATION_STEP = "      - name: Validate unsigned signing preparation boundaries\n        if: github.event_name == 'pull_request' && github.event.pull_request.draft && matrix.suite == 'release_distribution'\n        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py\n"
-SIGNING_PREPARATION_MAC_STEP = "      - name: Validate unsigned signing preparation boundaries on hosted Mac\n        if: matrix.suite == 'runtime_distribution'\n        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py\n"
+SIGNING_PREPARATION_STEP = "      - name: Validate unsigned signing preparation boundaries\n        if: github.event_name == 'pull_request' && github.event.pull_request.draft && matrix.suite == 'release_distribution'\n        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py tests/test_signed_current_payload.py\n"
+SIGNING_PREPARATION_MAC_STEP = "      - name: Validate unsigned signing preparation boundaries on hosted Mac\n        if: matrix.suite == 'runtime_distribution'\n        run: python -m pytest -q tests/test_macos_signing_preparation.py tests/test_macos_signing_finalization.py tests/test_macos_signing_delta.py tests/test_signed_current_payload.py\n"
 
 LIFECYCLE_SOAK_STEP = '      - name: Complete partial lifecycle-soak runner contract\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n'
 LIFECYCLE_SOAK_MAC_STEP = "      - name: Complete partial lifecycle-soak runner contract on hosted Mac\n        if: matrix.suite == 'runtime_distribution'\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n"

@@ -25,6 +25,7 @@ if __name__ == '__main__':
 from scripts import prepare_macos_signing as preparation
 
 FINAL_IDENTITY = 'signed-build-identity-v2.json'
+CURRENT_FINAL_IDENTITY = 'signed-build-identity-v3.json'
 SIGNATURE_DIRECTORY = 'Contents/_CodeSignature'
 # Current script-main envelope only; future formats must be explicitly reviewed.
 SIGNATURE_FILES = frozenset(SIGNATURE_DIRECTORY + '/' + name for name in (
@@ -109,7 +110,7 @@ class _UniqueDict(dict):
         super().__setitem__(key, value)
 
 
-def _bridge_coverage(envelope_bytes, bridge_bytes):
+def _bridge_coverage(envelope_bytes, bridge_bytes, *, resource_path=preparation.BRIDGE):
     """Only meaningful alongside unchanged-snapshot outer static verification.
 
     CodeDirectory authenticates CodeResources (special slot -3). Require the
@@ -118,7 +119,7 @@ def _bridge_coverage(envelope_bytes, bridge_bytes):
     """
     try:
         envelope = plistlib.loads(envelope_bytes, dict_type=_UniqueDict)
-        entry = envelope['files2'][preparation.BRIDGE.removeprefix('Contents/')]
+        entry = envelope['files2'][resource_path.removeprefix('Contents/')]
         if (not isinstance(entry, dict) or not {'hash2'} <= set(entry)
                 or set(entry) - {'hash', 'hash2'}
                 or type(entry['hash2']) is not bytes
@@ -128,17 +129,22 @@ def _bridge_coverage(envelope_bytes, bridge_bytes):
             raise ValueError('signing_bridge_not_sealed')
     except (KeyError, TypeError, plistlib.InvalidFileException, RecursionError, ExpatError) as exc:
         raise ValueError('signing_bridge_not_sealed') from exc
-    return {'path': preparation.BRIDGE, 'resource_key': preparation.BRIDGE.removeprefix('Contents/'),
+    return {'path': resource_path, 'resource_key': resource_path.removeprefix('Contents/'),
             'sha256': preparation._digest(bridge_bytes), 'envelope': SIGNATURE_DIRECTORY + '/CodeResources'}
 
 
-def _validate_delta(source, app, original, current, bridge):
+def _validate_delta(source, app, original, current, bridge, *, nested_only=False, current_payload=False):
     from scripts.macos_signing_delta import verify_signature_only_change
     planned = {item['path']: item for item in bridge['signing_order']}
-    expected = set(original) | {preparation.BRIDGE, SIGNATURE_DIRECTORY} | SIGNATURE_FILES
+    expected = set(original) | {preparation.BRIDGE}
+    if not nested_only:
+        expected |= {SIGNATURE_DIRECTORY} | SIGNATURE_FILES
+    if current_payload:
+        from executor.autonomy.signed_payload import RELATIVE_PATH
+        expected.add(RELATIVE_PATH)
     if set(current) != expected:
         raise ValueError('signing_output_layout_unsupported')
-    for name in {SIGNATURE_DIRECTORY} | SIGNATURE_FILES:
+    for name in (() if nested_only else {SIGNATURE_DIRECTORY} | SIGNATURE_FILES):
         item = current[name]
         if (item['type'] != ('directory' if name == SIGNATURE_DIRECTORY else 'file')
                 or item['mode'] != (0o755 if name == SIGNATURE_DIRECTORY else 0o644)):
@@ -165,9 +171,9 @@ def _validate_delta(source, app, original, current, bridge):
     return transitions
 
 
-def finalize_signing_workspace(distribution, workspace, *, expected_receipt_sha256,
+def _process_signing_workspace(distribution, workspace, *, expected_receipt_sha256,
                                expected_prepared_identity_sha256, expected_policy_sha256,
-                               required_publisher_policy):
+                               required_publisher_policy, current_payload_phase=None):
     """Consume build→prepare output and emit an external build-only identity.
 
     All three pins and the policy come from the invoking trusted build, not from
@@ -175,6 +181,10 @@ def finalize_signing_workspace(distribution, workspace, *, expected_receipt_sha2
     """
     from executor.autonomy.app_distribution import (
         RECEIPT_NAME, _read_distribution_receipt, stage_macos_distribution)
+    from executor.autonomy.signed_payload import RELATIVE_PATH, current_payload
+    if current_payload_phase not in (None, 'prepare', 'finalize'):
+        raise ValueError('signing_payload_phase_invalid')
+    output_name = FINAL_IDENTITY if current_payload_phase is None else CURRENT_FINAL_IDENTITY
     policy = preparation._policy(required_publisher_policy)
     for value in (expected_receipt_sha256, expected_prepared_identity_sha256, expected_policy_sha256):
         _pin(value)
@@ -182,7 +192,7 @@ def finalize_signing_workspace(distribution, workspace, *, expected_receipt_sha2
         raise ValueError('signing_publisher_policy_mismatch')
     distribution, workspace = _path(distribution), _path(workspace)
     if (workspace.is_relative_to(distribution) or distribution.is_relative_to(workspace)
-            or (workspace / FINAL_IDENTITY).exists()):
+            or (workspace / output_name).exists()):
         raise ValueError('signing_finalization_workspace_invalid')
     receipt, receipt_bytes = _read_distribution_receipt(distribution / RECEIPT_NAME)
     if preparation._digest(receipt_bytes) != expected_receipt_sha256 or receipt.get('presentation') != 'native':
@@ -221,6 +231,8 @@ def finalize_signing_workspace(distribution, workspace, *, expected_receipt_sha2
             if _read(app / preparation.BRIDGE) != bridge_bytes:
                 raise ValueError('signing_bridge_changed')
             allowed = names | {preparation.BRIDGE, SIGNATURE_DIRECTORY} | SIGNATURE_FILES
+            if current_payload_phase == 'finalize':
+                allowed.add(RELATIVE_PATH)
             observed_names = {'.'} | {p.relative_to(app).as_posix() for p in app.rglob('*')}
             if not observed_names <= allowed:
                 raise ValueError('signing_output_layout_unsupported')
@@ -232,9 +244,12 @@ def finalize_signing_workspace(distribution, workspace, *, expected_receipt_sha2
             deadline = time.monotonic() + 120
             # Verify outer first: the normal unsigned build must reach Apple's
             # real rejection, not an invented signature-presence shortcut.
-            _verify_static(app, policy, policy['bundle_id'], deadline)
-            transitions = _validate_delta(source, app, original, current, bridge)
-            coverage = _bridge_coverage(_read(app / (SIGNATURE_DIRECTORY + '/CodeResources')), bridge_bytes)
+            if current_payload_phase != 'prepare':
+                _verify_static(app, policy, policy['bundle_id'], deadline)
+            transitions = _validate_delta(source, app, original, current, bridge,
+                nested_only=current_payload_phase == 'prepare', current_payload=current_payload_phase == 'finalize')
+            coverage = (None if current_payload_phase == 'prepare' else
+                _bridge_coverage(_read(app / (SIGNATURE_DIRECTORY + '/CodeResources')), bridge_bytes))
             for item in bridge['signing_order']:
                 _verify_static(app / item['path'], policy, item['required_identifier'], deadline)
             def unchanged():
@@ -246,6 +261,38 @@ def finalize_signing_workspace(distribution, workspace, *, expected_receipt_sha2
                         or _read_distribution_receipt(distribution / RECEIPT_NAME) != (receipt, receipt_bytes)):
                     raise ValueError('signing_finalization_input_changed')
             unchanged()
+            if current_payload_phase is not None:
+                payload = current_payload(app, unsigned_receipt_sha256=expected_receipt_sha256)
+                payload_bytes = preparation._encoded(payload)
+                if current_payload_phase == 'prepare':
+                    # This explicit v3 path runs AFTER independently verified
+                    # nested signing and BEFORE the outer seal. v2 is unchanged.
+                    resources_fd = os.open(app / 'Contents/Resources', os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+                    try:
+                        preparation._write_at(resources_fd, Path(RELATIVE_PATH).name, payload_bytes)
+                    finally:
+                        os.close(resources_fd)
+                    expected_current = {**current, RELATIVE_PATH: {
+                        'type': 'file', 'mode': 0o644, 'xattrs': {}, 'bytes': len(payload_bytes),
+                        'sha256': preparation._digest(payload_bytes), 'macho_header': False}}
+                    if (preparation._capture(app, set(expected_current)) != expected_current
+                            or preparation._capture(source, names) != original
+                            or _read(workspace / preparation.IDENTITY) != prepared_bytes
+                            or _read(workspace / preparation.ORIGINAL_RECEIPT) != receipt_bytes
+                            or _read_distribution_receipt(distribution / RECEIPT_NAME) != (receipt, receipt_bytes)
+                            or _read(app / RELATIVE_PATH) != payload_bytes):
+                        raise ValueError('signing_current_payload_changed')
+                    unchanged_roots()
+                    return {'format': 'jae-current-payload-preparation-v1',
+                        'phase': 'NESTED_SIGNED_CURRENT_PAYLOAD',
+                        'current_payload_sha256': preparation._digest(payload_bytes),
+                        'outer_signature': 'REQUIRED_AFTER_THIS_STAGE',
+                        'consumer_admission': 'NOT_ADMITTED', 'certification': 'NOT_CERTIFIED'}
+                if _read(app / RELATIVE_PATH) != payload_bytes:
+                    raise ValueError('signing_current_payload_changed')
+                payload_coverage = _bridge_coverage(
+                    _read(app / (SIGNATURE_DIRECTORY + '/CodeResources')), payload_bytes,
+                    resource_path=RELATIVE_PATH)
             result = {
                 'format': 'jae-build-bundle-identity-v2', 'phase': 'STATIC_SIGNED_BUILD_IDENTITY',
                 'app_name': app.name, 'unsigned_receipt_sha256': expected_receipt_sha256,
@@ -260,15 +307,37 @@ def finalize_signing_workspace(distribution, workspace, *, expected_receipt_sha2
                 'online_revocation_validation': 'NOT_PERFORMED', 'release_authentication': 'NOT_PERFORMED',
                 'consumer_admission': 'NOT_ADMITTED', 'certification': 'NOT_CERTIFIED',
             }
-            preparation._write_at(workspace_fd, FINAL_IDENTITY, preparation._encoded(result))
+            if current_payload_phase == 'finalize':
+                result.update(format='jae-build-bundle-identity-v3',
+                    current_payload_coverage=payload_coverage)
+            preparation._write_at(workspace_fd, output_name, preparation._encoded(result))
             # A failed final recheck can leave retained, mismatching evidence.
             # An external identity is always point-in-time and must be rehashed.
             unchanged()
-            if _read(workspace / FINAL_IDENTITY) != preparation._encoded(result):
+            if _read(workspace / output_name) != preparation._encoded(result):
                 raise ValueError('signing_finalization_input_changed')
             return result
     finally:
         os.close(workspace_fd)
+
+
+def finalize_signing_workspace(distribution, workspace, *, expected_receipt_sha256,
+                               expected_prepared_identity_sha256, expected_policy_sha256,
+                               required_publisher_policy):
+    """Original v2 contract: the additional current-payload resource is refused."""
+    return _process_signing_workspace(distribution, workspace,
+        expected_receipt_sha256=expected_receipt_sha256,
+        expected_prepared_identity_sha256=expected_prepared_identity_sha256,
+        expected_policy_sha256=expected_policy_sha256,
+        required_publisher_policy=required_publisher_policy)
+
+
+def prepare_current_signed_payload(distribution, workspace, **kwargs):
+    return _process_signing_workspace(distribution, workspace, current_payload_phase='prepare', **kwargs)
+
+
+def finalize_current_signed_payload(distribution, workspace, **kwargs):
+    return _process_signing_workspace(distribution, workspace, current_payload_phase='finalize', **kwargs)
 
 
 def main(argv=None):
@@ -280,8 +349,11 @@ def main(argv=None):
     parser.add_argument('--expected-policy-sha256', required=True)
     parser.add_argument('--publisher-team-id', required=True)
     parser.add_argument('--publisher-bundle-id', required=True)
+    parser.add_argument('--current-payload-stage', choices=('prepare', 'finalize'))
     args = parser.parse_args(argv)
-    result = finalize_signing_workspace(args.distribution, args.workspace,
+    entry = {'prepare': prepare_current_signed_payload, 'finalize': finalize_current_signed_payload}.get(
+        args.current_payload_stage, finalize_signing_workspace)
+    result = entry(args.distribution, args.workspace,
         expected_receipt_sha256=args.expected_receipt_sha256,
         expected_prepared_identity_sha256=args.expected_prepared_identity_sha256,
         expected_policy_sha256=args.expected_policy_sha256,

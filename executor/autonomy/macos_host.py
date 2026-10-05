@@ -591,7 +591,8 @@ def _no_alias(path: Path) -> None:
         raise ValueError("native_host_path_invalid")
 
 
-def verify_native_host(directory: str | Path, *, expected_source_sha256: str | None = None) -> bool:
+def verify_native_host(directory: str | Path, *, expected_source_sha256: str | None = None,
+                       required_publisher_policy=None) -> bool:
     expected = (hashlib.sha256(HOST_SOURCE.encode()).hexdigest()
                 if expected_source_sha256 is None else expected_source_sha256)
     if not isinstance(expected, str) or len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
@@ -599,6 +600,14 @@ def verify_native_host(directory: str | Path, *, expected_source_sha256: str | N
     root = Path(directory).absolute()
     executable, receipt = root / "AIApplicationWindow", root / HOST_RECEIPT
     try:
+        from .signed_payload import has_current_payload, read_current_payload
+        if root.name == 'native-host' and root.parent.name == 'Resources' and root.parent.parent.name == 'Contents':
+            app = root.parent.parent.parent
+            if has_current_payload(app):
+                current = read_current_payload(app, required_publisher_policy=required_publisher_policy)
+                return current['native']['source_sha256'] == expected
+        if required_publisher_policy is not None:
+            return False
         _no_alias(root)
         if executable.is_symlink() or receipt.is_symlink() or not executable.is_file() or not receipt.is_file():
             return False
@@ -608,7 +617,7 @@ def verify_native_host(directory: str | Path, *, expected_source_sha256: str | N
                          "executable_sha256": _digest(executable)}
                 and bool(executable.stat().st_mode & stat.S_IXUSR)
                 and {path.name for path in root.iterdir()} == {"AIApplicationWindow", HOST_RECEIPT})
-    except (OSError, UnicodeError, ValueError, TypeError):
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError):
         return False
 
 

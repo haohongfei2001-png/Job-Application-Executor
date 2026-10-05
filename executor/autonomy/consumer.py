@@ -32,7 +32,7 @@ APP_NAME = "AI 投递经理"
 BUNDLE_ID = "com.local.job-application-executor.ai-application-manager"
 # Increase for each subsequently adopted source release. Equal sequence with
 # different bytes is intentionally not an ordinary installer update.
-RELEASE_SEQUENCE = 7
+RELEASE_SEQUENCE = 8
 
 
 def _owned_bundle_file(path: Path) -> bool:
@@ -257,7 +257,7 @@ def _is_native_packaged_launcher(value: str) -> bool:
     return type(value) is str and value in {_native_packaged_launcher_v1(), _native_packaged_launcher_v2(), _native_packaged_launcher()}
 
 
-def _native_bundle_matches(release: Path, directory: Path) -> bool:
+def _native_bundle_matches(release: Path, directory: Path, *, required_publisher_policy=None) -> bool:
     """Bind retained native images to THEIR owned source, including rollback."""
     from .macos_host import verify_native_host
 
@@ -276,8 +276,9 @@ def _native_bundle_matches(release: Path, directory: Path) -> bool:
         body = ast.literal_eval(declarations[0].value)
         if not isinstance(body, str):
             return False
+        options = {} if required_publisher_policy is None else {'required_publisher_policy': required_publisher_policy}
         return verify_native_host(directory,
-            expected_source_sha256=hashlib.sha256(body.encode()).hexdigest())
+            expected_source_sha256=hashlib.sha256(body.encode()).hexdigest(), **options)
     except (OSError, UnicodeError, ValueError, TypeError, SyntaxError):
         return False
 
@@ -409,17 +410,23 @@ def _packaged_bundle_matches(executable: Path, runtime: Path) -> bool:
         return False
 
 
-def _trusted_bundle(app: Path) -> bool:
+def _trusted_bundle(app: Path, *, required_publisher_policy=None) -> bool:
     """Accept only an existing app bundle with our identity and executable."""
     if app.is_symlink() or not app.is_dir():
+        return False
+    from .signed_payload import has_current_payload
+    if required_publisher_policy is not None and not has_current_payload(app):
         return False
     contents = app / "Contents"
     macos = contents / "MacOS"
     resources = contents / "Resources"
     release = resources / "release"
     runtime = resources / "runtime"
+    if has_current_payload(app) and (not release.is_dir() or not runtime.is_dir()):
+        return False
     info_path = contents / "Info.plist"
     executable = macos / "AIApplicationManager"
+    options = {} if required_publisher_policy is None else {'required_publisher_policy': required_publisher_policy}
     if (any(path.is_symlink() for path in (contents, macos, resources, release, runtime))
             or not _owned_bundle_file(info_path)
             or not _owned_bundle_file(executable)):
@@ -432,9 +439,9 @@ def _trusted_bundle(app: Path) -> bool:
             and info.get("CFBundleExecutable") == "AIApplicationManager"
             and bool(executable.stat().st_mode & stat.S_IXUSR)
             and (verify_source_candidate(release)
-                 and (verify_runtime_candidate(runtime, release) if runtime.exists() else True)
+                 and (verify_runtime_candidate(runtime, release, **options) if runtime.exists() else True)
                  and _packaged_bundle_matches(executable, runtime)
-                 and (_native_bundle_matches(release, resources / "native-host")
+                 and (_native_bundle_matches(release, resources / "native-host", **options)
                       if _is_native_packaged_launcher(_owned_bundle_text(executable))
                       else not ((resources / "native-host").exists() or (resources / "native-host").is_symlink()))
              if release.exists() else _legacy_bundle_matches(executable))
@@ -444,7 +451,7 @@ def _trusted_bundle(app: Path) -> bool:
 
 
 
-def _bundle_transaction_identity(app: Path) -> tuple | None:
+def _bundle_transaction_identity(app: Path, *, required_publisher_policy=None) -> tuple | None:
     """Bind verified payloads and the owned bundle inode across transaction waits.
 
     Manifest integrity alone accepts a different, freshly resealed release.
@@ -476,6 +483,9 @@ def _bundle_transaction_identity(app: Path) -> tuple | None:
         if native.exists() or native.is_symlink():
             directories.append(native)
             paths.append(native / "native-host-manifest.json")
+        from .signed_payload import has_current_payload, RELATIVE_PATH
+        if has_current_payload(app):
+            paths.append(app / RELATIVE_PATH)
         if any(path.is_symlink() or not path.is_dir() for path in directories):
             raise ValueError("bundle_directory_invalid")
         evidence = []
@@ -491,7 +501,8 @@ def _bundle_transaction_identity(app: Path) -> tuple | None:
 
     try:
         before = capture()
-        if not _trusted_bundle(app) or capture() != before:
+        options = {} if required_publisher_policy is None else {'required_publisher_policy': required_publisher_policy}
+        if not _trusted_bundle(app, **options) or capture() != before:
             return None
         return before
     except (OSError, UnicodeError, ValueError, TypeError):
@@ -581,13 +592,26 @@ def _legacy_root_has_state(base: Path, root: Path, target: Path | None = None) -
     return False
 
 
-def _candidate_starts(python: Path, release: Path) -> bool:
+def _candidate_starts(python: Path, release: Path, *, required_publisher_policy=None) -> bool:
     """Require the staged service to answer authenticated loopback health."""
     from .release import source_manifest
 
     runtime = python.parent.parent
+    from .signed_payload import app_for_runtime, has_current_payload
+    from .publisher_policy import resolve_policy
+    app = app_for_runtime(runtime, release)
+    if app is not None and has_current_payload(app):
+        try:
+            required_publisher_policy = resolve_policy(required_publisher_policy)
+        except ValueError:
+            return False
+        if not _trusted_bundle(app, required_publisher_policy=required_publisher_policy):
+            return False
+    elif required_publisher_policy is not None:
+        return False
+    options = {} if required_publisher_policy is None else {'required_publisher_policy': required_publisher_policy}
     marker = runtime / STANDALONE_MARKER
-    if (marker.exists() or marker.is_symlink()) and not verify_standalone_runtime(runtime, release):
+    if (marker.exists() or marker.is_symlink()) and not verify_standalone_runtime(runtime, release, **options):
         return False
     expected_digest = source_manifest(release)["source_sha256"]
     script = (
@@ -595,7 +619,10 @@ def _candidate_starts(python: Path, release: Path) -> bool:
         f"root=pathlib.Path({str(release)!r}).resolve();"
         "sys.path.insert(0,str(root));"
         "from executor.autonomy.release import installed_dependencies_match;"
-        "assert installed_dependencies_match(root);"
+        "import json;"
+        "policy=json.loads(sys.argv[3]) if len(sys.argv)>3 else None;"
+        "assert (installed_dependencies_match(root) if policy is None else "
+        "installed_dependencies_match(root,required_publisher_policy=policy));"
         "sys.argv=['executor.autonomy.cli','--runtime',sys.argv[1],"
         "'--port',sys.argv[2],'serve'];"
         "runpy.run_module('executor.autonomy.cli',run_name='__main__')"
@@ -611,7 +638,8 @@ def _candidate_starts(python: Path, release: Path) -> bool:
                 port = reservation.getsockname()[1]
             env = {**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"}
             process = subprocess.Popen(
-                [str(python), "-I", "-B", "-c", script, str(runtime), str(port)],
+                [str(python), "-I", "-B", "-c", script, str(runtime), str(port)]
+                + ([json.dumps(required_publisher_policy, sort_keys=True)] if required_publisher_policy is not None else []),
                 cwd=release,
                 env=env,
                 stdin=subprocess.DEVNULL,
