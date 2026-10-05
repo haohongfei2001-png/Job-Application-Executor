@@ -194,7 +194,8 @@ def test_existing_hosted_jobs_keep_complete_runner_coverage_without_new_allocati
     step = mac.split("      - name: Complete partial lifecycle-soak runner contract on hosted Mac\n", 1)[1].split("      - name:", 1)[0]
     assert "        if: matrix.suite == 'runtime_distribution'\n" in step
     assert "        run: python -m pytest -q tests/test_lifecycle_soak_runner.py\n" in step
-    assert "timeout-minutes: 30" in foundation and "timeout-minutes: 25" in mac
+    assert "timeout-minutes: 30" in foundation
+    assert "timeout-minutes: ${{ matrix.suite == 'native_integration' && 30 || 25 }}" in mac
 
 
 def test_real_preparation_delay_is_not_counted_as_observation(tmp_path):
