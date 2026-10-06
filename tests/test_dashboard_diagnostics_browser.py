@@ -883,7 +883,7 @@ def test_task_workspace_profile_import_pending_guidance_uses_explicit_existing_r
             page.locator("#profile-close").click()
             assert writes.count(base + "/ui/api/tasks") == 1
             page.locator("#newtask button").click()
-            page.wait_for_function("document.querySelectorAll('[data-task-card]').length === 2")
+            expect(page.locator("[data-task-card]")).to_have_count(2)
             assert len(queue.tasks()) == 2 and queue.get(tid) == before
             selected = settings.load_settings()["profile_path"]
             assert next(task for task in queue.tasks() if task["task_id"] != tid)["spec"]["profile_ref"] == selected
