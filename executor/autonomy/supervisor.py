@@ -21,7 +21,7 @@ from .dashboard import DASHBOARD_HTML
 from .commands import CommandEnvelope
 from .diagnostics import collect_diagnostics
 from .loopback_http import LoopbackHTTPServer
-from .manager import ManagerController, safe_task_view
+from .manager import ManagerController, ProfileReconciliationRequired, safe_task_view
 from .queue import TaskQueue, TaskSpec, private_dir
 from .runtime_paths import local_token
 from .release import is_packaged_source, read_release_identity
@@ -52,12 +52,23 @@ class Supervisor:
         self.preparation_sessions = PrivatePreparationSessions(queue,self.valid_ui_session,self.mutation_fenced)
 
     def configure_profile(self, text, expected_version):
-        current = select_profile(text, expected_version)
-        # TaskSpec holds its own immutable profile_ref; only future tasks change.
-        self.manager.settings = current
-        self.worker.settings = current
-        return {"settings_version": settings.settings_version(current),
-                "profile_selected": True, "submit_capability": False}
+        with self._command_lock:
+            current = select_profile(text, expected_version)
+            # Selection is not explicit reconciliation. Preserve any existing
+            # fence and report it without rereading a completed publication.
+            self.manager.settings = current
+            self.worker.settings = current
+            return {"settings_version": settings.settings_version(current),
+                    "profile_selected": True, "submit_capability": False,
+                    "reconciliation_required": bool(getattr(self.manager, "_profile_selection_uncertain", False))}
+
+    def profile_setup_state(self):
+        # Follow the existing mutation -> command lock order. This observation
+        # neither validates private profile values nor changes admission state.
+        with self._mutation_lock:
+            with self._command_lock:
+                return {**profile_setup_state(), "reconciliation_required": bool(
+                    getattr(self.manager, "_profile_selection_uncertain", False))}
 
     def profile_editor_state(self):
         _current, view = profile_editor.editor_state(_allow_missing_resume=True, _allow_damaged_resume=True)
@@ -804,7 +815,7 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                             self._send_json(200, result)
                             return
                     if self.command == "GET" and parsed.path == "/ui/api/profile-setup":
-                        self._send_json(200, profile_setup_state())
+                        self._send_json(200, supervisor.profile_setup_state())
                         return
                     if self.command == "POST" and parsed.path == "/ui/api/profile-setup":
                         if origin != expected_origin:
@@ -900,8 +911,13 @@ def create_server(supervisor, host="127.0.0.1", port=9344):
                             employment_type=data.get("employment_type", ""),
                             selected_candidate_id=data.get("selected_candidate_id", ""),
                         )
-                        result = supervisor.run_mutation(lambda: supervisor.manager.commit_local_form(
-                            request, discovery, selected_candidate_id=data.get("selected_candidate_id", "")))
+                        try:
+                            result = supervisor.run_mutation(lambda: supervisor.manager.commit_local_form(
+                                request, discovery, selected_candidate_id=data.get("selected_candidate_id", "")))
+                        except ProfileReconciliationRequired:
+                            self._send_json(409, {"error": "profile_reconciliation_required",
+                                                 "submit_capability": False})
+                            return
                         response = {"discovery": result.get("discovery")}
                         if "task_id" in result:
                             response.update(task_id=result["task_id"], revision=result["revision"])
