@@ -1684,6 +1684,14 @@ finally:
     before=queue.tasks();typed=answers.load(task['task_id']);key=(state/'task-answers.key').read_bytes()
     profile_before=_installed_missing_resume_recovery(target,state,port,home,environment,profile_before)
     assert queue.tasks()==before and answers.load(task['task_id'])==typed
+    damaged_task=queue.enqueue(TaskSpec(company='Synthetic DMG',role='Retained damaged profile',
+        target_url='https://example.test/dmg-damaged-resume',
+        profile_ref=json.loads(profile_before[0])['profile_path']))
+    queue.pause(damaged_task['task_id'])
+    before=queue.tasks()
+    profile_before=_installed_missing_resume_recovery(target,state,port,home,environment,profile_before,
+                                                     damaged=True)
+    assert queue.tasks()==before and answers.load(task['task_id'])==typed
     assert _installed_profile_onboarding(target,state,port,home,environment,create=False,
         expected_resume=profile_before[2])==profile_before
     # The second complete candidate changes only a synthetic source version.
@@ -1795,8 +1803,8 @@ def _installed_profile_onboarding(target,state,port,home,environment,*,create,ex
         assert stopped.get('ok') is True or stopped.get('reason')=='service_record_missing'
 
 
-def _installed_missing_resume_recovery(target,state,port,home,environment,previous):
-    """Lose only a known synthetic managed leaf; repair through installed UI."""
+def _installed_missing_resume_recovery(target,state,port,home,environment,previous,*,damaged=False):
+    """Change only a known synthetic managed leaf; repair through installed UI."""
     from playwright.sync_api import sync_playwright, expect
     from executor.autonomy import cli
     from executor.autonomy.first_use_recovery import _owned_request
@@ -1806,7 +1814,12 @@ def _installed_missing_resume_recovery(target,state,port,home,environment,previo
     original=json.loads(previous[1]);missing=Path(original['assets']['resume']['path'])
     assert missing.parent==state and missing.read_bytes()==previous[2]
     retained=home/'retained-synthetic-original-resume.pdf'
-    assert not retained.exists();missing.rename(retained)
+    damaged_bytes=b'SYNTHETIC_CHANGED_INSTALLED_RESUME'
+    if damaged:
+        missing.write_bytes(damaged_bytes)
+        old_resume_identity=(missing.stat().st_ino,missing.stat().st_mode)
+    else:
+        assert not retained.exists();missing.rename(retained)
     command=[str(target/'Contents/Resources/runtime/bin/python'),'-I','-B','-c',CLI_ENTRY_SCRIPT,
         str(source),'--runtime',str(state),'--port',str(port),'native-entry','--native-smoke']
     base='http://127.0.0.1:'+str(port)
@@ -1833,7 +1846,8 @@ def _installed_missing_resume_recovery(target,state,port,home,environment,previo
                 page.locator('#profile-setup').click()
                 expect(page.locator('#profile-editor-open')).to_be_enabled()
                 page.locator('#profile-editor-open').click()
-                expect(page.locator('#profile-editor-status')).to_contain_text('简历文件缺失')
+                expect(page.locator('#profile-editor-status')).to_contain_text(
+                    '简历内容已变化' if damaged else '简历文件缺失')
                 expect(page.locator('#profile-editor-resume')).to_be_enabled()
                 expect(page.locator('#profile-editor-save')).to_be_disabled()
                 page.locator('#profile-editor-resume').set_input_files({
@@ -1849,8 +1863,12 @@ def _installed_missing_resume_recovery(target,state,port,home,environment,previo
         assert new_profile.parent==state and new_profile!=old_profile
         new_bytes=new_profile.read_bytes();updated=json.loads(new_bytes)
         assert updated['fields']==original['fields']
-        assert old_profile.read_bytes()==previous[1] and retained.read_bytes()==previous[2]
-        assert not missing.exists()
+        assert old_profile.read_bytes()==previous[1]
+        if damaged:
+            assert missing.read_bytes()==damaged_bytes
+            assert (missing.stat().st_ino,missing.stat().st_mode)==old_resume_identity
+        else:
+            assert retained.read_bytes()==previous[2] and not missing.exists()
         new_resume=Path(updated['assets']['resume']['path'])
         assert new_resume.parent==state and new_resume!=missing and new_resume.read_bytes()==replacement
         assert updated['assets']['resume']['sha256']==hashlib.sha256(replacement).hexdigest()
