@@ -335,7 +335,8 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                     self.assertEqual(protected.count(resume_path), 1)
                     protected = protected.replace(resume_path, "", 1)
                     for image in ("profile-onboarding-start.png", "profile-onboarding-settings.png",
-                                  "profile-missing-resume.png", "profile-damaged-resume.png"):
+                                  "profile-missing-resume.png", "profile-damaged-resume.png",
+                                  "profile-reconciliation.png"):
                         capture_path = f"            ${{{{ runner.temp }}}}/jae-preparation-ui/{image}\n"
                         self.assertEqual(protected.count(capture_path), 1)
                         protected = protected.replace(capture_path, "", 1)

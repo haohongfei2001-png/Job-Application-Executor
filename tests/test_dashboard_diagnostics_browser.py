@@ -812,6 +812,123 @@ def test_task_workspace_profile_setup_actual_file_save_and_complete_authority(pr
             browser.close()
 
 
+def _latch_profile_recovery(settings, supervisor):
+    from pathlib import Path
+    supervisor.configure_profile('{"fields":{"identity.full_name":{"value":"SYNTHETIC_BEFORE_RECOVERY"}}}',
+                                 settings.settings_version(settings.load_settings()))
+    damaged = Path(supervisor.manager.settings["profile_path"])
+    damaged.write_bytes(b"SYNTHETIC_INVALID_PROFILE")
+    with pytest.raises(RuntimeError, match="profile_selection_reconciliation_required"):
+        supervisor.manager._profile_ref()
+    assert supervisor.manager._profile_selection_uncertain is True
+    return damaged
+
+
+def test_task_workspace_profile_import_pending_guidance_uses_explicit_existing_reconcile(profile_setup_service, monkeypatch):
+    import os
+    from pathlib import Path
+    from executor.discovery.core import DiscoveryRequest, DiscoveryResult
+    settings, queue, supervisor, base, tid, calls = profile_setup_service
+    before = queue.get(tid)
+    damaged = _latch_profile_recovery(settings, supervisor)
+    prepared = DiscoveryRequest("Synthetic", "Future", source_url="https://future.test/reconciliation")
+    discovery = DiscoveryResult("UNSUPPORTED", (), None, "synthetic", "no_official_site_contract")
+    monkeypatch.setattr(supervisor.manager, "prepare_local_form", lambda *a, **k: (prepared, discovery))
+    writes, errors = [], []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 600, "height": 850})
+        try:
+            page.on("request", lambda request: writes.append(request.url) if request.method == "POST" else None)
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            page.locator("#profile-setup").click()
+            expect(page.locator("#profile-status")).to_contain_text("仍需明确核对")
+            page.locator("#profile-import summary").click()
+            page.locator("#profile-file").set_input_files({"name": "recovery.json", "mimeType": "application/json",
+                "buffer": b'{"fields":{"identity.full_name":{"value":"SYNTHETIC_RECOVERED"}}}'})
+            page.locator("#profile-save").click()
+            expect(page.locator("#profile-status")).to_contain_text("资料已保存在本机，但仍需明确核对")
+            expect(page.locator("#profile-editor-open")).to_have_text("打开资料并核对")
+            assert writes == [base + "/ui/api/profile-setup"]
+            assert supervisor.manager._profile_selection_uncertain is True and queue.get(tid) == before
+            screenshot = os.environ.get("JAE_UI_SCREENSHOT_DIR")
+            if screenshot:
+                destination = Path(screenshot);destination.mkdir(parents=True, exist_ok=True)
+                page.locator("#profile-dialog").screenshot(path=str(destination / "profile-reconciliation.png"), animations="disabled")
+            page.locator("#profile-close").click()
+            page.locator('#newtask [name="company"]').fill("Synthetic")
+            page.locator('#newtask [name="role"]').fill("Future")
+            page.locator('#newtask [name="target_url"]').fill(prepared.source_url)
+            page.locator("#newtask button").click()
+            expect(page.locator("#profile-reconciliation-note")).to_contain_text("本次没有添加任务")
+            expect(page.locator("#toast")).to_contain_text("资料仍待明确核对")
+            expect(page.locator('#newtask [name="role"]')).to_have_value("Future")
+            assert queue.tasks() == [before] and supervisor.manager._profile_selection_uncertain is True
+            page.locator("button[data-profile-reconciliation]").click()
+            expect(page.locator("#profile-editor-reconcile")).to_be_enabled()
+            expect(page.locator("#profile-editor-save")).to_be_disabled()
+            assert writes == [base + "/ui/api/profile-setup", base + "/ui/api/tasks"]
+            # Opening the editor is read-only. Only this existing explicit
+            # action can reconcile; it must never replay the blocked task.
+            page.locator("#profile-editor-reconcile").click()
+            expect(page.locator("#profile-editor-status")).to_contain_text("已重新读取本机当前记录")
+            assert supervisor.manager._profile_selection_uncertain is False and queue.tasks() == [before]
+            assert writes[-1] == base + "/ui/api/profile-editor/reconcile"
+            page.locator("#profile-editor-close").click()
+            page.locator("#profile-setup").click()
+            expect(page.locator("#profile-status")).to_contain_text("已选择本机资料")
+            expect(page.locator("#profile-status")).not_to_contain_text("仍需明确核对")
+            expect(page.locator("#profile-editor-open")).to_have_text("填写或编辑基本资料与简历")
+            page.locator("#profile-close").click()
+            assert writes.count(base + "/ui/api/tasks") == 1
+            page.locator("#newtask button").click()
+            expect(page.locator("[data-task-card]")).to_have_count(2)
+            assert len(queue.tasks()) == 2 and queue.get(tid) == before
+            selected = settings.load_settings()["profile_path"]
+            assert next(task for task in queue.tasks() if task["task_id"] != tid)["spec"]["profile_ref"] == selected
+            assert damaged.read_bytes() == b"SYNTHETIC_INVALID_PROFILE" and calls == [] and errors == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("failure", ["http", "missing_status"])
+def test_task_workspace_profile_import_readback_failure_is_unconfirmed_without_replay(profile_setup_service, failure):
+    settings, queue, supervisor, base, tid, calls = profile_setup_service
+    _latch_profile_recovery(settings, supervisor)
+    before = queue.get(tid);writes = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.goto(base + "/ui-login?ticket=" + supervisor.issue_ui_ticket())
+            page.locator("#profile-setup").click()
+            expect(page.locator("#profile-file")).to_be_enabled()
+            page.locator("#profile-import summary").click()
+            def intercept(route):
+                if route.request.method == "POST":
+                    writes.append(route.request.url);route.continue_()
+                elif writes:
+                    payload = {"error": "SYNTHETIC_PRIVATE_TRACE"} if failure == "http" else {
+                        "settings_version": settings.settings_version(settings.load_settings()),
+                        "profile_selected": True, "submit_capability": False}
+                    route.fulfill(status=500 if failure == "http" else 200,
+                                  content_type="application/json", body=json.dumps(payload))
+                else: route.continue_()
+            page.route("**/ui/api/profile-setup", intercept)
+            page.locator("#profile-file").set_input_files({"name": "new.json", "mimeType": "application/json",
+                "buffer": b'{"fields":{"identity.full_name":{"value":"SYNTHETIC_IMPORTED"}}}'})
+            page.locator("#profile-save").click()
+            expect(page.locator("#profile-status")).to_contain_text("资料保存未确认")
+            expect(page.locator("#profile-save")).to_be_disabled()
+            expect(page.locator("#profile-editor-open")).to_be_disabled()
+            assert "SYNTHETIC_PRIVATE_TRACE" not in page.locator("#profile-dialog").inner_text()
+            assert len(writes) == 1 and supervisor.manager._profile_selection_uncertain is True
+            assert queue.get(tid) == before and calls == []
+        finally:
+            browser.close()
+
+
 @pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
 def test_task_workspace_profile_setup_stale_file_read_never_sends_or_revives_private_selection(
     profile_setup_service, interruption
@@ -2051,7 +2168,8 @@ def profile_editor_ui():
     import copy
     observed = {"payload": _editor_payload(), "status": 200, "requests": [], "pending": [],
                 "hold": False, "expired": False, "save_status": 200, "save_payload": None,
-                "reconcile_status": 200, "errors": [], "external": [], "profile_selected": True, "readiness_checks": {}}
+                "reconcile_status": 200, "errors": [], "external": [], "profile_selected": True,
+                "reconciliation_required": False, "readiness_checks": {}}
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 600, "height": 800})
@@ -2071,7 +2189,8 @@ def profile_editor_ui():
                 route.fulfill(status=401, content_type="application/json", body='{}')
                 return
             if path == "/ui/api/profile-setup":
-                payload = {"settings_version": "a" * 64, "profile_selected": observed["profile_selected"], "submit_capability": False}
+                payload = {"settings_version": "a" * 64, "profile_selected": observed["profile_selected"],
+                           "submit_capability": False, "reconciliation_required": observed["reconciliation_required"]}
             elif path == "/ui/api/profile-editor":
                 if request.method == "POST":
                     payload = observed["save_payload"] or {**copy.deepcopy(observed["payload"]), "save_status": "saved"}
@@ -2107,6 +2226,87 @@ def _open_editor(page):
     expect(page.locator("#profile-editor-open")).to_be_enabled()
     page.locator("#profile-editor-open").click()
     expect(page.locator("#profile-editor-dialog")).to_be_visible()
+
+
+@pytest.mark.parametrize("pending", [None, 0, "false"])
+def test_task_workspace_profile_setup_unknown_reconciliation_status_is_not_ready(profile_editor_ui, pending):
+    page, observed = profile_editor_ui
+    observed["reconciliation_required"] = pending
+    page.locator("#profile-setup").click()
+    expect(page.locator("#profile-status")).to_contain_text("无法读取设置")
+    expect(page.locator("#profile-editor-open")).to_be_disabled()
+    expect(page.locator("#profile-file")).to_be_disabled()
+    assert _editor_posts(observed) == []
+
+
+@pytest.mark.parametrize("interruption", ["close", "escape", "expired_session"])
+def test_task_workspace_pending_profile_setup_late_reply_never_reopens_editor(profile_editor_ui, interruption):
+    page, observed = profile_editor_ui
+    pending = []
+    page.route("**/ui/api/profile-setup", lambda route: pending.append(route))
+    page.locator("#profile-setup").click()
+    expect(page.locator("#profile-dialog")).to_be_visible()
+    if interruption == "close": page.locator("#profile-close").click()
+    elif interruption == "escape": page.locator("#profile-dialog").press("Escape")
+    else:
+        observed["expired"] = True;page.evaluate("readiness()")
+        expect(page.locator("#session-expired")).to_be_visible()
+    with page.expect_response("**/ui/api/profile-setup"):
+        pending[0].fulfill(content_type="application/json", body=json.dumps({
+            "settings_version": "a" * 64, "profile_selected": True,
+            "submit_capability": False, "reconciliation_required": True}))
+    expect(page.locator("#profile-dialog")).not_to_be_visible()
+    expect(page.locator("#profile-editor-dialog")).not_to_be_visible()
+    assert page.locator("#profile-status").inner_text() == ""
+    assert _editor_posts(observed) == []
+
+
+@pytest.mark.parametrize("status,body", [
+    (409, {"error": "state_conflict"}),
+    (500, {"error": "profile_reconciliation_required", "submit_capability": False}),
+    (409, {"error": "profile_reconciliation_required", "submit_capability": False,
+           "message": "SYNTHETIC_PRIVATE_ERROR"}),
+])
+def test_task_workspace_unrelated_task_conflict_does_not_claim_profile_cause(profile_editor_ui, status, body):
+    page, observed = profile_editor_ui
+    page.route("**/ui/api/tasks", lambda route: route.fulfill(
+        status=status, content_type="application/json", body=json.dumps(body)))
+    page.locator('#newtask [name="company"]').fill("Synthetic")
+    page.locator('#newtask [name="role"]').fill("Retained role")
+    page.locator("#newtask button").click()
+    expect(page.locator("#toast")).to_contain_text("请核对公司、岗位和官方链接")
+    expect(page.locator("button[data-profile-reconciliation]")).not_to_be_visible()
+    assert "SYNTHETIC_PRIVATE_ERROR" not in page.locator("body").inner_text()
+
+
+@pytest.mark.parametrize("candidate", [False, True])
+def test_task_workspace_profile_blocked_task_guidance_only_opens_existing_editor(profile_editor_ui, candidate):
+    page, observed = profile_editor_ui
+    observed["reconciliation_required"] = True
+    observed["payload"]["admission_status"] = "reconciliation_required"
+    posts = []
+    def blocked(route):
+        posts.append(route.request.post_data_buffer)
+        route.fulfill(status=409, content_type="application/json",
+                      body='{"error":"profile_reconciliation_required","submit_capability":false}')
+    page.route("**/ui/api/tasks", blocked)
+    page.locator('#newtask [name="company"]').fill("Synthetic")
+    page.locator('#newtask [name="role"]').fill("Retained role")
+    if candidate:
+        page.evaluate("""showDiscovery({discovery:{status:'AMBIGUOUS',candidates:[{
+          candidate_id:'synthetic-choice',title:'Synthetic role',location:'Synthetic city'}]}},
+          {company:'Synthetic',role:'Retained role'})""")
+        page.locator('button[data-candidate="synthetic-choice"]').click()
+    else:
+        page.locator("#newtask button").click()
+    expect(page.locator("#profile-reconciliation-note")).to_be_visible()
+    expect(page.locator('#newtask [name="role"]')).to_have_value("Retained role")
+    page.locator("button[data-profile-reconciliation]").click()
+    expect(page.locator("#profile-editor-reconcile")).to_be_enabled()
+    assert len(posts) == 1 and _editor_posts(observed) == []
+    page.locator("#profile-editor-close").click()
+    assert _editor_posts(observed) == [] and len(posts) == 1
+    expect(page.locator("#profile-editor-dialog")).not_to_be_visible()
 
 
 def _editor_posts(observed):
@@ -2389,7 +2589,8 @@ def test_task_workspace_profile_onboarding_late_setup_reply_never_opens_private_
         expect(page.locator("#session-expired")).to_be_visible()
     with page.expect_response("**/ui/api/profile-setup"):
         pending[0].fulfill(content_type="application/json", body=json.dumps({
-            "settings_version": "a" * 64, "profile_selected": False, "submit_capability": False}))
+            "settings_version": "a" * 64, "profile_selected": False, "submit_capability": False,
+            "reconciliation_required": False}))
     page.wait_for_function("!document.querySelector('#profile-dialog').open")
     assert not page.locator("#profile-editor-dialog").is_visible()
     assert not any(path == "/ui/api/profile-editor" for _, path, _ in observed["requests"])

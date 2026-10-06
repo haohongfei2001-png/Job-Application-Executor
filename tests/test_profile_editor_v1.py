@@ -1515,3 +1515,84 @@ def test_damaged_resume_http_requires_local_session_exact_version_and_no_replay(
     assert status == 200 and result["admission_status"] == "ready"
     assert request("POST", body=body, headers=dict(envelope))[0] == 409
     assert (snapshot(profile), snapshot(resume)) == before
+
+
+def test_json_recovery_reports_pending_reconciliation_without_clearing_admission(api, monkeypatch):
+    from executor.discovery.core import DiscoveryRequest, DiscoveryResult
+    service, request = api
+    first = service.configure_profile(json.dumps({"fields": {"identity.full_name": {"value": "SYNTHETIC_OLD"}}}),
+                                      settings.settings_version(settings.load_settings()))
+    old = Path(service.manager.settings["profile_path"])
+    existing = service.queue.enqueue(TaskSpec(company="Synthetic", role="Existing",
+        target_url="https://existing.test/profile-recovery", profile_ref=str(old), live_authorized=False))
+    old.write_bytes(b"SYNTHETIC_INVALID_PROFILE")
+    with pytest.raises(RuntimeError, match="profile_selection_reconciliation_required"):
+        service.manager._profile_ref()
+    before_tasks, before_events = service.queue.tasks(), service.queue.recent_events(100)
+    before_old = snapshot(old)
+    status, state, headers = request(path="/ui/api/profile-setup")
+    assert status == 200 and headers["Cache-Control"] == "no-store"
+    assert state["reconciliation_required"] is True
+    text = json.dumps({"fields": {"identity.full_name": {"value": "SYNTHETIC_NEW"}}})
+    envelope = json.dumps({"profile_json": text, "expected_settings_version": state["settings_version"]}).encode()
+    status, result, _ = request("POST", "/ui/api/profile-setup", envelope, {"Content-Type": "application/json"})
+    assert status == 200 and result["profile_selected"] is True
+    assert result["reconciliation_required"] is True and service.manager._profile_selection_uncertain
+    status, observed, _ = request(path="/ui/api/profile-setup")
+    assert status == 200 and observed == result
+    for secret in (str(old), "SYNTHETIC_OLD", "SYNTHETIC_NEW"):
+        assert secret not in json.dumps(observed)
+    selected = service.manager.settings["profile_path"]
+    assert selected != str(old) and snapshot(old) == before_old
+    # Neither a successful import nor its metadata readback clears the fence.
+    prepared = DiscoveryRequest("Synthetic", "Future", source_url="https://future.test/profile-recovery")
+    discovery = DiscoveryResult("UNSUPPORTED", (), None, "synthetic", "no_official_site_contract")
+    monkeypatch.setattr(service.manager, "prepare_local_form", lambda *a, **k: (prepared, discovery))
+    task_request = json.dumps({"company": "Synthetic", "role": "Future",
+                              "target_url": prepared.source_url}).encode()
+    status, blocked, _ = request("POST", "/ui/api/tasks", task_request, {"Content-Type": "application/json"})
+    assert (status, blocked) == (409, {"error": "profile_reconciliation_required", "submit_capability": False})
+    assert service.queue.tasks() == before_tasks and service.queue.recent_events(100) == before_events
+    assert request(path="/ui/api/profile-setup", authenticated=False)[0] == 401
+    status, reconciled, _ = request("POST", "/ui/api/profile-editor/reconcile", b"{}", {"Content-Type": "application/json"})
+    assert status == 200 and reconciled["admission_status"] == "ready"
+    assert request(path="/ui/api/profile-setup")[1]["reconciliation_required"] is False
+    assert service.queue.tasks() == before_tasks and service.queue.recent_events(100) == before_events
+    status, created, _ = request("POST", "/ui/api/tasks", task_request, {"Content-Type": "application/json"})
+    assert status == 200 and service.queue.get(created["task_id"])["spec"]["profile_ref"] == selected
+    assert service.queue.get(existing["task_id"]) == existing and snapshot(old) == before_old
+
+
+def test_profile_setup_observation_does_not_read_or_validate_profile_values(api, monkeypatch):
+    service, request = api
+    for pending in (True, False):
+        service.manager._profile_selection_uncertain = pending
+        monkeypatch.setattr(service.manager, "_profile_ref", lambda: pytest.fail("setup read changed admission"))
+        monkeypatch.setattr(editor, "editor_state", lambda **k: pytest.fail("setup read exposed profile values"))
+        status, observed, _ = request(path="/ui/api/profile-setup")
+        assert status == 200 and observed["reconciliation_required"] is pending
+        assert service.manager._profile_selection_uncertain is pending
+
+
+def test_profile_setup_read_failure_retains_fence_and_sanitizes_response(api, monkeypatch):
+    import executor.autonomy.supervisor as supervisor_module
+    service, request = api
+    service.manager._profile_selection_uncertain = True
+    monkeypatch.setattr(supervisor_module, "profile_setup_state",
+        lambda: (_ for _ in ()).throw(OSError("SYNTHETIC_PRIVATE_SETTINGS_PATH")))
+    status, result, _ = request(path="/ui/api/profile-setup")
+    assert (status, result) == (500, {"error": "internal_error"})
+    assert service.manager._profile_selection_uncertain is True
+
+
+def test_unrelated_runtime_conflict_cannot_claim_profile_reconciliation(api, monkeypatch):
+    from executor.discovery.core import DiscoveryRequest, DiscoveryResult
+    service, request = api
+    prepared = DiscoveryRequest("Synthetic", "Future", source_url="https://future.test/profile-recovery")
+    discovery = DiscoveryResult("UNSUPPORTED", (), None, "synthetic", "no_official_site_contract")
+    monkeypatch.setattr(service.manager, "prepare_local_form", lambda *a, **k: (prepared, discovery))
+    monkeypatch.setattr(service.manager, "commit_local_form",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("profile_selection_reconciliation_required")))
+    status, result, _ = request("POST", "/ui/api/tasks", b'{"company":"Synthetic","role":"Future"}',
+                                {"Content-Type": "application/json"})
+    assert (status, result) == (409, {"error": "state_conflict"})

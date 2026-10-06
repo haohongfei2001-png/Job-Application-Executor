@@ -22,6 +22,12 @@ from . import profile_editor
 from .queue import TaskQueue, TaskSpec
 
 
+class ProfileReconciliationRequired(RuntimeError):
+    """Finite consumer guidance; the existing admission fence stays in place."""
+    def __init__(self):
+        super().__init__("profile_selection_reconciliation_required")
+
+
 class ManagerAction(StrEnum):
     REPORT = "REPORT"
     RESUME = "RESUME"
@@ -483,7 +489,7 @@ class ManagerController:
 
     def _profile_ref(self) -> str:
         if getattr(self, "_profile_selection_uncertain", False):
-            raise RuntimeError("profile_selection_reconciliation_required")
+            raise ProfileReconciliationRequired()
         value = self.settings.get("profile_path")
         if not isinstance(value, str) or not value.strip():
             raise ValueError("profile_path is not configured")
@@ -496,7 +502,7 @@ class ManagerController:
                     raise profile_editor.EditorConflict()
             except Exception:
                 self._profile_selection_uncertain = True
-                raise RuntimeError("profile_selection_reconciliation_required") from None
+                raise ProfileReconciliationRequired() from None
         return value
 
     def prepare_local_form(self, company: str, role: str, target_url: str = "", *,

@@ -173,6 +173,7 @@ jobs:
             ${{ runner.temp }}/jae-preparation-ui/profile-onboarding-settings.png
             ${{ runner.temp }}/jae-preparation-ui/profile-missing-resume.png
             ${{ runner.temp }}/jae-preparation-ui/profile-damaged-resume.png
+            ${{ runner.temp }}/jae-preparation-ui/profile-reconciliation.png
           if-no-files-found: error
           retention-days: 3
 

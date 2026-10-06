@@ -257,18 +257,27 @@ const readinessBtn=document.getElementById('readiness-details'),readinessDialog=
 const profileBtn=document.getElementById('profile-setup'),profileDialog=document.getElementById('profile-dialog'),
   profileFile=document.getElementById('profile-file'),profileStatus=document.getElementById('profile-status'),
   profileSave=document.getElementById('profile-save'),profileClose=document.getElementById('profile-close');
-let profileEpoch=0,profileVersion=null,profileBusy=false;
+let profileEpoch=0,profileVersion=null,profileBusy=false,profileReconciliation=null;
 function validProfileState(data){
   return data&&/^[0-9a-f]{64}$/.test(data.settings_version)
-    &&typeof data.profile_selected==='boolean'&&data.submit_capability===false;
+    &&typeof data.profile_selected==='boolean'&&data.submit_capability===false
+    &&typeof data.reconciliation_required==='boolean';
 }
 function profileControls(){
   profileFile.disabled=uiSessionExpired||profileBusy||!profileVersion;
   profileSave.disabled=profileFile.disabled||profileFile.files.length!==1;
   document.getElementById('profile-editor-open').disabled=profileFile.disabled||profileFile.files.length!==0;
+  document.getElementById('profile-editor-open').textContent=profileReconciliation===true?
+    '打开资料并核对':'填写或编辑基本资料与简历';
+}
+function profileSetupMessage(data,saved=false){
+  if(data.reconciliation_required)return (saved?'资料已保存在本机，但仍需明确核对后才能添加新任务。':'当前资料仍需明确核对后才能添加新任务。')+
+    '点击上方“打开资料并核对”，再选择“重新读取并核对”；不会自动重试任务。';
+  return saved?'资料已保存在本机，已选为以后新任务的资料；添加任务时仍会核对，已有任务保持原资料。':
+    data.profile_selected?'已选择本机资料。可打开编辑器核对基本资料与简历；已选择不代表完整或正确。':'尚未保存个人资料。点击上方按钮填写并明确保存，无需准备资料文件。';
 }
 function clearProfileSelection(){
-  profileEpoch++;profileVersion=null;profileBusy=false;profileFile.value='';
+  profileEpoch++;profileVersion=null;profileBusy=false;profileReconciliation=null;profileFile.value='';
   profileStatus.textContent='';document.getElementById('profile-import').open=false;profileControls();
 }
 async function openProfileSetup({editor=false}={}){
@@ -281,8 +290,8 @@ async function openProfileSetup({editor=false}={}){
     const data=await response.json();
     if(uiSessionExpired||epoch!==profileEpoch||!profileDialog.open)return;
     if(!response.ok||!validProfileState(data))throw new Error();
-    profileVersion=data.settings_version;
-    profileStatus.textContent=data.profile_selected?'已选择本机资料。可打开编辑器核对基本资料与简历；已选择不代表完整或正确。':'尚未保存个人资料。点击上方按钮填写并明确保存，无需准备资料文件。';
+    profileVersion=data.settings_version;profileReconciliation=data.reconciliation_required;
+    profileStatus.textContent=profileSetupMessage(data);
     profileControls();
     if(editor)await openEditor();
   }catch(_){
@@ -324,12 +333,12 @@ profileSave.onclick=async()=>{
     if(uiSessionExpired||epoch!==profileEpoch||!profileDialog.open)return;
     if(!readback.ok||!validProfileState(observed)||!observed.profile_selected
       ||observed.settings_version!==data.settings_version)throw new Error();
-    profileVersion=observed.settings_version;profileFile.value='';
-    profileStatus.textContent='资料已保存在本机，之后添加的任务将使用这份资料。已有任务保持原资料。';
+    profileVersion=observed.settings_version;profileFile.value='';profileReconciliation=observed.reconciliation_required;
+    profileStatus.textContent=profileSetupMessage(observed,true);
     void readiness();
   }catch(_){
     if(!uiSessionExpired&&epoch===profileEpoch&&profileDialog.open){
-      profileVersion=null;profileFile.value='';
+      profileVersion=null;profileReconciliation=null;profileFile.value='';
       profileStatus.textContent='资料保存未确认。请关闭后重新打开并检查文件与设置；不会自动重试。';
     }
   }finally{if(epoch===profileEpoch){profileBusy=false;profileControls();}}
@@ -1393,12 +1402,27 @@ newTaskForm.addEventListener('submit',async event=>{
   try{
     const r=await uiRequest('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
       credentials:'same-origin',body:JSON.stringify(data)});
+    const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
+    if(showProfileAdmissionGuidance(r,result))return;
     if(!r.ok)throw new Error();
-    const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');showDiscovery(result,data);
+    showDiscovery(result,data);
     if(result.task_id){if(result.task_binding!=='existing_different')newTaskForm.reset();await state()}
   }catch(e){notify('暂时无法安全查找岗位；请核对公司、岗位和官方链接。')}
   finally{button.disabled=uiSessionExpired}
 });
+function showProfileAdmissionGuidance(response,result){
+  if(uiSessionExpired||response.status!==409||!result||typeof result!=='object'||Array.isArray(result)
+    ||Object.keys(result).length!==2||result.error!=='profile_reconciliation_required'
+    ||result.submit_capability!==false)return false;
+  pendingDiscovery=null;candidatesEl.replaceChildren();
+  const note=document.createElement('p'),button=document.createElement('button');
+  note.className='candidate-note';note.id='profile-reconciliation-note';
+  note.textContent='本次没有添加任务：资料仍待明确核对。打开资料后选择“重新读取并核对”，再自行添加任务；公司、岗位和链接仍保留。';
+  button.type='button';button.dataset.profileReconciliation='true';button.textContent='打开资料并核对';
+  button.setAttribute('aria-describedby',note.id);candidatesEl.append(note,button);
+  notify('资料仍待明确核对，本次没有添加任务，也不会自动重试。');
+  return true;
+}
 function showDiscovery(result,request){
   const discovery=result.discovery||{};
   if(result.task_id){
@@ -1431,10 +1455,16 @@ candidatesEl.addEventListener('click',async event=>{
   try{
     const data={...pendingDiscovery.request,selected_candidate_id:button.dataset.candidate};
     const r=await uiRequest('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(data)});
+    const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
+    if(showProfileAdmissionGuidance(r,result))return;
     if(!r.ok)throw new Error();
-    const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');showDiscovery(result,pendingDiscovery?.request||data);
+    showDiscovery(result,pendingDiscovery?.request||data);
     if(result.task_id){if(result.task_binding!=='existing_different')newTaskForm.reset();await state()}
   }catch(e){notify('候选已变化或暂时无法核验，请重新查找。');button.disabled=uiSessionExpired}
+});
+candidatesEl.addEventListener('click',event=>{
+  if(event.target.closest('button[data-profile-reconciliation]')&&!uiSessionExpired)
+    void openProfileSetup({editor:true});
 });
 candidatesEl.addEventListener('click',event=>{
   const button=event.target.closest('button[data-existing-task]');
