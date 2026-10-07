@@ -54,6 +54,11 @@ PREPARATION_MAC_STEP = "      - name: Anonymous preparation early Mac oracle\n  
 PUBLIC_PROBE_STEP = '      - name: Observe public Qiyunfang preflight without applicant data\n        timeout-minutes: 2\n        run: python scripts/probe_qiyunfang_preflight.py --output "$RUNNER_TEMP/jae-qiyunfang-public-preflight.json"\n'
 PUBLIC_PROBE_ARTIFACT = '      - name: Retain value-free public preflight diagnostic\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: jae-qiyunfang-public-preflight-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/jae-qiyunfang-public-preflight.json\n          if-no-files-found: ignore\n          retention-days: 3\n'
 
+# Cohort launch/wait/retention are frozen independently. Only these exact
+# additions and the exact Python patch pin normalize to the original gate hash.
+COHORT_STEPS = '      - name: Prepare independent exact-source owners\n        id: cohort\n        run: python scripts/ci_full_suite_cohort.py prepare\n      - name: Full round-closure consumer owner\n        id: consumer\n        background: true\n        run: python scripts/ci_full_suite_cohort.py owner consumer\n      - name: Full round-closure browser_contract owner\n        id: browser_contract\n        background: true\n        run: python scripts/ci_full_suite_cohort.py owner browser_contract\n      - name: Full round-closure remainder owner\n        id: remainder\n        background: true\n        run: python scripts/ci_full_suite_cohort.py owner remainder\n      - name: Wait for every full-file owner\n        wait: [consumer, browser_contract, remainder]\n      - name: Require successful owners and retain exact receipts\n        if: always() && steps.cohort.outcome == \'success\'\n        env:\n          JAE_FULL_SUITE_OWNER_RESULTS: >-\n            {"consumer":"${{ steps.consumer.outcome }}","browser_contract":"${{ steps.browser_contract.outcome }}","remainder":"${{ steps.remainder.outcome }}"}\n        run: python scripts/ci_full_suite_cohort.py verify\n'
+COHORT_ARTIFACT = '      - name: Retain raw cohort receipts and resource audit\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: jae-full-suite-cohort-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/jae-full-suite-cohort/audit/\n          if-no-files-found: error\n          retention-days: 3\n'
+
 MAC_RUNTIME_ORIGINAL = "          - suite: runtime_distribution\n            tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py tests/test_app_distribution_v1.py\n"
 MAC_RUNTIME_SPLIT = "          - suite: runtime_candidate\n            tests: tests/test_release_candidate_v1.py tests/test_standalone_runtime_v1.py\n          - suite: runtime_distribution\n            tests: tests/test_app_distribution_v1.py\n"
 MAC_WHOLE_FILES = {
@@ -342,18 +347,19 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                         protected = protected.replace(capture_path, "", 1)
                 if name == "full_suite":
                     protected = body[body.index("      - uses: actions/setup-python@v5"):]
-                    # Normalize ONLY the exact mandatory allocator addition;
-                    # original dependencies, environment and compile gate retain
-                    # the pre-sharding full-suite byte hash above.
+                    # Retain the original dependency/standalone/compile hash.
+                    # Exact new owner topology is frozen above and checked below.
                     old = "      - name: Full round-closure test suite\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -v\n"
-                    new = "      - name: Full round-closure test suite\n        id: full_suite\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n          JAE_FULL_SUITE_SHARD: ${{ matrix.shard }}\n          JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}\n          JAE_FULL_SUITE_RECEIPT: ${{ runner.temp }}/jae-full-suite-${{ matrix.shard }}.json\n        run: python -m pytest -v -p scripts.ci_full_suite\n"
-                    self.assertEqual(protected.count(new), 1)
-                    protected = protected.replace(new, old, 1)
+                    self.assertEqual(protected.count(COHORT_STEPS), 1)
+                    self.assertEqual(protected.count(COHORT_ARTIFACT), 1)
+                    self.assertEqual(protected.count("          python-version: '3.12.14'\n"), 1)
+                    protected = protected.replace(COHORT_STEPS, old, 1).replace(COHORT_ARTIFACT, "", 1)
+                    protected = protected.replace("          python-version: '3.12.14'\n", "          python-version: '3.12'\n", 1)
                 protected = protected.rstrip() + "\n"
                 self.assertEqual(hashlib.sha256(protected.encode()).hexdigest(), digest)
         self.assertIn("        suite: [consumer_transactions, recovery_transactions, release_distribution]\n", JOBS["packaged_candidate"])
         self.assertEqual(JOBS["macos_consumer_release"].count("          - suite:"), 5)
-        self.assertEqual(JOBS["full_suite"].count("run: python -m pytest -v -p scripts.ci_full_suite\n"), 1)
+        self.assertEqual(JOBS["full_suite"].count("run: python scripts/ci_full_suite_cohort.py owner "), 3)
 
     def test_mac_split_preserves_every_original_whole_file_exactly_once(self):
         body = JOBS['macos_consumer_release']
@@ -404,18 +410,39 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                 env={'PATH': os.environ['PATH']}, timeout=10)
             self.assertNotEqual(missing.returncode, 0)
 
-    def test_three_serial_owners_and_fail_closed_aggregate_preserve_existing_check(self):
+    def test_same_host_parallel_owners_and_fail_closed_aggregate_preserve_existing_check(self):
         shards, gate = JOBS["full_suite"], JOBS["test"]
-        self.assertIn("      fail-fast: false\n      max-parallel: 3\n      matrix:\n        shard: [consumer, browser_contract, remainder]\n", shards)
+        self.assertNotIn("strategy:", shards)
+        self.assertNotIn("matrix.", shards)
+        self.assertIn("    runs-on: ubuntu-latest\n    timeout-minutes: 30\n", shards)
+        self.assertEqual(shards.count("      - uses: actions/setup-python@v5\n"), 1)
+        self.assertIn("          python-version: '3.12.14'\n", shards)
+        self.assertIn("      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/jae-playwright-browsers\n", shards)
+        self.assertIn("      JAE_FULL_SUITE_COHORT: ${{ runner.temp }}/jae-full-suite-cohort\n", shards)
+        self.assertIn("      JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}\n", shards)
+        self.assertEqual(shards.count(COHORT_STEPS), 1)
+        self.assertEqual(shards.count(COHORT_ARTIFACT), 1)
+        self.assertEqual(shards.count("background: true"), 3)
+        self.assertEqual(shards.count("wait: [consumer, browser_contract, remainder]"), 1)
+        self.assertNotIn("continue-on-error", shards)
+        self.assertNotIn("cancel:", shards)
+        self.assertLess(shards.index("ci_full_suite_cohort.py prepare"), shards.index("background: true"))
+        self.assertLess(shards.index("wait: ["), shards.index("ci_full_suite_cohort.py verify"))
+        self.assertLess(shards.index("ci_full_suite_cohort.py verify"), shards.index("Compile Python sources"))
+        self.assertIn("        if: always() && steps.cohort.outcome == 'success'\n        env:\n          JAE_FULL_SUITE_OWNER_RESULTS:", COHORT_STEPS)
+        self.assertIn("        id: cohort\n        run: python scripts/ci_full_suite_cohort.py prepare\n", COHORT_STEPS)
+        self.assertIn("        if: always()\n        uses: actions/upload-artifact@v4", COHORT_ARTIFACT)
+        self.assertIn("          if-no-files-found: error\n          retention-days: 3\n", COHORT_ARTIFACT)
         self.assertNotIn("needs:", shards)
-        self.assertNotIn("upload-artifact", shards)
         self.assertNotIn("upload-artifact", gate)
         self.assertNotIn("matrix:", gate)
         self.assertIn("    needs: [full_suite, signed_dmg_acceptance, macos_consumer_gate]\n", gate)
         self.assertEqual(job_condition("test"), "always() && (" + job_condition("full_suite") + ")")
         self.assertIn("closure_head: ${{ steps.full_aggregate.outputs.sha }}", gate)
         for owner in ("consumer", "browser_contract", "remainder"):
-            self.assertIn("      receipt_" + owner + ": ${{ steps.full_suite.outputs.receipt_" + owner + " }}\n", shards)
+            self.assertIn("      receipt_" + owner + ": ${{ steps." + owner + ".outputs.receipt_" + owner + " }}\n", shards)
+            self.assertIn("        id: " + owner + "\n        background: true\n        run: python scripts/ci_full_suite_cohort.py owner " + owner + "\n", shards)
+            self.assertIn('"' + owner + '":"${{ steps.' + owner + '.outcome }}"', shards)
         self.assertIn("JAE_FULL_SUITE_RECEIPTS: ${{ toJSON(needs.full_suite.outputs) }}", gate)
         self.assertIn("JAE_FULL_SUITE_RESULT: ${{ needs.full_suite.result }}", gate)
         self.assertIn("JAE_EVENT_ACTION: ${{ github.event.action }}", gate)

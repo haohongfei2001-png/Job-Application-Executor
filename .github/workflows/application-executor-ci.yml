@@ -461,15 +461,16 @@ jobs:
     if: (github.event.action != 'labeled' && (github.event_name == 'push' || github.event.pull_request.draft == false)) || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.pull_request.head.repo.full_name == github.repository && github.event.label.name == format('eng-{0}', github.event.pull_request.head.sha))
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      max-parallel: 3
-      matrix:
-        shard: [consumer, browser_contract, remainder]
+    # One host/runtime cohort prevents image rollout drift between full-file owners.
+    # Native background steps preserve separate logs without extending the 30m budget.
+    env:
+      JAE_FULL_SUITE_COHORT: ${{ runner.temp }}/jae-full-suite-cohort
+      JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/jae-playwright-browsers
     outputs:
-      receipt_consumer: ${{ steps.full_suite.outputs.receipt_consumer }}
-      receipt_browser_contract: ${{ steps.full_suite.outputs.receipt_browser_contract }}
-      receipt_remainder: ${{ steps.full_suite.outputs.receipt_remainder }}
+      receipt_consumer: ${{ steps.consumer.outputs.receipt_consumer }}
+      receipt_browser_contract: ${{ steps.browser_contract.outputs.receipt_browser_contract }}
+      receipt_remainder: ${{ steps.remainder.outputs.receipt_remainder }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -519,7 +520,7 @@ jobs:
           PY
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.12.14'
           cache: pip
       - name: Install dependencies
         run: |
@@ -530,16 +531,39 @@ jobs:
         run: |
           python scripts/prepare_standalone_runtime.py "$RUNNER_TEMP/jae-standalone"
           echo "JAE_STANDALONE_RUNTIME=$RUNNER_TEMP/jae-standalone/python" >> "$GITHUB_ENV"
-      - name: Full round-closure test suite
-        id: full_suite
+      - name: Prepare independent exact-source owners
+        id: cohort
+        run: python scripts/ci_full_suite_cohort.py prepare
+      - name: Full round-closure consumer owner
+        id: consumer
+        background: true
+        run: python scripts/ci_full_suite_cohort.py owner consumer
+      - name: Full round-closure browser_contract owner
+        id: browser_contract
+        background: true
+        run: python scripts/ci_full_suite_cohort.py owner browser_contract
+      - name: Full round-closure remainder owner
+        id: remainder
+        background: true
+        run: python scripts/ci_full_suite_cohort.py owner remainder
+      - name: Wait for every full-file owner
+        wait: [consumer, browser_contract, remainder]
+      - name: Require successful owners and retain exact receipts
+        if: always() && steps.cohort.outcome == 'success'
         env:
-          APPLICATION_EXECUTOR_BROWSER_MODE: isolated
-          JAE_FULL_SUITE_SHARD: ${{ matrix.shard }}
-          JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}
-          JAE_FULL_SUITE_RECEIPT: ${{ runner.temp }}/jae-full-suite-${{ matrix.shard }}.json
-        run: python -m pytest -v -p scripts.ci_full_suite
+          JAE_FULL_SUITE_OWNER_RESULTS: >-
+            {"consumer":"${{ steps.consumer.outcome }}","browser_contract":"${{ steps.browser_contract.outcome }}","remainder":"${{ steps.remainder.outcome }}"}
+        run: python scripts/ci_full_suite_cohort.py verify
       - name: Compile Python sources
         run: python -m compileall -q executor tests
+      - name: Retain raw cohort receipts and resource audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jae-full-suite-cohort-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/jae-full-suite-cohort/audit/
+          if-no-files-found: error
+          retention-days: 3
 
   test:
     # Preserve the existing check name and downstream closure authority. Missing,

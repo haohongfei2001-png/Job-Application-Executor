@@ -3,10 +3,12 @@ from collections import Counter
 import copy
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from scripts.ci_full_suite import (FORMAT, OUTCOMES, SHARDS, aggregate, decode, digest,
@@ -44,6 +46,14 @@ def encode(values):
 
 
 class FullSuiteAllocationTests(unittest.TestCase):
+    def test_production_cohort_pin_is_exact_and_has_no_environment_override(self):
+        from scripts.ci_full_suite_cohort import PYTHON_VERSION
+        self.assertEqual(PYTHON_VERSION, (3, 12, 14))
+        source = (ROOT / "scripts/ci_full_suite_cohort.py").read_text()
+        self.assertEqual(source.count("PYTHON_VERSION = (3, 12, 14)"), 1)
+        self.assertIn("sys.version_info[:3] != PYTHON_VERSION", source)
+        self.assertIn("python-version: '3.12.14'", (ROOT / ".github/workflows/application-executor-ci.yml").read_text())
+
     def test_disjoint_complete_file_union_preserves_order_and_discovers_future_files(self):
         original = RECORDS + [("new_location/test_future.py", "new_location/test_future.py::test_future")]
         groups = partition(original)
@@ -88,6 +98,17 @@ class FullSuiteAllocationTests(unittest.TestCase):
         values["unexpected"] = values["receipt_consumer"]
         with self.assertRaises(ValueError):
             aggregate(values, SOURCE, "success")
+
+    def test_image_only_and_python_patch_only_mismatches_are_not_normalized(self):
+        for field, value in (("image", "ubuntu24:20261004.327.1"), ("python", "3.12.15")):
+            values = receipts()
+            for receipt in values.values():
+                receipt["runtime"]["image"] = "ubuntu24:20260927.320.1"
+            values["receipt_browser_contract"]["runtime"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "different source, runtime or collection"):
+                aggregate(encode(values), SOURCE, "success")
+            # The actual differing field survives intact; strict equality remains.
+            self.assertEqual(values["receipt_browser_contract"]["runtime"][field], value)
 
     def test_collection_receipt_missing_duplicate_wrong_owner_or_error_cannot_pass(self):
         event = {"path": "tests/test_module_skip.py", "nodeid_sha256": "d" * 64, "outcome": "skipped"}
@@ -159,7 +180,14 @@ class FullSuitePytestProbeTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "scripts").mkdir()
         (self.root / "scripts/__init__.py").write_text("")
-        (self.root / "scripts/ci_full_suite.py").write_bytes((ROOT / "scripts/ci_full_suite.py").read_bytes())
+        for name in ("ci_full_suite.py", "ci_full_suite_cohort.py"):
+            source = (ROOT / "scripts" / name).read_text()
+            if name == "ci_full_suite_cohort.py":
+                # This committed synthetic repository uses this test interpreter.
+                # Production remains independently pinned; no runtime bypass.
+                source = source.replace("PYTHON_VERSION = (3, 12, 14)",
+                                        "PYTHON_VERSION = " + repr(tuple(sys.version_info[:3])), 1)
+            (self.root / "scripts" / name).write_text(source)
         (self.root / "tests").mkdir()
         (self.root / "requirements.txt").write_text("pytest==9.1.1\n")
         (self.root / "pytest.ini").write_text("[pytest]\npythonpath = .\n")
@@ -216,6 +244,400 @@ class TestSubcases(unittest.TestCase):
         run = subprocess.run([sys.executable, "-m", "pytest", "-v", "-p", "scripts.ci_full_suite", *args],
                              cwd=self.root, env=options, text=True, capture_output=True, timeout=30)
         return run, json.loads(target.read_text()) if target.exists() else None
+
+    def cohort_options(self):
+        for name in ("browsers", "standalone"):
+            (self.root / name).mkdir(exist_ok=True)
+        return dict(self.env, JAE_FULL_SUITE_COHORT=str(self.root / "cohort"),
+                    JAE_FULL_SUITE_EXPECTED_SHA=self.sha,
+                    PLAYWRIGHT_BROWSERS_PATH=str(self.root / "browsers"),
+                    JAE_STANDALONE_RUNTIME=str(self.root / "standalone"))
+
+    def cohort_command(self, action, env, owner=None):
+        command = [sys.executable, "scripts/ci_full_suite_cohort.py", action]
+        if owner is not None:
+            command.append(owner)
+        return subprocess.run(command, cwd=self.root, env=env, text=True, capture_output=True, timeout=45)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_same_host_actual_concurrent_owners_have_independent_mutable_paths(self):
+        probe = '''
+import json, os, socket, tempfile, time
+from pathlib import Path
+def test_owner_resources():
+    owner = os.environ["JAE_FULL_SUITE_SHARD"]
+    source = Path(__file__).resolve().parents[1]
+    home, temporary = Path.home(), Path(tempfile.gettempdir())
+    for root in (source, home, temporary):
+        assert not (root / "same-name-resource").exists()
+        (root / "same-name-resource").write_text(owner)
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0)); listener.listen()
+        for root in (source, home, temporary):
+            assert (root / "same-name-resource").read_text() == owner
+        Path(os.environ["JAE_FULL_SUITE_RECEIPT"] + ".probe").write_text(json.dumps({
+            "pid": os.getpid(), "port": listener.getsockname()[1], "source": str(source),
+            "home": str(home), "tmp": str(temporary), "display": os.environ.get("DISPLAY"),
+            "browsers": os.environ["PLAYWRIGHT_BROWSERS_PATH"],
+            "runtime": os.environ["JAE_STANDALONE_RUNTIME"],
+        }))
+        # All three sockets remain bound until every owner advertises its port.
+        audit = Path(os.environ["JAE_FULL_SUITE_RECEIPT"]).parent
+        deadline = time.monotonic() + 10
+        while len(list(audit.glob("*.receipt.json.probe"))) != 3:
+            assert time.monotonic() < deadline, "owners did not overlap"
+            time.sleep(0.02)
+'''
+        for name in ("test_consumer_entry_v1.py", "test_jcr_probe.py", "test_remainder.py"):
+            (self.root / "tests" / name).write_text(probe)
+        self.commit()
+        env = self.cohort_options()
+        env["DISPLAY"] = ":99"
+        prepared = self.cohort_command("prepare", env)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        children = []
+        for owner in SHARDS:
+            options = dict(env, GITHUB_OUTPUT=str(self.root / (owner + ".output")))
+            children.append(subprocess.Popen([sys.executable, "scripts/ci_full_suite_cohort.py", "owner", owner],
+                cwd=self.root, env=options, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        for child in children:
+            out, err = child.communicate(timeout=45)
+            self.assertEqual(child.returncode, 0, out + err)
+        audit = self.root / "cohort" / "audit"
+        probes = [json.loads((audit / (owner + ".receipt.json.probe")).read_text()) for owner in SHARDS]
+        for key in ("pid", "port", "source", "home", "tmp"):
+            self.assertEqual(len({p[key] for p in probes}), 3, key)
+        for probe in probes:
+            self.assertIsNone(probe["display"])
+            self.assertEqual(probe["browsers"], env["PLAYWRIGHT_BROWSERS_PATH"])
+            self.assertEqual(probe["runtime"], env["JAE_STANDALONE_RUNTIME"])
+        for owner in SHARDS:
+            isolation = json.loads((audit / (owner + ".isolation.json")).read_text())
+            self.assertEqual(isolation["source"]["sha"], self.sha)
+            self.assertEqual(json.loads((audit / (owner + ".execution.json")).read_text())["exit_status"], 0)
+            self.assertTrue((self.root / (owner + ".output")).read_text().startswith("receipt_" + owner + "="))
+            observations = [json.loads(line) for line in (audit / (owner + ".host.jsonl")).read_text().splitlines()]
+            self.assertTrue(observations)
+            for observation in observations:
+                self.assertIn("/proc/meminfo", observation["kernel"])
+                self.assertIn("/proc/net/tcp6", observation["kernel"])
+                self.assertIn("/proc/net/udp", observation["kernel"])
+                self.assertEqual(observation["disk"]["command"][:2], ["df", "-B1"])
+                self.assertEqual(observation["sockets"]["command"], ["ss", "-lntup"])
+                self.assertIn("browser_resources", observation)
+        env["JAE_FULL_SUITE_OWNER_RESULTS"] = json.dumps(dict.fromkeys(SHARDS, "success"))
+        verified = self.cohort_command("verify", env)
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertEqual(json.loads((audit / "summary.json").read_text())["collection"]["count"], 3)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_cohort_failed_owner_preserves_other_receipts_and_summary_refuses_all_non_success(self):
+        (self.root / "tests/test_consumer_entry_v1.py").write_text("def test_failure(): assert False\n")
+        self.commit()
+        env = self.cohort_options()
+        prepared = self.cohort_command("prepare", env)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        results = {}
+        for owner in SHARDS:
+            run = self.cohort_command("owner", env, owner)
+            self.assertEqual(run.returncode, 1 if owner == "consumer" else 0, run.stdout + run.stderr)
+            results[owner] = "failure" if run.returncode else "success"
+        audit = self.root / "cohort" / "audit"
+        snapshots = {owner: (audit / (owner + ".receipt.json")).read_bytes() for owner in SHARDS}
+        self.assertEqual(json.loads(snapshots["consumer"])["exit_status"], 1)
+        for state in ("failure", "cancelled", "skipped", "pending", ""):
+            results["consumer"] = state
+            env["JAE_FULL_SUITE_OWNER_RESULTS"] = json.dumps(results)
+            result = self.cohort_command("verify", env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((audit / "summary.json").exists())
+            for owner in SHARDS:
+                self.assertEqual((audit / (owner + ".receipt.json")).read_bytes(), snapshots[owner])
+        del results["consumer"]
+        env["JAE_FULL_SUITE_OWNER_RESULTS"] = json.dumps(results)
+        self.assertNotEqual(self.cohort_command("verify", env).returncode, 0)
+        # Even forged successful native outcomes cannot overrule a failed receipt.
+        env["JAE_FULL_SUITE_OWNER_RESULTS"] = json.dumps(dict.fromkeys(SHARDS, "success"))
+        self.assertNotEqual(self.cohort_command("verify", env).returncode, 0)
+        (audit / "consumer.receipt.json").unlink()
+        self.assertNotEqual(self.cohort_command("verify", env).returncode, 0)
+        for owner in ("browser_contract", "remainder"):
+            self.assertEqual((audit / (owner + ".receipt.json")).read_bytes(), snapshots[owner])
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_actual_owner_cancellation_keeps_other_owners_and_refuses_summary(self):
+        (self.root / "tests/test_consumer_entry_v1.py").write_text('''
+import os, time
+from pathlib import Path
+def test_cancelled():
+    Path(os.environ["JAE_FULL_SUITE_RECEIPT"] + ".started").write_text(str(os.getpid()))
+    time.sleep(30)
+''')
+        self.commit()
+        env = self.cohort_options()
+        prepared = self.cohort_command("prepare", env)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        audit = self.root / "cohort" / "audit"
+        children = {}
+        for owner in SHARDS:
+            children[owner] = subprocess.Popen([sys.executable, "scripts/ci_full_suite_cohort.py", "owner", owner],
+                cwd=self.root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            sentinel = audit / "consumer.receipt.json.started"
+            deadline = time.monotonic() + 15
+            while not sentinel.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(sentinel.exists())
+            pytest_pid = int(sentinel.read_text())
+            children["consumer"].send_signal(signal.SIGTERM)
+            out, err = children["consumer"].communicate(timeout=15)
+            self.assertEqual(children["consumer"].returncode, 143, out + err)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pytest_pid, 0)
+            for owner in ("browser_contract", "remainder"):
+                out, err = children[owner].communicate(timeout=30)
+                self.assertEqual(children[owner].returncode, 0, out + err)
+                self.assertEqual(json.loads((audit / (owner + ".receipt.json")).read_text())["exit_status"], 0)
+            self.assertFalse((audit / "consumer.receipt.json").exists())
+            self.assertTrue((audit / "consumer.host-end.json").exists())
+            env["JAE_FULL_SUITE_OWNER_RESULTS"] = json.dumps(dict.fromkeys(SHARDS, "success") | {"consumer": "cancelled"})
+            result = self.cohort_command("verify", env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((audit / "summary.json").exists())
+        finally:
+            for child in children.values():
+                if child.poll() is None:
+                    child.terminate()
+                child.communicate(timeout=15)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_compile_gate_targets_each_tested_worktree_and_propagates_failure(self):
+        probe = '''
+import os
+from pathlib import Path
+def test_owner_compile():
+    source = Path(__file__).resolve().parents[1]
+    (source / "executor").mkdir(exist_ok=True)
+    if os.environ["JAE_FULL_SUITE_SHARD"] == "consumer":
+        (source / "executor/late_invalid.py").write_text("def broken(\\n")
+'''
+        for name in ("test_consumer_entry_v1.py", "test_jcr_probe.py", "test_remainder.py"):
+            (self.root / "tests" / name).write_text(probe)
+        self.commit()
+        env = self.cohort_options()
+        prepared = self.cohort_command("prepare", env)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        audit = self.root / "cohort" / "audit"
+        for owner in SHARDS:
+            run = self.cohort_command("owner", env, owner)
+            expected = 1 if owner == "consumer" else 0
+            self.assertEqual(run.returncode, expected, run.stdout + run.stderr)
+            self.assertEqual(json.loads((audit / (owner + ".execution.json")).read_text())["compile_status"], expected)
+            self.assertEqual(json.loads((audit / (owner + ".receipt.json")).read_text())["exit_status"], 0)
+        self.assertFalse((self.root / "executor/late_invalid.py").exists())
+        self.assertTrue((self.root / "cohort/consumer/source/executor/late_invalid.py").exists())
+        env["JAE_FULL_SUITE_OWNER_RESULTS"] = json.dumps(dict.fromkeys(SHARDS, "success") | {"consumer": "failure"})
+        self.assertNotEqual(self.cohort_command("verify", env).returncode, 0)
+        self.assertFalse((audit / "summary.json").exists())
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_detached_term_ignoring_descendants_are_reaped_after_leader_exit(self):
+        probe = '''
+import os, signal, subprocess, sys, threading, time
+from pathlib import Path
+def test_detached_tree():
+    root = os.environ["JAE_FULL_SUITE_RECEIPT"]
+    grandchild = "import os,signal,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path(" + repr(root + ".grandchild") + ").write_text(str(os.getpid()));time.sleep(60)"
+    child = "import os,signal,subprocess,sys,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);subprocess.Popen([sys.executable,'-c'," + repr(grandchild) + "],start_new_session=True);Path(" + repr(root + ".child") + ").write_text(str(os.getpid()));time.sleep(60)"
+    thread = threading.Thread(target=lambda: subprocess.Popen(
+        [sys.executable, "-c", child], start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    thread.start(); thread.join()
+    deadline = time.monotonic() + 10
+    while not Path(root + ".grandchild").exists():
+        assert time.monotonic() < deadline
+        time.sleep(.02)
+    # The pytest leader exits successfully before either detached descendant.
+'''
+        (self.root / "tests/test_consumer_entry_v1.py").write_text(probe)
+        self.commit()
+        env = self.cohort_options()
+        prepared = self.cohort_command("prepare", env)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        run = self.cohort_command("owner", env, "consumer")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        audit = self.root / "cohort" / "audit"
+        for suffix in ("child", "grandchild"):
+            pid = int((audit / ("consumer.receipt.json." + suffix)).read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+        cleanup = json.loads((audit / "consumer.cleanup.json").read_text())
+        self.assertTrue(cleanup["complete"])
+        self.assertIsNone(cleanup["cancelled_signal"])
+        self.assertGreaterEqual(sum(e.get("signal") == signal.SIGKILL for e in cleanup["events"]), 2)
+        self.assertGreaterEqual(sum("reaped_pid" in e for e in cleanup["events"]), 2)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_cancellation_during_compile_reaps_detached_tree_without_signalling_sibling(self):
+        compile_body = '''
+import os, signal, subprocess, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+root = os.environ["JAE_FULL_SUITE_RECEIPT"]
+child = "import os,signal,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path(" + repr(root + ".compile-child") + ").write_text(str(os.getpid()));time.sleep(60)"
+subprocess.Popen([sys.executable, "-c", child], start_new_session=True,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+Path(root + ".compile").write_text(str(os.getpid()))
+time.sleep(60)
+'''
+        (self.root / "tests/test_consumer_entry_v1.py").write_text(
+            "from pathlib import Path\ndef test_prepare_compile():\n"
+            "    Path('compileall.py').write_text(" + repr(compile_body) + ")\n")
+        sibling = '''
+import os, time
+from pathlib import Path
+def test_sibling_stays_alive():
+    root = Path(os.environ["JAE_FULL_SUITE_RECEIPT"])
+    Path(str(root) + ".sibling").write_text(str(os.getpid()))
+    deadline = time.monotonic() + 20
+    while not Path(str(root) + ".release").exists():
+        assert time.monotonic() < deadline
+        time.sleep(.02)
+'''
+        (self.root / "tests/test_jcr_probe.py").write_text(sibling)
+        self.commit()
+        env = self.cohort_options()
+        prepared = self.cohort_command("prepare", env)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        children = {owner: subprocess.Popen([sys.executable, "scripts/ci_full_suite_cohort.py", "owner", owner],
+            cwd=self.root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for owner in ("consumer", "browser_contract")}
+        audit = self.root / "cohort" / "audit"
+        try:
+            targets = [audit / name for name in ("consumer.receipt.json.compile", "consumer.receipt.json.compile-child", "browser_contract.receipt.json.sibling")]
+            deadline = time.monotonic() + 15
+            while not all(path.exists() for path in targets) and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(all(path.exists() for path in targets))
+            pids = [int(path.read_text()) for path in targets]
+            children["consumer"].send_signal(signal.SIGTERM)
+            out, err = children["consumer"].communicate(timeout=15)
+            self.assertEqual(children["consumer"].returncode, 143, out + err)
+            for pid in pids[:2]:
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+            os.kill(pids[2], 0)
+            self.assertIsNone(children["browser_contract"].poll())
+            cleanup = json.loads((audit / "consumer.cleanup.json").read_text())
+            self.assertTrue(cleanup["complete"])
+            self.assertNotIn(pids[2], [e.get("pid") for e in cleanup["events"]])
+            (audit / "browser_contract.receipt.json.release").write_text("finish")
+            out, err = children["browser_contract"].communicate(timeout=15)
+            self.assertEqual(children["browser_contract"].returncode, 0, out + err)
+        finally:
+            for child in children.values():
+                if child.poll() is None:
+                    child.terminate()
+                child.communicate(timeout=15)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_spawn_window_signals_are_deferred_until_child_is_owned(self):
+        (self.root / "tests/test_consumer_entry_v1.py").write_text("import time\ndef test_wait(): time.sleep(30)\n")
+        self.commit()
+        env = self.cohort_options()
+        prepared = self.cohort_command("prepare", env)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        harness = '''
+import os, signal, sys
+from pathlib import Path
+sys.path.insert(0, "scripts")
+import ci_full_suite_cohort as cohort
+real = cohort.subprocess.Popen
+phase = sys.argv[1]
+def spawn(command, **kwargs):
+    if command[1:3] != ["-m", "pytest"]:
+        return real(command, **kwargs)
+    if phase == "before": os.kill(os.getpid(), signal.SIGTERM)
+    process = real(command, **kwargs)
+    Path(os.environ["JAE_FULL_SUITE_COHORT"], "spawned-pid").write_text(str(process.pid))
+    if phase == "after": os.kill(os.getpid(), signal.SIGTERM)
+    return process
+cohort.subprocess.Popen = spawn
+raise SystemExit(cohort.run_owner(Path(os.environ["JAE_FULL_SUITE_COHORT"]), "consumer"))
+'''
+        for phase in ("before", "after"):
+            run = subprocess.run([sys.executable, "-c", harness, phase], cwd=self.root,
+                                 env=env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(run.returncode, 143, run.stdout + run.stderr)
+            pid = int((self.root / "cohort/spawned-pid").read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+            cleanup = json.loads((self.root / "cohort/audit/consumer.cleanup.json").read_text())
+            self.assertTrue(cleanup["complete"])
+            self.assertEqual(cleanup["cancelled_signal"], signal.SIGTERM)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_unavailable_lifecycle_or_unproved_cleanup_never_falls_back_to_success(self):
+        harness = '''
+import os, sys
+from pathlib import Path
+sys.path.insert(0, "scripts")
+import ci_full_suite_cohort as cohort
+mode = sys.argv[1]
+if mode == "subreaper":
+    class Unavailable:
+        def prctl(self, *_): return -1
+    cohort.ctypes.CDLL = lambda *_a, **_k: Unavailable()
+elif mode == "pidfd":
+    del cohort.os.pidfd_open
+elif mode == "cleanup":
+    # Even an erroneous child-list identity must never signal this process.
+    cohort.OwnerLifecycle.children = lambda self: [os.getpid()]
+with cohort.OwnerLifecycle(Path("lifecycle-" + mode + ".json")):
+    pass
+'''
+        for mode in ("subreaper", "pidfd", "cleanup"):
+            run = subprocess.run([sys.executable, "-c", harness, mode], cwd=self.root,
+                                 env=self.env, text=True, capture_output=True, timeout=15)
+            self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+            if mode == "cleanup":
+                cleanup = json.loads((self.root / ("lifecycle-" + mode + ".json")).read_text())
+                self.assertFalse(cleanup["complete"])
+                self.assertEqual(cleanup["events"], [])
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_empty_proc_snapshot_is_not_evidence_of_no_children(self):
+        harness = '''
+import os, signal, subprocess, sys, time
+from pathlib import Path
+sys.path.insert(0, "scripts")
+import ci_full_suite_cohort as cohort
+sentinel = Path("racing-child.pid").resolve()
+script = "import os,signal,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path(" + repr(str(sentinel)) + ").write_text(str(os.getpid()));time.sleep(60)"
+real = cohort.OwnerLifecycle.children
+missed = False
+def snapshot(self):
+    global missed
+    if not missed:
+        missed = True
+        return []  # A deterministic miss in the non-atomic /proc candidate list.
+    return real(self)
+cohort.OwnerLifecycle.children = snapshot
+with cohort.OwnerLifecycle(Path("racing-cleanup.json")):
+    child = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+    deadline = time.monotonic() + 10
+    while not sentinel.exists():
+        assert time.monotonic() < deadline
+        time.sleep(.02)
+assert missed
+try: os.kill(int(sentinel.read_text()), 0)
+except ProcessLookupError: pass
+else: raise AssertionError("an empty snapshot lost a living owned child")
+'''
+        run = subprocess.run([sys.executable, "-c", harness], cwd=self.root,
+                             env=self.env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertTrue(json.loads((self.root / "racing-cleanup.json").read_text())["complete"])
 
     def test_real_owner_union_matches_unpartitioned_collection_and_subtests(self):
         outputs = {}
