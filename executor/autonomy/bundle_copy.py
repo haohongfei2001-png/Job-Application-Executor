@@ -50,7 +50,9 @@ def _open_relative(root_fd, relative, entries):
     parent = os.dup(root_fd)
     try:
         for index, name in enumerate(parts):
-            key = Path(*parts[:index + 1]).as_posix()
+            # Path already parsed the lexical components. Preserve POSIX root
+            # anchors and unresolved '..' without rebuilding every ancestor.
+            key = name if index == 0 else key + ('' if key.endswith('/') else '/') + name
             directory = index < len(parts) - 1 or stat.S_ISDIR(entries[key][2])
             flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
             child = os.open(name, flags | (os.O_DIRECTORY if directory else 0), dir_fd=parent)
