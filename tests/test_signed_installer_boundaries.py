@@ -426,3 +426,126 @@ def test_signed_copy_rejects_unadmitted_source_before_destination_writes(
     assert list(target.iterdir()) == []
     assert canary.read_bytes() == b'PRIVATE_CANARY'
     assert source.exists()
+
+
+def _reference_open_relative(root_fd, relative, entries):
+    """Pre-optimization descriptor walk, retained only as a differential oracle."""
+    parts = Path(relative).parts
+    parent = bundle_copy.os.dup(root_fd)
+    try:
+        for index, name in enumerate(parts):
+            key = Path(*parts[:index + 1]).as_posix()
+            directory = index < len(parts) - 1 or stat.S_ISDIR(entries[key][2])
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            child = bundle_copy.os.open(name, flags | (os.O_DIRECTORY if directory else 0), dir_fd=parent)
+            try:
+                if (bundle_copy._signature(bundle_copy.os.fstat(child)) != entries[key]
+                        or bundle_copy._signature(bundle_copy.os.stat(name, dir_fd=parent, follow_symlinks=False)) != entries[key]):
+                    raise ValueError('installer_bundle_changed')
+            except BaseException:
+                bundle_copy.os.close(child)
+                raise
+            bundle_copy.os.close(parent)
+            parent = child
+        result, parent = parent, None
+        return result
+    finally:
+        if parent is not None:
+            bundle_copy.os.close(parent)
+
+
+def test_descriptor_walk_names_operations_and_refusals_match_reference(monkeypatch):
+    from types import SimpleNamespace
+    from itertools import product
+    roots = ['', '.', '..', '/', '//', 'a', 'a/..']
+    names = ['', '.', '..', 'b', 'b/c', 'b//./c', 'AI 投递经理.app',
+             'caf\u00e9', 'cafe\u0301', 'with space', 'line\nbreak', r'back\slash']
+    paths = sorted({root + '/' + tail if root else tail for root, tail in product(roots, names)})
+    faults = [None, 'open', 'fstat', 'stat', 'fstat_error', 'stat_error', 'missing_entry']
+    original_os = bundle_copy.os
+    for relative, fault in product(paths, faults):
+        def observe(operation):
+            events, opened = [], {}
+            parts = Path(relative).parts
+            def metadata(index):
+                return SimpleNamespace(st_dev=1, st_ino=index + 10,
+                    st_mode=(stat.S_IFREG | 0o644) if index == len(parts)-1 else (stat.S_IFDIR | 0o755),
+                    st_uid=os.geteuid(), st_nlink=1, st_size=3, st_mtime_ns=11, st_ctime_ns=12)
+            class Entries(dict):
+                def __getitem__(self, key):
+                    events.append(('entry', key))
+                    return super().__getitem__(key)
+            entries = Entries({Path(*parts[:index+1]).as_posix(): bundle_copy._signature(metadata(index))
+                               for index in range(len(parts))})
+            if fault == 'missing_entry' and parts:
+                entries.pop(Path(*parts).as_posix())
+            def dup(fd):
+                events.append(('dup', fd)); return 100
+            def open_child(name, flags, *, dir_fd):
+                events.append(('open', name, flags, dir_fd))
+                index = len(opened)
+                if fault == 'open' and index == len(parts)-1:
+                    raise OSError('synthetic_open_failure')
+                fd = 101 + index; opened[fd] = index; return fd
+            def fstat(fd):
+                events.append(('fstat', fd))
+                if fault == 'fstat_error' and opened[fd] == len(parts)-1:
+                    raise OSError('synthetic_fstat_failure')
+                value = metadata(opened[fd])
+                if fault == 'fstat' and opened[fd] == len(parts)-1:
+                    value.st_ino += 1000
+                return value
+            def visible(name, *, dir_fd, follow_symlinks):
+                events.append(('stat', name, dir_fd, follow_symlinks))
+                index = len(opened)-1
+                if fault == 'stat_error' and index == len(parts)-1:
+                    raise OSError('synthetic_stat_failure')
+                value = metadata(index)
+                if fault == 'stat' and index == len(parts)-1:
+                    value.st_ino += 1000
+                return value
+            proxy = SimpleNamespace(**{key:getattr(original_os, key) for key in
+                ('O_RDONLY', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_DIRECTORY')},
+                dup=dup, open=open_child, fstat=fstat, stat=visible,
+                close=lambda fd: events.append(('close', fd)))
+            with monkeypatch.context() as patch:
+                patch.setattr(bundle_copy, 'os', proxy)
+                try:
+                    result = ('returned', operation(99, relative, entries))
+                except (OSError, ValueError, KeyError) as exc:
+                    result = ('raised', type(exc).__name__, str(exc))
+            return result, events
+        assert observe(bundle_copy._open_relative) == observe(_reference_open_relative), (relative, fault)
+
+
+def test_descriptor_naming_keeps_complete_signed_identity_and_check_counts(
+        current_transition, monkeypatch):
+    _, app, _ = current_transition
+    publisher_calls = inert_publisher_seam(monkeypatch)
+    original_open = bundle_copy._open_relative
+    original_xattrs = bundle_copy._no_xattrs
+    original_payload = signed_payload.current_payload
+    original_fence = signed_payload._tree_fence
+    def capture(open_relative):
+        counters = {'descriptor_walks':0, 'xattrs':0, 'payloads':0, 'fences':0}
+        publisher_calls.clear()
+        def counted(name, function):
+            def wrapped(*args, **kwargs):
+                counters[name] += 1
+                return function(*args, **kwargs)
+            return wrapped
+        with monkeypatch.context() as patch:
+            patch.setattr(bundle_copy, '_open_relative', counted('descriptor_walks', open_relative))
+            patch.setattr(bundle_copy, '_no_xattrs', counted('xattrs', original_xattrs))
+            patch.setattr(signed_payload, 'current_payload', counted('payloads', original_payload))
+            patch.setattr(signed_payload, '_tree_fence', counted('fences', original_fence))
+            identity = consumer._bundle_transaction_identity(app, required_publisher_policy=POLICY)
+        assert identity is not None
+        return identity, counters, list(publisher_calls)
+    optimized = capture(original_open)
+    assert optimized == capture(_reference_open_relative)
+    assert optimized[1]['payloads'] == 4
+    assert optimized[1]['fences'] == 8
+    assert optimized[1]['descriptor_walks'] > 0
+    assert optimized[1]['xattrs'] == optimized[1]['descriptor_walks'] + 4
+    assert optimized[2] == [app] * 4
