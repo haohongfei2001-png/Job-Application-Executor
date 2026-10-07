@@ -2848,16 +2848,27 @@ def test_installer_retirement_remains_bound_to_pre_prompt_service(tmp_path,monke
     assert json.loads(path.read_text())==(record if fault in {'wrong_loaded_source','lost_ack'} else successor)
 
 
-def test_installer_exact_copy_update_holds_original_locks_and_keeps_task_bytes(tmp_path,monkeypatch):
-    import fcntl,os
+@pytest.mark.parametrize('installed_version,candidate_version',[(1,2),(12,13)])
+def test_installer_exact_copy_update_holds_original_locks_and_keeps_task_bytes(tmp_path,monkeypatch,installed_version,candidate_version):
+    import fcntl,os,plistlib
     installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)
+    for app,version in [(target,installed_version),(candidate,candidate_version)]:
+        path=app/'Contents/Info.plist';info=plistlib.loads(path.read_bytes());info['CFBundleVersion']=str(version);path.write_bytes(plistlib.dumps(info))
     monkeypatch.setattr(consumer.sys,'platform','darwin')
-    monkeypatch.setattr(macos_host,'present_native_installer',lambda *a,**k:{'action':'update'})
+    modes=[]
+    monkeypatch.setattr(macos_host,'present_native_installer',lambda directory,mode:modes.append(mode) or {'action':'update'})
     before=_installer_inventory(state);old=_installer_inventory(target);probes=[];opened=[]
+    candidate_before=_installer_inventory(candidate)
+    locks=[state/'native-window.lock',state/'worker.lock',state/'migration.lock',
+           target.parent/('.'+consumer.APP_NAME+'.app.transaction.lock')]
+    def lock_identity(path):
+        metadata=path.stat(follow_symlinks=False)
+        return metadata.st_dev,metadata.st_ino
+    lock_ids={path:lock_identity(path) for path in locks}
     monkeypatch.setattr(consumer,'_candidate_starts',lambda *a:True)
     def compatible(*args):
-        for path in [state/'native-window.lock',state/'worker.lock',state/'migration.lock',
-                     target.parent/('.'+consumer.APP_NAME+'.app.transaction.lock')]:
+        for path in locks:
+            assert lock_identity(path)==lock_ids[path]
             fd=os.open(path,os.O_RDWR)
             try:
                 with pytest.raises(BlockingIOError):fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -2867,9 +2878,12 @@ def test_installer_exact_copy_update_holds_original_locks_and_keeps_task_bytes(t
     monkeypatch.setattr(installer.subprocess,'Popen',lambda args,**kw:opened.append(args))
     result=installer.run_downloaded_installer(candidate,target,state,9344,consumer._bundle_transaction_identity(candidate))
     assert result['ok'] is True and result['updated'] is True and probes==[True] and len(opened)==1
-    assert _installer_inventory(target)==_installer_inventory(candidate)
+    assert modes==['update']
+    assert installer.bundle_release_version(target,consumer._bundle_transaction_identity(target))==candidate_version
+    assert _installer_inventory(target)==_installer_inventory(candidate)==candidate_before
     assert _installer_inventory(target.parent/('.'+consumer.APP_NAME+'.app.previous'))==old
     assert _installer_inventory(state)==before
+    assert {path:lock_identity(path) for path in locks}==lock_ids
 
 
 @pytest.mark.parametrize('phase',['health','compatibility'])
@@ -2911,7 +2925,7 @@ def test_installer_pending_fence_never_opens_legacy_native_launch(tmp_path,monke
         installer._open_existing(target,consumer._bundle_transaction_identity(target),9344)
 
 
-@pytest.mark.parametrize('installed_version,candidate_version,mode',[(3,2,'older'),(2,2,'conflict')])
+@pytest.mark.parametrize('installed_version,candidate_version,mode',[(3,2,'older'),(2,2,'conflict'),(12,12,'conflict'),(13,13,'conflict')])
 def test_installer_old_or_same_version_different_payload_never_offers_update(tmp_path,monkeypatch,installed_version,candidate_version,mode):
     import plistlib
     installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)

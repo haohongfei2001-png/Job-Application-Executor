@@ -2185,7 +2185,7 @@ def _release_task_discovery(page, pending):
         "discovery": {"status": "AMBIGUOUS", "candidates": [{
             "candidate_id": _TASK_DRAFT_CANDIDATE, "job_id": "synthetic-job-a",
             "title": "Synthetic Role A", "location": "Synthetic Location A"}]}}))
-    expect(page.get_by_role("button", name="选择此岗位", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="选择此岗位", exact=True)).to_be_enabled()
 
 
 def _assert_task_draft_requests(page, observed, pending, candidate):
@@ -2338,6 +2338,13 @@ def test_task_workspace_delayed_candidate_recheck_keeps_its_own_request_snapshot
     assert len(pending["submissions"]) == 3
     page.get_by_role("button", name="选择此岗位", exact=True).click()
     page.wait_for_function("window.__taskAddRequests === 4")
+    expected_submissions = [
+        ("POST", _TASK_DRAFT_A),
+        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_DRAFT_CANDIDATE}),
+        ("POST", _TASK_DRAFT_B),
+        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": next_candidate}),
+    ]
+    assert pending["submissions"] == expected_submissions
     pending["routes"].pop(0).fulfill(status=200, content_type="application/json", body=json.dumps({
         "task_id": "prep-a", "revision": 7, "task_binding": "requested",
         "discovery": {"status": "VERIFIED"}}))
@@ -2345,12 +2352,7 @@ def test_task_workspace_delayed_candidate_recheck_keeps_its_own_request_snapshot
     for key, value in _TASK_DRAFT_B.items():
         expect(page.locator(f'#newtask input[name="{key}"]')).to_have_value(value)
     page.evaluate("state()")
-    assert pending["submissions"] == [
-        ("POST", _TASK_DRAFT_A),
-        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_DRAFT_CANDIDATE}),
-        ("POST", _TASK_DRAFT_B),
-        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": next_candidate}),
-    ]
+    assert pending["submissions"] == expected_submissions
     assert all(method == "GET" for method, _, _ in observed["requests"])
     assert observed["external"] == [] and observed["errors"] == []
     assert page.evaluate("window.__copied") == []
