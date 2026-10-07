@@ -8,6 +8,10 @@ files run completely on Ubuntu/Mac; no case, fixture or timeout is reduced.
 from __future__ import annotations
 
 import json
+import os
+import select
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -22,6 +26,269 @@ from test_consumer_entry_v1 import (
     _retirement_inventory,
     _assert_retirement_inventory,
 )
+
+
+class _ProbeOutput:
+    """Drain both child streams; retain at most 8 KiB total, never publish bytes.
+
+    Nonblocking reads and a bounded select let finish retire the reader even
+    when a descendant keeps a write end open. The reader never waits for or
+    signals a child. Only the original probe owns process lifecycle decisions.
+    Observed byte counts exclude any output left unread at bounded retirement;
+    even an exited child can leave buffered bytes without an observed EOF.
+    """
+
+    _LIMIT = 4096  # Per stream, 8 KiB total.
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._done = threading.Event()
+        self._reads = {}
+        self._writes = {}
+        self._data = {name: bytearray() for name in ("stdout", "stderr")}
+        self._counts = {name: 0 for name in self._data}
+        self._eof = {name: False for name in self._data}
+        self._error = False
+        self._thread = None
+        self._result = None
+        try:
+            for name in self._data:
+                read_fd, write_fd = os.pipe()
+                self._reads[name] = read_fd
+                self._writes[name] = write_fd
+                os.set_blocking(read_fd, False)
+            self._thread = threading.Thread(target=self._drain, daemon=True)
+            self._thread.start()
+        except Exception:
+            self._stop.set()
+            self.close_writers()
+            self._close_readers()
+            if self._thread is not None and self._thread.is_alive():
+                self._thread.join(timeout=.25)
+            raise
+
+    def close_writers(self):
+        while self._writes:
+            _, fd = self._writes.popitem()
+            try:
+                os.close(fd)
+            except OSError:
+                self._error = True
+
+    def _close_readers(self):
+        with self._lock:
+            while self._reads:
+                _, fd = self._reads.popitem()
+                try:
+                    os.close(fd)
+                except OSError:
+                    self._error = True
+
+    def _read_once(self, name, fd):
+        # The lock protects against finish closing/reusing an fd after its
+        # bounded join. The only read inside it is explicitly nonblocking.
+        with self._lock:
+            if self._reads.get(name) != fd:
+                return
+            try:
+                chunk = os.read(fd, 4096)
+            except BlockingIOError:
+                return
+            except OSError:
+                self._error = True
+                raise
+            if not chunk:
+                self._eof[name] = True
+                os.close(self._reads.pop(name))
+                return
+            self._counts[name] += len(chunk)
+            remaining = self._LIMIT - len(self._data[name])
+            self._data[name].extend(chunk[:remaining])
+
+    def _drain(self):
+        try:
+            while not self._stop.is_set():
+                with self._lock:
+                    readers = dict(self._reads)
+                if not readers:
+                    return
+                try:
+                    ready, _, _ = select.select(list(readers.values()), [], [], .02)
+                except OSError:
+                    if self._stop.is_set():
+                        break
+                    raise
+                for name, fd in readers.items():
+                    if fd in ready:
+                        self._read_once(name, fd)
+            # Capture already-buffered prefixes without waiting for descendant
+            # EOF or trying to drain an unbounded writer to completion.
+            with self._lock:
+                readers = dict(self._reads)
+            for name, fd in readers.items():
+                self._read_once(name, fd)
+        except Exception:
+            # Do not let threading's default exception hook publish private
+            # exception text, close a live writer's pipe, or stop draining it.
+            # Observation faults invalidate this evidence, not the product.
+            self._error = True
+            self._discard_until_stopped()
+        finally:
+            self._close_readers()
+            self._done.set()
+
+    def _discard_until_stopped(self):
+        while not self._stop.is_set():
+            with self._lock:
+                for name, fd in list(self._reads.items()):
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except OSError:
+                        continue
+                    if not chunk:
+                        self._eof[name] = True
+                        try:
+                            os.close(self._reads.pop(name))
+                        except OSError:
+                            self._error = True
+                if not self._reads:
+                    return
+            self._stop.wait(.001)
+
+    def retire(self):
+        """Resource cleanup is separate from fallible classification/reporting."""
+        self.close_writers()
+        self._stop.set()
+        self._done.wait(timeout=.25)
+        # No reader owns a blocking operation. Closing under the same lock
+        # prevents fd reuse while a final nonblocking read is in progress.
+        self._close_readers()
+        try:
+            self._thread.join(timeout=.25)
+        except Exception:
+            self._error = True
+            try:
+                threading.Thread.join(self._thread, timeout=.25)
+            except Exception:
+                pass
+
+    def finish(self):
+        self.retire()
+        if self._result is not None:
+            return dict(self._result)
+        result = self._classify()
+        self._result = result
+        return dict(result)
+
+    def _classify(self):
+        with self._lock:
+            result = {"reader_stopped": not self._thread.is_alive(),
+                      "reader_error": self._error}
+            for name, data in self._data.items():
+                kind = "empty" if not data else "unclassified"
+                if name == "stdout" and data.strip() == b'{"ok": false, "error": "operation_failed"}':
+                    kind = "operation_failed"
+                elif name == "stderr" and b"Fatal Python error: init_fs_encoding:" in data:
+                    kind = "python_initialization_failed"
+                elif name == "stderr" and b"AssertionError" in data:
+                    kind = "assertion_reported"
+                result.update({name + "_class": kind,
+                               name + "_bytes_observed": self._counts[name],
+                               name + "_bytes_retained": len(data),
+                               name + "_truncated": self._counts[name] > len(data),
+                               name + "_eof_observed": self._eof[name]})
+                data.clear()
+            return result
+
+
+def _observe_candidate_probe(actual, python, source, sequence):
+    """Test-only observation; preserve the real call, process and bool result."""
+    original_subprocess = consumer.subprocess
+    captures = []
+    children = []
+    capture_failed = False
+
+    class ObservedSubprocess:
+        def __getattr__(self, name):
+            return getattr(original_subprocess, name)
+
+        def Popen(self, *args, **kwargs):
+            nonlocal capture_failed
+            try:
+                capture = _ProbeOutput()
+            except Exception:
+                # Observation setup failure must not prevent the original
+                # launch or replace its error, nor cause a second launch.
+                capture_failed = True
+                child = original_subprocess.Popen(*args, **kwargs)
+                children.append(child)
+                return child
+            captures.append(capture)
+            observed = {**kwargs, **capture._writes}
+            try:
+                child = original_subprocess.Popen(*args, **observed)
+                children.append(child)
+                return child  # Original object; poll/terminate/wait untouched.
+            finally:
+                capture.close_writers()
+
+    started = time.monotonic()
+    outcome = "raised"
+    consumer.subprocess = ObservedSubprocess()
+    try:
+        result = actual(python, source)
+        outcome = "healthy" if result is True else "unhealthy"
+        return result
+    finally:
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        consumer.subprocess = original_subprocess
+        diagnostics = []
+        for capture in captures:
+            try:
+                diagnostics.append(capture.finish())
+            except Exception:
+                capture_failed = True
+                try:
+                    capture.retire()
+                except Exception:
+                    pass
+                with capture._lock:
+                    for data in capture._data.values():
+                        data.clear()
+        try:
+            # Everything emitted is a fixed enum or scalar. In particular,
+            # never emit bytes, argv, env, token, exception text or path.
+            event = {"format": "jae-synthetic-candidate-probe-v1",
+                     "probe": sequence, "outcome": outcome, "elapsed_ms": elapsed_ms,
+                     "child_count": len(children), "capture_failed": capture_failed,
+                     "observation_valid": not capture_failed and all(
+                         not item["reader_error"] and item["reader_stopped"] for item in diagnostics),
+                     "returncode_after_cleanup": children[-1].returncode if children else None}
+            if len(diagnostics) == 1:
+                event.update(diagnostics[0])
+            print(json.dumps(event, sort_keys=True))
+        except Exception:
+            pass  # A diagnostic sink cannot change the probe result.
+
+
+@pytest.fixture(autouse=True)
+def _diagnose_one_recovery_probe(request, monkeypatch):
+    # Deliberately limit observation to the original failing synthetic nodeid.
+    if request.node.name != (
+        "test_first_recovery_move_rechecks_both_roles_before_restoring_private_authority"
+        "[retained_resealed-rollback]"
+    ):
+        return
+    actual = consumer._candidate_starts
+    sequence = 0
+
+    def observed(python, source):
+        nonlocal sequence
+        sequence += 1
+        return _observe_candidate_probe(actual, python, source, sequence)
+
+    monkeypatch.setattr(consumer, "_candidate_starts", observed)
 
 
 @pytest.mark.parametrize("recovery_fault", [
