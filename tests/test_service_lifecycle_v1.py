@@ -12,6 +12,92 @@ import pytest
 from executor.autonomy import cli
 
 
+@pytest.mark.parametrize("mode", ["isolated", "live"])
+@pytest.mark.parametrize("worker_failure", [False, True])
+def test_service_registry_retirement_follows_all_worker_locks(
+    tmp_path, monkeypatch, mode, worker_failure
+):
+    from pathlib import Path
+    from executor.autonomy.worker import ProcessLock, Worker
+    from executor.otp import bridge
+
+    root, global_root = tmp_path / "selected", tmp_path / "global"
+    lock_paths = [root / "worker.lock"]
+    if mode == "live":
+        lock_paths.append(global_root / "worker.lock")
+    monkeypatch.setattr(cli, "RUNTIME", global_root)
+    monkeypatch.setattr(cli, "browser_mode", lambda: mode)
+    # Direct serve() calls must not replace pytest's process signal handlers.
+    monkeypatch.setattr(cli.signal, "signal", lambda *_: None)
+    monkeypatch.setattr(bridge, "OtpBridge", lambda: None)
+    real_retire, real_unlink = cli._await_preparation_retirement, Path.unlink
+    phases = []
+
+    def assert_owned():
+        for path in lock_paths:
+            with pytest.raises(RuntimeError, match="another local worker is active"):
+                with ProcessLock(path):
+                    pass
+
+    def worker_run(self):
+        assert_owned()
+        phases.append("worker")
+        if worker_failure:
+            raise RuntimeError("synthetic worker failure")
+        self.stop_event.set()
+
+    def retire(supervisor):
+        assert_owned()
+        phases.append("retire")
+        return real_retire(supervisor)
+
+    def unlink(self, *args, **kwargs):
+        if self == root / "service.json":
+            for path in lock_paths:
+                with ProcessLock(path):
+                    pass
+            phases.append("registry")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Worker, "run_forever", worker_run)
+    monkeypatch.setattr(cli, "_await_preparation_retirement", retire)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    if worker_failure:
+        with pytest.raises(RuntimeError, match="synthetic worker failure"):
+            cli.serve(root, 0)
+    else:
+        cli.serve(root, 0)
+    assert phases == ["worker", "retire", "registry"]
+    assert not (root / "service.json").exists()
+
+
+def test_worker_lock_release_failure_keeps_service_registry(tmp_path, monkeypatch):
+    from executor.autonomy.worker import ProcessLock, Worker
+
+    root = tmp_path / "runtime"
+    real_exit = ProcessLock.__exit__
+    retained = []
+
+    def fail_close(self, *args):
+        retained.append(self)
+        raise OSError("synthetic lock release failure")
+
+    monkeypatch.setattr(Worker, "run_forever", lambda self: self.stop_event.set())
+    monkeypatch.setattr(cli.signal, "signal", lambda *_: None)
+    monkeypatch.setattr(ProcessLock, "__exit__", fail_close)
+    try:
+        with pytest.raises(OSError, match="synthetic lock release failure"):
+            cli.serve(root, 0)
+        assert cli._service_record(root / "service.json")["port"] > 0
+        assert len(retained) == 1 and retained[0].handle is not None
+        with pytest.raises(RuntimeError, match="another local worker is active"):
+            with ProcessLock(root / "worker.lock"):
+                pass
+    finally:
+        for lock in retained:
+            real_exit(lock)
+
+
 def test_service_worker_lock_stays_owned_until_preparation_cleanup_proven(tmp_path,monkeypatch):
     from executor.autonomy.worker import ProcessLock
     from executor.autonomy.state_compatibility import _private_lock_fd

@@ -493,6 +493,62 @@ def test_startup_lost_ack_after_commit_retains_exact_data_and_normal_reopen(tmp_
     assert module._fence_path(app.parent).read_bytes()==fence
 
 
+@pytest.mark.parametrize("replace_registry", [False, True])
+def test_first_use_ack_failure_closes_worker_guard_before_registry_removal(
+    tmp_path, monkeypatch, replace_registry
+):
+    from pathlib import Path
+    from executor.autonomy import cli
+    from executor.autonomy.worker import ProcessLock
+
+    module, recovery, consumer, host, app, state = _pending_recovery_fixture(tmp_path, monkeypatch)
+    record = _recovery_record(recovery, app, state)
+    read_fd, write_fd = os.pipe()
+    startup = recovery._FirstUseStartup(state, _spare_port(), record, write_fd)
+    real_unlink = Path.unlink
+    retained, replacements, removals = [], [], []
+
+    def fail_ack(self, service):
+        assert self is startup and self.committed
+        retained.append(fingerprints(state))
+        if replace_registry:
+            replacement = {**service, "instance": "C" * 43}
+            (state / "service.json").write_text(json.dumps(replacement))
+            replacements.append(replacement)
+        raise BrokenPipeError("synthetic first-use acknowledgement loss")
+
+    def unlink(self, *args, **kwargs):
+        if self == state / "service.json":
+            assert startup.worker_fd is None
+            assert startup.app_fd is None and startup.ack_fd is None
+            assert startup.components[2].socket.fileno() == -1
+            with ProcessLock(state / "worker.lock"):
+                pass
+            removals.append(self)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(recovery._FirstUseStartup, "acknowledge", fail_ack)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    try:
+        with pytest.raises(BrokenPipeError, match="synthetic first-use acknowledgement loss"):
+            cli.serve(state, startup.port, _first_use_startup=startup)
+    finally:
+        os.close(read_fd)
+    assert startup.worker_fd is None
+    with ProcessLock(state / "worker.lock"):
+        pass
+    assert module._read_first_fence(app.parent)["status"] == "complete"
+    after = fingerprints(state)
+    assert {name: value for name, value in after.items() if name != "service.json"} == {
+        name: value for name, value in retained[0].items() if name != "service.json"}
+    if replace_registry:
+        assert cli._service_record(state / "service.json") == replacements[0]
+        assert removals == []
+    else:
+        assert not (state / "service.json").exists()
+        assert removals == [state / "service.json"]
+
+
 @pytest.mark.parametrize('fault',['wrong_registry','wrong_health','wrong_ack_pid','bad_progress'])
 def test_startup_refusal_only_polls_its_real_child_and_never_signals_or_adopts_service(tmp_path,monkeypatch,fault):
     import subprocess, sys

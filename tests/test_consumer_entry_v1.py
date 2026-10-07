@@ -6270,6 +6270,133 @@ def test_ten_actual_service_retirements_preserve_private_authority_and_ack(
     assert len(instances) == 10
 
 
+@pytest.mark.parametrize("pause_at", ["before_lock_release", "after_registry_unlink"])
+def test_actual_service_stop_waits_for_worker_lock_release(
+    retirement_private_state, tmp_path, monkeypatch, pause_at
+):
+    """Pipe gates expose both sides of the real daemon's retirement boundary."""
+    import select
+    import threading
+    from executor.autonomy.worker import ProcessLock
+
+    root, queue, db, key = retirement_private_state
+    before = _retirement_authority(root, db)
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    notify_read, notify_write = os.pipe()
+    release_read, release_write = os.pipe()
+    child_program = """
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from executor.autonomy import cli
+from executor.autonomy.worker import ProcessLock
+root, port = Path(sys.argv[2]), int(sys.argv[3])
+notify, release, pause_at = int(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
+real_replace, real_unlink, real_exit = Path.replace, Path.unlink, ProcessLock.__exit__
+def pause():
+    os.write(notify, b'P')
+    assert os.read(release, 1) == b'R'
+def published(self, target):
+    result = real_replace(self, target)
+    if Path(target) == root / 'service.json':
+        os.write(notify, b'S')
+    return result
+def unlink(self, *args, **kwargs):
+    result = real_unlink(self, *args, **kwargs)
+    if self == root / 'service.json' and pause_at == 'after_registry_unlink':
+        pause()
+    return result
+def close(self, *args):
+    if self.path == root / 'worker.lock' and pause_at == 'before_lock_release':
+        pause()
+    return real_exit(self, *args)
+Path.replace, Path.unlink, ProcessLock.__exit__ = published, unlink, close
+cli.serve(root, port)
+"""
+    replies, errors = [], []
+    finished = threading.Event()
+    observed_held = threading.Event()
+    boundary_seen = threading.Event()
+    actual_record = cli._service_record
+
+    def observed_record(path):
+        record = actual_record(path)
+        if boundary_seen.is_set():
+            observed_held.set()
+        return record
+
+    def stop():
+        try:
+            replies.append(cli.lifecycle("stop", root, port))
+        except BaseException as failure:
+            errors.append(type(failure).__name__)
+        finally:
+            finished.set()
+
+    def wait_marker(expected):
+        readable, _, _ = select.select([notify_read], [], [], 15)
+        assert readable, "synthetic daemon did not reach its retirement boundary"
+        assert os.read(notify_read, 1) == expected
+
+    monkeypatch.delenv("APPLICATION_EXECUTOR_LOCAL_TOKEN", raising=False)
+    monkeypatch.setattr(cli, "_service_record", observed_record)
+    log = tmp_path / "retirement-order.log"
+    client = None
+    with log.open("wb") as stream:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", child_program,
+             str(Path(__file__).resolve().parents[1]), str(root), str(port),
+             str(notify_write), str(release_read), pause_at],
+            env={**os.environ, "APPLICATION_EXECUTOR_BROWSER_MODE": "isolated"},
+            stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+            pass_fds=(notify_write, release_read),
+        )
+    os.close(notify_write)
+    os.close(release_read)
+    try:
+        wait_marker(b"S")
+        identity = cli.request(root, port, "/v1/service-identity")
+        assert cli.lifecycle("health", root, port)["ok"] is True
+        client = threading.Thread(target=stop, daemon=True)
+        client.start()
+        wait_marker(b"P")
+        boundary_seen.set()
+        assert process.poll() is None
+        if pause_at == "before_lock_release":
+            assert actual_record(root / "service.json") == identity
+            with pytest.raises(RuntimeError, match="another local worker is active"):
+                with ProcessLock(root / "worker.lock"):
+                    pass
+            assert observed_held.wait(5)
+            assert not finished.is_set()
+        else:
+            assert finished.wait(5)
+            assert replies == [{"ok": True, "running": False}] and errors == []
+            assert not (root / "service.json").exists()
+            with ProcessLock(root / "worker.lock"):
+                pass
+        _assert_retirement_authority(root, db, before)
+    finally:
+        os.write(release_write, b"R")
+        os.close(release_write)
+        os.close(notify_read)
+        if process.poll() is None and client is None and (root / "service.json").exists():
+            cli.lifecycle("stop", root, port)
+        assert process.wait(timeout=15) == 0
+        if client is not None:
+            client.join(timeout=15)
+    assert finished.is_set() and errors == []
+    assert replies == [{"ok": True, "running": False}]
+    assert not (root / "service.json").exists()
+    with ProcessLock(root / "worker.lock"):
+        pass
+    _assert_retirement_authority(root, db, before)
+    assert (root / "task-answers.key").read_bytes() == key
+    assert b"PRIVATE_" not in log.read_bytes()
+
+
 @pytest.mark.parametrize("pause_at", ["before_write", "after_write", "before_stop"])
 def test_http_service_retirement_observation_is_ordered_across_paused_handler(
     retirement_private_state, monkeypatch, pause_at
