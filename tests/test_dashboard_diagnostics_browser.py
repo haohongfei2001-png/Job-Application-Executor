@@ -2150,6 +2150,215 @@ def test_task_workspace_exact_binding_success_does_not_claim_a_new_duplicate(pre
     assert observed["external"] == [] and observed["errors"] == []
 
 
+# Each request is held by the test router until the edited draft is observable.
+# No recruiting website, account, applicant material or service write is used.
+_TASK_DRAFT_A = {"company": "Synthetic Company A", "role": "Synthetic Role A",
+                 "location": "", "campaign": "", "employment_type": "",
+                 "target_url": "https://jobs.example.test/original-a"}
+_TASK_DRAFT_B = {"company": "Synthetic Company B", "role": "Synthetic Role B",
+                 "location": "", "campaign": "", "employment_type": "",
+                 "target_url": "https://jobs.example.test/unsent-b"}
+_TASK_DRAFT_CANDIDATE = "synthetic-candidate-a"
+
+
+@pytest.fixture
+def pending_task_add_ui(preparation_ui):
+    page, observed = preparation_ui
+    pending = {"routes": [], "submissions": []}
+
+    def hold_submission(route):
+        pending["submissions"].append((route.request.method, route.request.post_data_json))
+        pending["routes"].append(route)
+        page.evaluate("count => window.__taskAddRequests = count", len(pending["submissions"]))
+
+    page.route("https://preparation.test/ui/api/tasks", hold_submission)
+    yield page, observed, pending
+
+
+def _fill_task_draft(page, values):
+    for key, value in values.items():
+        page.locator(f'#newtask input[name="{key}"]').fill(value)
+
+
+def _release_task_discovery(page, pending):
+    pending["routes"].pop(0).fulfill(status=200, content_type="application/json", body=json.dumps({
+        "discovery": {"status": "AMBIGUOUS", "candidates": [{
+            "candidate_id": _TASK_DRAFT_CANDIDATE, "job_id": "synthetic-job-a",
+            "title": "Synthetic Role A", "location": "Synthetic Location A"}]}}))
+    expect(page.get_by_role("button", name="选择此岗位", exact=True)).to_be_enabled()
+
+
+def _assert_task_draft_requests(page, observed, pending, candidate):
+    expected = [("POST", _TASK_DRAFT_A)]
+    if candidate:
+        expected.append(("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_DRAFT_CANDIDATE}))
+    # Refreshing ordinary read-only state must never submit the unsent draft.
+    page.evaluate("state()")
+    assert pending["submissions"] == expected
+    assert all(method == "GET" for method, _, _ in observed["requests"])
+    assert observed["external"] == [] and observed["errors"] == []
+    assert page.evaluate("window.__copied") == []
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+
+
+@pytest.mark.parametrize("edit_phase", ["direct_pending", "discovery_pending", "before_selection", "selection_pending"])
+@pytest.mark.parametrize("changed_field", ["company", "role", "target_url", "edit_reverted"])
+def test_task_workspace_delayed_add_preserves_newer_draft(pending_task_add_ui, edit_phase, changed_field):
+    page, observed, pending = pending_task_add_ui
+    expected_draft = dict(_TASK_DRAFT_A)
+
+    def edit_draft():
+        key = "role" if changed_field == "edit_reverted" else changed_field
+        _fill_task_draft(page, {key: _TASK_DRAFT_B[key]})
+        if changed_field == "edit_reverted":
+            # Matching values do not make a later edit the submitted form version.
+            _fill_task_draft(page, {key: _TASK_DRAFT_A[key]})
+        else:
+            expected_draft[key] = _TASK_DRAFT_B[key]
+
+    _fill_task_draft(page, _TASK_DRAFT_A)
+    page.locator("#newtask button").click()
+    page.wait_for_function("window.__taskAddRequests === 1")
+    candidate = edit_phase != "direct_pending"
+    if edit_phase in {"direct_pending", "discovery_pending"}:
+        edit_draft()
+    if candidate:
+        _release_task_discovery(page, pending)
+        if edit_phase == "before_selection":
+            edit_draft()
+        page.get_by_role("button", name="选择此岗位", exact=True).click()
+        page.wait_for_function("window.__taskAddRequests === 2")
+        if edit_phase == "selection_pending":
+            edit_draft()
+    pending["routes"].pop(0).fulfill(status=200, content_type="application/json", body=json.dumps({
+        "task_id": "prep-a", "revision": 7, "task_binding": "requested",
+        "discovery": {"status": "VERIFIED"}}))
+    # Wait for this success to be processed. Checking B before this would pass
+    # even if the delayed response subsequently erased it.
+    expect(page.locator("#toast")).to_contain_text("任务已保留在列表中")
+    expect(page.locator("#newtask button")).to_be_enabled()
+    expect(page.locator("#candidates button[data-candidate]")).to_have_count(0)
+    for key, value in expected_draft.items():
+        expect(page.locator(f'#newtask input[name="{key}"]')).to_have_value(value)
+    _assert_task_draft_requests(page, observed, pending, candidate)
+
+
+@pytest.mark.parametrize("candidate", [False, True], ids=["direct", "candidate"])
+@pytest.mark.parametrize("submit_method", ["click", "enter"])
+def test_task_workspace_delayed_add_clears_only_unchanged_submitted_draft(pending_task_add_ui, candidate, submit_method):
+    page, observed, pending = pending_task_add_ui
+    _fill_task_draft(page, _TASK_DRAFT_A)
+    if submit_method == "enter":
+        # Keep the edited field focused through discovery; selecting a candidate
+        # later blurs it but must not invent a new draft revision.
+        page.locator('#newtask input[name="target_url"]').press("Enter")
+    else:
+        page.locator("#newtask button").click()
+    page.wait_for_function("window.__taskAddRequests === 1")
+    if candidate:
+        _release_task_discovery(page, pending)
+        page.get_by_role("button", name="选择此岗位", exact=True).click()
+        page.wait_for_function("window.__taskAddRequests === 2")
+    pending["routes"].pop(0).fulfill(status=200, content_type="application/json", body=json.dumps({
+        "task_id": "prep-a", "revision": 7, "task_binding": "requested",
+        "discovery": {"status": "VERIFIED"}}))
+    expect(page.locator("#toast")).to_contain_text("任务已保留在列表中")
+    for key in _TASK_DRAFT_A:
+        expect(page.locator(f'#newtask input[name="{key}"]')).to_have_value("")
+    _assert_task_draft_requests(page, observed, pending, candidate)
+
+
+@pytest.mark.parametrize("candidate", [False, True], ids=["direct", "candidate"])
+@pytest.mark.parametrize("outcome", ["failure", "aborted", "duplicate", "reconciliation", "expired"])
+def test_task_workspace_delayed_add_non_success_preserves_draft_without_replay(pending_task_add_ui, candidate, outcome):
+    page, observed, pending = pending_task_add_ui
+    _fill_task_draft(page, _TASK_DRAFT_A)
+    page.locator("#newtask button").click()
+    page.wait_for_function("window.__taskAddRequests === 1")
+    if candidate:
+        _release_task_discovery(page, pending)
+        page.get_by_role("button", name="选择此岗位", exact=True).click()
+        page.wait_for_function("window.__taskAddRequests === 2")
+    _fill_task_draft(page, _TASK_DRAFT_B)
+    response = pending["routes"].pop(0)
+    if outcome == "aborted":
+        response.abort("failed")
+    else:
+        status, payload = {
+            "failure": (503, {"error": "synthetic_unavailable"}),
+            "duplicate": (200, {"task_id": "prep-a", "revision": 7,
+                                "task_binding": "existing_different", "discovery": {"status": "VERIFIED"}}),
+            "reconciliation": (409, {"error": "profile_reconciliation_required", "submit_capability": False}),
+            "expired": (401, {"error": "ui_session_required"}),
+        }[outcome]
+        response.fulfill(status=status, content_type="application/json", body=json.dumps(payload))
+    if outcome == "expired":
+        expect(page.locator("#session-expired")).to_be_visible()
+        expect(page.locator("#newtask button")).to_be_disabled()
+        for key in _TASK_DRAFT_B:
+            assert page.locator(f'#newtask input[name="{key}"]').evaluate("node => node.readOnly")
+    elif outcome == "duplicate":
+        expect(page.get_by_role("button", name="查看已有任务", exact=True)).to_be_visible()
+        expect(page.locator("#candidates")).to_contain_text("本次没有替换或启动任务")
+    elif outcome == "reconciliation":
+        expect(page.get_by_role("button", name="打开资料并核对", exact=True)).to_be_visible()
+        expect(page.locator("#toast")).to_contain_text("不会自动重试")
+    else:
+        expect(page.locator("#toast")).to_contain_text("候选已变化" if candidate else "暂时无法安全查找岗位")
+        expect(page.locator("#newtask button")).to_be_enabled()
+        if candidate:
+            expect(page.get_by_role("button", name="选择此岗位", exact=True)).to_be_enabled()
+    for key, value in _TASK_DRAFT_B.items():
+        expect(page.locator(f'#newtask input[name="{key}"]')).to_have_value(value)
+    _assert_task_draft_requests(page, observed, pending, candidate)
+
+
+def test_task_workspace_delayed_candidate_recheck_keeps_its_own_request_snapshot(pending_task_add_ui):
+    page, observed, pending = pending_task_add_ui
+    _fill_task_draft(page, _TASK_DRAFT_A)
+    page.locator("#newtask button").click()
+    page.wait_for_function("window.__taskAddRequests === 1")
+    _release_task_discovery(page, pending)
+    page.get_by_role("button", name="选择此岗位", exact=True).click()
+    page.wait_for_function("window.__taskAddRequests === 2")
+    candidate_response = pending["routes"].pop(0)
+    _fill_task_draft(page, _TASK_DRAFT_B)
+    page.locator("#newtask button").click()
+    page.wait_for_function("window.__taskAddRequests === 3")
+    # An explicit B discovery replaces shared pendingDiscovery while the prior
+    # A candidate request is still pending. Its eventual result belongs to A.
+    _release_task_discovery(page, pending)
+    next_candidate = "synthetic-candidate-a-rechecked"
+    candidate_response.fulfill(status=200, content_type="application/json", body=json.dumps({
+        "discovery": {"status": "AMBIGUOUS", "candidates": [{
+            "candidate_id": next_candidate, "job_id": "synthetic-job-a-rechecked",
+            "title": "Synthetic Role A Rechecked", "location": "Synthetic Location A"}]}}))
+    expect(page.locator("#candidates")).to_contain_text("Synthetic Role A Rechecked")
+    # Only this fresh, explicit click may issue the next request.
+    assert len(pending["submissions"]) == 3
+    page.get_by_role("button", name="选择此岗位", exact=True).click()
+    page.wait_for_function("window.__taskAddRequests === 4")
+    expected_submissions = [
+        ("POST", _TASK_DRAFT_A),
+        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_DRAFT_CANDIDATE}),
+        ("POST", _TASK_DRAFT_B),
+        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": next_candidate}),
+    ]
+    assert pending["submissions"] == expected_submissions
+    pending["routes"].pop(0).fulfill(status=200, content_type="application/json", body=json.dumps({
+        "task_id": "prep-a", "revision": 7, "task_binding": "requested",
+        "discovery": {"status": "VERIFIED"}}))
+    expect(page.locator("#toast")).to_contain_text("任务已保留在列表中")
+    for key, value in _TASK_DRAFT_B.items():
+        expect(page.locator(f'#newtask input[name="{key}"]')).to_have_value(value)
+    page.evaluate("state()")
+    assert pending["submissions"] == expected_submissions
+    assert all(method == "GET" for method, _, _ in observed["requests"])
+    assert observed["external"] == [] and observed["errors"] == []
+    assert page.evaluate("window.__copied") == []
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+
+
 # Synthetic private-editor payloads never leave the loopback/routed test origin.
 def _editor_payload():
     from executor.autonomy.task_preparation import CHECKLIST_FIELDS

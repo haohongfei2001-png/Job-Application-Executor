@@ -546,6 +546,15 @@ editorReconcile.onclick=async()=>{
 };
 
 const newTaskForm=document.getElementById('newtask');
+let newTaskFormVersion=0;
+for(const event of ['input','reset'])newTaskForm.addEventListener(event,()=>newTaskFormVersion++);
+function clearSubmittedTaskDraft(request,formVersion){
+  // Matching values alone cannot identify an edited-then-reverted draft.
+  if(newTaskFormVersion!==formVersion)return;
+  const current=Object.fromEntries(new FormData(newTaskForm).entries());
+  if(Object.keys(current).length===Object.keys(request).length&&
+    Object.entries(request).every(([key,value])=>current[key]===value))newTaskForm.reset();
+}
 const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
 const recoveryObservations=new Map();
 const providerLoad=document.getElementById('provider-load'),providerLoadStatus=document.getElementById('provider-load-status');
@@ -1398,15 +1407,15 @@ tasksEl.addEventListener('click',async event=>{
 newTaskForm.addEventListener('submit',async event=>{
   event.preventDefault();
   const button=newTaskForm.querySelector('button');button.disabled=true;
-  const data=Object.fromEntries(new FormData(newTaskForm).entries());
+  const data=Object.freeze(Object.fromEntries(new FormData(newTaskForm).entries())),formVersion=newTaskFormVersion;
   try{
     const r=await uiRequest('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
       credentials:'same-origin',body:JSON.stringify(data)});
     const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     if(showProfileAdmissionGuidance(r,result))return;
     if(!r.ok)throw new Error();
-    showDiscovery(result,data);
-    if(result.task_id){if(result.task_binding!=='existing_different')newTaskForm.reset();await state()}
+    showDiscovery(result,data,formVersion);
+    if(result.task_id){if(result.task_binding!=='existing_different')clearSubmittedTaskDraft(data,formVersion);await state()}
   }catch(e){notify('暂时无法安全查找岗位；请核对公司、岗位和官方链接。')}
   finally{button.disabled=uiSessionExpired}
 });
@@ -1423,7 +1432,7 @@ function showProfileAdmissionGuidance(response,result){
   notify('资料仍待明确核对，本次没有添加任务，也不会自动重试。');
   return true;
 }
-function showDiscovery(result,request){
+function showDiscovery(result,request,formVersion){
   const discovery=result.discovery||{};
   if(result.task_id){
     pendingDiscovery=null;candidatesEl.replaceChildren();
@@ -1444,22 +1453,24 @@ function showDiscovery(result,request){
     }
     return;
   }
-  pendingDiscovery={request,discovery};
+  pendingDiscovery=Object.freeze({request,discovery,formVersion});
   const labels={AMBIGUOUS:'发现多个同名岗位，请按地点、批次和用工类型选择。',INCOMPLETE:'公开列表覆盖范围尚未证实，暂不选择或写入。',UNAVAILABLE:'未找到符合全部条件的在招岗位。',UNSUPPORTED:'此公司或链接暂不在已验证的发现范围内。'};
   candidatesEl.innerHTML='<div class="candidate-note">'+esc(labels[discovery.status]||'岗位尚未核验。')+'</div>'+
     (discovery.candidates||[]).map(c=>'<div class="candidate"><b>'+esc(c.title)+'</b><br>'+esc(c.location||'地点未注明')+' · '+esc(c.campaign||'批次未注明')+' · '+esc(c.employment_type||'类型未注明')+'<br>职位 '+esc(c.job_id)+(discovery.status==='AMBIGUOUS'?'<button type="button" data-candidate="'+esc(c.candidate_id)+'">选择此岗位</button>':'')+'</div>').join('');
 }
 candidatesEl.addEventListener('click',async event=>{
   const button=event.target.closest('button[data-candidate]');if(!button||!pendingDiscovery)return;
+  // Another lookup may replace pendingDiscovery while this request is pending.
+  const submission=pendingDiscovery;
   button.disabled=true;
   try{
-    const data={...pendingDiscovery.request,selected_candidate_id:button.dataset.candidate};
+    const data={...submission.request,selected_candidate_id:button.dataset.candidate};
     const r=await uiRequest('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(data)});
     const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
     if(showProfileAdmissionGuidance(r,result))return;
     if(!r.ok)throw new Error();
-    showDiscovery(result,pendingDiscovery?.request||data);
-    if(result.task_id){if(result.task_binding!=='existing_different')newTaskForm.reset();await state()}
+    showDiscovery(result,submission.request,submission.formVersion);
+    if(result.task_id){if(result.task_binding!=='existing_different')clearSubmittedTaskDraft(submission.request,submission.formVersion);await state()}
   }catch(e){notify('候选已变化或暂时无法核验，请重新查找。');button.disabled=uiSessionExpired}
 });
 candidatesEl.addEventListener('click',event=>{

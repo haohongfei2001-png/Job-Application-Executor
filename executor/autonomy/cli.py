@@ -180,6 +180,9 @@ def serve(root, port, *, _first_use_startup=None):
             try:
                 _first_use_startup.acknowledge(record)
             except BaseException:
+                # Close the bound server and worker guard before registry
+                # absence can advertise that this failed startup has retired.
+                locks.close()
                 if _service_record(state) == record:
                     state.unlink()  # Our just-published registry; never another PID.
                 raise
@@ -193,6 +196,9 @@ def serve(root, port, *, _first_use_startup=None):
             _await_preparation_retirement(supervisor)
             server.shutdown()
             server.server_close()
+            # Registry absence is the stop client's completion receipt. Release
+            # every worker guard first; an uncertain close keeps the registry.
+            locks.close()
             try:
                 if _service_record(state) == record:
                     state.unlink(missing_ok=True)
