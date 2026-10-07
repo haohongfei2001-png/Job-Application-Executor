@@ -464,9 +464,7 @@ jobs:
     # One host/runtime cohort prevents image rollout drift between full-file owners.
     # Native background steps preserve separate logs without extending the 30m budget.
     env:
-      JAE_FULL_SUITE_COHORT: ${{ runner.temp }}/jae-full-suite-cohort
       JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/jae-playwright-browsers
     outputs:
       receipt_consumer: ${{ steps.consumer.outputs.receipt_consumer }}
       receipt_browser_contract: ${{ steps.browser_contract.outputs.receipt_browser_contract }}
@@ -522,6 +520,9 @@ jobs:
         with:
           python-version: '3.12.14'
           cache: pip
+      - name: Initialize runner-local cohort paths
+        run: |
+          printf '%s\n' "JAE_FULL_SUITE_COHORT=$RUNNER_TEMP/jae-full-suite-cohort" "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/jae-playwright-browsers" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

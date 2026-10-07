@@ -56,6 +56,7 @@ PUBLIC_PROBE_ARTIFACT = '      - name: Retain value-free public preflight diagno
 
 # Cohort launch/wait/retention are frozen independently. Only these exact
 # additions and the exact Python patch pin normalize to the original gate hash.
+COHORT_PATHS = '      - name: Initialize runner-local cohort paths\n        run: |\n          printf \'%s\\n\' "JAE_FULL_SUITE_COHORT=$RUNNER_TEMP/jae-full-suite-cohort" "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/jae-playwright-browsers" >> "$GITHUB_ENV"\n'
 COHORT_STEPS = '      - name: Prepare independent exact-source owners\n        id: cohort\n        run: python scripts/ci_full_suite_cohort.py prepare\n      - name: Full round-closure consumer owner\n        id: consumer\n        background: true\n        run: python scripts/ci_full_suite_cohort.py owner consumer\n      - name: Full round-closure browser_contract owner\n        id: browser_contract\n        background: true\n        run: python scripts/ci_full_suite_cohort.py owner browser_contract\n      - name: Full round-closure remainder owner\n        id: remainder\n        background: true\n        run: python scripts/ci_full_suite_cohort.py owner remainder\n      - name: Wait for every full-file owner\n        wait: [consumer, browser_contract, remainder]\n      - name: Require successful owners and retain exact receipts\n        if: always() && steps.cohort.outcome == \'success\'\n        env:\n          JAE_FULL_SUITE_OWNER_RESULTS: >-\n            {"consumer":"${{ steps.consumer.outcome }}","browser_contract":"${{ steps.browser_contract.outcome }}","remainder":"${{ steps.remainder.outcome }}"}\n        run: python scripts/ci_full_suite_cohort.py verify\n'
 COHORT_ARTIFACT = '      - name: Retain raw cohort receipts and resource audit\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: jae-full-suite-cohort-${{ github.run_id }}-${{ github.run_attempt }}\n          path: ${{ runner.temp }}/jae-full-suite-cohort/audit/\n          if-no-files-found: error\n          retention-days: 3\n'
 
@@ -350,10 +351,11 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
                     # Retain the original dependency/standalone/compile hash.
                     # Exact new owner topology is frozen above and checked below.
                     old = "      - name: Full round-closure test suite\n        env:\n          APPLICATION_EXECUTOR_BROWSER_MODE: isolated\n        run: python -m pytest -v\n"
+                    self.assertEqual(protected.count(COHORT_PATHS), 1)
                     self.assertEqual(protected.count(COHORT_STEPS), 1)
                     self.assertEqual(protected.count(COHORT_ARTIFACT), 1)
                     self.assertEqual(protected.count("          python-version: '3.12.14'\n"), 1)
-                    protected = protected.replace(COHORT_STEPS, old, 1).replace(COHORT_ARTIFACT, "", 1)
+                    protected = protected.replace(COHORT_PATHS, "", 1).replace(COHORT_STEPS, old, 1).replace(COHORT_ARTIFACT, "", 1)
                     protected = protected.replace("          python-version: '3.12.14'\n", "          python-version: '3.12'\n", 1)
                 protected = protected.rstrip() + "\n"
                 self.assertEqual(hashlib.sha256(protected.encode()).hexdigest(), digest)
@@ -417,8 +419,34 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertIn("    runs-on: ubuntu-latest\n    timeout-minutes: 30\n", shards)
         self.assertEqual(shards.count("      - uses: actions/setup-python@v5\n"), 1)
         self.assertIn("          python-version: '3.12.14'\n", shards)
-        self.assertIn("      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/jae-playwright-browsers\n", shards)
-        self.assertIn("      JAE_FULL_SUITE_COHORT: ${{ runner.temp }}/jae-full-suite-cohort\n", shards)
+        self.assertEqual(shards.count(COHORT_PATHS), 1)
+        self.assertLess(shards.index("Refuse stale or ineligible engineering closure head"), shards.index(COHORT_PATHS))
+        self.assertLess(shards.index(COHORT_PATHS), shards.index("      - name: Install dependencies\n"))
+        self.assertNotIn("${{", COHORT_PATHS)
+        # Job env is evaluated before a runner exists; only step-level contexts
+        # can use runner.temp. Check every job, including the regression fixture.
+        def validate_job_env_contexts(body):
+            match = re.search(r"^    env:\n((?:^      .*(?:\n|$))*)", body, re.MULTILINE)
+            if match:
+                contexts = re.findall(r"\$\{\{\s*([A-Za-z_][A-Za-z_0-9]*)\.", match.group(1))
+                if set(contexts) - {"github", "needs", "strategy", "matrix", "vars", "secrets", "inputs"}:
+                    raise ValueError("context unavailable in job env")
+        for body in JOBS.values():
+            validate_job_env_contexts(body)
+        for variable in ("JAE_FULL_SUITE_COHORT", "PLAYWRIGHT_BROWSERS_PATH"):
+            invalid = shards.replace("    env:\n", "    env:\n      " + variable + ": ${{ runner.temp }}/invalid\n", 1)
+            with self.subTest(variable=variable), self.assertRaises(ValueError):
+                validate_job_env_contexts(invalid)
+        # Execute the actual initialization shell, including a path with spaces.
+        with tempfile.TemporaryDirectory(prefix="cohort paths ") as directory:
+            target = Path(directory) / "github-env"
+            shell = textwrap.dedent(COHORT_PATHS.split("        run: |\n", 1)[1])
+            command = subprocess.run(["bash", "-e"], input=shell, text=True, capture_output=True,
+                                     env={"PATH": os.environ["PATH"], "RUNNER_TEMP": directory,
+                                          "GITHUB_ENV": str(target)}, timeout=10)
+            self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
+            self.assertEqual(target.read_text(), "JAE_FULL_SUITE_COHORT=" + directory + "/jae-full-suite-cohort\n"
+                             + "PLAYWRIGHT_BROWSERS_PATH=" + directory + "/jae-playwright-browsers\n")
         self.assertIn("      JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}\n", shards)
         self.assertEqual(shards.count(COHORT_STEPS), 1)
         self.assertEqual(shards.count(COHORT_ARTIFACT), 1)
