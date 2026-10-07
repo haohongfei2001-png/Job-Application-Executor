@@ -199,7 +199,8 @@ class OwnerLifecycle:
                 continue
             try:
                 fields = (entry / "stat").read_text().rpartition(")")[2].split()
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
+                # A process may exit between listing /proc and reading stat.
                 continue
             if int(fields[1]) == os.getpid():
                 owned.append(int(entry.name))
@@ -241,7 +242,7 @@ class OwnerLifecycle:
                 try:
                     try:
                         fields = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()
-                    except FileNotFoundError:
+                    except (FileNotFoundError, ProcessLookupError):
                         continue
                     # Open the pidfd BEFORE proving current parent ownership. If
                     # the numeric PID was reused, a handle can only reference the
