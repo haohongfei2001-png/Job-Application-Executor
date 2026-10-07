@@ -1,6 +1,7 @@
 """Complete-file allocation, raw identity receipts and real pytest failure probes."""
 from collections import Counter
 import copy
+import errno
 import json
 import os
 import signal
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from scripts.ci_full_suite import (FORMAT, OUTCOMES, SHARDS, aggregate, decode, digest,
                                   inventory, owner, partition, universe_inventory)
@@ -604,6 +606,130 @@ with cohort.OwnerLifecycle(Path("lifecycle-" + mode + ".json")):
                 cleanup = json.loads((self.root / ("lifecycle-" + mode + ".json")).read_text())
                 self.assertFalse(cleanup["complete"])
                 self.assertEqual(cleanup["events"], [])
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_exited_proc_entries_preserve_owned_identity_and_echild_proof(self):
+        harness = '''
+import errno, json, os, signal, subprocess, sys, time
+from pathlib import Path
+from unittest import mock
+sys.path.insert(0, "scripts")
+import ci_full_suite_cohort as cohort
+phase, code = sys.argv[1], int(sys.argv[2])
+real_iterdir, real_read = Path.iterdir, Path.read_text
+real_pidfd, real_waitpid = os.pidfd_open, os.waitpid
+victim = survivor = None
+armed = False
+injected = []
+waits = []
+def retire():
+    victim.kill()
+    victim.wait(timeout=5)
+def entries(path):
+    values = list(real_iterdir(path))
+    if armed and path == Path("/proc") and not injected:
+        values.sort(key=lambda entry: entry.name != str(victim.pid))
+        assert Path("/proc", str(victim.pid)) in values
+        if phase == "enumeration":
+            retire()  # Exit after enumeration, before the stat read.
+    return iter(values)
+def pidfd(pid, *args, **kwargs):
+    fd = real_pidfd(pid, *args, **kwargs)
+    if armed and phase == "recheck" and pid == victim.pid and not injected:
+        retire()  # Exit after opening the bound handle, before PPID recheck.
+    return fd
+def read(path, *args, **kwargs):
+    if (armed and path == Path("/proc", str(victim.pid), "stat")
+            and victim.returncode is not None and not injected):
+        injected.append(code)
+        raise OSError(code, os.strerror(code), str(path))
+    return real_read(path, *args, **kwargs)
+def waitpid(pid, options):
+    try:
+        result = real_waitpid(pid, options)
+    except ChildProcessError as error:
+        if armed and pid == -1:
+            waits.append({"errno": error.errno})
+        raise
+    if armed and pid == -1:
+        waits.append({"result": list(result)})
+    return result
+try:
+    with mock.patch.object(Path, "iterdir", entries), mock.patch.object(Path, "read_text", read), \
+            mock.patch.object(os, "pidfd_open", pidfd), mock.patch.object(os, "waitpid", waitpid):
+        with cohort.OwnerLifecycle(Path("exited-cleanup.json")) as lifecycle:
+            for name in ("victim", "survivor"):
+                script = "import signal,time;from pathlib import Path;signal.signal(signal.SIGTERM,signal.SIG_IGN);Path(" + repr(name + ".ready") + ").touch();time.sleep(60)"
+                process = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+                if name == "victim": victim = process
+                else: survivor = process
+            deadline = time.monotonic() + 5
+            while not all(Path(name + ".ready").exists() for name in ("victim", "survivor")):
+                assert time.monotonic() < deadline
+                time.sleep(.02)
+            fields = real_read(Path("/proc", str(survivor.pid), "stat")).rpartition(")")[2].split()
+            assert int(fields[1]) == os.getpid()
+            start_ticks = fields[19]
+            assert set(lifecycle.children()) == {victim.pid, survivor.pid}
+            armed = True
+        assert injected == [code]
+        assert waits[-1] == {"errno": errno.ECHILD}
+        signalled = [event for event in lifecycle.events if "signal" in event]
+        assert {event["pid"] for event in signalled} == {survivor.pid}
+        assert {event["start_ticks"] for event in signalled} == {start_ticks}
+        assert {event["signal"] for event in signalled} == {signal.SIGTERM, signal.SIGKILL}
+        assert survivor.pid in {event.get("reaped_pid") for event in lifecycle.events}
+        try: os.kill(survivor.pid, 0)
+        except ProcessLookupError: pass
+        else: raise AssertionError("owned child survived cleanup")
+        Path("exited-proof.json").write_text(json.dumps({"injected": injected, "final_wait": waits[-1]}))
+finally:
+    # Keep the before-fix failure probe from leaving its synthetic children.
+    for process in (victim, survivor):
+        if process is not None:
+            if process.poll() is None: process.kill()
+            process.wait(timeout=5)
+'''
+        for phase in ("enumeration", "recheck"):
+            for code in (errno.ESRCH, errno.ENOENT):
+                with self.subTest(phase=phase, errno=code):
+                    for name in ("victim.ready", "survivor.ready", "exited-proof.json"):
+                        (self.root / name).unlink(missing_ok=True)
+                    run = subprocess.run([sys.executable, "-c", harness, phase, str(code)],
+                                         cwd=self.root, env=self.env, text=True,
+                                         capture_output=True, timeout=15)
+                    self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                    self.assertTrue(json.loads((self.root / "exited-cleanup.json").read_text())["complete"])
+                    proof = json.loads((self.root / "exited-proof.json").read_text())
+                    self.assertEqual(proof, {"injected": [code], "final_wait": {"errno": errno.ECHILD}})
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
+    def test_proc_stat_permission_and_other_errors_fail_cleanup_closed(self):
+        from scripts.ci_full_suite_cohort import OwnerLifecycle
+        for phase in ("enumeration", "recheck"):
+            for code in (errno.EACCES, errno.EPERM, errno.EIO, errno.EINVAL):
+                with self.subTest(phase=phase, errno=code):
+                    audit = self.root / "stat-error-cleanup.json"
+                    lifecycle = OwnerLifecycle(audit)
+                    error = OSError(code, os.strerror(code), "/proc/123/stat")
+                    children = lifecycle.children if phase == "enumeration" else lambda: [123]
+                    with mock.patch.object(lifecycle, "children", side_effect=children), \
+                            mock.patch.object(Path, "iterdir", return_value=iter([Path("/proc/123")])), \
+                            mock.patch.object(Path, "read_text", side_effect=error), \
+                            mock.patch.object(os, "waitpid", return_value=(0, 0)), \
+                            mock.patch.object(os, "pidfd_open", return_value=456), \
+                            mock.patch.object(os, "close") as close, \
+                            mock.patch.object(signal, "pidfd_send_signal") as send:
+                        with self.assertRaises(OSError) as raised:
+                            lifecycle.__exit__(None, None, None)
+                        self.assertIs(raised.exception, error)
+                        send.assert_not_called()
+                        if phase == "recheck": close.assert_called_once_with(456)
+                        else: close.assert_not_called()
+                    cleanup = json.loads(audit.read_text())
+                    self.assertFalse(cleanup["complete"])
+                    self.assertEqual(cleanup["error"], type(error).__name__)
+                    self.assertEqual(cleanup["events"], [])
 
     @unittest.skipUnless(sys.platform == "linux", "Linux-only cohort ownership; native Mac gates are separate")
     def test_empty_proc_snapshot_is_not_evidence_of_no_children(self):
