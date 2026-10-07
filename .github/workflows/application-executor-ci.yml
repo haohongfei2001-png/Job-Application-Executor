@@ -460,9 +460,9 @@ jobs:
   full_suite:
     if: (github.event.action != 'labeled' && (github.event_name == 'push' || github.event.pull_request.draft == false)) || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.pull_request.head.repo.full_name == github.repository && github.event.label.name == format('eng-{0}', github.event.pull_request.head.sha))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     # One host/runtime cohort prevents image rollout drift between full-file owners.
-    # Native background steps preserve separate logs without extending the 30m budget.
+    # The shared 45m budget includes cold dependency setup and all three owners.
     env:
       JAE_FULL_SUITE_EXPECTED_SHA: ${{ github.event.action == 'labeled' && github.event.pull_request.head.sha || github.sha }}
     outputs:

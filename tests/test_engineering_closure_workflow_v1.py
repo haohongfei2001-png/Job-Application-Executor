@@ -223,7 +223,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         self.assertNotIn('continue-on-error',smoke)
         expected_budgets = {"foundation": 30, "packaged_candidate": 20,
                             "macos_consumer_release": "${{ matrix.suite == 'native_integration' && 30 || 25 }}",
-                            "full_suite": 30, "test": 5,
+                            "full_suite": 45, "test": 5,
                             "engineering_closure_macos": 20, "preparation_validation": 25, "signed_dmg_acceptance": 75, "macos_consumer_gate": 5}
         for name, budget in expected_budgets.items():
             self.assertIn(f"    timeout-minutes: {budget}\n", JOBS[name])
@@ -416,7 +416,7 @@ class EngineeringClosureRoutingTests(unittest.TestCase):
         shards, gate = JOBS["full_suite"], JOBS["test"]
         self.assertNotIn("strategy:", shards)
         self.assertNotIn("matrix.", shards)
-        self.assertIn("    runs-on: ubuntu-latest\n    timeout-minutes: 30\n", shards)
+        self.assertIn("    runs-on: ubuntu-latest\n    timeout-minutes: 45\n", shards)
         self.assertEqual(shards.count("      - uses: actions/setup-python@v5\n"), 1)
         self.assertIn("          python-version: '3.12.14'\n", shards)
         self.assertEqual(shards.count(COHORT_PATHS), 1)
