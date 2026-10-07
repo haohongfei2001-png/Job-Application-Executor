@@ -1518,8 +1518,196 @@ def test_single_installer_builder_refuses_wrong_platform_before_read_or_output(t
     assert not output.exists()
 
 
+def _hdiutil_free_space(root):
+    try:
+        space = os.statvfs(root)
+        return {'bytes': space.f_bavail * space.f_frsize, 'inodes': space.f_favail}
+    except Exception:
+        return 'unavailable'
+
+
+def _hdiutil_stderr_tail(capture, operation):
+    import errno
+
+    if capture is None:
+        return {'bytes': None, 'tail': ['unavailable']}
+    capture.seek(0, os.SEEK_END)
+    size = capture.tell()
+    capture.seek(max(0, size - 4096))
+    tail = capture.read(4096).decode('utf-8', errors='replace')
+    # Only exact native status messages are safe to publish. Unknown lines,
+    # paths, environment values and payload text never become diagnostic text.
+    reasons = {os.strerror(code) for code in errno.errorcode}
+    reasons.update({'Resource busy', 'no mountable file systems', 'image not recognized',
+                    'no such file or directory', 'Device / media not supported'})
+    allowed = {f'hdiutil: {operation} failed - {reason}' for reason in reasons}
+    lines = tail.splitlines()[-8:]
+    return {'bytes': size, 'truncated': size > 4096 or len(tail.splitlines()) > 8,
+            'tail': [line if line in allowed else '[redacted non-status line]'
+                     for line in lines]}
+
+
+def _run_hdiutil_with_diagnostics(run, root, argv, **options):
+    import tempfile
+    import time
+
+    if (argv[0] != '/usr/bin/hdiutil' or argv[1] not in {'create', 'verify', 'attach', 'detach'}
+            or options.get('stderr') != subprocess.DEVNULL):
+        return run(argv, **options)
+    capture = None
+    started = None
+    before = _hdiutil_free_space(root)
+    try:
+        started = time.monotonic()
+        capture = tempfile.TemporaryFile(dir=root)
+    except Exception:
+        pass  # A diagnostic allocation failure must not replace the command.
+    try:
+        return run(argv, **{**options, **({'stderr': capture} if capture is not None else {})})
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        try:
+            report = {'operation': argv[1], 'error': type(error).__name__,
+                      'returncode': getattr(error, 'returncode', None),
+                      'elapsed_seconds': round(time.monotonic() - started, 3) if started is not None else None,
+                      'output_filesystem_before': before,
+                      'output_filesystem_after': _hdiutil_free_space(root),
+                      'stderr': _hdiutil_stderr_tail(capture, argv[1])}
+            print('synthetic_hdiutil_failure: ' + json.dumps(report), file=sys.stderr)
+        except Exception:
+            try:
+                print('synthetic_hdiutil_failure: diagnostics_unavailable', file=sys.stderr)
+            except Exception:
+                pass
+        raise  # Same exception, return code and check/timeout behavior.
+    finally:
+        if capture is not None:
+            try:
+                capture.close()
+            except Exception:
+                pass
+
+
+@pytest.fixture
+def installer_image_diagnostics(monkeypatch, tmp_path):
+    from functools import partial
+    from types import SimpleNamespace
+    from executor.autonomy import macos_installer_image as image
+
+    # Patch only this builder's module reference, never shared subprocess.run.
+    monkeypatch.setattr(image, 'subprocess', SimpleNamespace(
+        run=partial(_run_hdiutil_with_diagnostics, subprocess.run, tmp_path),
+        DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE))
+
+
+def test_hdiutil_diagnostics_preserve_command_options_and_success(tmp_path, capsys):
+    argv = ['/usr/bin/hdiutil', 'attach', '-readonly', '-plist', str(tmp_path/'synthetic.dmg')]
+    options = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.PIPE,
+               'stderr': subprocess.DEVNULL, 'timeout': 60, 'check': True}
+    result = subprocess.CompletedProcess(argv, 0, stdout=b'SYNTHETIC_PLIST_BYTES')
+    calls = []
+
+    def run(command, **forwarded):
+        calls.append((command, forwarded))
+        assert command is argv
+        assert {k: v for k, v in forwarded.items() if k != 'stderr'} == {
+            k: v for k, v in options.items() if k != 'stderr'}
+        forwarded['stderr'].write(b'CANARY_PRIVATE_SUCCESS_OUTPUT')
+        return result
+
+    assert _run_hdiutil_with_diagnostics(run, tmp_path, argv, **options) is result
+    assert len(calls) == 1 and calls[0][1]['stderr'].closed
+    assert options['stderr'] == subprocess.DEVNULL
+    assert capsys.readouterr() == ('', '')
+
+
+@pytest.mark.parametrize('failure', ['exit', 'timeout'])
+def test_hdiutil_diagnostics_bound_and_redact_stderr_preserving_failure(
+    tmp_path, capsys, monkeypatch, failure
+):
+    from types import SimpleNamespace
+
+    argv = ['/usr/bin/hdiutil', 'create', '-quiet', '-srcfolder', str(tmp_path/'synthetic-source'),
+            str(tmp_path/'synthetic.dmg')]
+    error = (subprocess.CalledProcessError(1, argv) if failure == 'exit'
+             else subprocess.TimeoutExpired(argv, 180))
+    spaces = iter([SimpleNamespace(f_bavail=23, f_frsize=4096, f_favail=17),
+                   SimpleNamespace(f_bavail=19, f_frsize=4096, f_favail=13)])
+    monkeypatch.setattr(os, 'statvfs', lambda root: next(spaces))
+    calls = []
+
+    def run(command, **options):
+        calls.append(command)
+        assert command is argv and options['check'] is True and options['timeout'] == 180
+        assert options['stdin'] == options['stdout'] == subprocess.DEVNULL
+        options['stderr'].write(b'CANARY_DISCARDED_PREFIX' + b'x' * 10000 + b'\n'
+            + (b'CANARY_SECRET=/Users/private/payload env=CANARY_TOKEN\n' * 12)
+            + b'hdiutil: create failed - Resource busy CANARY_SECRET\n'
+            + b'hdiutil: create failed - Resource busy\n')
+        raise error
+
+    with pytest.raises(type(error)) as raised:
+        _run_hdiutil_with_diagnostics(run, tmp_path, argv, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, check=True)
+    assert raised.value is error and error.cmd is argv and error.stderr is None
+    assert calls == [argv]
+    captured = capsys.readouterr()
+    assert captured.out == '' and len(captured.err) < 2000
+    assert 'CANARY' not in captured.err and '/Users/' not in captured.err and str(tmp_path) not in captured.err
+    report = json.loads(captured.err.removeprefix('synthetic_hdiutil_failure: '))
+    assert report['returncode'] == (1 if failure == 'exit' else None)
+    assert report['elapsed_seconds'] >= 0
+    assert report['output_filesystem_before'] == {'bytes': 23 * 4096, 'inodes': 17}
+    assert report['output_filesystem_after'] == {'bytes': 19 * 4096, 'inodes': 13}
+    assert report['stderr']['bytes'] > 10000 and report['stderr']['truncated'] is True
+    assert report['stderr']['tail'] == ['[redacted non-status line]'] * 7 + [
+        'hdiutil: create failed - Resource busy']
+
+
+@pytest.mark.parametrize('fault', ['space', 'capture', 'read'])
+@pytest.mark.parametrize('failed', [False, True])
+def test_hdiutil_diagnostic_faults_never_replace_command_result(
+    tmp_path, monkeypatch, capsys, fault, failed
+):
+    import tempfile
+
+    def unavailable(*args, **kwargs):
+        raise OSError('CANARY_DIAGNOSTIC_ERROR')
+
+    if fault == 'space':
+        monkeypatch.setattr(os, 'statvfs', unavailable)
+    elif fault == 'capture':
+        monkeypatch.setattr(tempfile, 'TemporaryFile', unavailable)
+    else:
+        monkeypatch.setattr(sys.modules[__name__], '_hdiutil_stderr_tail', unavailable)
+    argv = ['/usr/bin/hdiutil', 'create', '-quiet', str(tmp_path/'synthetic.dmg')]
+    error = subprocess.CalledProcessError(1, argv)
+    result = subprocess.CompletedProcess(argv, 0)
+    calls = []
+
+    def run(command, **options):
+        calls.append(command)
+        if fault == 'capture':
+            assert options['stderr'] == subprocess.DEVNULL
+        if failed:
+            raise error
+        return result
+
+    if failed:
+        with pytest.raises(subprocess.CalledProcessError) as raised:
+            _run_hdiutil_with_diagnostics(run, tmp_path, argv, stderr=subprocess.DEVNULL)
+        assert raised.value is error
+    else:
+        assert _run_hdiutil_with_diagnostics(run, tmp_path, argv, stderr=subprocess.DEVNULL) is result
+    assert calls == [argv]
+    captured = capsys.readouterr()
+    assert 'CANARY' not in captured.err and captured.out == ''
+    assert ('unavailable' in captured.err) is failed
+
+
 @pytest.mark.skipif(sys.platform!='darwin',reason='Real readonly DMG and Cocoa installation require hosted macOS')
-def test_hosted_mac_single_dmg_install_open_update_preserves_private_authority(native_installed_app,tmp_path):
+def test_hosted_mac_single_dmg_install_open_update_preserves_private_authority(
+    native_installed_app,tmp_path,installer_image_diagnostics
+):
     """Actual bundle/DMG/service; automatic Cocoa clicks never grant install intent."""
     import plistlib
     from contextlib import contextmanager
