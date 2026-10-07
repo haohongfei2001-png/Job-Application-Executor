@@ -556,6 +556,9 @@ function clearSubmittedTaskDraft(request,formVersion){
     Object.entries(request).every(([key,value])=>current[key]===value))newTaskForm.reset();
 }
 const candidatesEl=document.getElementById('candidates');let pendingDiscovery=null;
+// Every explicit lookup or candidate choice owns presentation until a later
+// request replaces it. Editing a draft or receiving a reply is not ownership.
+let discoveryRequestEpoch=0;
 const recoveryObservations=new Map();
 const providerLoad=document.getElementById('provider-load'),providerLoadStatus=document.getElementById('provider-load-status');
 let providerLoadBusy=false,providerLoadUnknown=false,providerLoadState='unknown',providerLoadEpoch=0;
@@ -1406,23 +1409,27 @@ tasksEl.addEventListener('click',async event=>{
 });
 newTaskForm.addEventListener('submit',async event=>{
   event.preventDefault();
+  if(uiSessionExpired)return;
+  const requestEpoch=++discoveryRequestEpoch;
+  pendingDiscovery=null;candidatesEl.replaceChildren();
   const button=newTaskForm.querySelector('button');button.disabled=true;
   const data=Object.freeze(Object.fromEntries(new FormData(newTaskForm).entries())),formVersion=newTaskFormVersion;
   try{
     const r=await uiRequest('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},
       credentials:'same-origin',body:JSON.stringify(data)});
     const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
-    if(showProfileAdmissionGuidance(r,result))return;
+    if(showProfileAdmissionGuidance(r,result,requestEpoch))return;
     if(!r.ok)throw new Error();
-    showDiscovery(result,data,formVersion);
-    if(result.task_id){if(result.task_binding!=='existing_different')clearSubmittedTaskDraft(data,formVersion);await state()}
+    showDiscovery(result,data,formVersion,requestEpoch);
+    if(result.task_id){if(requestEpoch===discoveryRequestEpoch&&result.task_binding!=='existing_different')clearSubmittedTaskDraft(data,formVersion);await state()}
   }catch(e){notify('暂时无法安全查找岗位；请核对公司、岗位和官方链接。')}
   finally{button.disabled=uiSessionExpired}
 });
-function showProfileAdmissionGuidance(response,result){
+function showProfileAdmissionGuidance(response,result,requestEpoch=discoveryRequestEpoch){
   if(uiSessionExpired||response.status!==409||!result||typeof result!=='object'||Array.isArray(result)
     ||Object.keys(result).length!==2||result.error!=='profile_reconciliation_required'
     ||result.submit_capability!==false)return false;
+  if(requestEpoch!==discoveryRequestEpoch)return true;
   pendingDiscovery=null;candidatesEl.replaceChildren();
   const note=document.createElement('p'),button=document.createElement('button');
   note.className='candidate-note';note.id='profile-reconciliation-note';
@@ -1432,20 +1439,23 @@ function showProfileAdmissionGuidance(response,result){
   notify('资料仍待明确核对，本次没有添加任务，也不会自动重试。');
   return true;
 }
-function showDiscovery(result,request,formVersion){
+function showDiscovery(result,request,formVersion,requestEpoch=discoveryRequestEpoch){
   const discovery=result.discovery||{};
+  const ownsPanel=requestEpoch===discoveryRequestEpoch;
   if(result.task_id){
-    pendingDiscovery=null;candidatesEl.replaceChildren();
+    if(ownsPanel){pendingDiscovery=null;candidatesEl.replaceChildren();}
     if(result.task_binding==='existing_different'){
       const message='同一目标已有任务，仍保留原岗位、资料和授权；本次没有替换或启动任务。';
-      const note=document.createElement('p');note.className='candidate-note';
-      note.id='existing-task-note';note.textContent=message;
-      candidatesEl.append(note);
-      if(typeof result.task_id==='string'&&/^[A-Za-z0-9_.:-]{1,120}$/.test(result.task_id)){
-        const review=document.createElement('button');review.type='button';
-        review.setAttribute('aria-describedby','existing-task-note');
-        review.dataset.existingTask=result.task_id;review.textContent='查看已有任务';
-        candidatesEl.append(review);
+      if(ownsPanel){
+        const note=document.createElement('p');note.className='candidate-note';
+        note.id='existing-task-note';note.textContent=message;
+        candidatesEl.append(note);
+        if(typeof result.task_id==='string'&&/^[A-Za-z0-9_.:-]{1,120}$/.test(result.task_id)){
+          const review=document.createElement('button');review.type='button';
+          review.setAttribute('aria-describedby','existing-task-note');
+          review.dataset.existingTask=result.task_id;review.textContent='查看已有任务';
+          candidatesEl.append(review);
+        }
       }
       notify(message);
     }else{
@@ -1453,25 +1463,27 @@ function showDiscovery(result,request,formVersion){
     }
     return;
   }
+  if(!ownsPanel)return;
   pendingDiscovery=Object.freeze({request,discovery,formVersion});
   const labels={AMBIGUOUS:'发现多个同名岗位，请按地点、批次和用工类型选择。',INCOMPLETE:'公开列表覆盖范围尚未证实，暂不选择或写入。',UNAVAILABLE:'未找到符合全部条件的在招岗位。',UNSUPPORTED:'此公司或链接暂不在已验证的发现范围内。'};
   candidatesEl.innerHTML='<div class="candidate-note">'+esc(labels[discovery.status]||'岗位尚未核验。')+'</div>'+
     (discovery.candidates||[]).map(c=>'<div class="candidate"><b>'+esc(c.title)+'</b><br>'+esc(c.location||'地点未注明')+' · '+esc(c.campaign||'批次未注明')+' · '+esc(c.employment_type||'类型未注明')+'<br>职位 '+esc(c.job_id)+(discovery.status==='AMBIGUOUS'?'<button type="button" data-candidate="'+esc(c.candidate_id)+'">选择此岗位</button>':'')+'</div>').join('');
 }
 candidatesEl.addEventListener('click',async event=>{
-  const button=event.target.closest('button[data-candidate]');if(!button||!pendingDiscovery)return;
+  const button=event.target.closest('button[data-candidate]');if(!button||!pendingDiscovery||uiSessionExpired)return;
   // Another lookup may replace pendingDiscovery while this request is pending.
   const submission=pendingDiscovery;
+  const requestEpoch=++discoveryRequestEpoch;
   button.disabled=true;
   try{
     const data={...submission.request,selected_candidate_id:button.dataset.candidate};
     const r=await uiRequest('/ui/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(data)});
     const result=await r.json();if(uiSessionExpired)throw new Error('ui_session_expired');
-    if(showProfileAdmissionGuidance(r,result))return;
+    if(showProfileAdmissionGuidance(r,result,requestEpoch))return;
     if(!r.ok)throw new Error();
-    showDiscovery(result,submission.request,submission.formVersion);
-    if(result.task_id){if(result.task_binding!=='existing_different')clearSubmittedTaskDraft(submission.request,submission.formVersion);await state()}
-  }catch(e){notify('候选已变化或暂时无法核验，请重新查找。');button.disabled=uiSessionExpired}
+    showDiscovery(result,submission.request,submission.formVersion,requestEpoch);
+    if(result.task_id){if(requestEpoch===discoveryRequestEpoch&&result.task_binding!=='existing_different')clearSubmittedTaskDraft(submission.request,submission.formVersion);await state()}
+  }catch(e){notify('候选已变化或暂时无法核验，请重新查找。');if(requestEpoch===discoveryRequestEpoch)button.disabled=uiSessionExpired}
 });
 candidatesEl.addEventListener('click',event=>{
   if(event.target.closest('button[data-profile-reconciliation]')&&!uiSessionExpired)

@@ -2848,7 +2848,7 @@ def test_installer_retirement_remains_bound_to_pre_prompt_service(tmp_path,monke
     assert json.loads(path.read_text())==(record if fault in {'wrong_loaded_source','lost_ack'} else successor)
 
 
-@pytest.mark.parametrize('installed_version,candidate_version',[(1,2),(12,13)])
+@pytest.mark.parametrize('installed_version,candidate_version',[(1,2),(12,13),(13,14)])
 def test_installer_exact_copy_update_holds_original_locks_and_keeps_task_bytes(tmp_path,monkeypatch,installed_version,candidate_version):
     import fcntl,os,plistlib
     installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)
@@ -2925,7 +2925,7 @@ def test_installer_pending_fence_never_opens_legacy_native_launch(tmp_path,monke
         installer._open_existing(target,consumer._bundle_transaction_identity(target),9344)
 
 
-@pytest.mark.parametrize('installed_version,candidate_version,mode',[(3,2,'older'),(2,2,'conflict'),(12,12,'conflict'),(13,13,'conflict')])
+@pytest.mark.parametrize('installed_version,candidate_version,mode',[(3,2,'older'),(2,2,'conflict'),(12,12,'conflict'),(13,13,'conflict'),(14,14,'conflict')])
 def test_installer_old_or_same_version_different_payload_never_offers_update(tmp_path,monkeypatch,installed_version,candidate_version,mode):
     import plistlib
     installer,consumer,candidate,target,state=_downloaded_installer_fixture(tmp_path,monkeypatch)

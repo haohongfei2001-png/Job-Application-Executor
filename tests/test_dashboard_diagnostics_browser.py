@@ -2313,8 +2313,8 @@ def test_task_workspace_delayed_add_non_success_preserves_draft_without_replay(p
     _assert_task_draft_requests(page, observed, pending, candidate)
 
 
-def test_task_workspace_delayed_candidate_recheck_keeps_its_own_request_snapshot(pending_task_add_ui):
-    page, observed, pending = pending_task_add_ui
+def test_task_workspace_delayed_candidate_recheck_keeps_its_own_request_snapshot(candidate_panel_ui):
+    page, observed, pending = candidate_panel_ui
     _fill_task_draft(page, _TASK_DRAFT_A)
     page.locator("#newtask button").click()
     page.wait_for_function("window.__taskAddRequests === 1")
@@ -2325,15 +2325,20 @@ def test_task_workspace_delayed_candidate_recheck_keeps_its_own_request_snapshot
     _fill_task_draft(page, _TASK_DRAFT_B)
     page.locator("#newtask button").click()
     page.wait_for_function("window.__taskAddRequests === 3")
-    # An explicit B discovery replaces shared pendingDiscovery while the prior
-    # A candidate request is still pending. Its eventual result belongs to A.
-    _release_task_discovery(page, pending)
+    # B owns the panel after its explicit lookup. A's later response still
+    # belongs to A, so it cannot replace B's panel or its submitted snapshot.
+    _fulfill_task_panel(pending["routes"].pop(0),
+        _task_panel_discovery(_TASK_PANEL_B_CANDIDATE, "Synthetic Role B"))
+    expect(page.locator("#candidates")).to_contain_text("Synthetic Role B")
+    _fill_task_draft(page, _TASK_PANEL_C)
     next_candidate = "synthetic-candidate-a-rechecked"
     candidate_response.fulfill(status=200, content_type="application/json", body=json.dumps({
         "discovery": {"status": "AMBIGUOUS", "candidates": [{
             "candidate_id": next_candidate, "job_id": "synthetic-job-a-rechecked",
             "title": "Synthetic Role A Rechecked", "location": "Synthetic Location A"}]}}))
-    expect(page.locator("#candidates")).to_contain_text("Synthetic Role A Rechecked")
+    _wait_candidate_handler(page, _TASK_DRAFT_CANDIDATE)
+    expect(page.locator("#candidates")).to_contain_text("Synthetic Role B")
+    expect(page.locator("#candidates")).not_to_contain_text("Synthetic Role A Rechecked")
     # Only this fresh, explicit click may issue the next request.
     assert len(pending["submissions"]) == 3
     page.get_by_role("button", name="选择此岗位", exact=True).click()
@@ -2342,14 +2347,14 @@ def test_task_workspace_delayed_candidate_recheck_keeps_its_own_request_snapshot
         ("POST", _TASK_DRAFT_A),
         ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_DRAFT_CANDIDATE}),
         ("POST", _TASK_DRAFT_B),
-        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": next_candidate}),
+        ("POST", {**_TASK_DRAFT_B, "selected_candidate_id": _TASK_PANEL_B_CANDIDATE}),
     ]
     assert pending["submissions"] == expected_submissions
     pending["routes"].pop(0).fulfill(status=200, content_type="application/json", body=json.dumps({
-        "task_id": "prep-a", "revision": 7, "task_binding": "requested",
+        "task_id": "prep-b", "revision": 9, "task_binding": "requested",
         "discovery": {"status": "VERIFIED"}}))
     expect(page.locator("#toast")).to_contain_text("任务已保留在列表中")
-    for key, value in _TASK_DRAFT_B.items():
+    for key, value in _TASK_PANEL_C.items():
         expect(page.locator(f'#newtask input[name="{key}"]')).to_have_value(value)
     page.evaluate("state()")
     assert pending["submissions"] == expected_submissions
@@ -2416,7 +2421,7 @@ def _wait_candidate_handler(page, candidate_id):
         "the completion observer must not hide a rejected UI callback"
 
 
-def _start_overlapping_task_queries(page, pending, *, finish_newer=True):
+def _start_overlapping_task_queries(page, pending, *, finish_newer=True, newer_request=_TASK_DRAFT_B):
     _fill_task_draft(page, _TASK_DRAFT_A)
     page.locator("#newtask button").click()
     page.wait_for_function("window.__taskAddRequests === 1")
@@ -2424,7 +2429,8 @@ def _start_overlapping_task_queries(page, pending, *, finish_newer=True):
     page.get_by_role("button", name="选择此岗位", exact=True).click()
     page.wait_for_function("window.__taskAddRequests === 2")
     older = pending["routes"].pop(0)
-    _fill_task_draft(page, _TASK_DRAFT_B)
+    if newer_request is not None:
+        _fill_task_draft(page, newer_request)
     page.locator("#newtask button").click()
     page.wait_for_function("window.__taskAddRequests === 3")
     newer = pending["routes"].pop(0)
@@ -2536,6 +2542,48 @@ def test_task_workspace_latest_query_owns_candidate_panel_while_newer_request_is
         "task_binding": "requested", "discovery": {"status": "VERIFIED"}})
     _wait_candidate_handler(page, next_candidate)
     _assert_task_panel_contracts(page, observed, pending, expected, _TASK_PANEL_C)
+
+
+@pytest.mark.parametrize("older_outcome", ["recheck", "created"])
+def test_task_workspace_repeated_identical_query_has_its_own_panel_owner(candidate_panel_ui, older_outcome):
+    page, observed, pending = candidate_panel_ui
+    # Submit the unchanged form again: equal payloads and draft revisions do
+    # not make two explicit requests the same owner.
+    older, _ = _start_overlapping_task_queries(page, pending, newer_request=None)
+    panel_before = page.locator("#candidates").inner_html()
+    payload = _task_panel_discovery("synthetic-a-rechecked", "Synthetic Role A Rechecked")
+    if older_outcome == "created":
+        payload = {"task_id": "prep-a", "revision": 7, "task_binding": "requested",
+                   "discovery": {"status": "VERIFIED"}}
+    _fulfill_task_panel(older, payload)
+    _wait_candidate_handler(page, _TASK_DRAFT_CANDIDATE)
+    assert page.locator("#candidates").inner_html() == panel_before
+    expected = [("POST", _TASK_DRAFT_A),
+        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_DRAFT_CANDIDATE}),
+        ("POST", _TASK_DRAFT_A)]
+    _assert_task_panel_contracts(page, observed, pending, expected, _TASK_DRAFT_A)
+    page.locator(f'[data-candidate="{_TASK_PANEL_B_CANDIDATE}"]').click()
+    page.wait_for_function("window.__taskAddRequests === 4")
+    expected.append(("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_PANEL_B_CANDIDATE}))
+    _fulfill_task_panel(pending["routes"].pop(0), {"task_id": "prep-a", "revision": 7,
+        "task_binding": "requested", "discovery": {"status": "VERIFIED"}})
+    _wait_candidate_handler(page, _TASK_PANEL_B_CANDIDATE)
+    _assert_task_panel_contracts(page, observed, pending, expected, {key: "" for key in _TASK_DRAFT_A})
+
+
+def test_task_workspace_older_candidate_cannot_reopen_panel_after_latest_task_succeeds(candidate_panel_ui):
+    page, observed, pending = candidate_panel_ui
+    older, newer = _start_overlapping_task_queries(page, pending, finish_newer=False)
+    _fill_task_draft(page, _TASK_PANEL_C)
+    _fulfill_task_panel(newer, {"task_id": "prep-b", "revision": 9,
+        "task_binding": "requested", "discovery": {"status": "VERIFIED"}})
+    expect(page.locator("#newtask button")).to_be_enabled()
+    expect(page.locator("#toast")).to_contain_text("任务已保留在列表中")
+    expect(page.locator("#candidates")).to_be_empty()
+    _fulfill_task_panel(older, _task_panel_discovery("synthetic-a-rechecked", "Synthetic Role A Rechecked"))
+    _wait_candidate_handler(page, _TASK_DRAFT_CANDIDATE)
+    expect(page.locator("#candidates")).to_be_empty()
+    _assert_task_panel_contracts(page, observed, pending, _task_panel_initial_submissions(), _TASK_PANEL_C)
 
 
 def test_task_workspace_latest_explicit_candidate_choice_owns_panel(candidate_panel_ui):
