@@ -2359,6 +2359,302 @@ def test_task_workspace_delayed_candidate_recheck_keeps_its_own_request_snapshot
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
 
 
+@pytest.fixture
+def candidate_panel_ui(pending_task_add_ui):
+    """Observe real handler completion, not merely response/body arrival."""
+    page, observed, pending = pending_task_add_ui
+    page.add_init_script("""(() => {
+      window.__candidateHandlersDone = [];
+      const original = EventTarget.prototype.addEventListener;
+      EventTarget.prototype.addEventListener = function(type, listener, options) {
+        if (this.id === 'candidates' && type === 'click' && typeof listener === 'function') {
+          const actual = listener;
+          listener = function(event) {
+            const candidate = event.target.closest('button[data-candidate]')?.dataset.candidate;
+            const result = actual.call(this, event);
+            // Synchronous navigation listeners are untouched. The real async
+            // handler owns this promise, including any awaited state refresh.
+            if (candidate && result && typeof result.then === 'function') {
+              result.then(
+                () => window.__candidateHandlersDone.push({candidate, status:'fulfilled'}),
+                () => window.__candidateHandlersDone.push({candidate, status:'rejected'})
+              );
+            }
+            return result;
+          };
+        }
+        return original.call(this, type, listener, options);
+      };
+      window.addEventListener('load', () => {
+        EventTarget.prototype.addEventListener = original;
+      }, {once:true});
+    })();""")
+    page.reload()
+    expect(page.locator('[data-task-preparation]')).to_have_count(2)
+    yield page, observed, pending
+
+
+_TASK_PANEL_B_CANDIDATE = "synthetic-candidate-b"
+_TASK_PANEL_C = {**_TASK_DRAFT_B, "role": "Synthetic Unsent Role C",
+                 "target_url": "https://jobs.example.test/unsent-c"}
+
+
+def _task_panel_discovery(candidate_id, title):
+    return {"discovery": {"status": "AMBIGUOUS", "candidates": [{
+        "candidate_id": candidate_id, "job_id": candidate_id + "-job",
+        "title": title, "location": title + " Location"}]}}
+
+
+def _fulfill_task_panel(route, payload, status=200):
+    route.fulfill(status=status, content_type="application/json", body=json.dumps(payload))
+
+
+def _wait_candidate_handler(page, candidate_id):
+    page.wait_for_function("candidate => window.__candidateHandlersDone.some(item => item.candidate === candidate)",
+                           arg=candidate_id)
+    assert page.evaluate("window.__candidateHandlersDone.every(item => item.status === 'fulfilled')"), \
+        "the completion observer must not hide a rejected UI callback"
+
+
+def _start_overlapping_task_queries(page, pending, *, finish_newer=True):
+    _fill_task_draft(page, _TASK_DRAFT_A)
+    page.locator("#newtask button").click()
+    page.wait_for_function("window.__taskAddRequests === 1")
+    _release_task_discovery(page, pending)
+    page.get_by_role("button", name="选择此岗位", exact=True).click()
+    page.wait_for_function("window.__taskAddRequests === 2")
+    older = pending["routes"].pop(0)
+    _fill_task_draft(page, _TASK_DRAFT_B)
+    page.locator("#newtask button").click()
+    page.wait_for_function("window.__taskAddRequests === 3")
+    newer = pending["routes"].pop(0)
+    if finish_newer:
+        _fulfill_task_panel(newer, _task_panel_discovery(_TASK_PANEL_B_CANDIDATE, "Synthetic Role B"))
+        expect(page.locator("#candidates")).to_contain_text("Synthetic Role B")
+        expect(page.locator("#newtask button")).to_be_enabled()
+    return older, newer
+
+
+def _task_panel_initial_submissions():
+    return [("POST", _TASK_DRAFT_A),
+            ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_DRAFT_CANDIDATE}),
+            ("POST", _TASK_DRAFT_B)]
+
+
+def _assert_task_panel_contracts(page, observed, pending, expected, draft):
+    page.evaluate("state()")
+    assert pending["submissions"] == expected, "responses and state reads must not replay a request"
+    assert pending["routes"] == []
+    for key, value in draft.items():
+        expect(page.locator(f'#newtask input[name="{key}"]')).to_have_value(value)
+    assert all(method == "GET" for method, _, _ in observed["requests"])
+    assert observed["external"] == [] and observed["errors"] == []
+    assert page.evaluate("window.__copied") == []
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+
+
+@pytest.mark.parametrize("outcome", ["recheck", "unavailable", "created", "duplicate", "reconciliation", "failure", "aborted"])
+def test_task_workspace_latest_query_owns_candidate_panel_after_older_reply(candidate_panel_ui, outcome):
+    page, observed, pending = candidate_panel_ui
+    older, _ = _start_overlapping_task_queries(page, pending)
+    _fill_task_draft(page, _TASK_PANEL_C)
+    panel_before = page.locator("#candidates").inner_html()
+    if outcome == "created":
+        # The polling interval already holds the original function object.
+        # Count the handler's explicit state() call, not incidental polling.
+        page.evaluate("""() => {
+          const original = state;
+          window.__candidateStateRefreshes = 0;
+          state = function(...args) {
+            window.__candidateStateRefreshes++;
+            return original.apply(this, args);
+          };
+        }""")
+    if outcome == "aborted":
+        older.abort("failed")
+    else:
+        status, payload = {
+            "recheck": (200, _task_panel_discovery("synthetic-a-rechecked", "Synthetic Role A Rechecked")),
+            "unavailable": (200, {"discovery": {"status": "UNAVAILABLE", "candidates": []}}),
+            "created": (200, {"task_id": "prep-a", "revision": 7, "task_binding": "requested",
+                              "discovery": {"status": "VERIFIED"}}),
+            "duplicate": (200, {"task_id": "prep-a", "revision": 7, "task_binding": "existing_different",
+                                "discovery": {"status": "VERIFIED"}}),
+            "reconciliation": (409, {"error": "profile_reconciliation_required", "submit_capability": False}),
+            "failure": (503, {"error": "synthetic_unavailable"}),
+        }[outcome]
+        _fulfill_task_panel(older, payload, status)
+    _wait_candidate_handler(page, _TASK_DRAFT_CANDIDATE)
+    if outcome == "created":
+        expect(page.locator("#toast")).to_contain_text("任务已保留在列表中")
+        assert page.evaluate("window.__candidateStateRefreshes") == 1
+    assert page.locator("#candidates").inner_html() == panel_before, "an older response took B's candidate panel"
+    assert pending["submissions"] == _task_panel_initial_submissions()
+    # B stays actionable, but a fresh explicit click is still required. The
+    # visible C draft must never leak into B's already submitted request.
+    page.locator(f'[data-candidate="{_TASK_PANEL_B_CANDIDATE}"]').click()
+    page.wait_for_function("window.__taskAddRequests === 4")
+    expected = _task_panel_initial_submissions() + [
+        ("POST", {**_TASK_DRAFT_B, "selected_candidate_id": _TASK_PANEL_B_CANDIDATE})]
+    assert pending["submissions"] == expected
+    _fulfill_task_panel(pending["routes"].pop(0), {"task_id": "prep-b", "revision": 9,
+        "task_binding": "requested", "discovery": {"status": "VERIFIED"}})
+    _wait_candidate_handler(page, _TASK_PANEL_B_CANDIDATE)
+    expect(page.locator("#candidates button[data-candidate]")).to_have_count(0)
+    _assert_task_panel_contracts(page, observed, pending, expected, _TASK_PANEL_C)
+
+
+@pytest.mark.parametrize("newer_phase", ["lookup_pending", "selection_pending"])
+def test_task_workspace_latest_query_owns_candidate_panel_while_newer_request_is_pending(candidate_panel_ui, newer_phase):
+    page, observed, pending = candidate_panel_ui
+    older, newer = _start_overlapping_task_queries(page, pending, finish_newer=newer_phase == "selection_pending")
+    expected = _task_panel_initial_submissions()
+    if newer_phase == "selection_pending":
+        page.locator(f'[data-candidate="{_TASK_PANEL_B_CANDIDATE}"]').click()
+        page.wait_for_function("window.__taskAddRequests === 4")
+        newer = pending["routes"].pop(0)
+        expected.append(("POST", {**_TASK_DRAFT_B, "selected_candidate_id": _TASK_PANEL_B_CANDIDATE}))
+    _fill_task_draft(page, _TASK_PANEL_C)
+    panel_before = page.locator("#candidates").inner_html()
+    _fulfill_task_panel(older, _task_panel_discovery("synthetic-a-rechecked", "Synthetic Role A Rechecked"))
+    _wait_candidate_handler(page, _TASK_DRAFT_CANDIDATE)
+    assert page.locator("#candidates").inner_html() == panel_before, "an older response replaced the pending query's panel"
+    expect(page.locator("#candidates button[data-candidate]:enabled")).to_have_count(0)
+    if newer_phase == "lookup_pending":
+        expect(page.locator("#newtask button")).to_be_disabled()
+    assert pending["submissions"] == expected
+    next_candidate = "synthetic-b-rechecked"
+    _fulfill_task_panel(newer, _task_panel_discovery(next_candidate, "Synthetic Role B Rechecked"))
+    expect(page.locator(f'[data-candidate="{next_candidate}"]')).to_be_enabled()
+    expect(page.locator("#newtask button")).to_be_enabled()
+    if newer_phase == "selection_pending":
+        _wait_candidate_handler(page, _TASK_PANEL_B_CANDIDATE)
+    page.locator(f'[data-candidate="{next_candidate}"]').click()
+    page.wait_for_function("count => window.__taskAddRequests === count", arg=len(expected) + 1)
+    expected.append(("POST", {**_TASK_DRAFT_B, "selected_candidate_id": next_candidate}))
+    _fulfill_task_panel(pending["routes"].pop(0), {"task_id": "prep-b", "revision": 9,
+        "task_binding": "requested", "discovery": {"status": "VERIFIED"}})
+    _wait_candidate_handler(page, next_candidate)
+    _assert_task_panel_contracts(page, observed, pending, expected, _TASK_PANEL_C)
+
+
+def test_task_workspace_latest_explicit_candidate_choice_owns_panel(candidate_panel_ui):
+    page, observed, pending = candidate_panel_ui
+    _fill_task_draft(page, _TASK_DRAFT_A)
+    page.locator("#newtask button").click()
+    page.wait_for_function("window.__taskAddRequests === 1")
+    alternate = "synthetic-candidate-a-alternate"
+    discovery = _task_panel_discovery(_TASK_DRAFT_CANDIDATE, "Synthetic Role A")
+    discovery["discovery"]["candidates"] += _task_panel_discovery(alternate, "Synthetic Alternate A")["discovery"]["candidates"]
+    _fulfill_task_panel(pending["routes"].pop(0), discovery)
+    page.locator(f'[data-candidate="{_TASK_DRAFT_CANDIDATE}"]').click()
+    page.wait_for_function("window.__taskAddRequests === 2")
+    older = pending["routes"].pop(0)
+    # This second choice is an existing enabled control, not a forced submit.
+    page.locator(f'[data-candidate="{alternate}"]').click()
+    page.wait_for_function("window.__taskAddRequests === 3")
+    _fill_task_draft(page, _TASK_DRAFT_B)
+    latest = "synthetic-alternate-rechecked"
+    _fulfill_task_panel(pending["routes"].pop(0), _task_panel_discovery(latest, "Synthetic Alternate Rechecked"))
+    _wait_candidate_handler(page, alternate)
+    panel_before = page.locator("#candidates").inner_html()
+    _fulfill_task_panel(older, _task_panel_discovery("synthetic-a-rechecked", "Synthetic Role A Rechecked"))
+    _wait_candidate_handler(page, _TASK_DRAFT_CANDIDATE)
+    assert page.locator("#candidates").inner_html() == panel_before, "an older choice replaced the latest explicit candidate choice"
+    expected = [("POST", _TASK_DRAFT_A),
+        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_DRAFT_CANDIDATE}),
+        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": alternate})]
+    assert pending["submissions"] == expected
+    page.locator(f'[data-candidate="{latest}"]').click()
+    page.wait_for_function("window.__taskAddRequests === 4")
+    expected.append(("POST", {**_TASK_DRAFT_A, "selected_candidate_id": latest}))
+    _fulfill_task_panel(pending["routes"].pop(0), {"task_id": "prep-a", "revision": 7,
+        "task_binding": "requested", "discovery": {"status": "VERIFIED"}})
+    _wait_candidate_handler(page, latest)
+    _assert_task_panel_contracts(page, observed, pending, expected, _TASK_DRAFT_B)
+
+
+def test_task_workspace_unsent_edit_does_not_take_candidate_panel_ownership(candidate_panel_ui):
+    page, observed, pending = candidate_panel_ui
+    _fill_task_draft(page, _TASK_DRAFT_A)
+    page.locator("#newtask button").click()
+    page.wait_for_function("window.__taskAddRequests === 1")
+    _release_task_discovery(page, pending)
+    page.locator(f'[data-candidate="{_TASK_DRAFT_CANDIDATE}"]').click()
+    page.wait_for_function("window.__taskAddRequests === 2")
+    _fill_task_draft(page, _TASK_DRAFT_B)
+    rechecked = "synthetic-a-rechecked"
+    _fulfill_task_panel(pending["routes"].pop(0), _task_panel_discovery(rechecked, "Synthetic Role A Rechecked"))
+    _wait_candidate_handler(page, _TASK_DRAFT_CANDIDATE)
+    expect(page.locator(f'[data-candidate="{rechecked}"]')).to_be_enabled()
+    assert len(pending["submissions"]) == 2
+    page.locator(f'[data-candidate="{rechecked}"]').click()
+    page.wait_for_function("window.__taskAddRequests === 3")
+    expected = [("POST", _TASK_DRAFT_A),
+        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": _TASK_DRAFT_CANDIDATE}),
+        ("POST", {**_TASK_DRAFT_A, "selected_candidate_id": rechecked})]
+    _fulfill_task_panel(pending["routes"].pop(0), {"task_id": "prep-a", "revision": 7,
+        "task_binding": "requested", "discovery": {"status": "VERIFIED"}})
+    _wait_candidate_handler(page, rechecked)
+    _assert_task_panel_contracts(page, observed, pending, expected, _TASK_DRAFT_B)
+
+
+@pytest.mark.parametrize("action", ["navigate", "cancel_existing_task"])
+def test_task_workspace_latest_candidate_panel_survives_existing_task_controls(candidate_panel_ui, action):
+    page, observed, pending = candidate_panel_ui
+    older, _ = _start_overlapping_task_queries(page, pending)
+    commands = []
+    def cancel(route):
+        commands.append(route.request.post_data_json)
+        observed["tasks"][1].update(stage="CANCELLED", revision=10)
+        _fulfill_task_panel(route, {"ok": True})
+    page.route("https://preparation.test/ui/api/command", cancel)
+    page.locator('[data-task-select="prep-b"]').click()
+    expect(page.locator('[data-task-card="prep-b"]')).to_have_attribute("data-current-task", "true")
+    if action == "cancel_existing_task":
+        # This cancels only this existing task. There is no query-cancel UI.
+        page.locator('[data-action="CANCEL"][data-task="prep-b"]').click()
+        expect(page.locator('[data-task-card="prep-b"] .stage')).to_have_text("已取消")
+        assert len(commands) == 1
+        command = commands[0]
+        assert command == {"task_id": "prep-b", "action": "CANCEL", "expected_revision": 9,
+                           "command_id": command["command_id"]}
+        assert command["command_id"].startswith("ui-")
+    else:
+        assert commands == []
+    commands_before = list(commands)
+    panel_before = page.locator("#candidates").inner_html()
+    _fulfill_task_panel(older, _task_panel_discovery("synthetic-a-rechecked", "Synthetic Role A Rechecked"))
+    _wait_candidate_handler(page, _TASK_DRAFT_CANDIDATE)
+    assert page.locator("#candidates").inner_html() == panel_before
+    expect(page.locator('[data-task-card="prep-b"]')).to_have_attribute("data-current-task", "true")
+    _assert_task_panel_contracts(page, observed, pending, _task_panel_initial_submissions(), _TASK_DRAFT_B)
+    assert commands == commands_before, "stale candidate replies must not replay task commands"
+
+
+@pytest.mark.parametrize("expiry_source", ["older_response", "state_before_older_response"])
+def test_task_workspace_candidate_panel_ownership_preserves_global_session_expiry(candidate_panel_ui, expiry_source):
+    page, observed, pending = candidate_panel_ui
+    older, _ = _start_overlapping_task_queries(page, pending)
+    _fill_task_draft(page, _TASK_PANEL_C)
+    panel_text = page.locator("#candidates").inner_text()
+    observed["expired"] = True
+    if expiry_source == "older_response":
+        _fulfill_task_panel(older, {"error": "ui_session_required"}, 401)
+    else:
+        page.evaluate("state()")
+        expect(page.locator("#session-expired")).to_be_visible()
+        _fulfill_task_panel(older, _task_panel_discovery("synthetic-a-rechecked", "Synthetic Role A Rechecked"))
+    _wait_candidate_handler(page, _TASK_DRAFT_CANDIDATE)
+    expect(page.locator("#session-expired")).to_be_visible()
+    assert page.locator("#candidates").inner_text() == panel_text
+    expect(page.locator("#candidates button[data-candidate]:enabled")).to_have_count(0)
+    expect(page.locator("#newtask button")).to_be_disabled()
+    for key in _TASK_PANEL_C:
+        assert page.locator(f'#newtask input[name="{key}"]').evaluate("node => node.readOnly && !node.disabled")
+    _assert_task_panel_contracts(page, observed, pending, _task_panel_initial_submissions(), _TASK_PANEL_C)
+
+
 # Synthetic private-editor payloads never leave the loopback/routed test origin.
 def _editor_payload():
     from executor.autonomy.task_preparation import CHECKLIST_FIELDS
